@@ -1,0 +1,109 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Third Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Third Files\imgui">
+      <UniqueIdentifier>{dc58ffd4-3af9-4222-8aaf-9ee1e71918e7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Shaders">
+      <UniqueIdentifier>{38a02159-fa17-4745-9df2-ea3f13822c7b}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\Renderer.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Tasks.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Time.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\World.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\IO.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Loading.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Third\imgui-docking\imgui.h">
+      <Filter>Third Files\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Third\imgui-docking\imgui_internal.h">
+      <Filter>Third Files\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Third\imgui-docking\imconfig.h">
+      <Filter>Third Files\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Third\imgui-docking\backends\imgui_impl_dx12.h">
+      <Filter>Third Files\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Third\imgui-docking\misc\cpp\imgui_stdlib.h">
+      <Filter>Third Files\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="src\UI.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\GPU.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Third\imgui-docking\backends\imgui_impl_win32.h">
+      <Filter>Third Files\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Editor.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\String.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\Main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Third\D3D12MemoryAllocator-master\src\D3D12MemAlloc.cpp">
+      <Filter>Third Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Third\imgui-docking\imgui_draw.cpp">
+      <Filter>Third Files\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Third\imgui-docking\imgui_tables.cpp">
+      <Filter>Third Files\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Third\imgui-docking\imgui_widgets.cpp">
+      <Filter>Third Files\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Third\imgui-docking\imgui.cpp">
+      <Filter>Third Files\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Third\imgui-docking\backends\imgui_impl_dx12.cpp">
+      <Filter>Third Files\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Third\imgui-docking\misc\cpp\imgui_stdlib.cpp">
+      <Filter>Third Files\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Third\imgui-docking\backends\imgui_impl_win32.cpp">
+      <Filter>Third Files\imgui</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <FxCompile Include="src\Shaders\mesh.hlsl">
+      <Filter>Source Files\Shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="src\Shaders\structs.hlsl">
+      <Filter>Source Files\Shaders</Filter>
+    </FxCompile>
+  </ItemGroup>
+</Project>
