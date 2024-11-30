@@ -9,9 +9,19 @@ typedef uint assetID;
 
 namespace Components
 {
-    typedef std::bitset<64> Mask;
+    static constexpr uint componentMaxCount = 64;
+    typedef std::bitset<componentMaxCount> Mask;
 
     static uint masksIndex = 0;
+    static std::vector<uint> strides;
+
+    template<typename T>
+    static uint GetComponentStride()
+    {
+        strides.push_back(sizeof(T));
+        masksIndex++;
+        return masksIndex;
+    }
 
     template<typename T>
     struct ComponentBase
@@ -23,12 +33,19 @@ namespace Components
     template<typename T>
     Mask ComponentBase<T>::mask = 1 << masksIndex;
     template<typename T>
-    uint ComponentBase<T>::bucketIndex = sizeof(masksIndex++);
+    uint ComponentBase<T>::bucketIndex = GetComponentStride<T>();
     template<typename T>
     uint ComponentBase<T>::stride = sizeof(T);
 
     template<typename T>
     concept IsComponent = std::is_base_of<Components::ComponentBase<T>, T>::value;
+
+    template<Components::IsComponent T>
+    struct PTR
+    {
+        uint index;
+        T& Get();
+    };
 
     struct Entity : ComponentBase<Entity>
     {
@@ -50,14 +67,14 @@ namespace Components
 
     struct Material : ComponentBase<Material>
     {
-        Shader* shader;
+        PTR<Shader> shader;
     };
     Material material;
 
     struct Instance : ComponentBase<Instance>
     {
-        Mesh* mesh;
-        Material* material;
+        PTR<Mesh> mesh;
+        PTR<Material> material;
     };
     Instance instance;
 }
@@ -78,94 +95,147 @@ namespace Systems
         void Update(World* world)
         {
             IOs::Log("----------------");
-            IOs::Log("component {} mask {} size {}", typeid(Components::Entity).name(), Components::Entity::mask.to_string(), Components::Entity::stride);
-            IOs::Log("component {} mask {} size {}", typeid(Components::Shader).name(), Components::Shader::mask.to_string(), Components::Shader::stride);
-            IOs::Log("component {} mask {} size {}", typeid(Components::Mesh).name(), Components::Mesh::mask.to_string(), Components::Mesh::stride);
-            IOs::Log("component {} mask {} size {}", typeid(Components::Material).name(), Components::Material::mask.to_string(), Components::Material::stride);
-            IOs::Log("component {} mask {} size {}", typeid(Components::Instance).name(), Components::Instance::mask.to_string(), Components::Instance::stride);
+            IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Entity).name(), Components::Entity::mask.to_string(), Components::Entity::bucketIndex, Components::Entity::stride);
+            IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Shader).name(), Components::Shader::mask.to_string(), Components::Shader::bucketIndex, Components::Shader::stride);
+            IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Mesh).name(), Components::Mesh::mask.to_string(), Components::Mesh::bucketIndex, Components::Mesh::stride);
+            IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Material).name(), Components::Material::mask.to_string(), Components::Material::bucketIndex, Components::Material::stride);
+            IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Instance).name(), Components::Instance::mask.to_string(), Components::Instance::bucketIndex, Components::Instance::stride);
             ZoneScoped;
         }
     };
 }
 
+static constexpr uint poolMaxSlots = 65535;
 class World
 {
-    static constexpr uint maxScene = 8;
-    static constexpr uint maxBucket = 12;
-    static constexpr uint maxEntity = 12;
-    struct Bucket
-    {
-        uint scene : maxScene;
-        Components::Mask mask;
-        std::vector<std::vector<void*>> components;
-
-        Bucket()
-        {
-            components.resize(mask.size());
-        }
-    };
-
-    struct EntitySpace
-    {
-        uint scene : maxScene;
-        uint bucket : maxBucket;
-        uint entity : maxEntity;
-    };
-    // an entity is just an index in this array
-    // the array stores the real place the entity is living
-    std::vector<EntitySpace> entities;
-
 public:
-    struct Query
+    struct Pool
     {
-        Components::Mask required{ 0 };
-        Components::Mask excluded{ 0 };
-        uint entityPerThreadHint{ 10 };
+    public:
+        Components::Mask mask;
+        uint count;
+        std::array<void*, Components::componentMaxCount> data;
+        Slots freeslots;
 
-        void Add(Components::Mask mask)
+        void Start()
         {
-            required &= mask;
+            count = 0;
+            freeslots.Start(poolMaxSlots);
+            for (uint i = 0; i < data.size(); i++)
+            {
+                data[i] = nullptr;
+                if(mask[i])
+                    data[i] = malloc(poolMaxSlots * Components::strides[i]);
+            }
         }
-        void Exclude(Components::Mask mask)
+
+        uint GetSlot()
         {
-            excluded &= mask;
+            return freeslots.Get();
+        }
+
+        void ReleaseSlot(uint index)
+        {
+            freeslots.Release(index);
         }
     };
+
+    struct EntitySlot
+    {
+        uint pool : 16;
+        uint index : 16;
+    };
+
     struct Entity
     {
         uint id;
 
-        template <Components::IsComponent T>
-        T* Get()
+        Entity(Components::Mask mask)
         {
-            auto& entitySpace = World::instance->entities[id];
-            auto& bucket = World::instance->buckets[entitySpace.bucket];
-            T* res = (T*)bucket.components[T::bucketIndex][entitySpace.entity];
+            EntitySlot slot;
+            slot.pool = GetOrCreatePoolIndex(mask);
+            slot.index = World::instance->components[slot.pool].GetSlot();
+
+            if (World::instance->entityFreeSlots.size())
+            {
+                id = (uint)World::instance->entityFreeSlots.back();
+                World::instance->entityFreeSlots.pop_back(); // pourquoi le popback avec la convertion en uint compile pas !??!?
+                World::instance->entitySlots[id] = slot;
+            }
+            else
+            {
+                World::instance->entitySlots.push_back(slot);
+                id = (uint)World::instance->entitySlots.size() - 1;
+            }
+        }
+
+        ~Entity()
+        {
+            World::instance->entitySlots[id].index = poolMaxSlots;
+            World::instance->entitySlots[id].pool = poolMaxSlots;
+            World::instance->entityFreeSlots.push_back(id);
+        }
+
+        template <Components::IsComponent T>
+        T& Get()
+        {
+            // TODO : check that the pool have the right mask (debug assert ?)
+            auto& slot = World::instance->entitySlots[id];
+            auto& pool = World::instance->components[slot.pool];
+            auto& res = ((T*)pool.data[T::bucketIndex])[slot.index];
             return res;
         }
 
         template <Components::IsComponent T>
-        void Set()
+        void Set(T value)
         {
-            T::mask;
-            return nullptr;
+            auto& slot = World::instance->entitySlots[id];
+            if (!(World::instance->components[slot.pool].mask & T::mask))
+            {
+                //TODO : make a temp copy Copy(from, to)
+                slot.pool = GetOrCreatePoolIndex(World::instance->components[slot.pool].mask & T::mask);
+                slot.index = World::instance->components[slot.pool].GetSlot();
+            }
+            auto& res = *(T*)World::instance->components[slot.pool].data[T::bucketIndex][slot.index * sizeof(T)];
+            res = value;
+        }
+
+        void Copy(EntitySlot from, EntitySlot to)
+        {
+
+        }
+
+        uint GetOrCreatePoolIndex(Components::Mask mask)
+        {
+            for (uint i = 0; i < World::instance->components.size(); i++)
+            {
+                auto& pool = World::instance->components[i];
+                if (pool.mask == mask && pool.count < poolMaxSlots)
+                    return i;
+            }
+            Pool newPool;
+            newPool.mask = mask;
+            newPool.Start();
+            World::instance->components.push_back(newPool);
+            return (uint)World::instance->components.size() - 1;
+        }
+        Pool& GetOrCreatePool(Components::Mask mask)
+        {
+            return World::instance->components[GetOrCreatePoolIndex(mask)];       
         }
     };
 
     static World* instance;
 
-    std::vector<Bucket> buckets;
+    std::vector<EntitySlot> entitySlots;
+    std::vector<uint> entityFreeSlots;
+    std::vector<Pool> components;
 
     Systems::Player player;
 
-    World()
+    void Start()
     {
         instance = this;
-    }
-
-    void Add()
-    {
-
     }
 
     void Schedule(tf::Subflow& subflow)
@@ -174,34 +244,15 @@ public:
         //ECS systems
         SUBTASKWORLD(player);
     }
-    
-    template <Components::IsComponent T>
-    T* Get()
-    {
-        T::mask;
-        return nullptr;
-    }
-
-    uint GetCount(Query query)
-    {
-        return 0;
-    }
-
-    typedef void (*Task)(void* data, Entity entity);
-    template <Task task>
-    void ParallelFor(Query query, void* data)
-    {
-        return;
-
-        uint totalCount = GetCount(query);
-
-        if (totalCount <= query.entityPerThreadHint)
-        {
-            Entity entity{};
-            task(data, entity);
-        }
-
-        uint chunkCount = 0;
-    }
 };
 World* World::instance;
+
+namespace Components
+{
+    template<Components::IsComponent T>
+    T& PTR<T>::Get()
+    {
+        World::Entity entity{ index };
+        return entity.Get<T>();
+    }
+}

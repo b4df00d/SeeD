@@ -29,6 +29,7 @@ void operator delete(void* ptr) noexcept
 }
 #endif
 
+#include "Containers.h"
 #include "String.h"
 
 #include "Time.h"
@@ -160,7 +161,7 @@ public:
 
     void Load()
     {
-        world.Add();
+
     }
 
     bool IsRunning()

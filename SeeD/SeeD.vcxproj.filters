@@ -65,6 +65,9 @@
     <ClInclude Include="src\String.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\Containers.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Main.cpp">

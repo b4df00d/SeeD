@@ -419,40 +419,36 @@ public:
     {
         ZoneScoped;
         rendererWorld->instances.Clear();
-        World::Query query;
-        query.Add(Components::Instance::mask);
-        world->ParallelFor <
-            [](void* data, World::Entity entity)
-            {
-                RendererWorld* rendererWorld = (RendererWorld*)data;
+        
+        for (uint i = 0; i < world->entitySlots.size(); i++)
+        {
+            World::Entity entity { i };
 
-                Components::Instance* instanceCmp = entity.Get<Components::Instance>();
-                Components::Mesh* meshCmp = instanceCmp->mesh;
-                Components::Material* materialCmp = instanceCmp->material;
-                Components::Shader* shaderCmp = materialCmp->shader;
+            Components::Instance& instanceCmp = entity.Get<Components::Instance>();
+            Components::Mesh& meshCmp = instanceCmp.mesh.Get();
+            Components::Material& materialCmp = instanceCmp.material.Get();
+            Components::Shader& shaderCmp = materialCmp.shader.Get();
 
-                Shader shader{};
-                Material material{};
-                Mesh mesh{};
-                Instance instance{};
+            Shader shader{};
+            Material material{};
+            Mesh mesh{};
+            Instance instance{};
 
-                uint shaderIndex = rendererWorld->shaders.AddUnique(shader);
-                material.shaderIndex = shaderIndex;
+            uint shaderIndex = rendererWorld->shaders.AddUnique(shader);
+            material.shaderIndex = shaderIndex;
 
-                uint materialIndex = rendererWorld->materials.AddUnique(material);
-                instance.materialIndex = materialIndex;
+            uint materialIndex = rendererWorld->materials.AddUnique(material);
+            instance.materialIndex = materialIndex;
 
-                uint meshIndex = rendererWorld->meshes.AddUnique(mesh);
-                instance.meshIndex = meshIndex;
+            uint meshIndex = rendererWorld->meshes.AddUnique(mesh);
+            instance.meshIndex = meshIndex;
 
-                rendererWorld->instances.Add(instance);
+            rendererWorld->instances.Add(instance);
 
-                // if in range (depending on distance and BC size)
-                    // Add to TLAS
-                // count instances with shader
-            }
-        >
-            (query, (void*)&rendererWorld);
+            // if in range (depending on distance and BC size)
+                // Add to TLAS
+            // count instances with shader
+        }
 
         // create execute indirect buckets
         // update TLAS

@@ -83,30 +83,6 @@ public:
     }
 };
 
-class Slots
-{
-public:
-    std::vector<uint> freeslots;
-    void Start(uint count)
-    {
-        freeslots.resize(count);
-        for (uint i = 0; i < count; i++)
-        {
-            freeslots[i] = (count - 1) - i;
-        }
-    }
-    uint Get()
-    {
-        uint slot = freeslots[freeslots.size() - 1];
-        freeslots.pop_back();
-        return slot;
-    }
-    void Release(uint slot)
-    {
-        freeslots.push_back(slot);
-    }
-};
-
 
 // FUCK this the first forward declaration I need to make :(
 
@@ -138,7 +114,7 @@ public:
 
 struct DescriptorHeap
 {
-    uint maxDescriptorCount = 65536;
+    static const uint maxDescriptorCount = 65535;
     ID3D12DescriptorHeap* globalDescriptorHeap;
     Slots globalDescriptorHeapSlots;
     int descriptorIncrementSize;
@@ -1024,6 +1000,7 @@ struct Profiler
 
         profileData.QueryStarted = true;
 
+        cb.profileIdx = profileIdx;
         return profileIdx;
     }
 

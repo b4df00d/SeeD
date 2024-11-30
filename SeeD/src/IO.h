@@ -94,8 +94,8 @@ public:
         int3 mouseStopDrag;
     };
 
-    Keys _keys;
-    Keys keys;
+	Keys _keys{};
+	Keys keys{};
     Mouse _mouse;
     Mouse mouse;
     WindowInformation window;
