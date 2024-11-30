@@ -57,17 +57,17 @@ public:
     TextureLoader textureLoader;
     ShaderLoader shaderLoader;
 
-    void Start(IOs::WindowInformation window)
+    void On(IOs::WindowInformation window)
     {
-        time.Start();
-        ios.Start(window);
-        gpu.Start(&ios.window);
-        profiler.Start();
-        renderer.Start(&ios.window);
-        ui.Start(&ios.window, gpu.device, gpu.swapChain);
-        assetLoader.Start();
-        textureLoader.Start();
-        shaderLoader.Start();
+        time.On();
+        ios.On(window);
+        gpu.On(&ios.window);
+        profiler.On();
+        renderer.On(&ios.window);
+        ui.On(&ios.window, gpu.device, gpu.swapChain);
+        assetLoader.On();
+        textureLoader.On();
+        shaderLoader.On();
     }
 
     void Loop()
@@ -98,21 +98,21 @@ public:
         }
     }
 
-    void Stop()
+    void Off()
     {
         renderer.WaitFrame(); // wait previous frame
         gpu.FrameStart();
         renderer.WaitFrame(); // wait current frame
 
-        shaderLoader.Stop();
-        textureLoader.Stop();
-        assetLoader.Stop();
-        ui.Stop();
-        renderer.Stop();
-        profiler.Stop();
-        gpu.Stop();
-        ios.Stop();
-        time.Stop();
+        shaderLoader.Off();
+        textureLoader.Off();
+        assetLoader.Off();
+        ui.Off();
+        profiler.Off();
+        renderer.Off();
+        gpu.Off();
+        ios.Off();
+        time.Off();
     }
 
     void ScheduleInputs(tf::Subflow& subflow)
@@ -180,9 +180,9 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //window.windowResolution *= 2.f;
 
     Engine engine;
-    engine.Start(window);
+    engine.On(window);
     engine.Loop();
-    engine.Stop();
+    engine.Off();
 
     return 0;
 }

@@ -9,7 +9,7 @@ class TextureLoader
 {
 public:
     IWICImagingFactory* wicFactory = NULL;
-    void Start()
+    void On()
     {
 		ZoneScoped;
         HRESULT hr;
@@ -17,7 +17,7 @@ public:
         hr = CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFactory));// create the WIC factory
     }
 
-    void Stop()
+    void Off()
     {
 		ZoneScoped;
         wicFactory->Release();
@@ -54,12 +54,12 @@ public:
         std::vector<unsigned char> meshlet_triangles;
     };
 
-	void Start()
+	void On()
 	{
 		ZoneScoped;
 	}
 
-	void Stop()
+	void Off()
 	{
 		ZoneScoped;
 	}
@@ -117,7 +117,7 @@ public :
     IDxcUtils* DxcUtils{};
     IDxcCompiler3* DxcCompiler{};
 
-    void Start()
+    void On()
     {
         ZoneScoped;
         HRESULT hr;
@@ -127,7 +127,7 @@ public :
         if (FAILED(hr)) GPU::PrintDeviceRemovedReason(hr);
     }
 
-	void Stop()
+	void Off()
 	{
 		ZoneScoped;
 		DxcUtils->Release();

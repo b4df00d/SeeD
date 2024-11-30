@@ -24,7 +24,7 @@ public:
 
 	float deltaSeconds{};
 
-	void Start()
+	void On()
 	{
 		ZoneScoped;
 		// Check to see if this system supports high performance timers.
@@ -43,7 +43,7 @@ public:
 		deltaTicks = 0;
 	}
 
-	void Stop()
+	void Off()
 	{
 		ZoneScoped;
 	}

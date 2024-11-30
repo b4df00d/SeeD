@@ -334,7 +334,7 @@ public:
 		return 0;
 	}
 
-	void Start(WindowInformation _window)
+	void On(WindowInformation _window)
 	{
 		ZoneScoped;
 
@@ -477,7 +477,7 @@ public:
 		return;
 	}
 
-	void Stop()
+	void Off()
 	{
 
 	}

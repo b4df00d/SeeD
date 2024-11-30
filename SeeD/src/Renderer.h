@@ -30,8 +30,8 @@ public:
     CullingContext cullingContext;
     uint2 resolution;
 
-    virtual void Start(IOs::WindowInformation* window) = 0;
-    virtual void Stop() = 0;
+    virtual void On(IOs::WindowInformation* window) = 0;
+    virtual void Off() = 0;
     virtual tf::Task Schedule(World* world, tf::Subflow& subflow) = 0;
     virtual void Execute() = 0;
 };
@@ -42,7 +42,7 @@ public:
     PerFrame<CommandBuffer> commandBuffer;
     String name;
 
-    void Start(bool asyncCompute, String _name)
+    void On(bool asyncCompute, String _name)
     {
         ZoneScoped;
         name = _name;
@@ -84,7 +84,7 @@ public:
         }
     }
 
-    void Stop()
+    void Off()
     {
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -315,34 +315,34 @@ public:
     PostProcess postProcess;
     Present present;
 
-    void Start(IOs::WindowInformation* window) override
+    void On(IOs::WindowInformation* window) override
     {
         resolution = window->windowResolution;
 
-        skinning.Start(false, L"skinning");
-        particles.Start(false, L"particles");
-        spawning.Start(false, L"spawning");
-        culling.Start(false, L"culling");
-        zPrepass.Start(false, L"zPrepass");
-        gBuffers.Start(false, L"gBuffers");
-        lighting.Start(false, L"lighting");
-        forward.Start(false, L"forward");
-        postProcess.Start(false, L"postProcess");
-        present.Start(false, L"present");
+        skinning.On(false, L"skinning");
+        particles.On(false, L"particles");
+        spawning.On(false, L"spawning");
+        culling.On(false, L"culling");
+        zPrepass.On(false, L"zPrepass");
+        gBuffers.On(false, L"gBuffers");
+        lighting.On(false, L"lighting");
+        forward.On(false, L"forward");
+        postProcess.On(false, L"postProcess");
+        present.On(false, L"present");
     }
 
-    void Stop() override
+    void Off() override
     {
-        skinning.Stop();
-        particles.Stop();
-        spawning.Stop();
-        culling.Stop();
-        zPrepass.Stop();
-        gBuffers.Stop();
-        lighting.Stop();
-        forward.Stop();
-        postProcess.Stop();
-        present.Stop();
+        skinning.Off();
+        particles.Off();
+        spawning.Off();
+        culling.Off();
+        zPrepass.Off();
+        gBuffers.Off();
+        lighting.Off();
+        forward.Off();
+        postProcess.Off();
+        present.Off();
     }
 
     tf::Task Schedule(World* world, tf::Subflow& subflow) override
@@ -478,7 +478,7 @@ public:
 
         commandBuffer->cmd->OMSetRenderTargets(1, &GPU::instance->backBuffer->rtv.handle, false, nullptr);
 
-        UI::instance->FrameStop(commandBuffer->cmd);
+        UI::instance->FrameOff(commandBuffer->cmd);
 
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 
@@ -492,16 +492,16 @@ class EditorView : View
 public:
     Editor editor;
 
-    void Start(IOs::WindowInformation* window) override
+    void On(IOs::WindowInformation* window) override
     {
         resolution = window->windowResolution;
 
-        editor.Start(false, L"editor");
+        editor.On(false, L"editor");
     }
 
-    void Stop() override
+    void Off() override
     {
-        editor.Stop();
+        editor.Off();
     }
 
     tf::Task Schedule(World* world, tf::Subflow& subflow) override
@@ -526,16 +526,16 @@ public:
 
     PerFrame<Resource> backBuffer;
 
-    void Start(IOs::WindowInformation* window)
+    void On(IOs::WindowInformation* window)
     {
-        mainView.Start(window);
-        editorView.Start(window);
+        mainView.On(window);
+        editorView.On(window);
     }
     
-    void Stop()
+    void Off()
     {
-        mainView.Stop();
-        editorView.Stop();
+        mainView.Off();
+        editorView.Off();
     }
 
     void Schedule(World* world, tf::Subflow& subflow)

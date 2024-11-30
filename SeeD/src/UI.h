@@ -14,7 +14,7 @@ class UI
 
 public:
 	static UI* instance;
-    void Start(IOs::WindowInformation* window, ID3D12Device9* device, IDXGISwapChain3* swapchain)
+    void On(IOs::WindowInformation* window, ID3D12Device9* device, IDXGISwapChain3* swapchain)
     {
         ZoneScoped;
 		instance = this;
@@ -42,7 +42,7 @@ public:
         ImGui_ImplDX12_Init(device, sc.BufferCount, sc.BufferDesc.Format, pd3dSrvDescHeap, hFontSrvCpuDescHandle, hFontSrvGpuDescHandle);
     }
 
-    void Stop()
+    void Off()
     {
         ZoneScoped;
         ImGui_ImplDX12_Shutdown();
@@ -58,7 +58,7 @@ public:
         ImGui::NewFrame();
     }
 
-    void FrameStop(ID3D12GraphicsCommandList4* cmdList)
+    void FrameOff(ID3D12GraphicsCommandList4* cmdList)
     {
         ZoneScoped;
         ImGui::Render();

@@ -29,7 +29,7 @@ extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"
 struct Fence
 {
     ID3D12Fence* fence = NULL;
-    UINT64 fenceValue;
+    UINT64 fenceValue = 0;
     HANDLE fenceEvent;
 };
 
@@ -110,6 +110,7 @@ public:
     static void CleanUploadResources();
     static std::vector<std::tuple<uint, D3D12MA::Allocation*>> uploadResources;
     static std::vector<D3D12MA::Allocation*> allResources;
+    static std::vector<String> allResourcesNames;
 };
 
 struct DescriptorHeap
@@ -122,7 +123,7 @@ struct DescriptorHeap
     Slots rtvDescriptorHeapSlots;
     int rtvdescriptorIncrementSize;
 
-    void Start(ID3D12Device9* device)
+    void On(ID3D12Device9* device)
     {
         {
             D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
@@ -137,7 +138,7 @@ struct DescriptorHeap
             }
             globalDescriptorHeap->SetName(L"Global Desc Heap");
 
-            globalDescriptorHeapSlots.Start(maxDescriptorCount);
+            globalDescriptorHeapSlots.On(maxDescriptorCount);
 
             descriptorIncrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         }
@@ -155,7 +156,7 @@ struct DescriptorHeap
             }
             rtvDescriptorHeap->SetName(L"RTV Desc Heap");
 
-            rtvDescriptorHeapSlots.Start(maxDescriptorCount);
+            rtvDescriptorHeapSlots.On(maxDescriptorCount);
 
             rtvdescriptorIncrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         }
@@ -223,12 +224,12 @@ public:
     uint frameIndex{};
     uint frameNumber{};
 
-    void Start(IOs::WindowInformation* window)
+    void On(IOs::WindowInformation* window)
     {
         instance = this;
         ZoneScoped;
         CreateDevice(window);
-        descriptorHeap.Start(device);
+        descriptorHeap.On(device);
         CreateSwapChain(window);
         CreateMemoryAllocator();
 
@@ -391,7 +392,7 @@ public:
         }
     }
 
-    void Stop()
+    void Off()
     {
         ZoneScoped;
         graphicQueue->Release();
@@ -448,6 +449,7 @@ void Resource::CreateTexture(uint2 resolution, String name)
 
     allocation->SetName(name.c_str());
     allResources.push_back(allocation);
+    allResourcesNames.push_back(name);
 
     {
         auto desc = GetResource()->GetDesc();
@@ -513,6 +515,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
 
     allocation->SetName(name.c_str());
     allResources.push_back(allocation);
+    allResourcesNames.push_back(name);
 
     {
         D3D12_CPU_DESCRIPTOR_HANDLE handle = GPU::instance->descriptorHeap.GetGlobalSlot(srv);
@@ -581,6 +584,7 @@ void Resource::CreateReadBackBuffer(uint size, String name)
 
     allocation->SetName(name.c_str());
     allResources.push_back(allocation);
+    allResourcesNames.push_back(name);
 
     /*
     {
@@ -693,6 +697,7 @@ void Resource::Upload(void* data, CommandBuffer* cb)
     uploadAllocation->SetName(L"UploadBuffer");
     uploadResources.push_back({ GPU::instance->frameNumber, uploadAllocation });
     allResources.push_back(uploadAllocation);
+    allResourcesNames.push_back(L"UploadBuffer");
 
     void* buf;
     uploadAllocation->GetResource()->Map(0, nullptr, &buf);
@@ -721,8 +726,11 @@ void Resource::CleanUploadResources()
             D3D12MA::Allocation* alloc = std::get<1>(uploadResources[i]);
             for (int j = (int)allResources.size() - 1; j >= 0; j--)
             {
-                if(allResources[j] == alloc)
+                if (allResources[j] == alloc)
+                {
                     allResources.erase(allResources.begin() + i);
+                    allResourcesNames.erase(allResourcesNames.begin() + i);
+                }
             }
             alloc->Release();
             uploadResources.erase(uploadResources.begin() + i);
@@ -732,6 +740,7 @@ void Resource::CleanUploadResources()
 
 std::vector<std::tuple<uint, D3D12MA::Allocation*>> Resource::uploadResources;
 std::vector<D3D12MA::Allocation*> Resource::allResources;
+std::vector<String> Resource::allResourcesNames;
 // end of definitions of Resource::
 
 template <class T>
@@ -785,7 +794,7 @@ public:
         memcpy(buf, cpuData.data, sizeof(T) * cpuData.size());
         GetResourcePtr()->Unmap(0, nullptr);
     }
-    ~StructuredUploadBuffer()
+    void Release()
     {
         gpuData.Release();
     }
@@ -828,7 +837,7 @@ public:
         GetResourcePtr()->Unmap(0, nullptr);
     }
 
-    ~ReadBackBuffer()
+    void Release()
     {
         gpuData.Release();
     }
@@ -942,7 +951,7 @@ struct Profiler
     ReadBackBuffer readbackBuffer;
     std::vector<ProfileData> profiles;
 
-    void Start()
+    void On()
     {
         ZoneScoped;
         D3D12_QUERY_HEAP_DESC queryheapDesc = { };
@@ -1073,10 +1082,11 @@ struct Profiler
             UpdateProfile(profiles[profileIdx], profileIdx, gpuFrequency, frameQueryData);
     }
 
-    void Stop()
+    void Off()
     {
         ZoneScoped;
         buffer.Release();
+        readbackBuffer.Release();
         queryHeap->Release();
     }
 };

@@ -117,10 +117,10 @@ public:
         std::array<void*, Components::componentMaxCount> data;
         Slots freeslots;
 
-        void Start()
+        void On()
         {
             count = 0;
-            freeslots.Start(poolMaxSlots);
+            freeslots.On(poolMaxSlots);
             for (uint i = 0; i < data.size(); i++)
             {
                 data[i] = nullptr;
@@ -215,7 +215,7 @@ public:
             }
             Pool newPool;
             newPool.mask = mask;
-            newPool.Start();
+            newPool.On();
             World::instance->components.push_back(newPool);
             return (uint)World::instance->components.size() - 1;
         }
@@ -233,7 +233,7 @@ public:
 
     Systems::Player player;
 
-    void Start()
+    void On()
     {
         instance = this;
     }

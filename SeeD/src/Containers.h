@@ -4,7 +4,7 @@ class Slots
 {
 public:
     std::vector<uint16_t> freeslots;
-    void Start(uint16_t count)
+    void On(uint16_t count)
     {
         freeslots.resize(count);
         for (uint16_t i = 0; i < count; i++)
