@@ -69,6 +69,7 @@ public:
 		ZoneScoped;
     }
 
+    // also DirectXMesh can do meshlets https://github.com/microsoft/DirectXMesh
     Mesh Process(MeshOriginal& originalMesh)
     {
 		ZoneScoped;

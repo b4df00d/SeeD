@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../Third/taskflow-master/taskflow/taskflow.hpp"
+#include "../../Third/taskflow-master/taskflow/algorithm/for_each.hpp"
 
 static tf::Executor executor;
 static tf::Taskflow taskflow;

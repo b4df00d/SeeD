@@ -94,13 +94,15 @@ namespace Systems
     {
         void Update(World* world)
         {
+            ZoneScoped;
+            /*
             IOs::Log("----------------");
             IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Entity).name(), Components::Entity::mask.to_string(), Components::Entity::bucketIndex, Components::Entity::stride);
             IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Shader).name(), Components::Shader::mask.to_string(), Components::Shader::bucketIndex, Components::Shader::stride);
             IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Mesh).name(), Components::Mesh::mask.to_string(), Components::Mesh::bucketIndex, Components::Mesh::stride);
             IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Material).name(), Components::Material::mask.to_string(), Components::Material::bucketIndex, Components::Material::stride);
             IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Instance).name(), Components::Instance::mask.to_string(), Components::Instance::bucketIndex, Components::Instance::stride);
-            ZoneScoped;
+            */
         }
     };
 }
@@ -138,17 +140,46 @@ public:
         {
             freeslots.Release(index);
         }
+
+        inline bool Satisfy(Components::Mask include, Components::Mask exclude)
+        {
+            return ((mask & include) == include) && (mask & exclude) == 0;
+        }
     };
 
     struct EntitySlot
     {
-        uint pool : 16;
-        uint index : 16;
+        /*
+        union
+        {
+            struct {
+        */
+                uint pool : 16;
+                uint index : 16;
+        /*
+            };
+            uint slot{};
+        };
+        */
+
+        template <Components::IsComponent T>
+        T& Get()
+        {
+            // TODO : check that the pool have the right mask (debug assert ?)
+            auto& pool = World::instance->components[this->pool];
+            auto& res = ((T*)pool.data[T::bucketIndex])[this->index];
+            return res;
+        }
     };
 
     struct Entity
     {
         uint id;
+
+        Entity(uint i)
+        {
+            id = i;
+        }
 
         Entity(Components::Mask mask)
         {
@@ -181,9 +212,7 @@ public:
         {
             // TODO : check that the pool have the right mask (debug assert ?)
             auto& slot = World::instance->entitySlots[id];
-            auto& pool = World::instance->components[slot.pool];
-            auto& res = ((T*)pool.data[T::bucketIndex])[slot.index];
-            return res;
+            return slot.Get<T>();
         }
 
         template <Components::IsComponent T>
@@ -231,6 +260,9 @@ public:
     std::vector<uint> entityFreeSlots;
     std::vector<Pool> components;
 
+    std::array<std::vector<EntitySlot>, 128> frameQueries;
+    uint frameQueriesIndex;
+
     Systems::Player player;
 
     void On()
@@ -241,8 +273,29 @@ public:
     void Schedule(tf::Subflow& subflow)
     {
         ZoneScoped;
+        frameQueriesIndex = 0;
         //ECS systems
         SUBTASKWORLD(player);
+    }
+
+    uint Query(Components::Mask include, Components::Mask exclude)
+    {
+        uint queryIndex = frameQueriesIndex++;
+        std::vector<EntitySlot>& queryResult = frameQueries[queryIndex];
+        queryResult.clear();
+        queryResult.reserve(components.size() * poolMaxSlots);
+        for (uint i = 0; i < components.size(); i++)
+        {
+            Pool& pool = components[i];
+            if (pool.Satisfy(include, exclude))
+            {
+                for (uint j = 0; j < pool.count; j++)
+                {
+                    queryResult.push_back({ i, j });
+                }
+            }
+        }
+        return queryIndex;
     }
 };
 World* World::instance;

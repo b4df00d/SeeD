@@ -1009,7 +1009,7 @@ struct Profiler
 
         profileData.QueryStarted = true;
 
-        cb.profileIdx = profileIdx;
+        cb.profileIdx = (uint)profileIdx;
         return profileIdx;
     }
 

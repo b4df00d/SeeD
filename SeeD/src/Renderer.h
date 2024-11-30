@@ -349,12 +349,12 @@ public:
     {
         ZoneScoped;
 
-        SUBTASKRENDERERWORLD(UpdateMeshes);
-        SUBTASKRENDERERWORLD(UpdateMaterials);
-        SUBTASKRENDERERWORLD(UpdateShaders);
-        SUBTASKRENDERERWORLD(UpdateInstances);
-        SUBTASKRENDERERWORLD(UpdateLights);
-        SUBTASKRENDERERWORLD(UpdateCameras);
+        tf::Task updateMeshes = UpdateMeshes(world, subflow);
+        tf::Task updateMaterials = UpdateMaterials(world, subflow);
+        tf::Task updateShaders = UpdateShaders(world, subflow);
+        tf::Task updateInstances = UpdateInstances(world, subflow);
+        tf::Task updateLights = UpdateLights(world, subflow);
+        tf::Task updateCameras = UpdateCameras(world, subflow);
 
         SUBTASKVIEWPASS(skinning);
         SUBTASKVIEWPASS(particles);
@@ -367,8 +367,8 @@ public:
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
-        UpdateInstances.succeed(UpdateMeshes, UpdateMaterials, UpdateShaders);
-        UpdateInstances.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+        updateInstances.succeed(updateMeshes, updateMaterials, updateShaders);
+        updateInstances.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
         presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
@@ -389,16 +389,30 @@ public:
         present.Execute();
     }
 
-    void UpdateMeshes(World* world)
+    tf::Task UpdateMeshes(World* world, tf::Subflow& subflow)
     {
         ZoneScoped;
         // parallel for meshes
             // load mesh from disk
             // upload mesh
             // update BLAS
+
+        uint queryIndex = world->Query(Components::Mesh::mask, 0);
+
+        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityStep = 1;
+        RendererWorld* frameWorld = rendererWorld.Get();
+
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+            {
+                ZoneScoped;
+
+            }
+        );
+        return task;
     }
 
-    void UpdateMaterials(World* world)
+    tf::Task UpdateMaterials(World* world, tf::Subflow& subflow)
     {
         ZoneScoped;
         // parallel for materials
@@ -406,64 +420,128 @@ public:
             // load textures from disk
             // upload textures
             // upload materials
+
+        uint queryIndex = world->Query(Components::Material::mask, 0);
+
+        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityStep = 1;
+        RendererWorld* frameWorld = rendererWorld.Get();
+
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+            {
+                ZoneScoped;
+
+            }
+        );
+        return task;
     }
 
-    void UpdateShaders(World* world)
+    tf::Task UpdateShaders(World* world, tf::Subflow& subflow)
     {
         ZoneScoped;
         // parallel for shaders
             // compile shader
+
+        uint queryIndex = world->Query(Components::Shader::mask, 0);
+
+        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityStep = 1;
+        RendererWorld* frameWorld = rendererWorld.Get();
+
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+            {
+                ZoneScoped;
+
+            }
+        );
+        return task;
     }
 
-    void UpdateInstances(World* world)
+    tf::Task UpdateInstances(World* world, tf::Subflow& subflow)
     {
         ZoneScoped;
         rendererWorld->instances.Clear();
+
+        uint queryIndex = world->Query(Components::Instance::mask, 0);
+
+        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityStep = 128;
+        RendererWorld* frameWorld = rendererWorld.Get();
         
-        for (uint i = 0; i < world->entitySlots.size(); i++)
-        {
-            World::Entity entity { i };
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+            {
+                ZoneScoped;
+                auto& queryResult = world->frameQueries[queryIndex];
 
-            Components::Instance& instanceCmp = entity.Get<Components::Instance>();
-            Components::Mesh& meshCmp = instanceCmp.mesh.Get();
-            Components::Material& materialCmp = instanceCmp.material.Get();
-            Components::Shader& shaderCmp = materialCmp.shader.Get();
+                Components::Instance& instanceCmp = queryResult[i].Get<Components::Instance>();
+                Components::Mesh& meshCmp = instanceCmp.mesh.Get();
+                Components::Material& materialCmp = instanceCmp.material.Get();
+                Components::Shader& shaderCmp = materialCmp.shader.Get();
 
-            Shader shader{};
-            Material material{};
-            Mesh mesh{};
-            Instance instance{};
+                Shader shader{};
+                Material material{};
+                Mesh mesh{};
+                Instance instance{};
 
-            uint shaderIndex = rendererWorld->shaders.AddUnique(shader);
-            material.shaderIndex = shaderIndex;
+                uint shaderIndex = frameWorld->shaders.AddUnique(shader);
+                material.shaderIndex = shaderIndex;
 
-            uint materialIndex = rendererWorld->materials.AddUnique(material);
-            instance.materialIndex = materialIndex;
+                uint materialIndex = frameWorld->materials.AddUnique(material);
+                instance.materialIndex = materialIndex;
 
-            uint meshIndex = rendererWorld->meshes.AddUnique(mesh);
-            instance.meshIndex = meshIndex;
+                uint meshIndex = frameWorld->meshes.AddUnique(mesh);
+                instance.meshIndex = meshIndex;
 
-            rendererWorld->instances.Add(instance);
+                frameWorld->instances.Add(instance);
 
-            // if in range (depending on distance and BC size)
-                // Add to TLAS
-            // count instances with shader
-        }
+                // if in range (depending on distance and BC size)
+                    // Add to TLAS
+                // count instances with shader
+            }
+        );
 
         // create execute indirect buckets
         // update TLAS
+        return task;
     }
 
-    void UpdateLights(World* world)
+    tf::Task UpdateLights(World* world, tf::Subflow& subflow)
     {
         ZoneScoped;
         // upload lights
+        uint queryIndex = world->Query(Components::Material::mask, 0);
+
+        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityStep = 1;
+        RendererWorld* frameWorld = rendererWorld.Get();
+
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+            {
+                ZoneScoped;
+
+            }
+        );
+        return task;
     }
 
-    void UpdateCameras(World* world)
+    tf::Task UpdateCameras(World* world, tf::Subflow& subflow)
     {
         ZoneScoped;
         // upload camera
+
+        uint queryIndex = world->Query(Components::Material::mask, 0);
+
+        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityStep = 1;
+        RendererWorld* frameWorld = rendererWorld.Get();
+
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+            {
+                ZoneScoped;
+
+            }
+        );
+        return task;
     }
 };
 
@@ -545,11 +623,22 @@ public:
         auto mainViewEndTask = mainView.Schedule(world, subflow);
         auto editorViewEndTask = editorView.Schedule(world, subflow);
 
-        SUBTASKRENDERER(WaitFrame);
         SUBTASKRENDERER(ExecuteFrame);
+        SUBTASKRENDERER(WaitFrame);
+        SUBTASKRENDERER(PresentFrame);
 
-        WaitFrame.succeed(mainViewEndTask, editorViewEndTask);
-        WaitFrame.precede(ExecuteFrame);
+        ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
+        ExecuteFrame.precede(WaitFrame);
+        WaitFrame.precede(PresentFrame);
+    }
+
+    void ExecuteFrame()
+    {
+        ZoneScoped;
+        HRESULT hr;
+
+        mainView.Execute();
+        editorView.Execute();
     }
 
     void WaitFrame()
@@ -578,13 +667,10 @@ public:
         }
     }
 
-    void ExecuteFrame()
+    void PresentFrame()
     {
         ZoneScoped;
         HRESULT hr;
-
-        mainView.Execute();
-        editorView.Execute();
 
         if (GPU::instance->swapChain != nullptr)
         {
