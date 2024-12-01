@@ -26,14 +26,14 @@ namespace Components
     template<typename T>
     struct ComponentBase
     {
-        static Mask mask;
         static uint bucketIndex;
+        static Mask mask;
         static uint stride;
     };
     template<typename T>
-    Mask ComponentBase<T>::mask = 1 << masksIndex;
-    template<typename T>
     uint ComponentBase<T>::bucketIndex = GetComponentStride<T>();
+    template<typename T>
+    Mask ComponentBase<T>::mask = 1 << ComponentBase<T>::bucketIndex;
     template<typename T>
     uint ComponentBase<T>::stride = sizeof(T);
 
@@ -107,7 +107,9 @@ namespace Systems
     };
 }
 
+// Just one world. keep it simple.
 static constexpr uint poolMaxSlots = 65535;
+static constexpr uint poolInvalid = 65535;
 class World
 {
 public:
@@ -176,12 +178,17 @@ public:
     {
         uint id;
 
-        Entity(uint i)
+        Entity()
+        {
+            id = ~0;
+        }
+
+        void Make(uint i)
         {
             id = i;
         }
 
-        Entity(Components::Mask mask)
+        void Make(Components::Mask mask)
         {
             EntitySlot slot;
             slot.pool = GetOrCreatePoolIndex(mask);
@@ -202,8 +209,8 @@ public:
 
         ~Entity()
         {
-            World::instance->entitySlots[id].index = poolMaxSlots;
-            World::instance->entitySlots[id].pool = poolMaxSlots;
+            World::instance->entitySlots[id].index = poolInvalid;
+            World::instance->entitySlots[id].pool = poolInvalid;
             World::instance->entityFreeSlots.push_back(id);
         }
 
@@ -305,7 +312,8 @@ namespace Components
     template<Components::IsComponent T>
     T& PTR<T>::Get()
     {
-        World::Entity entity{ index };
+        World::Entity entity;
+        entity.Make(index);
         return entity.Get<T>();
     }
 }

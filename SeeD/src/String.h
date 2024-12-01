@@ -1,6 +1,13 @@
 #pragma once
 #include <iostream>
 
+std::wstring CharToWString(const char* ptr)
+{
+	std::string str(ptr);
+	std::wstring temp(str.begin(), str.end());
+	return temp;
+}
+
 class String : public std::wstring
 {
 public:
@@ -12,7 +19,11 @@ public:
 	{
 
 	}
-	String(std::wstring str) : std::wstring(str)
+	String(std::wstring& str) : std::wstring(str)
+	{
+
+	}
+	String(const std::wstring& str) : std::wstring(str)
 	{
 
 	}

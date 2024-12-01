@@ -9,9 +9,8 @@ struct CullingContext
     TLAS tlas;
 };
 
-class RendererWorld
+struct ViewWorld
 {
-public:
     StructuredUploadBuffer<Camera> cameras;
     StructuredUploadBuffer<Instance> instances;
     StructuredUploadBuffer<Instance> instancesGPU; // only for instances created on GPU
@@ -21,18 +20,26 @@ public:
     StructuredUploadBuffer<Light> lights;
 };
 
-
+struct GlobalResources
+{
+    World::EntitySlot nonWorldIndex{ poolInvalid , 0 };
+    // adding a general resource with entitySlot.pool = poolInvalid says that this resource dont come from world
+    // is this only for shaders of the renderer ? :/
+    Map<World::EntitySlot, Shader, Shader> shaders;
+    Map<World::EntitySlot, Mesh, Mesh> meshes;
+    Map<World::EntitySlot, Texture, Texture> textures;
+};
 
 class View
 {
 public:
-    PerFrame<RendererWorld> rendererWorld;
+    PerFrame<ViewWorld> rendererWorld;
     CullingContext cullingContext;
     uint2 resolution;
 
-    virtual void On(IOs::WindowInformation* window) = 0;
+    virtual void On(IOs::WindowInformation& window, GlobalResources& globalResources) = 0;
     virtual void Off() = 0;
-    virtual tf::Task Schedule(World* world, tf::Subflow& subflow) = 0;
+    virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
     virtual void Execute() = 0;
 };
 
@@ -42,10 +49,11 @@ public:
     PerFrame<CommandBuffer> commandBuffer;
     String name;
 
-    void On(bool asyncCompute, String _name)
+    virtual void On(bool asyncCompute, String _name)
     {
         ZoneScoped;
         name = _name;
+        //name = CharToWString(typeid(this).name()); // name = L"class Pass * __ptr64"
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -78,6 +86,11 @@ public:
             }
             hr = GPU::instance->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&commandBuffer.Get(i)->passEnd.fence));
             if (FAILED(hr))
+            {
+                GPU::PrintDeviceRemovedReason(hr);
+            }
+            commandBuffer.Get(i)->passEnd.fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            if (commandBuffer.Get(i)->passEnd.fenceEvent == nullptr)
             {
                 GPU::PrintDeviceRemovedReason(hr);
             }
@@ -141,12 +154,17 @@ public:
         commandQueue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
+    virtual void Setup(View* view) = 0;
     virtual void Render(View* view) = 0;
 };
 
 class Skinning : public Pass
 {
 public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     void Render(View* view) override
     {
         ZoneScoped;
@@ -160,6 +178,10 @@ public:
 class Particles : public Pass
 {
 public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     void Render(View* view) override
     {
         ZoneScoped;
@@ -172,6 +194,10 @@ public:
 class Spawning : public Pass
 {
 public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     void Render(View* view) override
     {
         ZoneScoped;
@@ -184,6 +210,10 @@ public:
 class Culling : public Pass
 {
 public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     void Render(View* view) override
     {
         ZoneScoped;
@@ -195,6 +225,10 @@ public:
 class ZPrepass : public Pass
 {
 public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     // Draw occluders ? no need if using previous frame Z ?
     void Render(View* view) override
     {
@@ -207,6 +241,10 @@ public:
 class GBuffers : public Pass
 {
 public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     // indirect draw calls from cullingResult
     void Render(View* view) override
     {
@@ -219,6 +257,10 @@ public:
 class Lighting : public Pass
 {
 public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     void Render(View* view) override
     {
         ZoneScoped;
@@ -229,7 +271,19 @@ public:
 
 class Forward : public Pass
 {
+    World::Entity aShader;
 public:
+    virtual void On(bool asyncCompute, String _name) override
+    {
+        Pass::On(asyncCompute, _name);
+        ZoneScoped;
+        aShader.Make(Components::Shader::mask);
+        aShader.Get<Components::Shader>().id = 123456789;
+    }
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     void Render(View* view) override
     {
         ZoneScoped;
@@ -274,6 +328,10 @@ public:
 class PostProcess : public Pass
 {
 public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     void Render(View* view) override
     {
         ZoneScoped;
@@ -285,6 +343,10 @@ public:
 class Present : public Pass
 {
 public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     void Render(View* view) override
     {
         ZoneScoped;
@@ -315,9 +377,9 @@ public:
     PostProcess postProcess;
     Present present;
 
-    void On(IOs::WindowInformation* window) override
+    void On(IOs::WindowInformation& window, GlobalResources& globalResources) override
     {
-        resolution = window->windowResolution;
+        resolution = window.windowResolution;
 
         skinning.On(false, L"skinning");
         particles.On(false, L"particles");
@@ -345,7 +407,7 @@ public:
         present.Off();
     }
 
-    tf::Task Schedule(World* world, tf::Subflow& subflow) override
+    tf::Task Schedule(World& world, tf::Subflow& subflow) override
     {
         ZoneScoped;
 
@@ -387,9 +449,10 @@ public:
         forward.Execute();
         postProcess.Execute();
         present.Execute();
+
     }
 
-    tf::Task UpdateMeshes(World* world, tf::Subflow& subflow)
+    tf::Task UpdateMeshes(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
         // parallel for meshes
@@ -397,13 +460,13 @@ public:
             // upload mesh
             // update BLAS
 
-        uint queryIndex = world->Query(Components::Mesh::mask, 0);
+        uint queryIndex = world.Query(Components::Mesh::mask, 0);
 
-        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
-        RendererWorld* frameWorld = rendererWorld.Get();
+        ViewWorld* frameWorld = rendererWorld.Get();
 
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
             {
                 ZoneScoped;
 
@@ -412,7 +475,7 @@ public:
         return task;
     }
 
-    tf::Task UpdateMaterials(World* world, tf::Subflow& subflow)
+    tf::Task UpdateMaterials(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
         // parallel for materials
@@ -421,13 +484,13 @@ public:
             // upload textures
             // upload materials
 
-        uint queryIndex = world->Query(Components::Material::mask, 0);
+        uint queryIndex = world.Query(Components::Material::mask, 0);
 
-        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
-        RendererWorld* frameWorld = rendererWorld.Get();
+        ViewWorld* frameWorld = rendererWorld.Get();
 
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
             {
                 ZoneScoped;
 
@@ -436,19 +499,19 @@ public:
         return task;
     }
 
-    tf::Task UpdateShaders(World* world, tf::Subflow& subflow)
+    tf::Task UpdateShaders(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
         // parallel for shaders
             // compile shader
 
-        uint queryIndex = world->Query(Components::Shader::mask, 0);
+        uint queryIndex = world.Query(Components::Shader::mask, 0);
 
-        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
-        RendererWorld* frameWorld = rendererWorld.Get();
+        ViewWorld* frameWorld = rendererWorld.Get();
 
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
             {
                 ZoneScoped;
 
@@ -457,21 +520,21 @@ public:
         return task;
     }
 
-    tf::Task UpdateInstances(World* world, tf::Subflow& subflow)
+    tf::Task UpdateInstances(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
         rendererWorld->instances.Clear();
 
-        uint queryIndex = world->Query(Components::Instance::mask, 0);
+        uint queryIndex = world.Query(Components::Instance::mask, 0);
 
-        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 128;
-        RendererWorld* frameWorld = rendererWorld.Get();
+        ViewWorld* frameWorld = rendererWorld.Get();
         
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
             {
                 ZoneScoped;
-                auto& queryResult = world->frameQueries[queryIndex];
+                auto& queryResult = world.frameQueries[queryIndex];
 
                 Components::Instance& instanceCmp = queryResult[i].Get<Components::Instance>();
                 Components::Mesh& meshCmp = instanceCmp.mesh.Get();
@@ -505,17 +568,17 @@ public:
         return task;
     }
 
-    tf::Task UpdateLights(World* world, tf::Subflow& subflow)
+    tf::Task UpdateLights(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
         // upload lights
-        uint queryIndex = world->Query(Components::Material::mask, 0);
+        uint queryIndex = world.Query(Components::Material::mask, 0);
 
-        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
-        RendererWorld* frameWorld = rendererWorld.Get();
+        ViewWorld* frameWorld = rendererWorld.Get();
 
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
             {
                 ZoneScoped;
 
@@ -524,18 +587,18 @@ public:
         return task;
     }
 
-    tf::Task UpdateCameras(World* world, tf::Subflow& subflow)
+    tf::Task UpdateCameras(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
         // upload camera
 
-        uint queryIndex = world->Query(Components::Material::mask, 0);
+        uint queryIndex = world.Query(Components::Material::mask, 0);
 
-        uint entityCount = (uint)world->frameQueries[queryIndex].size();
+        uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
-        RendererWorld* frameWorld = rendererWorld.Get();
+        ViewWorld* frameWorld = rendererWorld.Get();
 
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [world, frameWorld, queryIndex](int i)
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
             {
                 ZoneScoped;
 
@@ -549,6 +612,10 @@ public:
 class Editor : public Pass
 {
 public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
     void Render(View* view) override
     {
         ZoneScoped;
@@ -570,9 +637,9 @@ class EditorView : View
 public:
     Editor editor;
 
-    void On(IOs::WindowInformation* window) override
+    void On(IOs::WindowInformation& window, GlobalResources& globalResources) override
     {
-        resolution = window->windowResolution;
+        resolution = window.windowResolution;
 
         editor.On(false, L"editor");
     }
@@ -582,7 +649,7 @@ public:
         editor.Off();
     }
 
-    tf::Task Schedule(World* world, tf::Subflow& subflow) override
+    tf::Task Schedule(World& world, tf::Subflow& subflow) override
     {
         ZoneScoped;
         SUBTASKVIEWPASS(editor);
@@ -599,15 +666,16 @@ public:
 class Renderer
 {
 public:
+    GlobalResources globalResources;
     MainView mainView;
     EditorView editorView;
 
     PerFrame<Resource> backBuffer;
 
-    void On(IOs::WindowInformation* window)
+    void On(IOs::WindowInformation& window)
     {
-        mainView.On(window);
-        editorView.On(window);
+        mainView.On(window, globalResources);
+        editorView.On(window, globalResources);
     }
     
     void Off()
@@ -616,7 +684,7 @@ public:
         editorView.Off();
     }
 
-    void Schedule(World* world, tf::Subflow& subflow)
+    void Schedule(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
 

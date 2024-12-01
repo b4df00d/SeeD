@@ -61,9 +61,10 @@ public:
     {
         time.On();
         ios.On(window);
+        world.On();
         gpu.On(&ios.window);
         profiler.On();
-        renderer.On(&ios.window);
+        renderer.On(ios.window);
         ui.On(&ios.window, gpu.device, gpu.swapChain);
         assetLoader.On();
         textureLoader.On();
@@ -156,7 +157,7 @@ public:
      
     void ScheduleRenderer(tf::Subflow& subflow)
     {
-        renderer.Schedule(&world, subflow);
+        renderer.Schedule(world, subflow);
     }
 
     void Load()
