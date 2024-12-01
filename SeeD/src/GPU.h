@@ -850,7 +850,6 @@ struct BLAS
 
 struct TLAS
 {
-
     ~TLAS()
     {
 
@@ -895,13 +894,8 @@ struct Mesh
 struct Material
 {
     uint shaderIndex;
-    float parameters[16];
-    uint texturesIndex[16];
-};
-
-struct Texture
-{
-    uint index;
+    SRV texturesSRV[16];
+    float parameters[15];
 };
 
 struct PSO

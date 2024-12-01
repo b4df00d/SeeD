@@ -67,9 +67,17 @@ namespace Components
     };
     Mesh mesh;
 
-    struct Material : ComponentBase<Material>
+    struct Texture : ComponentBase<Texture>
+    {
+        assetID id;
+    };
+    Texture texture;
+
+    struct __declspec(align(128)) Material : ComponentBase<Material>
     {
         Handle<Shader> shader;
+        Handle<Texture> textures[16];
+        float prameters[15]; // not 16 so that the struct is 128bytes
     };
     Material material;
 
@@ -120,8 +128,8 @@ public:
     public:
         Components::Mask mask;
         uint count;
-        std::array<void*, Components::componentMaxCount> data;
         Slots freeslots;
+        std::array<void*, Components::componentMaxCount> data;
 
         void On()
         {
@@ -137,11 +145,13 @@ public:
 
         uint GetSlot()
         {
+            count++;
             return freeslots.Get();
         }
 
         void ReleaseSlot(uint index)
         {
+            count--;
             freeslots.Release(index);
         }
 
@@ -249,6 +259,8 @@ public:
 
         uint GetOrCreatePoolIndex(Components::Mask mask)
         {
+            mask |= Components::Entity::mask;
+
             for (uint i = 0; i < World::instance->components.size(); i++)
             {
                 auto& pool = World::instance->components[i];

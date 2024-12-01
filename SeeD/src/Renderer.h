@@ -14,20 +14,60 @@ struct ViewWorld
     StructuredUploadBuffer<Camera> cameras;
     StructuredUploadBuffer<Instance> instances;
     StructuredUploadBuffer<Instance> instancesGPU; // only for instances created on GPU
-    StructuredUploadBuffer<Mesh> meshes;
     StructuredUploadBuffer<Material> materials;
-    StructuredUploadBuffer<Shader> shaders;
     StructuredUploadBuffer<Light> lights;
+};
+
+template<typename keyType, typename cpuType>
+class Map
+{
+public:
+    std::vector<keyType> keys;
+    std::vector<cpuType> data;
+
+    std::vector<bool> loaded; // and uploaded if applicable
+
+    int Contains(keyType key)
+    {
+        for (int i = 0; i < keys.size(); i++)
+        {
+            if (keys[i] == key)
+                return i;
+        }
+        return -1;
+    }
+
+    uint Add(keyType key)
+    {
+        uint index = Contains(key);
+        if (index == -1)
+        {
+            keys.push_back(key);
+            data.push_back(cpuType());
+            loaded.push_back(false);
+            index = (uint)keys.size() - 1;
+        }
+        return index;
+    }
+
+    void Remove(keyType key)
+    {
+        int index = Contains(key);
+        keys[index] = keys.back();
+        keys.pop_back();
+        data[index] = data.back();
+        data.pop_back();
+        loaded[index] = loaded.back();
+        loaded.pop_back();
+    }
 };
 
 struct GlobalResources
 {
-    World::EntitySlot nonWorldIndex{ poolInvalid , 0 };
-    // adding a general resource with entitySlot.pool = poolInvalid says that this resource dont come from world
-    // is this only for shaders of the renderer ? :/
-    Map<World::EntitySlot, Shader, Shader> shaders;
-    Map<World::EntitySlot, Mesh, Mesh> meshes;
-    Map<World::EntitySlot, Texture, Texture> textures;
+    Map<assetID, Shader> shaders;
+    Map<assetID, Mesh> meshes;
+    StructuredUploadBuffer<Mesh> meshesGPU;
+    Map<assetID, Resource> textures;
 };
 
 class View
@@ -39,7 +79,7 @@ public:
 
     virtual void On(IOs::WindowInformation& window, GlobalResources& globalResources) = 0;
     virtual void Off() = 0;
-    virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
+    virtual tf::Task Schedule(World& world, GlobalResources& globalResources, tf::Subflow& subflow) = 0;
     virtual void Execute() = 0;
 };
 
@@ -49,7 +89,7 @@ public:
     PerFrame<CommandBuffer> commandBuffer;
     String name;
 
-    virtual void On(bool asyncCompute, String _name)
+    virtual void On(GlobalResources& globalResources, bool asyncCompute, String _name)
     {
         ZoneScoped;
         name = _name;
@@ -148,7 +188,7 @@ public:
     void Execute()
     {
         if (commandBuffer->open)
-            IOs::Log("{} OPEN !!", name);
+            IOs::Log("{} OPEN !!", name.c_str());
         ID3D12CommandQueue* commandQueue = GPU::instance->graphicQueue;
         commandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
         commandQueue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
@@ -273,11 +313,12 @@ class Forward : public Pass
 {
     Components::Handle<Components::Shader> meshShader;
 public:
-    virtual void On(bool asyncCompute, String _name) override
+    virtual void On(GlobalResources& globalResources, bool asyncCompute, String _name) override
     {
-        Pass::On(asyncCompute, _name);
+        Pass::On(globalResources, asyncCompute, _name);
         ZoneScoped;
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
+        globalResources.shaders.Add(meshShader.Get().id);
     }
     void Setup(View* view) override
     {
@@ -380,16 +421,16 @@ public:
     {
         resolution = window.windowResolution;
 
-        skinning.On(false, "skinning");
-        particles.On(false, "particles");
-        spawning.On(false, "spawning");
-        culling.On(false, "culling");
-        zPrepass.On(false, "zPrepass");
-        gBuffers.On(false, "gBuffers");
-        lighting.On(false, "lighting");
-        forward.On(false, "forward");
-        postProcess.On(false, "postProcess");
-        present.On(false, "present");
+        skinning.On(globalResources, false, "skinning");
+        particles.On(globalResources, false, "particles");
+        spawning.On(globalResources, false, "spawning");
+        culling.On(globalResources, false, "culling");
+        zPrepass.On(globalResources, false, "zPrepass");
+        gBuffers.On(globalResources, false, "gBuffers");
+        lighting.On(globalResources, false, "lighting");
+        forward.On(globalResources, false, "forward");
+        postProcess.On(globalResources, false, "postProcess");
+        present.On(globalResources, false, "present");
     }
 
     void Off() override
@@ -406,14 +447,15 @@ public:
         present.Off();
     }
 
-    tf::Task Schedule(World& world, tf::Subflow& subflow) override
+    tf::Task Schedule(World& world, GlobalResources& globalResources, tf::Subflow& subflow) override
     {
         ZoneScoped;
 
+        tf::Task updateInstances = UpdateInstances(world, globalResources, subflow);
         tf::Task updateMeshes = UpdateMeshes(world, subflow);
-        tf::Task updateMaterials = UpdateMaterials(world, subflow);
+        tf::Task updateTextures = UpdateTextures(world, subflow);
         tf::Task updateShaders = UpdateShaders(world, subflow);
-        tf::Task updateInstances = UpdateInstances(world, subflow);
+        tf::Task updateMaterials = UpdateMaterials(world, subflow);
         tf::Task updateLights = UpdateLights(world, subflow);
         tf::Task updateCameras = UpdateCameras(world, subflow);
 
@@ -428,8 +470,8 @@ public:
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
-        updateInstances.succeed(updateMeshes, updateMaterials, updateShaders);
-        updateInstances.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+        updateInstances.precede(updateMeshes, updateTextures, updateShaders);
+        updateShaders.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
         presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
@@ -454,7 +496,7 @@ public:
     tf::Task UpdateMeshes(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
-        // parallel for meshes
+        // parallel for meshes in GlobalResources
             // load mesh from disk
             // upload mesh
             // update BLAS
@@ -474,16 +516,15 @@ public:
         return task;
     }
 
-    tf::Task UpdateMaterials(World& world, tf::Subflow& subflow)
+    tf::Task UpdateTextures(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
-        // parallel for materials
-            // load material from disk
-            // load textures from disk
-            // upload textures
-            // upload materials
+        // parallel for textures in GlobalResources
+            // load mesh from disk
+            // upload mesh
+            // update BLAS
 
-        uint queryIndex = world.Query(Components::Material::mask, 0);
+        uint queryIndex = world.Query(Components::Mesh::mask, 0);
 
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
@@ -501,7 +542,7 @@ public:
     tf::Task UpdateShaders(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
-        // parallel for shaders
+        // parallel for shaders in GlobalResources
             // compile shader
 
         uint queryIndex = world.Query(Components::Shader::mask, 0);
@@ -519,7 +560,7 @@ public:
         return task;
     }
 
-    tf::Task UpdateInstances(World& world, tf::Subflow& subflow)
+    tf::Task UpdateInstances(World& world, GlobalResources& globalResources, tf::Subflow& subflow)
     {
         ZoneScoped;
         rendererWorld->instances.Clear();
@@ -530,7 +571,7 @@ public:
         uint entityStep = 128;
         ViewWorld* frameWorld = rendererWorld.Get();
         
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, &globalResources, frameWorld, queryIndex](int i)
             {
                 ZoneScoped;
                 auto& queryResult = world.frameQueries[queryIndex];
@@ -540,20 +581,30 @@ public:
                 Components::Material& materialCmp = instanceCmp.material.Get();
                 Components::Shader& shaderCmp = materialCmp.shader.Get();
 
-                Shader shader{};
-                Material material{};
-                Mesh mesh{};
-                Instance instance{};
+                uint meshIndex = globalResources.meshes.Add(meshCmp.id);
+                if (!globalResources.meshes.loaded[meshIndex]) return;
 
-                uint shaderIndex = frameWorld->shaders.AddUnique(shader);
-                material.shaderIndex = shaderIndex;
+                uint shaderIndex = globalResources.shaders.Add(shaderCmp.id);
+                if (!globalResources.shaders.loaded[shaderIndex]) return;
 
-                uint materialIndex = frameWorld->materials.AddUnique(material);
-                instance.materialIndex = materialIndex;
+                Material material;
+                for (uint i = 0; i < 16; i++) // keep in sync with number of textures in material
+                {
+                    if (materialCmp.textures[i].index != entityInvalid)
+                    {
+                        Components::Texture& textureCmp = materialCmp.textures[i].Get();
+                        uint textureIndex = globalResources.textures.Add(textureCmp.id);
+                        if (!globalResources.textures.loaded[textureIndex]) return;
+                        material.texturesSRV[i] = globalResources.textures.data[textureIndex].srv;
+                    }
+                }
 
-                uint meshIndex = frameWorld->meshes.AddUnique(mesh);
+                // everything should be loaded to be able to draw the instance
+
+                frameWorld->materials.AddUnique(material);
+
+                Instance instance;
                 instance.meshIndex = meshIndex;
-
                 frameWorld->instances.Add(instance);
 
                 // if in range (depending on distance and BC size)
@@ -562,8 +613,30 @@ public:
             }
         );
 
-        // create execute indirect buckets
-        // update TLAS
+        return task;
+    }
+
+    tf::Task UpdateMaterials(World& world, tf::Subflow& subflow)
+    {
+        ZoneScoped;
+        // parallel for materials in frameworld
+            // add textures in globalResources
+            // load textures from disk
+            // upload textures
+            // upload materials
+
+        uint queryIndex = world.Query(Components::Material::mask, 0);
+
+        uint entityCount = (uint)world.frameQueries[queryIndex].size();
+        uint entityStep = 1;
+        ViewWorld* frameWorld = rendererWorld.Get();
+
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
+            {
+                ZoneScoped;
+
+            }
+        );
         return task;
     }
 
@@ -640,7 +713,7 @@ public:
     {
         resolution = window.windowResolution;
 
-        editor.On(false, "editor");
+        editor.On(globalResources, false, "editor");
     }
 
     void Off() override
@@ -648,7 +721,7 @@ public:
         editor.Off();
     }
 
-    tf::Task Schedule(World& world, tf::Subflow& subflow) override
+    tf::Task Schedule(World& world, GlobalResources& globalResources, tf::Subflow& subflow) override
     {
         ZoneScoped;
         SUBTASKVIEWPASS(editor);
@@ -687,8 +760,12 @@ public:
     {
         ZoneScoped;
 
-        auto mainViewEndTask = mainView.Schedule(world, subflow);
-        auto editorViewEndTask = editorView.Schedule(world, subflow);
+        SUBTASKRENDERER(LoadShaders);
+        SUBTASKRENDERER(LoadMeshes);
+        SUBTASKRENDERER(LoadTextures);
+
+        auto mainViewEndTask = mainView.Schedule(world, globalResources, subflow);
+        auto editorViewEndTask = editorView.Schedule(world, globalResources, subflow);
 
         SUBTASKRENDERER(ExecuteFrame);
         SUBTASKRENDERER(WaitFrame);
@@ -697,6 +774,38 @@ public:
         ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
         ExecuteFrame.precede(WaitFrame);
         WaitFrame.precede(PresentFrame);
+    }
+
+    // do that in backgroud task ?
+    void LoadShaders()
+    {
+        for (uint i = 0; i < globalResources.shaders.data.size(); i++)
+        {
+            if (!globalResources.shaders.loaded[i]) 
+            {
+                // load shader
+            }
+        }
+    }
+    void LoadMeshes()
+    {
+        for (uint i = 0; i < globalResources.meshes.data.size(); i++)
+        {
+            if (!globalResources.meshes.loaded[i])
+            {
+                // load mesh
+            }
+        }
+    }
+    void LoadTextures()
+    {
+        for (uint i = 0; i < globalResources.textures.data.size(); i++)
+        {
+            if (!globalResources.textures.loaded[i])
+            {
+                // load texture
+            }
+        }
     }
 
     void ExecuteFrame()
