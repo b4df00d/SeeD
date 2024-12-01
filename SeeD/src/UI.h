@@ -58,7 +58,7 @@ public:
         ImGui::NewFrame();
     }
 
-    void FrameOff(ID3D12GraphicsCommandList4* cmdList)
+    void FrameRender(ID3D12GraphicsCommandList4* cmdList)
     {
         ZoneScoped;
         ImGui::Render();

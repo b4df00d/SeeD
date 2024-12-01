@@ -18,48 +18,154 @@ struct ViewWorld
     StructuredUploadBuffer<Light> lights;
 };
 
+static uint fixedArraySize = 65536;
+template<typename T>
+class FixedArray
+{
+public:
+    std::atomic_uint32_t count = 0;
+    T* data = 0;
+
+    FixedArray()
+    {
+        data = new T[fixedArraySize];
+    }
+
+    ~FixedArray()
+    {
+        // destroy if this was a non POD ?
+        // or let the user destroy the entries before shutdown ?
+        /*
+        for (uint i = 0; i < count; i++)
+        {
+            delete data[i];
+        }
+        */
+        delete[] data;
+    }
+
+    uint Add(T value)
+    {
+        uint index = count++;
+        assert(index < fixedArraySize - 1);
+        data[index] = value;
+        return index;
+    }
+
+    T& operator[] (uint i)
+    {
+        //assert(i < count);
+        return data[i];
+    }
+};
+
 template<typename keyType, typename cpuType>
 class Map
 {
+    std::vector<FixedArray<keyType>*> keys;
+    std::vector<FixedArray<cpuType>*> data;
+    std::vector<FixedArray<bool>*> loaded;
 public:
-    std::vector<keyType> keys;
-    std::vector<cpuType> data;
-
-    std::vector<bool> loaded; // and uploaded if applicable
+    std::atomic_uint32_t count = 0;
+    std::atomic_int32_t pageCount = 0;
+    std::recursive_mutex lock;
 
     int Contains(keyType key)
     {
-        for (int i = 0; i < keys.size(); i++)
+        std::lock_guard<std::recursive_mutex> lg(lock);
+#if 0
+        for (uint i = 0; i < count; i++)
         {
-            if (keys[i] == key)
+            uint pageIndex = count / fixedArraySize;
+            uint index = count % fixedArraySize;
+            auto& page = *keys[pageIndex]; //not thread safe ? if someone add a page when we are here ?
+            if (page[index] == key)
                 return i;
         }
+#else
+        volatile uint currentPageCount = pageCount;
+        for (uint i = 0; i < currentPageCount; i++)
+        {
+            auto& page = *keys[i]; //not thread safe ? if someone add a page when we are here ?
+            for (uint j = 0; j < page.count; j++)
+            {
+                if (page[j] == key)
+                    return i * fixedArraySize + j;
+            }
+        }
+#endif
         return -1;
     }
 
     uint Add(keyType key)
     {
-        uint index = Contains(key);
+        int index = Contains(key);
         if (index == -1)
         {
-            keys.push_back(key);
-            data.push_back(cpuType());
-            loaded.push_back(false);
-            index = (uint)keys.size() - 1;
+            index = count++;
+            uint page = index / fixedArraySize;
+            if (page >= pageCount)
+            {
+                lock.lock();
+                if (page >= pageCount) // retest to see if another thread was already doning it
+                {
+                    pageCount++;
+
+                    if (pageCount > ((pageCount - 1) * 2))
+                    {
+                        keys.reserve(pageCount * 2);
+                        data.reserve(pageCount * 2);
+                        loaded.reserve(pageCount * 2);
+                    }
+
+                    keys.resize(pageCount);
+                    data.resize(pageCount);
+                    loaded.resize(pageCount);
+
+                    uint localIndex = index % fixedArraySize;
+                    keys[pageCount - 1] = new FixedArray<keyType>();
+                    data[pageCount - 1] = new FixedArray<cpuType>();
+                    loaded[pageCount - 1] = new FixedArray<bool>();
+                }
+                lock.unlock();
+            }
+            keys[page]->Add(key);
+            data[page]->Add(cpuType());
+            loaded[page]->Add(false);
         }
         return index;
     }
 
+    bool GetLoaded(uint index)
+    {
+        uint pageIndex = index / fixedArraySize;
+        uint localIndex = index % fixedArraySize;
+        auto& page = *loaded[pageIndex];
+        return page[localIndex];
+    }
+    cpuType& GetData(uint index)
+    {
+        uint pageIndex = index / fixedArraySize;
+        uint localIndex = index % fixedArraySize;
+        auto& page = *data[pageIndex];
+        return page[localIndex];
+    }
+
+    /*
     void Remove(keyType key)
     {
         int index = Contains(key);
-        keys[index] = keys.back();
+        uint page = count / fixedArraySize;
+        index = count % fixedArraySize;
+
+        keys[[index] = keys.back();
         keys.pop_back();
         data[index] = data.back();
         data.pop_back();
         loaded[index] = loaded.back();
         loaded.pop_back();
     }
+    */
 };
 
 struct GlobalResources
@@ -582,10 +688,10 @@ public:
                 Components::Shader& shaderCmp = materialCmp.shader.Get();
 
                 uint meshIndex = globalResources.meshes.Add(meshCmp.id);
-                if (!globalResources.meshes.loaded[meshIndex]) return;
+                if (!globalResources.meshes.GetLoaded(meshIndex)) return;
 
                 uint shaderIndex = globalResources.shaders.Add(shaderCmp.id);
-                if (!globalResources.shaders.loaded[shaderIndex]) return;
+                if (!globalResources.shaders.GetLoaded(shaderIndex)) return;
 
                 Material material;
                 for (uint i = 0; i < 16; i++) // keep in sync with number of textures in material
@@ -594,8 +700,8 @@ public:
                     {
                         Components::Texture& textureCmp = materialCmp.textures[i].Get();
                         uint textureIndex = globalResources.textures.Add(textureCmp.id);
-                        if (!globalResources.textures.loaded[textureIndex]) return;
-                        material.texturesSRV[i] = globalResources.textures.data[textureIndex].srv;
+                        if (!globalResources.textures.GetLoaded(textureIndex)) return;
+                        material.texturesSRV[i] = globalResources.textures.GetData(textureIndex).srv;
                     }
                 }
 
@@ -695,7 +801,7 @@ public:
 
         commandBuffer->cmd->OMSetRenderTargets(1, &GPU::instance->backBuffer->rtv.handle, false, nullptr);
 
-        UI::instance->FrameOff(commandBuffer->cmd);
+        UI::instance->FrameRender(commandBuffer->cmd);
 
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 
@@ -779,9 +885,9 @@ public:
     // do that in backgroud task ?
     void LoadShaders()
     {
-        for (uint i = 0; i < globalResources.shaders.data.size(); i++)
+        for (uint i = 0; i < globalResources.shaders.count; i++)
         {
-            if (!globalResources.shaders.loaded[i]) 
+            if (!globalResources.shaders.GetLoaded(i))
             {
                 // load shader
             }
@@ -789,9 +895,9 @@ public:
     }
     void LoadMeshes()
     {
-        for (uint i = 0; i < globalResources.meshes.data.size(); i++)
+        for (uint i = 0; i < globalResources.meshes.count; i++)
         {
-            if (!globalResources.meshes.loaded[i])
+            if (!globalResources.meshes.GetLoaded(i))
             {
                 // load mesh
             }
@@ -799,9 +905,9 @@ public:
     }
     void LoadTextures()
     {
-        for (uint i = 0; i < globalResources.textures.data.size(); i++)
+        for (uint i = 0; i < globalResources.textures.count; i++)
         {
-            if (!globalResources.textures.loaded[i])
+            if (!globalResources.textures.GetLoaded(i))
             {
                 // load texture
             }

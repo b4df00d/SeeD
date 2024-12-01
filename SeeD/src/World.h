@@ -3,7 +3,7 @@
 #include <concepts>
 #include <type_traits>
 
-#define SUBTASKWORLD(system) tf::Task system##Task = subflow.emplace([this](){this->system.Update(this);}).name(#system)
+#define SUBTASKWORLD(system) tf::Task system##Task = subflow.emplace([this, &system](){system->Update(this);}).name(#system)
 
 typedef uint64_t assetID;
 
@@ -81,6 +81,11 @@ namespace Components
     };
     Material material;
 
+    struct Transform : ComponentBase<Transform>
+    {
+        float4x4 matrix;
+    };
+
     struct Instance : ComponentBase<Instance>
     {
         Handle<Mesh> mesh;
@@ -95,25 +100,15 @@ namespace Systems
 {
     struct SystemBase
     {
-        static Components::Mask mask;
+        Components::Mask mask;
         virtual void Update(World* world) = 0;
     };
-    Components::Mask SystemBase::mask;
 
     struct Player : SystemBase
     {
-        void Update(World* world)
-        {
-            ZoneScoped;
-            /*
-            IOs::Log("----------------");
-            IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Entity).name(), Components::Entity::mask.to_string(), Components::Entity::bucketIndex, Components::Entity::stride);
-            IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Shader).name(), Components::Shader::mask.to_string(), Components::Shader::bucketIndex, Components::Shader::stride);
-            IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Mesh).name(), Components::Mesh::mask.to_string(), Components::Mesh::bucketIndex, Components::Mesh::stride);
-            IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Material).name(), Components::Material::mask.to_string(), Components::Material::bucketIndex, Components::Material::stride);
-            IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Instance).name(), Components::Instance::mask.to_string(), Components::Instance::bucketIndex, Components::Instance::stride);
-            */
-        }
+        bool loaded = false;
+
+        void Update(World* world) override;
     };
 }
 
@@ -195,12 +190,13 @@ public:
             id = ~0;
         }
 
-        inline void Make(uint i)
+        inline Entity Make(uint i)
         {
             id = i;
+            return *this;
         }
 
-        void Make(Components::Mask mask)
+        Entity Make(Components::Mask mask)
         {
             mask |= Components::Entity::mask;
 
@@ -221,6 +217,8 @@ public:
             }
 
             Get<Components::Entity>().index = id;
+
+            return *this;
         }
 
         void Release()
@@ -257,6 +255,7 @@ public:
 
         }
 
+        // not thread safe when need to create
         uint GetOrCreatePoolIndex(Components::Mask mask)
         {
             mask |= Components::Entity::mask;
@@ -288,11 +287,12 @@ public:
     std::array<std::vector<EntitySlot>, 128> frameQueries;
     uint frameQueriesIndex;
 
-    Systems::Player player;
+    std::vector<Systems::SystemBase*> systems;
 
     void On()
     {
         instance = this;
+        systems.push_back(new Systems::Player());
     }
 
     void Off()
@@ -305,7 +305,12 @@ public:
         ZoneScoped;
         frameQueriesIndex = 0;
         //ECS systems
-        SUBTASKWORLD(player);
+        for (uint i = 0; i < systems.size(); i++)
+        {
+            auto sys = systems[i];
+            //SUBTASKWORLD(sys);
+            tf::Task t = subflow.emplace([this, i]() {this->systems[i]->Update(this); }).name("#system");
+        }
     }
 
     uint Query(Components::Mask include, Components::Mask exclude)
@@ -345,5 +350,81 @@ namespace Components
             entity.Make(index);
         }
         return entity.Get<T>();
+    }
+}
+
+
+namespace Systems
+{
+    void Player::Update(World* world)
+    {
+        //ZoneScopedN("Player::Update");
+        if (!loaded)
+        {
+            uint shaderCount = 10;
+            uint meshCount = 1000;
+            uint materialCount = 1000;
+            uint instanceCount = 100000;
+
+            std::vector<World::Entity> shaderEnt;
+            std::vector<World::Entity> meshEnt;
+            std::vector<World::Entity> materialEnt;
+
+            shaderEnt.resize(shaderCount);
+            for (uint i = 0; i < shaderCount; i++)
+            {
+                World::Entity ent;
+                ent.Make(Components::Shader::mask);
+                ent.Get<Components::Shader>().id = std::rand();
+                shaderEnt[i] = ent;
+            }
+
+            meshEnt.resize(meshCount);
+            for (uint i = 0; i < meshCount; i++)
+            {
+                World::Entity ent;
+                ent.Make(Components::Mesh::mask);
+                ent.Get<Components::Mesh>().id = std::rand();
+                meshEnt[i] = ent;
+            }
+
+            materialEnt.resize(materialCount);
+            for (uint i = 0; i < materialCount; i++)
+            {
+                World::Entity ent;
+                ent.Make(Components::Material::mask);
+                auto& material = ent.Get<Components::Material>();
+                material.shader = Components::Handle<Components::Shader>{ shaderEnt[1.0f * std::rand() / RAND_MAX * (shaderCount-1)].id };
+                for (uint j = 0; j < 16; j++)
+                {
+                    material.textures[j] = Components::Handle<Components::Texture>{ meshEnt[1.0f * std::rand() / RAND_MAX * (meshCount -1)].id };
+                }
+                for (uint j = 0; j < 15; j++)
+                {
+                    material.prameters[j] = j;
+                }
+                materialEnt[i] = ent;
+            }
+
+            for (uint i = 0; i < instanceCount; i++)
+            {
+                World::Entity ent;
+                ent.Make(Components::Instance::mask | Components::Transform::mask);
+                auto& instance = ent.Get<Components::Instance>();
+                instance.mesh = Components::Handle<Components::Mesh>{ meshEnt[1.0f * std::rand() / RAND_MAX * (meshCount-1)].id };
+                instance.material = Components::Handle<Components::Material>{ materialEnt[1.0f * std::rand() / RAND_MAX * (materialCount-1)].id };
+            }
+
+            loaded = true;
+        }
+
+        /*
+        IOs::Log("----------------");
+        IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Entity).name(), Components::Entity::mask.to_string(), Components::Entity::bucketIndex, Components::Entity::stride);
+        IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Shader).name(), Components::Shader::mask.to_string(), Components::Shader::bucketIndex, Components::Shader::stride);
+        IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Mesh).name(), Components::Mesh::mask.to_string(), Components::Mesh::bucketIndex, Components::Mesh::stride);
+        IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Material).name(), Components::Material::mask.to_string(), Components::Material::bucketIndex, Components::Material::stride);
+        IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Instance).name(), Components::Instance::mask.to_string(), Components::Instance::bucketIndex, Components::Instance::stride);
+        */
     }
 }
