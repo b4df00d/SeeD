@@ -8,22 +8,29 @@ std::wstring CharToWString(const char* ptr)
 	return temp;
 }
 
-class String : public std::wstring
+std::string WCharToString(const WCHAR* ptr)
+{
+	std::wstring str(ptr);
+	std::string temp(str.begin(), str.end());
+	return temp;
+}
+
+class String : public std::string
 {
 public:
-	String() : std::wstring()
+	String() : std::string()
 	{
 
 	}
-	String(_In_z_ const WCHAR* const _Ptr) : std::wstring(_Ptr)
+	String(_In_z_ const char* const _Ptr) : std::string(_Ptr)
 	{
 
 	}
-	String(std::wstring& str) : std::wstring(str)
+	String(std::string& str) : std::string(str)
 	{
 
 	}
-	String(const std::wstring& str) : std::wstring(str)
+	String(const std::string& str) : std::string(str)
 	{
 
 	}
@@ -35,23 +42,23 @@ public:
 
 		for (size_t found = find(i_delim); found != String::npos; found = find(i_delim, startIndex))
 		{
-			result.emplace_back(std::wstring(begin() + startIndex, begin() + found));
+			result.emplace_back(std::string(begin() + startIndex, begin() + found));
 			startIndex = found + i_delim.size();
 		}
 		if (startIndex != size())
-			result.emplace_back(std::wstring(begin() + startIndex, end()));
+			result.emplace_back(std::string(begin() + startIndex, end()));
 
 		return result;
 	}
 
-	inline std::string ToString()
+	inline std::wstring ToWString()
 	{
-		return std::string(begin(), end());
+		return std::wstring(begin(), end());
 	}
 
-	inline const char* ToConstChar()
+	inline const WCHAR* ToConstWChar()
 	{
-		return std::string(begin(), end()).c_str();
+		return std::wstring(begin(), end()).c_str();
 	}
 
 };

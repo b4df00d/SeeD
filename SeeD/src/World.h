@@ -5,8 +5,9 @@
 
 #define SUBTASKWORLD(system) tf::Task system##Task = subflow.emplace([this](){this->system.Update(this);}).name(#system)
 
-typedef uint assetID;
+typedef uint64_t assetID;
 
+static constexpr uint entityInvalid = 65535;
 namespace Components
 {
     static constexpr uint componentMaxCount = 64;
@@ -41,15 +42,16 @@ namespace Components
     concept IsComponent = std::is_base_of<Components::ComponentBase<T>, T>::value;
 
     template<Components::IsComponent T>
-    struct PTR
+    struct Handle
     {
-        uint index;
+        uint index = entityInvalid;
         T& Get();
     };
 
+    // Be able to get the entity index from the entitySlot
     struct Entity : ComponentBase<Entity>
     {
-        uint index;
+        uint index = entityInvalid;
     };
     Entity entity;
 
@@ -67,14 +69,14 @@ namespace Components
 
     struct Material : ComponentBase<Material>
     {
-        PTR<Shader> shader;
+        Handle<Shader> shader;
     };
     Material material;
 
     struct Instance : ComponentBase<Instance>
     {
-        PTR<Mesh> mesh;
-        PTR<Material> material;
+        Handle<Mesh> mesh;
+        Handle<Material> material;
     };
     Instance instance;
 }
@@ -183,13 +185,15 @@ public:
             id = ~0;
         }
 
-        void Make(uint i)
+        inline void Make(uint i)
         {
             id = i;
         }
 
         void Make(Components::Mask mask)
         {
+            mask |= Components::Entity::mask;
+
             EntitySlot slot;
             slot.pool = GetOrCreatePoolIndex(mask);
             slot.index = World::instance->components[slot.pool].GetSlot();
@@ -205,9 +209,11 @@ public:
                 World::instance->entitySlots.push_back(slot);
                 id = (uint)World::instance->entitySlots.size() - 1;
             }
+
+            Get<Components::Entity>().index = id;
         }
 
-        ~Entity()
+        void Release()
         {
             World::instance->entitySlots[id].index = poolInvalid;
             World::instance->entitySlots[id].pool = poolInvalid;
@@ -229,7 +235,7 @@ public:
             if (!(World::instance->components[slot.pool].mask & T::mask))
             {
                 //TODO : make a temp copy Copy(from, to)
-                slot.pool = GetOrCreatePoolIndex(World::instance->components[slot.pool].mask & T::mask);
+                slot.pool = GetOrCreatePoolIndex(World::instance->components[slot.pool].mask | T::mask);
                 slot.index = World::instance->components[slot.pool].GetSlot();
             }
             auto& res = *(T*)World::instance->components[slot.pool].data[T::bucketIndex][slot.index * sizeof(T)];
@@ -277,6 +283,11 @@ public:
         instance = this;
     }
 
+    void Off()
+    {
+        instance = nullptr;
+    }
+
     void Schedule(tf::Subflow& subflow)
     {
         ZoneScoped;
@@ -310,10 +321,17 @@ World* World::instance;
 namespace Components
 {
     template<Components::IsComponent T>
-    T& PTR<T>::Get()
+    T& Handle<T>::Get()
     {
         World::Entity entity;
-        entity.Make(index);
+        if (index == entityInvalid)
+        {
+            entity.Make(T::mask);
+        }
+        else
+        {
+            entity.Make(index);
+        }
         return entity.Get<T>();
     }
 }

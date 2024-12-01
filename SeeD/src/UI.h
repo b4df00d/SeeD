@@ -109,7 +109,7 @@ public:
     {
         for (uint i = 0; i < guiWindows.size(); i++)
         {
-            if (ImGui::MenuItem(guiWindows[i]->name.ToConstChar()))
+            if (ImGui::MenuItem(guiWindows[i]->name.c_str()))
             {
                 guiWindows[i]->Open();
             }
@@ -127,11 +127,11 @@ std::vector<EditorWindow*> EditorWindow::guiWindows;
 class ProfilerWindow : public EditorWindow
 {
 public:
-    ProfilerWindow() : EditorWindow(L"Profiler") {}
+    ProfilerWindow() : EditorWindow("Profiler") {}
     void Update() override final
     {
         ZoneScoped;
-        if (!ImGui::Begin("Profiler", &isOpen, ImGuiWindowFlags_AlwaysAutoResize))
+        if (!ImGui::Begin("Profiler", &isOpen, ImGuiWindowFlags_None))
         {
             ImGui::End();
             return;
@@ -169,10 +169,39 @@ public:
 };
 ProfilerWindow profilerWindow;
 
+class AssetLibraryWindow : public EditorWindow
+{
+public:
+    AssetLibraryWindow() : EditorWindow("AssetLibrary") {}
+    void Update() override final
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("AssetLibrary", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+        
+        if (ImGui::Button("Clear"))
+        {
+            AssetLibrary::instance->map.clear();
+        }
+        ImGui::Separator();
+
+        for (auto& item : AssetLibrary::instance->map)
+        {
+            ImGui::Text("%ul %s", item.first, item.second.c_str());
+        }
+
+        ImGui::End();
+    }
+};
+AssetLibraryWindow assetLibraryWindowWindow;
+
 class AboutWindow : public EditorWindow
 {
 public:
-    AboutWindow() : EditorWindow(L"About") {}
+    AboutWindow() : EditorWindow("About") {}
     void Update() override final
     {
         ZoneScoped;

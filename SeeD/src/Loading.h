@@ -1,6 +1,67 @@
 #pragma once
 
+class AssetLibrary
+{
+public:
+    static AssetLibrary* instance;
+    std::unordered_map<assetID, String> map;
+    String file = "..\\assetLibrary.txt";
 
+    void On()
+    {
+        instance = this;
+        Load();
+    }
+
+    void Off()
+    {
+        Save();
+        instance = nullptr;
+    }
+
+    assetID Add(String path)
+    {
+        assetID id = (assetID)std::hash<std::string>{}(path);
+        map[id] = path;
+        return id;
+    }
+
+    String Get(assetID id)
+    {
+        return map[id];
+    }
+
+    void Save()
+    {
+        ZoneScoped;
+        String line;
+        std::ofstream myfile(file);
+        if (myfile.is_open())
+        {
+            for (auto& item : map)
+            {
+                myfile << item.first << " " << item.second << std::endl;
+            }
+        }
+    }
+
+    void Load()
+    {
+        ZoneScoped;
+        String line;
+        std::ifstream myfile(file);
+        if (myfile.is_open())
+        {
+            assetID id;
+            String path;
+            while (myfile >> id >> path)
+            {
+                map[id] = path;
+            }
+        }
+    }
+};
+AssetLibrary* AssetLibrary::instance;
 
 #include <wincodec.h>
 #include "../../Third/DirectXTex-main/WICTextureLoader/WICTextureLoader12.h"
@@ -26,7 +87,6 @@ public:
 
 
 #include "../../Third/meshoptimizer-master/src/meshoptimizer.h"
-
 class AssetLoader
 {
 public:
@@ -111,7 +171,6 @@ public:
 
 #pragma comment(lib, "dxcompiler.lib")
 #include "../../Third/DirectXShaderCompiler-main/inc/dxcapi.h"
-
 class ShaderLoader
 {
 public :
@@ -146,51 +205,51 @@ public :
 		ZoneScoped;
         String ps = file;
         struct stat result;
-        if (stat(ps.ToConstChar(), &result) == 0 && shader.creationTime.find(file) == shader.creationTime.end())
+        if (stat(ps.c_str(), &result) == 0 && shader.creationTime.find(file) == shader.creationTime.end())
         {
             shader.creationTime[file] = result.st_mtime;
         }
 
 		String line;
-		std::wifstream myfile(ps);
+		std::ifstream myfile(ps);
 		if (myfile.is_open())
 		{
 			while (getline(myfile, line))
 			{
-				if (line.find(L"#include") != -1)
+				if (line.find("#include") != -1)
 				{
-					size_t index = line.find(L"\"");
+					size_t index = line.find("\"");
 					if (index != -1)
 					{
 						// open include file
-						String includeFile = String((L"Shaders\\" + line.substr(index + 1, line.find_last_of(L"\"") - 1 - index)).c_str());
+						String includeFile = String(("Shaders\\" + line.substr(index + 1, line.find_last_of("\"") - 1 - index)).c_str());
 						Load(shader, includeFile);
 					}
 				}
 
-				if (line._Starts_with(L"#pragma "))
+				if (line._Starts_with("#pragma "))
 				{
-					auto tokens = line.Split(L" ");
+					auto tokens = line.Split(" ");
 
 					// add empty strings for shaders passes names to avoid checking if a token is there
 					for (uint i = (uint)tokens.size(); i < 4; i++)
 					{
-						tokens.push_back(L" ");
+						tokens.push_back(" ");
 					}
 					/*
 					#pragma gBuffer meshMain pixelBuffers
 					#pragma zPrepass vertexDepth
 					#pragma transparent meshMain pixelMain
 					*/
-					if (tokens[1] == L"gBuffer")
+					if (tokens[1] == "gBuffer")
 					{
 						Compile(shader, file);
 					}
-					else if (tokens[1] == L"zPrepass")
+					else if (tokens[1] == "zPrepass")
 					{
                         Compile(shader, file);
 					}
-                    else if (tokens[1] == L"transparent")
+                    else if (tokens[1] == "transparent")
                     {
                         Compile(shader, file);
                     }

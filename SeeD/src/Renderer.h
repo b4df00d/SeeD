@@ -53,7 +53,7 @@ public:
     {
         ZoneScoped;
         name = _name;
-        //name = CharToWString(typeid(this).name()); // name = L"class Pass * __ptr64"
+        //name = CharToWString(typeid(this).name()); // name = "class Pass * __ptr64"
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -64,7 +64,7 @@ public:
             {
                 GPU::PrintDeviceRemovedReason(hr);
             }
-            hr = commandBuffer.Get(i)->cmdAlloc->SetName(name.c_str());
+            hr = commandBuffer.Get(i)->cmdAlloc->SetName(name.ToConstWChar());
             if (FAILED(hr))
             {
                 GPU::PrintDeviceRemovedReason(hr);
@@ -74,7 +74,7 @@ public:
             {
                 GPU::PrintDeviceRemovedReason(hr);
             }
-            hr = commandBuffer.Get(i)->cmd->SetName(name.c_str());
+            hr = commandBuffer.Get(i)->cmd->SetName(name.ToConstWChar());
             if (FAILED(hr))
             {
                 GPU::PrintDeviceRemovedReason(hr);
@@ -148,7 +148,7 @@ public:
     void Execute()
     {
         if (commandBuffer->open)
-            IOs::Log(L"{} OPEN !!", name.c_str());
+            IOs::Log("{} OPEN !!", name);
         ID3D12CommandQueue* commandQueue = GPU::instance->graphicQueue;
         commandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
         commandQueue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
@@ -271,14 +271,13 @@ public:
 
 class Forward : public Pass
 {
-    World::Entity aShader;
+    Components::Handle<Components::Shader> meshShader;
 public:
     virtual void On(bool asyncCompute, String _name) override
     {
         Pass::On(asyncCompute, _name);
         ZoneScoped;
-        aShader.Make(Components::Shader::mask);
-        aShader.Get<Components::Shader>().id = 123456789;
+        meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
     {
@@ -381,16 +380,16 @@ public:
     {
         resolution = window.windowResolution;
 
-        skinning.On(false, L"skinning");
-        particles.On(false, L"particles");
-        spawning.On(false, L"spawning");
-        culling.On(false, L"culling");
-        zPrepass.On(false, L"zPrepass");
-        gBuffers.On(false, L"gBuffers");
-        lighting.On(false, L"lighting");
-        forward.On(false, L"forward");
-        postProcess.On(false, L"postProcess");
-        present.On(false, L"present");
+        skinning.On(false, "skinning");
+        particles.On(false, "particles");
+        spawning.On(false, "spawning");
+        culling.On(false, "culling");
+        zPrepass.On(false, "zPrepass");
+        gBuffers.On(false, "gBuffers");
+        lighting.On(false, "lighting");
+        forward.On(false, "forward");
+        postProcess.On(false, "postProcess");
+        present.On(false, "present");
     }
 
     void Off() override
@@ -641,7 +640,7 @@ public:
     {
         resolution = window.windowResolution;
 
-        editor.On(false, L"editor");
+        editor.On(false, "editor");
     }
 
     void Off() override

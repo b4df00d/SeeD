@@ -95,13 +95,13 @@ public:
     UAV uav{ UINT32_MAX };
     RTV rtv{ UINT32_MAX, 0, 0 };
 
-    void CreateTexture(uint2 resolution, String name = L"Texture");
-    void CreateBuffer(uint size, uint stride, bool upload = false, String name = L"Buffer");
+    void CreateTexture(uint2 resolution, String name = "Texture");
+    void CreateBuffer(uint size, uint stride, bool upload = false, String name = "Buffer");
     template <typename T>
-    void CreateBuffer(uint count, String name = L"Buffer");
+    void CreateBuffer(uint count, String name = "Buffer");
     template <typename T>
-    void CreateUploadBuffer(uint count, String name = L"Buffer");
-    void CreateReadBackBuffer(uint size, String name = L"ReadBackBuffer");
+    void CreateUploadBuffer(uint count, String name = "Buffer");
+    void CreateReadBackBuffer(uint size, String name = "ReadBackBuffer");
     void BackBuffer(ID3D12Resource* backBuffer);
     void Release();
     ID3D12Resource* GetResource();
@@ -260,7 +260,7 @@ public:
             adapterIndex++;
             adapter->GetDesc2(&desc);
 
-            if (String(desc.Description).find(L"NVIDIA") == -1) continue;
+            if (String(WCharToString(desc.Description)).find("NVIDIA") == -1) continue;
             if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
 
             hr = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_2, _uuidof(ID3D12Device9), nullptr);
@@ -447,7 +447,7 @@ void Resource::CreateTexture(uint2 resolution, String name)
         &allocation,
         IID_NULL, NULL);
 
-    allocation->SetName(name.c_str());
+    allocation->SetName(name.ToConstWChar());
     allResources.push_back(allocation);
     allResourcesNames.push_back(name);
 
@@ -513,7 +513,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
         &allocation,
         IID_NULL, NULL);
 
-    allocation->SetName(name.c_str());
+    allocation->SetName(name.ToConstWChar());
     allResources.push_back(allocation);
     allResourcesNames.push_back(name);
 
@@ -582,7 +582,7 @@ void Resource::CreateReadBackBuffer(uint size, String name)
         &allocation,
         IID_NULL, NULL);
 
-    allocation->SetName(name.c_str());
+    allocation->SetName(name.ToConstWChar());
     allResources.push_back(allocation);
     allResourcesNames.push_back(name);
 
@@ -697,7 +697,7 @@ void Resource::Upload(void* data, CommandBuffer* cb)
     uploadAllocation->SetName(L"UploadBuffer");
     uploadResources.push_back({ GPU::instance->frameNumber, uploadAllocation });
     allResources.push_back(uploadAllocation);
-    allResourcesNames.push_back(L"UploadBuffer");
+    allResourcesNames.push_back("UploadBuffer");
 
     void* buf;
     uploadAllocation->GetResource()->Map(0, nullptr, &buf);
@@ -929,7 +929,7 @@ struct Profiler
     static Profiler* instance;
     struct ProfileData
     {
-        LPCWSTR name = nullptr;
+        LPCSTR name = nullptr;
 
         bool QueryStarted = false;
         bool QueryFinished = false;
@@ -965,7 +965,7 @@ struct Profiler
         /*
         for (int i = 0; i < FRAMEBUFFERING; i++)
         {
-            String name = std::format(L"profilerData_{}", i);
+            String name = std::format("profilerData_{}", i);
             buffer[i].CreateBuffer<UINT64>((UINT)(maxProfiles * FRAMEBUFFERING * QUEUECOUNT));
             //buffer.Get(i)->gpuData.From(device->memory.GetUAV(device->profiler.Buffer[i].value.stride, device->profiler.Buffer[i].value.capacity, n, D3D12_RESOURCE_STATE_COPY_DEST));
         }
@@ -973,12 +973,12 @@ struct Profiler
         //readbackBuffer.value.SetCapacity((UINT)(maxProfiles * FRAMEBUFFERING * QUEUECOUNT));
         //readbackBuffer.resource.From(device->memory.GetReadBack(device->profiler.Buffer[0].value.stride, device->profiler.Buffer[0].value.capacity, "profilerDataReadBack"));
 
-        buffer.CreateBuffer<UINT64>((UINT)(maxProfiles * FRAMEBUFFERING * QUEUECOUNT), L"Profile");
+        buffer.CreateBuffer<UINT64>((UINT)(maxProfiles * FRAMEBUFFERING * QUEUECOUNT), "Profile");
 
         instance = this;
     }
 
-    UINT64 StartProfile(CommandBuffer& cb, const LPCWSTR name)
+    UINT64 StartProfile(CommandBuffer& cb, const LPCSTR name)
     {
         ZoneScoped;
         UINT64 profileIdx = UINT64(-1);

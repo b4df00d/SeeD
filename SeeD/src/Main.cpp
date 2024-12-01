@@ -50,6 +50,7 @@ public:
     GPU gpu;
     Profiler profiler;
     IOs ios;
+    AssetLibrary assetLibrary;
     World world;
     Renderer renderer;
     UI ui;
@@ -61,6 +62,7 @@ public:
     {
         time.On();
         ios.On(window);
+        assetLibrary.On();
         world.On();
         gpu.On(&ios.window);
         profiler.On();
@@ -111,6 +113,8 @@ public:
         ui.Off();
         profiler.Off();
         renderer.Off();
+        world.Off();
+        assetLibrary.Off();
         gpu.Off();
         ios.Off();
         time.Off();

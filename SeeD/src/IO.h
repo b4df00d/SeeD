@@ -220,7 +220,7 @@ public:
 			for (a = 0; a < cFiles; pt.y += 20, a++) {
 				DragQueryFile(drop, a, lpszFile, sizeof(lpszFile));
 				//MessageBox(hwnd, lpszFile, L"Title", MB_OK | MB_ICONINFORMATION);
-				String tmp(lpszFile);
+				String tmp(WCharToString(lpszFile));
 #pragma warning(push)
 #pragma warning(disable: 4244)
 				strcpy(window.dropFile, std::string(tmp.begin(), tmp.end()).c_str());
@@ -430,7 +430,7 @@ public:
 			HINSTANCE instance = window.windowInstance;
 			HWND handle = window.windowHandle;
 			window.windowHandle = CreateWindowEx(WS_EX_APPWINDOW | WS_EX_ACCEPTFILES,
-				L"SeeD", L"SeeD",
+				window.windowName, window.windowName,
 				//WS_POPUP
 				//| WS_SIZEBOX
 				WS_POPUPWINDOW | WS_CAPTION
@@ -563,7 +563,7 @@ public:
 	static void Log(std::wstring_view rt_fmt_str, Args&&... args)
 	{
 		String message = std::vformat(rt_fmt_str, std::make_wformat_args(args...));
-		message.append(L"\n");
+		message.append("\n");
 		std::wcout << message;
 		OutputDebugStringW(message.c_str());
 	}
