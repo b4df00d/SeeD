@@ -92,6 +92,16 @@ namespace Components
         Handle<Material> material;
     };
     Instance instance;
+
+    struct Light : ComponentBase<Light>
+    {
+        float4x4 matrix;
+    };
+
+    struct Camera : ComponentBase<Camera>
+    {
+        float4x4 matrix;
+    };
 }
 
 class World;
@@ -315,6 +325,7 @@ public:
 
     uint Query(Components::Mask include, Components::Mask exclude)
     {
+        ZoneScoped;
         uint queryIndex = frameQueriesIndex++;
         std::vector<EntitySlot>& queryResult = frameQueries[queryIndex];
         queryResult.clear();
@@ -353,6 +364,10 @@ namespace Components
     }
 }
 
+uint Rand(uint max)
+{
+    return (float(std::rand()) / float(RAND_MAX)) * max * 0.999f;
+}
 
 namespace Systems
 {
@@ -364,11 +379,13 @@ namespace Systems
             uint shaderCount = 10;
             uint meshCount = 1000;
             uint materialCount = 1000;
+            uint textureCount = 100;
             uint instanceCount = 100000;
 
             std::vector<World::Entity> shaderEnt;
             std::vector<World::Entity> meshEnt;
             std::vector<World::Entity> materialEnt;
+            std::vector<World::Entity> textureEnt;
 
             shaderEnt.resize(shaderCount);
             for (uint i = 0; i < shaderCount; i++)
@@ -388,16 +405,25 @@ namespace Systems
                 meshEnt[i] = ent;
             }
 
+            textureEnt.resize(textureCount);
+            for (uint i = 0; i < textureCount; i++)
+            {
+                World::Entity ent;
+                ent.Make(Components::Texture::mask);
+                ent.Get<Components::Texture>().id = std::rand();
+                textureEnt[i] = ent;
+            }
+
             materialEnt.resize(materialCount);
             for (uint i = 0; i < materialCount; i++)
             {
                 World::Entity ent;
                 ent.Make(Components::Material::mask);
                 auto& material = ent.Get<Components::Material>();
-                material.shader = Components::Handle<Components::Shader>{ shaderEnt[1.0f * std::rand() / RAND_MAX * (shaderCount-1)].id };
+                material.shader = Components::Handle<Components::Shader>{ shaderEnt[Rand(shaderCount)].id };
                 for (uint j = 0; j < 16; j++)
                 {
-                    material.textures[j] = Components::Handle<Components::Texture>{ meshEnt[1.0f * std::rand() / RAND_MAX * (meshCount -1)].id };
+                    material.textures[j] = Components::Handle<Components::Texture>{ meshEnt[Rand(textureCount)].id };
                 }
                 for (uint j = 0; j < 15; j++)
                 {
@@ -406,14 +432,19 @@ namespace Systems
                 materialEnt[i] = ent;
             }
 
+            std::set<assetID> check;
             for (uint i = 0; i < instanceCount; i++)
             {
                 World::Entity ent;
                 ent.Make(Components::Instance::mask | Components::Transform::mask);
                 auto& instance = ent.Get<Components::Instance>();
-                instance.mesh = Components::Handle<Components::Mesh>{ meshEnt[1.0f * std::rand() / RAND_MAX * (meshCount-1)].id };
-                instance.material = Components::Handle<Components::Material>{ materialEnt[1.0f * std::rand() / RAND_MAX * (materialCount-1)].id };
+                uint meshIndex = Rand(meshCount);
+                uint materialIndex = Rand(materialCount);
+                check.insert(meshIndex);
+                instance.mesh = Components::Handle<Components::Mesh>{ meshEnt[meshIndex].id };
+                instance.material = Components::Handle<Components::Material>{ materialEnt[materialIndex].id };
             }
+
 
             loaded = true;
         }

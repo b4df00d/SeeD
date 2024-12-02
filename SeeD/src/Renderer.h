@@ -23,7 +23,6 @@ template<typename T>
 class FixedArray
 {
 public:
-    std::atomic_uint32_t count = 0;
     T* data = 0;
 
     FixedArray()
@@ -44,17 +43,8 @@ public:
         delete[] data;
     }
 
-    uint Add(T value)
+    inline T& operator[] (uint i)
     {
-        uint index = count++;
-        assert(index < fixedArraySize - 1);
-        data[index] = value;
-        return index;
-    }
-
-    T& operator[] (uint i)
-    {
-        //assert(i < count);
         return data[i];
     }
 };
@@ -67,24 +57,39 @@ class Map
     std::vector<FixedArray<bool>*> loaded;
 public:
     std::atomic_uint32_t count = 0;
-    std::atomic_int32_t pageCount = 0;
+    std::atomic_uint32_t pageCount = 0;
     std::recursive_mutex lock;
+
+    Map()
+    {
+        keys.resize(256);
+        data.resize(256);
+        loaded.resize(256);
+        for (uint i = 0; i < 256; i++)
+        {
+            keys[i] = 0;
+            data[i] = 0;
+            loaded[i] = 0;
+        }
+        keys[0] = new FixedArray<keyType>();
+        data[0] = new FixedArray<cpuType>();
+        loaded[0] = new FixedArray<bool>();
+    }
 
     int Contains(keyType key)
     {
-        std::lock_guard<std::recursive_mutex> lg(lock);
-#if 0
+        //std::lock_guard<std::recursive_mutex> lg(lock); // PLZ !!!! not that !
+#if 1
         for (uint i = 0; i < count; i++)
         {
-            uint pageIndex = count / fixedArraySize;
-            uint index = count % fixedArraySize;
+            uint pageIndex = i / fixedArraySize;
+            uint index = i % fixedArraySize;
             auto& page = *keys[pageIndex]; //not thread safe ? if someone add a page when we are here ?
             if (page[index] == key)
                 return i;
         }
 #else
-        volatile uint currentPageCount = pageCount;
-        for (uint i = 0; i < currentPageCount; i++)
+        for (uint i = 0; i < pageCount; i++)
         {
             auto& page = *keys[i]; //not thread safe ? if someone add a page when we are here ?
             for (uint j = 0; j < page.count; j++)
@@ -103,35 +108,21 @@ public:
         if (index == -1)
         {
             index = count++;
-            uint page = index / fixedArraySize;
-            if (page >= pageCount)
+            uint pageIndex = index / fixedArraySize;
+            uint localIndex = index % fixedArraySize;
+            (*keys[pageIndex])[localIndex] = key;
+            (*data[pageIndex])[localIndex] = cpuType();
+            (*loaded[pageIndex])[localIndex] = false;
+
+            pageCount.store(pageIndex > pageCount.load() ? pageIndex : pageCount.load());
+            
+            //not very safe ... may leak some fixed arrays
+            if (keys[pageCount+1] == nullptr)
             {
-                lock.lock();
-                if (page >= pageCount) // retest to see if another thread was already doning it
-                {
-                    pageCount++;
-
-                    if (pageCount > ((pageCount - 1) * 2))
-                    {
-                        keys.reserve(pageCount * 2);
-                        data.reserve(pageCount * 2);
-                        loaded.reserve(pageCount * 2);
-                    }
-
-                    keys.resize(pageCount);
-                    data.resize(pageCount);
-                    loaded.resize(pageCount);
-
-                    uint localIndex = index % fixedArraySize;
-                    keys[pageCount - 1] = new FixedArray<keyType>();
-                    data[pageCount - 1] = new FixedArray<cpuType>();
-                    loaded[pageCount - 1] = new FixedArray<bool>();
-                }
-                lock.unlock();
+                keys[pageCount+1] = new FixedArray<keyType>();
+                data[pageCount+1] = new FixedArray<cpuType>();
+                loaded[pageCount+1] = new FixedArray<bool>();
             }
-            keys[page]->Add(key);
-            data[page]->Add(cpuType());
-            loaded[page]->Add(false);
         }
         return index;
     }
@@ -673,49 +664,55 @@ public:
 
         uint queryIndex = world.Query(Components::Instance::mask, 0);
 
+#define stepSize 512
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
-        uint entityStep = 128;
+        //uint entityStep = 128;
         ViewWorld* frameWorld = rendererWorld.Get();
         
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, &globalResources, frameWorld, queryIndex](int i)
+        tf::Task task = subflow.for_each_index(0, entityCount, stepSize, [&world, &globalResources, frameWorld, queryIndex](int i)
             {
                 ZoneScoped;
-                auto& queryResult = world.frameQueries[queryIndex];
 
-                Components::Instance& instanceCmp = queryResult[i].Get<Components::Instance>();
-                Components::Mesh& meshCmp = instanceCmp.mesh.Get();
-                Components::Material& materialCmp = instanceCmp.material.Get();
-                Components::Shader& shaderCmp = materialCmp.shader.Get();
-
-                uint meshIndex = globalResources.meshes.Add(meshCmp.id);
-                if (!globalResources.meshes.GetLoaded(meshIndex)) return;
-
-                uint shaderIndex = globalResources.shaders.Add(shaderCmp.id);
-                if (!globalResources.shaders.GetLoaded(shaderIndex)) return;
-
-                Material material;
-                for (uint i = 0; i < 16; i++) // keep in sync with number of textures in material
+                for (uint subQuery = 0; subQuery < stepSize; subQuery++)
                 {
-                    if (materialCmp.textures[i].index != entityInvalid)
+                    auto& queryResult = world.frameQueries[queryIndex];
+                    if (i + subQuery > queryResult.size() - 1) return;
+
+                    Components::Instance& instanceCmp = queryResult[i + subQuery].Get<Components::Instance>();
+                    Components::Mesh& meshCmp = instanceCmp.mesh.Get();
+                    Components::Material& materialCmp = instanceCmp.material.Get();
+                    Components::Shader& shaderCmp = materialCmp.shader.Get();
+
+                    uint meshIndex = globalResources.meshes.Add(meshCmp.id);
+                    if (!globalResources.meshes.GetLoaded(meshIndex)) continue;
+
+                    uint shaderIndex = globalResources.shaders.Add(shaderCmp.id);
+                    if (!globalResources.shaders.GetLoaded(shaderIndex)) continue;
+
+                    Material material;
+                    for (uint texIndex = 0; texIndex < 16; texIndex++) // keep in sync with number of textures in material
                     {
-                        Components::Texture& textureCmp = materialCmp.textures[i].Get();
-                        uint textureIndex = globalResources.textures.Add(textureCmp.id);
-                        if (!globalResources.textures.GetLoaded(textureIndex)) return;
-                        material.texturesSRV[i] = globalResources.textures.GetData(textureIndex).srv;
+                        if (materialCmp.textures[texIndex].index != entityInvalid)
+                        {
+                            Components::Texture& textureCmp = materialCmp.textures[texIndex].Get();
+                            uint textureIndex = globalResources.textures.Add(textureCmp.id);
+                            if (!globalResources.textures.GetLoaded(textureIndex)) continue;
+                            material.texturesSRV[texIndex] = globalResources.textures.GetData(textureIndex).srv;
+                        }
                     }
+
+                    // everything should be loaded to be able to draw the instance
+
+                    frameWorld->materials.AddUnique(material);
+
+                    Instance instance;
+                    instance.meshIndex = meshIndex;
+                    frameWorld->instances.Add(instance);
+
+                    // if in range (depending on distance and BC size)
+                        // Add to TLAS
+                    // count instances with shader
                 }
-
-                // everything should be loaded to be able to draw the instance
-
-                frameWorld->materials.AddUnique(material);
-
-                Instance instance;
-                instance.meshIndex = meshIndex;
-                frameWorld->instances.Add(instance);
-
-                // if in range (depending on distance and BC size)
-                    // Add to TLAS
-                // count instances with shader
             }
         );
 
@@ -750,7 +747,7 @@ public:
     {
         ZoneScoped;
         // upload lights
-        uint queryIndex = world.Query(Components::Material::mask, 0);
+        uint queryIndex = world.Query(Components::Light::mask, 0);
 
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
@@ -770,7 +767,7 @@ public:
         ZoneScoped;
         // upload camera
 
-        uint queryIndex = world.Query(Components::Material::mask, 0);
+        uint queryIndex = world.Query(Components::Camera::mask, 0);
 
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
