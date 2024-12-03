@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 
 struct CullingContext
 {
@@ -49,10 +50,11 @@ public:
     }
 };
 
+static constexpr uint invalidMapIndex = UINT_MAX;
 template<typename keyType, typename cpuType>
 class Map
 {
-    std::vector<FixedArray<keyType>*> keys;
+    std::unordered_map<keyType, uint> keys;
     std::vector<FixedArray<cpuType>*> data;
     std::vector<FixedArray<bool>*> loaded;
 public:
@@ -63,77 +65,43 @@ public:
 
     Map()
     {
-        keys.resize(256);
+        keys.reserve(256 * fixedArraySize);
         data.resize(256);
         loaded.resize(256);
         for (uint i = 0; i < 256; i++)
         {
-            keys[i] = 0;
             data[i] = 0;
             loaded[i] = 0;
         }
-        keys[0] = new FixedArray<keyType>();
         data[0] = new FixedArray<cpuType>();
         loaded[0] = new FixedArray<bool>();
     }
 
-    int Contains(keyType key)
+    uint Contains(keyType key)
     {
-#if 0
-        for (uint i = 0; i < count; i++)
-        {
-            uint pageIndex = i / fixedArraySize;
-            uint index = i % fixedArraySize;
-            auto& page = *keys[pageIndex]; //not thread safe ? if someone add a page when we are here ?
-            if (page[index] == key)
-                return i;
-        }
-#else
-        uint index = count % fixedArraySize;
-        int pageIndex = pageCount - 1;
-        for (int i = 0; i < pageIndex; i++)
-        {
-            auto& page = *keys[i];
-            for (int j = 0; j < fixedArraySize; j++)
-            {
-                if (page[j] == key)
-                {
-                    return i * fixedArraySize + j;
-                }
-            }
-        }
-        auto& page = *keys[pageCount];
-        for (int j = 0; j < index; j++)
-        {
-            if (page[j] == key)
-            {
-                return pageCount * fixedArraySize + j;
-            }
-        }
-#endif
-        return -1;
+        if (keys.contains(key))
+            return keys[key];
+        return invalidMapIndex;
     }
 
     uint Add(keyType key)
     {
-        //ZoneScoped;
-        int index = Contains(key);
-        if (index == -1)
+        uint index = Contains(key);
+        if (index == invalidMapIndex)
         {
             index = count++;
+            keys[key] = index;
             uint pageIndex = index / fixedArraySize;
             uint localIndex = index % fixedArraySize;
-            (*keys[pageIndex])[localIndex] = key;
             (*data[pageIndex])[localIndex] = cpuType();
             (*loaded[pageIndex])[localIndex] = false;
 
             pageCount.store(pageIndex > pageCount.load() ? pageIndex : pageCount.load());
             
             //not very safe ... may leak some fixed arrays
-            if (keys[pageCount+1] == nullptr)
+            if (data[pageCount+1] == nullptr)
             {
                 ZoneScopedN("NewPage");
-                keys[pageCount+1] = new FixedArray<keyType>();
                 data[pageCount+1] = new FixedArray<cpuType>();
                 loaded[pageCount+1] = new FixedArray<bool>();
             }
@@ -563,9 +531,6 @@ public:
         ZoneScoped;
 
         tf::Task updateInstances = UpdateInstances(world, globalResources, subflow);
-        tf::Task updateMeshes = UpdateMeshes(world, subflow);
-        tf::Task updateTextures = UpdateTextures(world, subflow);
-        tf::Task updateShaders = UpdateShaders(world, subflow);
         tf::Task updateMaterials = UpdateMaterials(world, subflow);
         tf::Task updateLights = UpdateLights(world, subflow);
         tf::Task updateCameras = UpdateCameras(world, subflow);
@@ -581,8 +546,7 @@ public:
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
-        updateInstances.precede(updateMeshes, updateTextures, updateShaders);
-        updateShaders.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+        updateInstances.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
         presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
@@ -604,83 +568,15 @@ public:
 
     }
 
-    tf::Task UpdateMeshes(World& world, tf::Subflow& subflow)
-    {
-        ZoneScoped;
-        // parallel for meshes in GlobalResources
-            // load mesh from disk
-            // upload mesh
-            // update BLAS
-
-        uint queryIndex = world.Query(Components::Mesh::mask, 0);
-
-        uint entityCount = (uint)world.frameQueries[queryIndex].size();
-        uint entityStep = 1;
-        ViewWorld* frameWorld = rendererWorld.Get();
-
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
-            {
-                ZoneScoped;
-
-            }
-        );
-        return task;
-    }
-
-    tf::Task UpdateTextures(World& world, tf::Subflow& subflow)
-    {
-        ZoneScoped;
-        // parallel for textures in GlobalResources
-            // load mesh from disk
-            // upload mesh
-            // update BLAS
-
-        uint queryIndex = world.Query(Components::Mesh::mask, 0);
-
-        uint entityCount = (uint)world.frameQueries[queryIndex].size();
-        uint entityStep = 1;
-        ViewWorld* frameWorld = rendererWorld.Get();
-
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
-            {
-                ZoneScoped;
-
-            }
-        );
-        return task;
-    }
-
-    tf::Task UpdateShaders(World& world, tf::Subflow& subflow)
-    {
-        ZoneScoped;
-        // parallel for shaders in GlobalResources
-            // compile shader
-
-        uint queryIndex = world.Query(Components::Shader::mask, 0);
-
-        uint entityCount = (uint)world.frameQueries[queryIndex].size();
-        uint entityStep = 1;
-        ViewWorld* frameWorld = rendererWorld.Get();
-
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
-            {
-                ZoneScoped;
-
-            }
-        );
-        return task;
-    }
-
     tf::Task UpdateInstances(World& world, GlobalResources& globalResources, tf::Subflow& subflow)
     {
         ZoneScoped;
         rendererWorld->instances.Clear();
 
-        uint queryIndex = world.Query(Components::Instance::mask, 0);
+        uint queryIndex = world.Query(Components::Instance::mask | Components::Transform::mask, 0);
 
 #define stepSize 512
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
-        //uint entityStep = 128;
         ViewWorld* frameWorld = rendererWorld.Get();
         
         tf::Task task = subflow.for_each_index(0, entityCount, stepSize, [&world, &globalResources, frameWorld, queryIndex](int i)
@@ -722,8 +618,12 @@ public:
 
                     //frameWorld->materials.AddUnique(material);
 
+                    Components::Transform& transformCmp = queryResult[i + subQuery].Get<Components::Transform>();
+
                     Instance instance;
                     instance.meshIndex = meshIndex;
+                    instance.materialIndex = meshIndex;
+                    instance.worldMatrix = transformCmp.matrix;
                     //frameWorld->instances.Add(instance);
 
                     // if in range (depending on distance and BC size)
