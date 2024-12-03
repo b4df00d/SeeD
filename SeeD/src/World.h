@@ -423,7 +423,7 @@ namespace Systems
                 material.shader = Components::Handle<Components::Shader>{ shaderEnt[Rand(shaderCount)].id };
                 for (uint j = 0; j < 16; j++)
                 {
-                    material.textures[j] = Components::Handle<Components::Texture>{ meshEnt[Rand(textureCount)].id };
+                    material.textures[j] = Components::Handle<Components::Texture>{ textureEnt[Rand(textureCount)].id };
                 }
                 for (uint j = 0; j < 15; j++)
                 {

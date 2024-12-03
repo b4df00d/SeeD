@@ -21,6 +21,7 @@ public:
 
     assetID Add(String path)
     {
+        ZoneScoped;
         assetID id = (assetID)std::hash<std::string>{}(path);
         map[id] = path;
         return id;

@@ -59,6 +59,7 @@ public:
     std::atomic_uint32_t count = 0;
     std::atomic_uint32_t pageCount = 0;
     std::recursive_mutex lock;
+    uint maxLoading = 10;
 
     Map()
     {
@@ -78,8 +79,7 @@ public:
 
     int Contains(keyType key)
     {
-        //std::lock_guard<std::recursive_mutex> lg(lock); // PLZ !!!! not that !
-#if 1
+#if 0
         for (uint i = 0; i < count; i++)
         {
             uint pageIndex = i / fixedArraySize;
@@ -89,13 +89,25 @@ public:
                 return i;
         }
 #else
-        for (uint i = 0; i < pageCount; i++)
+        uint index = count % fixedArraySize;
+        int pageIndex = pageCount - 1;
+        for (int i = 0; i < pageIndex; i++)
         {
-            auto& page = *keys[i]; //not thread safe ? if someone add a page when we are here ?
-            for (uint j = 0; j < page.count; j++)
+            auto& page = *keys[i];
+            for (int j = 0; j < fixedArraySize; j++)
             {
                 if (page[j] == key)
+                {
                     return i * fixedArraySize + j;
+                }
+            }
+        }
+        auto& page = *keys[pageCount];
+        for (int j = 0; j < index; j++)
+        {
+            if (page[j] == key)
+            {
+                return pageCount * fixedArraySize + j;
             }
         }
 #endif
@@ -104,6 +116,7 @@ public:
 
     uint Add(keyType key)
     {
+        //ZoneScoped;
         int index = Contains(key);
         if (index == -1)
         {
@@ -119,6 +132,7 @@ public:
             //not very safe ... may leak some fixed arrays
             if (keys[pageCount+1] == nullptr)
             {
+                ZoneScopedN("NewPage");
                 keys[pageCount+1] = new FixedArray<keyType>();
                 data[pageCount+1] = new FixedArray<cpuType>();
                 loaded[pageCount+1] = new FixedArray<bool>();
@@ -127,7 +141,7 @@ public:
         return index;
     }
 
-    bool GetLoaded(uint index)
+    bool& GetLoaded(uint index)
     {
         uint pageIndex = index / fixedArraySize;
         uint localIndex = index % fixedArraySize;
@@ -683,31 +697,34 @@ public:
                     Components::Material& materialCmp = instanceCmp.material.Get();
                     Components::Shader& shaderCmp = materialCmp.shader.Get();
 
-                    uint meshIndex = globalResources.meshes.Add(meshCmp.id);
+                    int meshIndex = globalResources.meshes.Add(meshCmp.id);
                     if (!globalResources.meshes.GetLoaded(meshIndex)) continue;
 
                     uint shaderIndex = globalResources.shaders.Add(shaderCmp.id);
                     if (!globalResources.shaders.GetLoaded(shaderIndex)) continue;
 
                     Material material;
+                    material.shaderIndex = shaderIndex;
+                    bool materialReady = true;
                     for (uint texIndex = 0; texIndex < 16; texIndex++) // keep in sync with number of textures in material
                     {
                         if (materialCmp.textures[texIndex].index != entityInvalid)
                         {
                             Components::Texture& textureCmp = materialCmp.textures[texIndex].Get();
                             uint textureIndex = globalResources.textures.Add(textureCmp.id);
-                            if (!globalResources.textures.GetLoaded(textureIndex)) continue;
+                            if (!globalResources.textures.GetLoaded(textureIndex)) materialReady = false;
                             material.texturesSRV[texIndex] = globalResources.textures.GetData(textureIndex).srv;
                         }
                     }
+                    if (!materialReady) continue;
 
                     // everything should be loaded to be able to draw the instance
 
-                    frameWorld->materials.AddUnique(material);
+                    //frameWorld->materials.AddUnique(material);
 
                     Instance instance;
                     instance.meshIndex = meshIndex;
-                    frameWorld->instances.Add(instance);
+                    //frameWorld->instances.Add(instance);
 
                     // if in range (depending on distance and BC size)
                         // Add to TLAS
@@ -863,10 +880,6 @@ public:
     {
         ZoneScoped;
 
-        SUBTASKRENDERER(LoadShaders);
-        SUBTASKRENDERER(LoadMeshes);
-        SUBTASKRENDERER(LoadTextures);
-
         auto mainViewEndTask = mainView.Schedule(world, globalResources, subflow);
         auto editorViewEndTask = editorView.Schedule(world, globalResources, subflow);
 
@@ -879,36 +892,71 @@ public:
         WaitFrame.precede(PresentFrame);
     }
 
-    // do that in backgroud task ?
-    void LoadShaders()
+    void ScheduleLoading(tf::Subflow& subflow)
     {
+        ZoneScoped;
+        uint loadingLeft = globalResources.shaders.maxLoading;
         for (uint i = 0; i < globalResources.shaders.count; i++)
         {
             if (!globalResources.shaders.GetLoaded(i))
             {
                 // load shader
+                //SUBTASKRENDERER(LoadShaders);
+                tf::Task pass = subflow.emplace([this, i]() {this->LoadShaders(i); }).name("LoadShaders");
+                loadingLeft--;
             }
+            if (loadingLeft == 0)
+                break;
         }
-    }
-    void LoadMeshes()
-    {
+        loadingLeft = globalResources.meshes.maxLoading;
         for (uint i = 0; i < globalResources.meshes.count; i++)
         {
             if (!globalResources.meshes.GetLoaded(i))
             {
                 // load mesh
+                //SUBTASKRENDERER(LoadMeshes);
+                tf::Task pass = subflow.emplace([this, i]() {this->LoadMeshes(i); }).name("LoadMeshes");
+                loadingLeft--;
             }
+            if (loadingLeft == 0)
+                break;
         }
-    }
-    void LoadTextures()
-    {
+        loadingLeft = globalResources.textures.maxLoading;
         for (uint i = 0; i < globalResources.textures.count; i++)
         {
             if (!globalResources.textures.GetLoaded(i))
             {
                 // load texture
+                //SUBTASKRENDERER(LoadTextures);
+                tf::Task pass = subflow.emplace([this, i]() {this->LoadTextures(i); }).name("LoadTextures");
+                loadingLeft--;
             }
+            if (loadingLeft == 0)
+                break;
         }
+    }
+
+    // do that in backgroud task ?
+    void LoadShaders(uint i)
+    {
+        ZoneScoped;
+        IOs::Log("shader");
+        globalResources.shaders.GetData(i);
+        globalResources.shaders.GetLoaded(i) = true;
+    }
+    void LoadMeshes(uint i)
+    {
+        ZoneScoped;
+        IOs::Log("mesh");
+        globalResources.meshes.GetData(i);
+        globalResources.meshes.GetLoaded(i) = true;
+    }
+    void LoadTextures(uint i)
+    {
+        ZoneScoped;
+        IOs::Log("texture");
+        globalResources.textures.GetData(i);
+        globalResources.textures.GetLoaded(i) = true;
     }
 
     void ExecuteFrame()
