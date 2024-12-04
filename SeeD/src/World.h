@@ -76,8 +76,10 @@ namespace Components
     struct __declspec(align(128)) Material : ComponentBase<Material>
     {
         Handle<Shader> shader;
-        Handle<Texture> textures[16];
-        float prameters[15]; // not 16 so that the struct is 128bytes
+        static const uint maxTextures = 16;
+        Handle<Texture> textures[maxTextures];
+        static const uint maxParameters = 15;// not 16 so that the struct is 128bytes
+        float prameters[maxParameters];
     };
     Material material;
 
@@ -198,6 +200,23 @@ public:
         Entity()
         {
             id = ~0;
+        }
+
+        Entity(const int& i)
+        {
+            id = i;
+        }
+
+        /*
+        explicit operator uint () const 
+        { 
+            return id; 
+        }
+        */
+
+        bool operator==(const Entity& other) const
+        {
+            return id == other.id;
         }
 
         inline Entity Make(uint i)
@@ -345,6 +364,17 @@ public:
     }
 };
 World* World::instance;
+namespace std 
+{
+    template<>
+    struct hash<World::Entity> 
+    {
+        inline size_t operator()(const World::Entity& x) const 
+        {
+            return x.id;
+        }
+    };
+}
 
 namespace Components
 {

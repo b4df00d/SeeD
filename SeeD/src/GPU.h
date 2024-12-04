@@ -894,8 +894,8 @@ struct Mesh
 struct Material
 {
     uint shaderIndex;
-    SRV texturesSRV[16];
     float parameters[15];
+    SRV texturesSRV[16];
 };
 
 struct PSO

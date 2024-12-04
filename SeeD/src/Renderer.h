@@ -1,23 +1,8 @@
 #pragma once
 
 #include <map>
+#include "Shaders/structs.hlsl"
 
-struct CullingContext
-{
-    StructuredUploadBuffer<Camera> camera;
-    StructuredUploadBuffer<Instance> instancesInView;
-    StructuredUploadBuffer<Light> lights;
-    TLAS tlas;
-};
-
-struct ViewWorld
-{
-    StructuredUploadBuffer<Camera> cameras;
-    StructuredUploadBuffer<Instance> instances;
-    StructuredUploadBuffer<Instance> instancesGPU; // only for instances created on GPU
-    StructuredUploadBuffer<Material> materials;
-    StructuredUploadBuffer<Light> lights;
-};
 
 static uint fixedArraySize = 65536;
 template<typename T>
@@ -51,12 +36,13 @@ public:
 };
 
 static constexpr uint invalidMapIndex = UINT_MAX;
-template<typename keyType, typename cpuType>
+template<typename keyType, typename cpuType, typename gpuType>
 class Map
 {
     std::unordered_map<keyType, uint> keys;
     std::vector<FixedArray<cpuType>*> data;
-    std::vector<FixedArray<bool>*> loaded;
+    std::vector<FixedArray<bool>*> loaded; // and uploaded if applicable
+    StructuredUploadBuffer<gpuType> gpuData;
 public:
     std::atomic_uint32_t count = 0;
     std::atomic_uint32_t pageCount = 0;
@@ -143,10 +129,26 @@ public:
 
 struct GlobalResources
 {
-    Map<assetID, Shader> shaders;
-    Map<assetID, Mesh> meshes;
-    StructuredUploadBuffer<Mesh> meshesGPU;
-    Map<assetID, Resource> textures;
+    Map<assetID, Shader, HLSL::Shader> shaders;
+    Map<assetID, Mesh, HLSL::Mesh> meshes;
+    Map<assetID, Resource, HLSL::Texture> textures;
+};
+
+struct CullingContext
+{
+    StructuredUploadBuffer<Camera> camera;
+    StructuredUploadBuffer<Instance> instancesInView;
+    StructuredUploadBuffer<Light> lights;
+    TLAS tlas;
+};
+
+struct ViewWorld
+{
+    StructuredUploadBuffer<Camera> cameras;
+    StructuredUploadBuffer<Light> lights;
+    Map<World::Entity, Material, HLSL::Material> materials;
+    StructuredUploadBuffer<Instance> instances;
+    StructuredUploadBuffer<Instance> instancesGPU; // only for instances created on GPU
 };
 
 class View
@@ -593,16 +595,21 @@ public:
                     Components::Material& materialCmp = instanceCmp.material.Get();
                     Components::Shader& shaderCmp = materialCmp.shader.Get();
 
-                    int meshIndex = globalResources.meshes.Add(meshCmp.id);
+                    uint meshIndex = globalResources.meshes.Add(meshCmp.id);
                     if (!globalResources.meshes.GetLoaded(meshIndex)) continue;
 
                     uint shaderIndex = globalResources.shaders.Add(shaderCmp.id);
                     if (!globalResources.shaders.GetLoaded(shaderIndex)) continue;
 
-                    Material material;
+                    uint materialIndex = frameWorld->materials.Add(World::Entity(instanceCmp.material.index));
+                    Material& material = frameWorld->materials.GetData(materialIndex);
                     material.shaderIndex = shaderIndex;
+                    for (uint paramIndex = 0; paramIndex < Components::Material::maxParameters; paramIndex++)
+                    {
+                        material.parameters[paramIndex] = materialCmp.prameters[paramIndex];
+                    }
                     bool materialReady = true;
-                    for (uint texIndex = 0; texIndex < 16; texIndex++) // keep in sync with number of textures in material
+                    for (uint texIndex = 0; texIndex < Components::Material::maxTextures; texIndex++)
                     {
                         if (materialCmp.textures[texIndex].index != entityInvalid)
                         {
@@ -616,13 +623,12 @@ public:
 
                     // everything should be loaded to be able to draw the instance
 
-                    //frameWorld->materials.AddUnique(material);
 
                     Components::Transform& transformCmp = queryResult[i + subQuery].Get<Components::Transform>();
 
                     Instance instance;
                     instance.meshIndex = meshIndex;
-                    instance.materialIndex = meshIndex;
+                    instance.materialIndex = materialIndex;
                     instance.worldMatrix = transformCmp.matrix;
                     //frameWorld->instances.Add(instance);
 
