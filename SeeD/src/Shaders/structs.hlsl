@@ -9,7 +9,8 @@ namespace HLSL
     
     struct Mesh
     {
-        
+        uint meshOffset;
+        uint meshletCount;
     };
     
     struct Texture
@@ -17,16 +18,23 @@ namespace HLSL
         uint index;
     };
     
-    struct Camera
-    {
-        float4x4 viewProj;
-    };
-    
     struct Material
     {
         Shader shader;
         float parameters[15];
         Texture textures[16];
+    };
+    
+    struct Instance
+    {
+        uint meshIndex;
+        uint materialIndex;
+        float4x4 worldMatrix;
+    };
+    
+    struct Camera
+    {
+        float4x4 viewProj;
     };
 
     struct Light

@@ -14,14 +14,14 @@ namespace Components
     typedef std::bitset<componentMaxCount> Mask;
 
     static uint masksIndex = 0;
-    static std::vector<uint> strides;
+    static std::array<uint, componentMaxCount> strides;
 
     template<typename T>
     static uint GetComponentStride()
     {
-        strides.push_back(sizeof(T));
+        strides[masksIndex] = sizeof(T);
         masksIndex++;
-        return masksIndex;
+        return masksIndex - 1;
     }
 
     template<typename T>
@@ -146,7 +146,7 @@ public:
             {
                 data[i] = nullptr;
                 if(mask[i])
-                    data[i] = malloc(poolMaxSlots * Components::strides[i]);
+                    data[i] = (void*)malloc(poolMaxSlots * Components::strides[i]);
             }
         }
 
@@ -186,9 +186,13 @@ public:
         template <Components::IsComponent T>
         T& Get()
         {
+            auto& poolpool = World::instance->components[pool];
             // TODO : check that the pool have the right mask (debug assert ?)
-            auto& pool = World::instance->components[this->pool];
-            auto& res = ((T*)pool.data[T::bucketIndex])[this->index];
+            assert(T::bucketIndex < Components::componentMaxCount);
+            assert(poolpool.data[T::bucketIndex] != nullptr);
+            assert((poolpool.mask & T::mask) != 0);
+            T* data = (T*)poolpool.data[T::bucketIndex];
+            auto& res = data[index];
             return res;
         }
     };
@@ -205,6 +209,11 @@ public:
         Entity(const int& i)
         {
             id = i;
+        }
+
+        ~Entity()
+        {
+
         }
 
         /*
@@ -362,6 +371,21 @@ public:
         }
         return queryIndex;
     }
+
+    uint CountQuery(Components::Mask include, Components::Mask exclude)
+    {
+        ZoneScoped;
+        uint countQuery = 0;
+        for (uint i = 0; i < components.size(); i++)
+        {
+            Pool& pool = components[i];
+            if (pool.Satisfy(include, exclude))
+            {
+                countQuery += pool.count;
+            }
+        }
+        return countQuery;
+    }
 };
 World* World::instance;
 namespace std 
@@ -410,7 +434,7 @@ namespace Systems
             uint meshCount = 1000;
             uint materialCount = 1000;
             uint textureCount = 100;
-            uint instanceCount = 100000;
+            uint instanceCount = 1000000;
 
             std::vector<World::Entity> shaderEnt;
             std::vector<World::Entity> meshEnt;
@@ -462,7 +486,6 @@ namespace Systems
                 materialEnt[i] = ent;
             }
 
-            std::set<assetID> check;
             for (uint i = 0; i < instanceCount; i++)
             {
                 World::Entity ent;
@@ -470,9 +493,11 @@ namespace Systems
                 auto& instance = ent.Get<Components::Instance>();
                 uint meshIndex = Rand(meshCount);
                 uint materialIndex = Rand(materialCount);
-                check.insert(meshIndex);
                 instance.mesh = Components::Handle<Components::Mesh>{ meshEnt[meshIndex].id };
                 instance.material = Components::Handle<Components::Material>{ materialEnt[materialIndex].id };
+
+                auto& transform = ent.Get<Components::Transform>();
+                transform.matrix = float4x4(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
             }
 
 

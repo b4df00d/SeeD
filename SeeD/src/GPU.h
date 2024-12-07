@@ -503,7 +503,10 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
     allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
 
     if (upload)
+    {
         allocationDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+        resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    }
 
     HRESULT hr = GPU::instance->allocator->CreateResource(
         &allocationDesc,
@@ -515,7 +518,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
 
     allocation->SetName(name.ToConstWChar());
     allResources.push_back(allocation);
-    allResourcesNames.push_back(name);
+    allResourcesNames.push_back(name.c_str());
 
     {
         D3D12_CPU_DESCRIPTOR_HANDLE handle = GPU::instance->descriptorHeap.GetGlobalSlot(srv);
@@ -531,6 +534,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
         GPU::instance->device->CreateShaderResourceView(GetResource(), &SRVDesc, handle);
     }
 
+    if (!upload)
     {
         D3D12_CPU_DESCRIPTOR_HANDLE handle = GPU::instance->descriptorHeap.GetGlobalSlot(uav);
 
@@ -653,7 +657,18 @@ void Resource::BackBuffer(ID3D12Resource* backBuffer)
 
 void Resource::Release()
 {
-    if(allocation) allocation->Release();
+    if (allocation)
+    {
+        for (int j = (int)allResources.size() - 1; j >= 0; j--)
+        {
+            if (allResources[j] == allocation)
+            {
+                allResources.erase(allResources.begin() + j);
+                allResourcesNames.erase(allResourcesNames.begin() + j);
+            }
+        }
+        allocation->Release();
+    }
 }
 
 ID3D12Resource* Resource::GetResource()
@@ -728,8 +743,8 @@ void Resource::CleanUploadResources()
             {
                 if (allResources[j] == alloc)
                 {
-                    allResources.erase(allResources.begin() + i);
-                    allResourcesNames.erase(allResourcesNames.begin() + i);
+                    allResources.erase(allResources.begin() + j);
+                    allResourcesNames.erase(allResourcesNames.begin() + j);
                 }
             }
             alloc->Release();
@@ -743,12 +758,47 @@ std::vector<D3D12MA::Allocation*> Resource::allResources;
 std::vector<String> Resource::allResourcesNames;
 // end of definitions of Resource::
 
+/*
+template <class T>
+class StructuredBuffer // JUST use Resource !!!!
+{
+public:
+    Resource gpuData;
+
+    uint Size()
+    {
+        return cpuData.size();
+    }
+    void Resize(uint size)
+    {
+        cpuData.resize(size);
+    }
+    void Reserve(uint size)
+    {
+        cpuData.reserve(size);
+    }
+    Resource& GetResource()
+    {
+        return gpuData;
+    }
+    ID3D12Resource* GetResourcePtr()
+    {
+        return gpuData.GetResource();
+    }
+    void Release()
+    {
+        gpuData.Release();
+    }
+};
+*/
+
 template <class T>
 class StructuredUploadBuffer
 {
 public:
     std::vector<T> cpuData;
     Resource gpuData;
+    std::mutex lock;
 
     void Clear()
     {
@@ -770,9 +820,33 @@ public:
         cpuData.push_back(value);
         return index;
     }
+    void AddRange(T* data, uint count)
+    {
+        lock.lock();
+        cpuData.reserve(cpuData.size() + count);
+        for (uint i = 0; i < count; i++)
+        {
+            cpuData.push_back(data[i]);
+        }
+        //std::atomic_thread_fence(std::memory_order_acquire);
+        //MemoryBarrier;
+        lock.unlock();
+    }
     uint Size()
     {
         return cpuData.size();
+    }
+    void Resize(uint size)
+    {
+        cpuData.resize(size);
+    }
+    void Reserve(uint size)
+    {
+        cpuData.reserve(size);
+    }
+    T& operator [] (uint index)
+    {
+        return cpuData[index];
     }
     Resource& GetResource()
     {
@@ -785,14 +859,23 @@ public:
     void Upload()
     {
         ZoneScoped;
-        if (gpuData.allocation == nullptr || gpuData.allocation->GetSize() < cpuData.size * sizeof(T))
+        if (gpuData.allocation == nullptr || gpuData.allocation->GetSize() < cpuData.size() * sizeof(T))
         {
-            gpuData.CreateUploadBuffer<T>(cpuData.size, typeid(T).name());
+            gpuData.CreateUploadBuffer<T>(max(uint1(cpuData.size()), uint1(1)), typeid(T).name());
+        }
+        if (sizeof(T) * cpuData.size() > GetResource().allocation->GetSize())
+        {
+            IOs::Log("{} allocation smaller than cpu data ... why", typeid(T).name());
+            gpuData.CreateUploadBuffer<T>(max(uint1(cpuData.size()), uint1(1)), typeid(T).name());
+            return;
         }
         void* buf;
-        GetResourcePtr()->Map(0, nullptr, &buf);
-        memcpy(buf, cpuData.data, sizeof(T) * cpuData.size());
-        GetResourcePtr()->Unmap(0, nullptr);
+        auto hr = GetResourcePtr()->Map(0, nullptr, &buf);
+        if (SUCCEEDED(hr))
+        {
+            memcpy(buf, cpuData.data(), sizeof(T) * cpuData.size());
+            GetResourcePtr()->Unmap(0, nullptr);
+        }
     }
     void Release()
     {
@@ -854,23 +937,6 @@ struct TLAS
     {
 
     }
-};
-
-struct Camera
-{
-
-};
-
-struct Light
-{
-
-};
-
-struct Instance
-{
-    uint meshIndex;
-    uint materialIndex;
-    float4x4 worldMatrix;
 };
 
 struct Meshlet

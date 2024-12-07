@@ -1,4 +1,4 @@
-
+//#undef NDEBUG
 #define WIN32_LEAN_AND_MEAN
 #include <iostream>
 #include <vector>
@@ -6,9 +6,6 @@
 
 #include "../../Third/hlslpp-master/include/hlsl++.h"
 using namespace hlslpp;
-
-#define NAMEOF(name) #name
-
 
 #define TRACY_ENABLE
 #define TRACY_ON_DEMAND
