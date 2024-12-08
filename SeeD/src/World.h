@@ -533,6 +533,7 @@ namespace Systems
         //ZoneScopedN("Player::Update");
         if (!loaded)
         {
+            //return;
             uint shaderCount = 10;
             uint meshCount = 1000;
             uint materialCount = 1000;
@@ -558,7 +559,7 @@ namespace Systems
             {
                 World::Entity ent;
                 ent.Make(Components::Mesh::mask);
-                ent.Get<Components::Mesh>().id.hash = std::rand();
+                ent.Get<Components::Mesh>().id = AssetLibrary::instance->Add("..\\Cache\\mesh.mesh");
                 meshEnt[i] = ent;
             }
 
@@ -567,7 +568,7 @@ namespace Systems
             {
                 World::Entity ent;
                 ent.Make(Components::Texture::mask);
-                ent.Get<Components::Texture>().id.hash = std::rand();
+                ent.Get<Components::Texture>().id = AssetLibrary::instance->Add("..\\Cache\\texture.dds");
                 textureEnt[i] = ent;
             }
 

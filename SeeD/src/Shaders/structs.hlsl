@@ -7,6 +7,13 @@ namespace HLSL
         uint id;
     };
     
+    struct Vertex
+    {
+        float3 pos;
+        float3 normal;
+        float2 uv;
+    };
+    
     struct Mesh
     {
         uint meshOffset;
@@ -44,6 +51,18 @@ namespace HLSL
         float3 color;
         float range;
         float angle;
+    };
+    
+    struct DrawCall
+    {
+        float4x4 world;
+        uint meshIndex;
+        uint materialIndex;
+    };
+    
+    struct Globals
+    {
+        uint2 resolution;
     };
     
 #ifndef __cplusplus

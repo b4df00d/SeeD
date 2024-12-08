@@ -1,19 +1,26 @@
+#pragma forward MeshMain PixelForward
+#pragma gBuffer MeshMain PixelgBuffer
+
 #include "structs.hlsl"
+#include "binding.hlsl"
 
 
+[RootSignature(GlobalRootSignature)]
 [outputtopology("triangle")]
-[numthread(12, 1, 1)]
-void Mesh(in uint groupThreadId : SV_GroupThreadID, out vertices MSVert outVerts[8], out indices uint3 outIndices[12])
+[numthreads(12, 1, 1)]
+void MeshMain(in uint groupThreadId : SV_GroupThreadID, out vertices HLSL::MSVert outVerts[8], out indices uint3 outIndices[12])
 {
     SetMeshOutputCounts(8, 12);
     
     if(groupThreadId < 8)
     {
-        float4 pos = cubeVertices[groupThreadId];
-        outVerts[groupThreadId].pos = mul(worldMat, pos);
-        outVerts[groupThreadId].color = cubeColors[groupThreadId];
+        StructuredBuffer<HLSL::Vertex> cubeVertices = ResourceDescriptorHeap[5];
+        float4 pos = float4(cubeVertices[groupThreadId].pos, 1);
+        outVerts[groupThreadId].pos = mul(drawCall.world, pos);
+        outVerts[groupThreadId].color = float4(1, 0, 1, 1);// cubeColors[ groupThreadId];
     }
     
+    StructuredBuffer<uint3> cubeIndices = ResourceDescriptorHeap[6];
     outIndices[groupThreadId] = cubeIndices[groupThreadId];
 }
 
@@ -28,4 +35,9 @@ void Amplification(in uint groupIndex : SV_GroupIndex)
     PayloadData data;
     data.count = 32;
     DispatchMesh(1, 1, 1, data);
+}
+
+float4 PixelForward()
+{
+    return 1;
 }

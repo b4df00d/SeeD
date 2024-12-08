@@ -134,10 +134,119 @@ public :
         instance = nullptr;
 	}
 
-    bool Compile(Shader& shader, String file)
+    bool Compile(Shader& shader, String file, String entry)
     {
 		ZoneScoped;
         bool compiled = false;
+
+        std::wstring wfile = file.ToWString();
+
+        HRESULT hr;
+        ID3DBlob* errorBuff = NULL; // a buffer holding the error data if any
+        ID3DBlob* signature = NULL;
+
+        
+        D3D12_SHADER_BYTECODE meshShaderBytecode{};
+        IDxcBlobEncoding* source = nullptr;
+        DxcUtils->LoadFile(wfile.c_str(), nullptr, &source);
+        DxcBuffer Source;
+        Source.Ptr = source->GetBufferPointer();
+        Source.Size = source->GetBufferSize();
+        Source.Encoding = DXC_CP_ACP;
+
+
+        // Create default include handler.
+        IDxcIncludeHandler* pIncludeHandler;
+        DxcUtils->CreateDefaultIncludeHandler(&pIncludeHandler);
+        IDxcBlob* pincludes = nullptr;
+        pIncludeHandler->LoadSource(wfile.c_str(), &pincludes);
+
+
+        auto includePath = std::wstring(L"src\\Shaders\\");
+        auto entryName = std::wstring(entry.ToWString());
+        std::vector<LPCWSTR> vArgs;
+        //vArgs.push_back(shaderFileName);
+        vArgs.push_back(L"-I");
+        vArgs.push_back(includePath.c_str());
+        vArgs.push_back(L"-E");
+        vArgs.push_back(entryName.c_str());
+        vArgs.push_back(L"-T");
+        vArgs.push_back(L"ms_6_8");
+        vArgs.push_back(DXC_ARG_ALL_RESOURCES_BOUND);
+        vArgs.push_back(L"-no-warnings");
+#ifdef _DEBUG
+        vArgs.push_back(L"/Zi");
+        vArgs.push_back(L"/Zss");
+        vArgs.push_back(L"-Qembed_debug");
+        vArgs.push_back(DXC_ARG_DEBUG);
+        vArgs.push_back(DXC_ARG_SKIP_OPTIMIZATIONS);
+        //vArgs.push_back(L"--hlsl-dxil-pix-shader-access-instrumentation");
+#else
+        vArgs.push_back(DXC_ARG_OPTIMIZATION_LEVEL3);
+        vArgs.push_back(L"-Qstrip_debug");
+        //vArgs.push_back(L"-Qstrip_reflect");
+        //vArgs.push_back(L"-remove-unused-functions");
+        //vArgs.push_back(L"-remove-unused-globals");
+#endif
+#ifdef REVERSE_Z
+        vArgs.push_back(L"-D");
+        vArgs.push_back(L"REVERSE_Z");
+#endif
+
+        // Compile it with specified arguments.
+        IDxcResult* pResults;
+        DxcCompiler->Compile(
+            &Source,
+            vArgs.data(),
+            (UINT32)vArgs.size(),
+            pIncludeHandler,
+            IID_PPV_ARGS(&pResults)
+        );
+
+        // Print errors if present.
+        IDxcBlobUtf8* pErrors = nullptr;
+        pResults->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&pErrors), nullptr);
+        if (pErrors != nullptr && pErrors->GetStringLength() != 0)
+        {
+            std::string errorMsg = std::string((char*)pErrors->GetStringPointer());
+            IOs::Log("---------------------- {} COMPILE FAILED -------------------", file.c_str());
+            IOs::Log(errorMsg);
+            return false;
+        }
+        // Quit if the compilation failed.
+        HRESULT hrStatus;
+        pResults->GetStatus(&hrStatus);
+        if (!SUCCEEDED(hrStatus))
+        {
+            return false;
+        }
+
+        // Save shader binary.
+        IDxcBlob* pShader = nullptr;
+        IDxcBlobUtf16* pShaderName = nullptr;
+        pResults->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&pShader), &pShaderName);
+        if (pShader == nullptr)
+        {
+            return false;
+        }
+        // fill out shader bytecode structure for pixel shader
+        meshShaderBytecode = {};
+        meshShaderBytecode.BytecodeLength = pShader->GetBufferSize();
+        meshShaderBytecode.pShaderBytecode = pShader->GetBufferPointer();
+
+        IDxcBlob* sig = nullptr;
+        pResults->GetOutput(DXC_OUT_ROOT_SIGNATURE, IID_PPV_ARGS(&sig), &pShaderName);
+        if (sig == nullptr)
+        {
+            return false;
+        }
+
+        hr = GPU::instance->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&(shader.rootSignature)));
+
+
+        D3D12_SHADER_BYTECODE vertexShaderBytecode{};
+        D3D12_SHADER_BYTECODE pixelShaderBytecode{};
+
         return compiled;
     }
 
@@ -186,15 +295,15 @@ public :
 					*/
 					if (tokens[1] == "gBuffer")
 					{
-                        compiled = Compile(shader, file);
+                        compiled = Compile(shader, file, tokens[2]);
 					}
 					else if (tokens[1] == "zPrepass")
 					{
-                        compiled = Compile(shader, file);
+                        compiled = Compile(shader, file, tokens[2]);
 					}
                     else if (tokens[1] == "transparent")
                     {
-                        compiled = Compile(shader, file);
+                        compiled = Compile(shader, file, tokens[2]);
                     }
 				}
 			}
