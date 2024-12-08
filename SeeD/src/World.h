@@ -434,7 +434,7 @@ namespace Systems
             uint meshCount = 1000;
             uint materialCount = 1000;
             uint textureCount = 100;
-            uint instanceCount = 1000000;
+            uint instanceCount = 2000000;
 
             std::vector<World::Entity> shaderEnt;
             std::vector<World::Entity> meshEnt;

@@ -52,43 +52,38 @@ public:
     {
         keys.reserve(262144);
     }
-    /*
-    ~Map()
-    {
-        keys.clear();
-        data.clear();
-        loaded.clear();
-    }
-    */
 
     void Release()
     {
         gpuData.Release();
     }
 
-    uint Contains(keyType key)
+    bool Contains(keyType key, uint& index)
     {
         if (keys.contains(key))
-            return keys[key];
-        return invalidMapIndex;
+        {
+            index = keys[key];
+            return true;
+        }
+        return false;
     }
-    uint Add(keyType key)
+    bool Add(keyType key, uint& index)
     {
-        uint index = Contains(key);
-        if (index == invalidMapIndex)
+        if (!Contains(key, index))
         {
             // Adding without lock it baaaaadd !
             lock.lock();
-            index = Contains(key);
-            if (index == invalidMapIndex)
+            if (!Contains(key, index))
             {
                 index = count++;
                 keys[key] = index;
                 Reserve(count);
+                SetLoaded(index, false);
             }
             lock.unlock();
+            return true;
         }
-        return index;
+        return false;
     }
     void Reserve(uint size)
     {
@@ -420,7 +415,8 @@ public:
         Pass::On(globalResources, asyncCompute, _name);
         ZoneScoped;
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
-        globalResources.shaders.Add(meshShader.Get().id);
+        uint index;
+        globalResources.shaders.Add(meshShader.Get().id, index);
     }
     void Setup(View* view) override
     {
@@ -555,9 +551,9 @@ public:
         ZoneScoped;
 
         tf::Task updateInstances = UpdateInstances(world, globalResources, subflow);
-        tf::Task updateMaterials = UpdateMaterials(world, subflow);
-        tf::Task updateLights = UpdateLights(world, subflow);
-        tf::Task updateCameras = UpdateCameras(world, subflow);
+        tf::Task updateMaterials = UpdateMaterials(world, globalResources, subflow);
+        tf::Task updateLights = UpdateLights(world, globalResources, subflow);
+        tf::Task updateCameras = UpdateCameras(world, globalResources, subflow);
 
         tf::Task updloadInstancesBuffers = UploadInstancesBuffers(world, globalResources, subflow);
         tf::Task updloadMeshesBuffers = UploadMeshesBuffers(world, globalResources, subflow);
@@ -606,7 +602,7 @@ public:
         rendererWorld->instances.Clear();
 
 
-#define stepSize 512
+#define stepSize 128
         ViewWorld* frameWorld = rendererWorld.Get();
         
         uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::Transform::mask, 0);
@@ -629,7 +625,7 @@ public:
         tf::Task task = subflow.for_each_index(0, entityCount, stepSize, 
             [&world, &globalResources, frameWorld, instanceQueryIndex](int i)
             {
-                ZoneScoped;
+                ZoneScopedN("UpdateInstance");
 
                 std::array<HLSL::Instance, stepSize> localInstances;
                 uint instanceCount = 0;
@@ -643,32 +639,17 @@ public:
                     Components::Material& materialCmp = instanceCmp.material.Get();
                     Components::Shader& shaderCmp = materialCmp.shader.Get();
 
-                      uint meshIndex = globalResources.meshes.Add(meshCmp.id);
+                    uint meshIndex;
+                    bool meshAdded = globalResources.meshes.Add(meshCmp.id, meshIndex);
                     if (!globalResources.meshes.GetLoaded(meshIndex)) continue;
 
-                    uint shaderIndex = globalResources.shaders.Add(shaderCmp.id);
+                    uint shaderIndex;
+                    bool shaderAdded = globalResources.shaders.Add(shaderCmp.id, shaderIndex);
                     if (!globalResources.shaders.GetLoaded(shaderIndex)) continue;
 
-                    uint materialIndex = frameWorld->materials.Add(World::Entity(instanceCmp.material.index));
-                    Material& material = frameWorld->materials.GetData(materialIndex);
-                    material.shaderIndex = shaderIndex;
-                    for (uint paramIndex = 0; paramIndex < Components::Material::maxParameters; paramIndex++)
-                    {
-                        // memcpy ? it is even just a cashline 
-                        material.parameters[paramIndex] = materialCmp.prameters[paramIndex];
-                    }
-                    bool materialReady = true;
-                    for (uint texIndex = 0; texIndex < Components::Material::maxTextures; texIndex++)
-                    {
-                        if (materialCmp.textures[texIndex].index != entityInvalid)
-                        {
-                            Components::Texture& textureCmp = materialCmp.textures[texIndex].Get();
-                            uint textureIndex = globalResources.textures.Add(textureCmp.id);
-                            if (!globalResources.textures.GetLoaded(textureIndex)) materialReady = false;
-                            material.texturesSRV[texIndex] = globalResources.textures.GetData(textureIndex).srv;
-                        }
-                    }
-                    if (!materialReady) continue;
+                    uint materialIndex;
+                    bool materialAdded = frameWorld->materials.Add(World::Entity(instanceCmp.material.index), materialIndex);
+                    if (!frameWorld->materials.GetLoaded(materialIndex)) continue;
 
                     // everything should be loaded to be able to draw the instance
 
@@ -694,7 +675,7 @@ public:
         return task;
     }
 
-    tf::Task UpdateMaterials(World& world, tf::Subflow& subflow)
+    tf::Task UpdateMaterials(World& world, GlobalResources& globalResources, tf::Subflow& subflow)
     {
         ZoneScoped;
         // parallel for materials in frameworld
@@ -706,19 +687,55 @@ public:
         uint queryIndex = world.Query(Components::Material::mask, 0);
 
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
-        uint entityStep = 1;
+        uint entityStep = 1024;
         ViewWorld* frameWorld = rendererWorld.Get();
 
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, 
+            [&world, &globalResources, frameWorld, queryIndex](int i)
             {
-                ZoneScoped;
+                ZoneScopedN("UpdateMaterials");
+                for (uint subQuery = 0; subQuery < stepSize; subQuery++)
+                {
+                    auto& queryResult = world.frameQueries[queryIndex];
+                    if (i + subQuery > queryResult.size() - 1) return;
 
+                    uint materialIndex;
+                    if (frameWorld->materials.Contains(World::Entity(queryResult[i + subQuery].Get<Components::Entity>().index), materialIndex))
+                    {
+                        Components::Material& materialCmp = queryResult[i + subQuery].Get<Components::Material>();
+                        Material& material = frameWorld->materials.GetData(materialIndex);
+
+                        uint shaderIndex;
+                        bool shaderAdded = globalResources.shaders.Contains(materialCmp.shader.Get().id, shaderIndex);
+
+                        material.shaderIndex = shaderIndex;
+                        for (uint paramIndex = 0; paramIndex < Components::Material::maxParameters; paramIndex++)
+                        {
+                            // memcpy ? it is even just a cashline 
+                            material.parameters[paramIndex] = materialCmp.prameters[paramIndex];
+                        }
+                        bool materialReady = true;
+                        for (uint texIndex = 0; texIndex < Components::Material::maxTextures; texIndex++)
+                        {
+                            if (materialCmp.textures[texIndex].index != entityInvalid)
+                            {
+                                Components::Texture& textureCmp = materialCmp.textures[texIndex].Get();
+                                uint textureIndex;
+                                bool textureAdded = globalResources.textures.Add(textureCmp.id, textureIndex);
+                                if (!globalResources.textures.GetLoaded(textureIndex)) materialReady = false;
+                                material.texturesSRV[texIndex] = globalResources.textures.GetData(textureIndex).srv;
+                            }
+                        }
+
+                        frameWorld->materials.SetLoaded(materialIndex, materialReady);
+                    }
+                }
             }
         );
         return task;
     }
 
-    tf::Task UpdateLights(World& world, tf::Subflow& subflow)
+    tf::Task UpdateLights(World& world, GlobalResources& globalResources, tf::Subflow& subflow)
     {
         ZoneScoped;
         // upload lights
@@ -730,14 +747,14 @@ public:
 
         tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
             {
-                ZoneScoped;
+                ZoneScopedN("UpdateLights");
 
             }
         );
         return task;
     }
 
-    tf::Task UpdateCameras(World& world, tf::Subflow& subflow)
+    tf::Task UpdateCameras(World& world, GlobalResources& globalResources, tf::Subflow& subflow)
     {
         ZoneScoped;
         // upload camera
@@ -750,7 +767,7 @@ public:
 
         tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
             {
-                ZoneScoped;
+                ZoneScopedN("UpdateCameras");
 
             }
         );
