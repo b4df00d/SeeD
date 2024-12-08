@@ -1,69 +1,5 @@
 #pragma once
 
-class AssetLibrary
-{
-public:
-    static AssetLibrary* instance;
-    std::unordered_map<assetID, String> map;
-    String file = "..\\assetLibrary.txt";
-
-    void On()
-    {
-        instance = this;
-        Load();
-    }
-
-    void Off()
-    {
-        Save();
-        instance = nullptr;
-    }
-
-    assetID Add(String path)
-    {
-        ZoneScoped;
-        assetID id = (assetID)std::hash<std::string>{}(path);
-        map[id] = path;
-        return id;
-    }
-
-    String Get(assetID id)
-    {
-        return map[id];
-    }
-
-    void Save()
-    {
-        ZoneScoped;
-        String line;
-        std::ofstream myfile(file);
-        if (myfile.is_open())
-        {
-            for (auto& item : map)
-            {
-                myfile << item.first << " " << item.second << std::endl;
-            }
-        }
-    }
-
-    void Load()
-    {
-        ZoneScoped;
-        String line;
-        std::ifstream myfile(file);
-        if (myfile.is_open())
-        {
-            assetID id;
-            String path;
-            while (myfile >> id >> path)
-            {
-                map[id] = path;
-            }
-        }
-    }
-};
-AssetLibrary* AssetLibrary::instance;
-
 #include <wincodec.h>
 #include "../../Third/DirectXTex-main/WICTextureLoader/WICTextureLoader12.h"
 #include "../../Third/DirectXTex-main/DDSTextureLoader/DDSTextureLoader12.h"
@@ -175,12 +111,14 @@ public:
 class ShaderLoader
 {
 public :
+    static ShaderLoader* instance;
     IDxcUtils* DxcUtils{};
     IDxcCompiler3* DxcCompiler{};
 
     void On()
     {
         ZoneScoped;
+        instance = this;
         HRESULT hr;
         hr = DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&DxcUtils));
         if (FAILED(hr)) GPU::PrintDeviceRemovedReason(hr);
@@ -193,17 +131,21 @@ public :
 		ZoneScoped;
 		DxcUtils->Release();
 		DxcCompiler->Release();
+        instance = nullptr;
 	}
 
-    void Compile(Shader& shader, String file)
+    bool Compile(Shader& shader, String file)
     {
 		ZoneScoped;
+        bool compiled = false;
+        return compiled;
     }
 
 
-    void Load(Shader& shader, String file)
+    bool Load(Shader& shader, String file)
     {
 		ZoneScoped;
+        bool compiled = false;
         String ps = file;
         struct stat result;
         if (stat(ps.c_str(), &result) == 0 && shader.creationTime.find(file) == shader.creationTime.end())
@@ -224,7 +166,7 @@ public :
 					{
 						// open include file
 						String includeFile = String(("Shaders\\" + line.substr(index + 1, line.find_last_of("\"") - 1 - index)).c_str());
-						Load(shader, includeFile);
+                        compiled = Load(shader, includeFile);
 					}
 				}
 
@@ -244,18 +186,20 @@ public :
 					*/
 					if (tokens[1] == "gBuffer")
 					{
-						Compile(shader, file);
+                        compiled = Compile(shader, file);
 					}
 					else if (tokens[1] == "zPrepass")
 					{
-                        Compile(shader, file);
+                        compiled = Compile(shader, file);
 					}
                     else if (tokens[1] == "transparent")
                     {
-                        Compile(shader, file);
+                        compiled = Compile(shader, file);
                     }
 				}
 			}
 		}
+        return compiled;
     }
 };
+ShaderLoader* ShaderLoader::instance = nullptr;

@@ -13,7 +13,6 @@
 #include "D3d12sdklayers.h"
 #include "../../Third/D3D12MemoryAllocator-master/include/D3D12MemAlloc.h"
 
-
 extern "C" { _declspec(dllexport) extern const UINT D3D12SDKVersion = 4; }
 extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
 
@@ -23,8 +22,86 @@ extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"
 #include "pix3.h"
 #endif
 
-
 #define FRAMEBUFFERING 2
+
+struct SRV
+{
+    uint offset;
+};
+
+struct UAV
+{
+    uint offset;
+};
+
+struct RTV
+{
+    uint offset;
+    D3D12_CPU_DESCRIPTOR_HANDLE handle;
+    ID3D12Resource* raw;
+};
+
+struct BLAS
+{
+
+};
+
+struct TLAS
+{
+    ~TLAS()
+    {
+
+    }
+};
+
+struct Meshlet
+{
+    /* offsets within meshlet_vertices and meshlet_triangles arrays with meshlet data */
+    uint vertexOffset;
+    uint triangleOffset;
+
+    /* number of vertices and triangles used in the meshlet; data is stored in consecutive range defined by offset and count */
+    uint vertexCount;
+    uint triangleCount;
+};
+
+struct Mesh
+{
+    uint meshOffset;
+    uint meshletCount;
+    BLAS blas;
+};
+
+struct Material
+{
+    uint shaderIndex;
+    float parameters[15];
+    SRV texturesSRV[16];
+};
+
+struct Shader
+{
+    ID3D12RootSignature* rootSignature;
+    ID3D12StateObject* pso;
+
+    // for reload
+    std::map<String, __time64_t> creationTime;
+    bool NeedReload()
+    {
+        for (auto& item : creationTime)
+        {
+            auto file = item.first;
+            struct stat result;
+            if (stat(file.c_str(), &result) == 0)
+            {
+                auto mod_time = result.st_mtime;
+                if (mod_time != item.second)
+                    return true;
+            }
+        }
+        return false;
+    }
+};
 
 struct Fence
 {
@@ -43,24 +120,10 @@ struct CommandBuffer
     Fence waitFor;
     uint profileIdx;
     bool open;
+    
+    void Set(Shader& shader);
 };
 
-struct SRV
-{
-    uint offset;
-};
-
-struct UAV
-{
-    uint offset;
-};
-
-struct RTV
-{
-    uint offset;
-    D3D12_CPU_DESCRIPTOR_HANDLE handle;
-    ID3D12Resource* raw;
-};
 
 // c´est crade, c´est parceque GPU est pas encore definit et j´ai pas acces a GPU::frameIndex;
 uint g_frameIndex;
@@ -108,6 +171,8 @@ public:
     void Upload(void* data, CommandBuffer* cb);
     void Transition(CommandBuffer* cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
     static void CleanUploadResources();
+
+    static std::mutex lock;
     static std::vector<std::tuple<uint, D3D12MA::Allocation*>> uploadResources;
     static std::vector<D3D12MA::Allocation*> allResources;
     static std::vector<String> allResourcesNames;
@@ -447,9 +512,12 @@ void Resource::CreateTexture(uint2 resolution, String name)
         &allocation,
         IID_NULL, NULL);
 
-    allocation->SetName(name.ToConstWChar());
+    std::wstring wname = name.ToWString();
+    allocation->SetName(wname.c_str());
+    lock.lock();
     allResources.push_back(allocation);
     allResourcesNames.push_back(name);
+    lock.unlock();
 
     {
         auto desc = GetResource()->GetDesc();
@@ -516,9 +584,12 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
         &allocation,
         IID_NULL, NULL);
 
-    allocation->SetName(name.ToConstWChar());
+    std::wstring wname = name.ToWString();
+    allocation->SetName(wname.c_str());
+    lock.lock();
     allResources.push_back(allocation);
     allResourcesNames.push_back(name.c_str());
+    lock.unlock();
 
     {
         D3D12_CPU_DESCRIPTOR_HANDLE handle = GPU::instance->descriptorHeap.GetGlobalSlot(srv);
@@ -586,9 +657,12 @@ void Resource::CreateReadBackBuffer(uint size, String name)
         &allocation,
         IID_NULL, NULL);
 
-    allocation->SetName(name.ToConstWChar());
+    std::wstring wname = name.ToWString();
+    allocation->SetName(wname.c_str());
+    lock.lock();
     allResources.push_back(allocation);
     allResourcesNames.push_back(name);
+    lock.unlock();
 
     /*
     {
@@ -710,9 +784,11 @@ void Resource::Upload(void* data, CommandBuffer* cb)
         IID_NULL, NULL);
 
     uploadAllocation->SetName(L"UploadBuffer");
+    lock.lock();
     uploadResources.push_back({ GPU::instance->frameNumber, uploadAllocation });
     allResources.push_back(uploadAllocation);
     allResourcesNames.push_back("UploadBuffer");
+    lock.unlock();
 
     void* buf;
     uploadAllocation->GetResource()->Map(0, nullptr, &buf);
@@ -753,10 +829,21 @@ void Resource::CleanUploadResources()
     }
 }
 
+std::mutex Resource::lock;
 std::vector<std::tuple<uint, D3D12MA::Allocation*>> Resource::uploadResources;
 std::vector<D3D12MA::Allocation*> Resource::allResources;
 std::vector<String> Resource::allResourcesNames;
-// end of definitions of Resource::
+// end of definitions of Resource
+
+// definitions of CommandBuffer   
+void CommandBuffer::Set(Shader& shader)
+{
+    cmd->SetGraphicsRootSignature(shader.rootSignature);
+    cmd->SetPipelineState1(shader.pso);
+    cmd->SetDescriptorHeaps(1, &GPU::instance->descriptorHeap.globalDescriptorHeap);
+    //cmd->SetGraphicsRootDescriptorTable();
+}
+// end of definitions of CommandBuffer
 
 /*
 template <class T>
@@ -834,7 +921,7 @@ public:
     }
     uint Size()
     {
-        return cpuData.size();
+        return (uint)cpuData.size();
     }
     void Resize(uint size)
     {
@@ -925,61 +1012,6 @@ public:
         gpuData.Release();
     }
 };
-
-struct BLAS
-{
-
-};
-
-struct TLAS
-{
-    ~TLAS()
-    {
-
-    }
-};
-
-struct Meshlet
-{
-    /* offsets within meshlet_vertices and meshlet_triangles arrays with meshlet data */
-    uint vertexOffset;
-    uint triangleOffset;
-
-    /* number of vertices and triangles used in the meshlet; data is stored in consecutive range defined by offset and count */
-    uint vertexCount;
-    uint triangleCount;
-};
-
-struct Mesh
-{
-    uint meshOffset;
-    uint meshletCount;
-    BLAS blas;
-};
-
-struct Material
-{
-    uint shaderIndex;
-    float parameters[15];
-    SRV texturesSRV[16];
-};
-
-struct PSO
-{
-
-};
-
-struct ShaderCode
-{
-    PSO pso;
-};
-
-struct Shader
-{
-    ShaderCode shaderCode;
-    std::map<String, __time64_t> creationTime;
-};
-
 
 // https://github.com/TheRealMJP/DeferredTexturing/blob/experimental/SampleFramework12/v1.01/Graphics/Profiler.cpp
 // use https://github.com/Raikiri/LegitProfiler for display ?

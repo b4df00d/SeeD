@@ -55,10 +55,4 @@ public:
 	{
 		return std::wstring(begin(), end());
 	}
-
-	inline const WCHAR* ToConstWChar()
-	{
-		return std::wstring(begin(), end()).c_str();
-	}
-
 };

@@ -5,7 +5,96 @@
 
 #define SUBTASKWORLD(system) tf::Task system##Task = subflow.emplace([this, &system](){system->Update(this);}).name(#system)
 
-typedef uint64_t assetID;
+//typedef uint64_t assetID;
+class World;
+//struct World::Entity;
+
+struct assetID
+{
+    UINT64 hash;
+    bool operator==(const assetID& other) const
+    {
+        return hash == other.hash;
+    }
+};
+namespace std
+{
+    template<>
+    struct hash<assetID>
+    {
+        inline size_t operator()(const assetID& x) const
+        {
+            return x.hash;
+        }
+    };
+}
+
+class AssetLibrary
+{
+public:
+    static AssetLibrary* instance;
+    std::unordered_map<assetID, String> map;
+    String file = "..\\assetLibrary.txt";
+
+    void On()
+    {
+        instance = this;
+        Load();
+    }
+
+    void Off()
+    {
+        Save();
+        instance = nullptr;
+    }
+
+    assetID Add(String path)
+    {
+        ZoneScoped;
+        assetID id;
+        id.hash = std::hash<std::string>{}(path);
+        map[id] = path;
+        return id;
+    }
+
+    String Get(assetID id)
+    {
+        assert(map.contains(id));
+        return map[id];
+    }
+
+    void Save()
+    {
+        ZoneScoped;
+        String line;
+        std::ofstream myfile(file);
+        if (myfile.is_open())
+        {
+            for (auto& item : map)
+            {
+                myfile << item.first.hash << " " << item.second << std::endl;
+            }
+        }
+    }
+
+    void Load()
+    {
+        ZoneScoped;
+        String line;
+        std::ifstream myfile(file);
+        if (myfile.is_open())
+        {
+            assetID id;
+            String path;
+            while (myfile >> id.hash >> path)
+            {
+                map[id] = path;
+            }
+        }
+    }
+};
+AssetLibrary* AssetLibrary::instance;
+
 
 static constexpr uint entityInvalid = 65535;
 namespace Components
@@ -46,6 +135,7 @@ namespace Components
     {
         uint index = entityInvalid;
         T& Get();
+        //explicit operator World::Entity() const;
     };
 
     // Be able to get the entity index from the entitySlot
@@ -409,6 +499,7 @@ namespace Components
         if (index == entityInvalid)
         {
             entity.Make(T::mask);
+            index = entity.id;
         }
         else
         {
@@ -416,11 +507,23 @@ namespace Components
         }
         return entity.Get<T>();
     }
+    /*
+    template<Components::IsComponent T>
+    inline Handle<T>::operator World::Entity() const
+    {
+        return World::Entity(index);
+    }
+    */
 }
 
 uint Rand(uint max)
 {
-    return (float(std::rand()) / float(RAND_MAX)) * max * 0.999f;
+    return uint((float(std::rand()) / float(RAND_MAX)) * max * 0.99999f);
+}
+
+float Rand01()
+{
+    return float(std::rand()) / float(RAND_MAX);
 }
 
 namespace Systems
@@ -434,7 +537,7 @@ namespace Systems
             uint meshCount = 1000;
             uint materialCount = 1000;
             uint textureCount = 100;
-            uint instanceCount = 2000000;
+            uint instanceCount = 100000;
 
             std::vector<World::Entity> shaderEnt;
             std::vector<World::Entity> meshEnt;
@@ -446,7 +549,7 @@ namespace Systems
             {
                 World::Entity ent;
                 ent.Make(Components::Shader::mask);
-                ent.Get<Components::Shader>().id = std::rand();
+                ent.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
                 shaderEnt[i] = ent;
             }
 
@@ -455,7 +558,7 @@ namespace Systems
             {
                 World::Entity ent;
                 ent.Make(Components::Mesh::mask);
-                ent.Get<Components::Mesh>().id = std::rand();
+                ent.Get<Components::Mesh>().id.hash = std::rand();
                 meshEnt[i] = ent;
             }
 
@@ -464,7 +567,7 @@ namespace Systems
             {
                 World::Entity ent;
                 ent.Make(Components::Texture::mask);
-                ent.Get<Components::Texture>().id = std::rand();
+                ent.Get<Components::Texture>().id.hash = std::rand();
                 textureEnt[i] = ent;
             }
 
@@ -497,7 +600,10 @@ namespace Systems
                 instance.material = Components::Handle<Components::Material>{ materialEnt[materialIndex].id };
 
                 auto& transform = ent.Get<Components::Transform>();
-                transform.matrix = float4x4(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+                transform.matrix = float4x4(1, 0, 0, 0, 
+                    0, 1, 0, 0, 
+                    0, 0, 1, 0,
+                    Rand01(), Rand01(), Rand01(), 1);
             }
 
 
