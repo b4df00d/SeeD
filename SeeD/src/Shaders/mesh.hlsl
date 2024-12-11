@@ -1,8 +1,8 @@
-#pragma forward MeshMain PixelForward
-#pragma gBuffer MeshMain PixelgBuffer
-
 #include "structs.hlsl"
 #include "binding.hlsl"
+
+#pragma forward MeshMain PixelForward
+#pragma gBuffer MeshMain PixelgBuffer
 
 
 [RootSignature(GlobalRootSignature)]
@@ -37,7 +37,25 @@ void Amplification(in uint groupIndex : SV_GroupIndex)
     DispatchMesh(1, 1, 1, data);
 }
 
-float4 PixelForward()
+
+struct PS_OUTPUT_FORWARD
 {
-    return 1;
+    float4 albedo : SV_Target0;
+    uint entityID : SV_Target1;
+};
+
+PS_OUTPUT_FORWARD PixelForward()
+{
+    PS_OUTPUT_FORWARD o;
+    o.albedo = 1;
+    o.entityID = 1;
+    return o;
+}
+
+PS_OUTPUT_FORWARD PixelgBuffer()
+{
+    PS_OUTPUT_FORWARD o;
+    o.albedo = 1;
+    o.entityID = 1;
+    return o;
 }

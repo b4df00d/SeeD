@@ -508,8 +508,13 @@ public:
         auto& instances = view->rendererWorld->instances;
         for (uint i = 0; i < instances.Size(); i++)
         {
-            commandBuffer->Set(GlobalResources::instance->shaders.GetData(meshShader.Get().id));
-            commandBuffer->cmd->DispatchMesh(1, 1, 1);
+            bool loaded = GlobalResources::instance->shaders.GetLoaded(meshShader.Get().id);
+            if (loaded)
+            {
+                Shader& shader = GlobalResources::instance->shaders.GetData(meshShader.Get().id);
+                commandBuffer->Set(shader);
+                commandBuffer->cmd->DispatchMesh(1, 1, 1);
+            }
         }
 
         Close();
@@ -627,7 +632,7 @@ public:
         updateInstances.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
         presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
-        updateInstances.precede(updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
+        updateInstances.precede(updateMaterials, updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
         presentTask.succeed(updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
 
         return presentTask;
@@ -655,7 +660,7 @@ public:
         rendererWorld->instances.Clear();
 
 
-#define stepSize 128
+#define UpdateInstancesStepSize 128
         ViewWorld* frameWorld = rendererWorld.Get();
         
         uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::Transform::mask, 0);
@@ -675,17 +680,18 @@ public:
         GlobalResources::instance->shaders.Reserve(shadersCount);
 
         
-        tf::Task task = subflow.for_each_index(0, entityCount, stepSize, 
+        tf::Task task = subflow.for_each_index(0, entityCount, UpdateInstancesStepSize,
             [&world, frameWorld, instanceQueryIndex](int i)
             {
                 ZoneScopedN("UpdateInstance");
 
-                std::array<HLSL::Instance, stepSize> localInstances;
+                std::array<HLSL::Instance, UpdateInstancesStepSize> localInstances;
                 uint instanceCount = 0;
-                for (uint subQuery = 0; subQuery < stepSize; subQuery++)
+                for (uint subQuery = 0; subQuery < UpdateInstancesStepSize; subQuery++)
                 {
                     auto& queryResult = world.frameQueries[instanceQueryIndex];
-                    if (i + subQuery > queryResult.size() - 1) return;
+                    if ((i + subQuery) > (queryResult.size() - 1)) 
+                        return;
 
                     Components::Instance& instanceCmp = queryResult[i + subQuery].Get<Components::Instance>();
                     Components::Mesh& meshCmp = instanceCmp.mesh.Get();
@@ -694,15 +700,18 @@ public:
 
                     uint meshIndex;
                     bool meshAdded = GlobalResources::instance->meshes.Add(meshCmp.id, meshIndex);
-                    if (!GlobalResources::instance->meshes.GetLoaded(meshIndex)) continue;
+                    if (!GlobalResources::instance->meshes.GetLoaded(meshIndex)) 
+                        continue;
 
                     uint shaderIndex;
                     bool shaderAdded = GlobalResources::instance->shaders.Add(shaderCmp.id, shaderIndex);
-                    if (!GlobalResources::instance->shaders.GetLoaded(shaderIndex)) continue;
+                    if (!GlobalResources::instance->shaders.GetLoaded(shaderIndex)) 
+                        continue;
 
                     uint materialIndex;
                     bool materialAdded = frameWorld->materials.Add(World::Entity(instanceCmp.material.index), materialIndex);
-                    if (!frameWorld->materials.GetLoaded(materialIndex)) continue;
+                    if (!frameWorld->materials.GetLoaded(materialIndex))
+                        continue;
 
                     // everything should be loaded to be able to draw the instance
 
@@ -740,17 +749,18 @@ public:
         uint queryIndex = world.Query(Components::Material::mask, 0);
 
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
-        uint entityStep = 1024;
+#define UpdateMaterialsStepSize 1024
         ViewWorld* frameWorld = rendererWorld.Get();
 
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, 
+        tf::Task task = subflow.for_each_index(0, entityCount, UpdateMaterialsStepSize,
             [&world, frameWorld, queryIndex](int i)
             {
                 ZoneScopedN("UpdateMaterials");
-                for (uint subQuery = 0; subQuery < stepSize; subQuery++)
+                for (uint subQuery = 0; subQuery < UpdateMaterialsStepSize; subQuery++)
                 {
                     auto& queryResult = world.frameQueries[queryIndex];
-                    if (i + subQuery > queryResult.size() - 1) return;
+                    if (i + subQuery > queryResult.size() - 1) 
+                        return;
 
                     uint materialIndex;
                     if (frameWorld->materials.Contains(World::Entity(queryResult[i + subQuery].Get<Components::Entity>().index), materialIndex))
@@ -775,7 +785,8 @@ public:
                                 Components::Texture& textureCmp = materialCmp.textures[texIndex].Get();
                                 uint textureIndex;
                                 bool textureAdded = GlobalResources::instance->textures.Add(textureCmp.id, textureIndex);
-                                if (!GlobalResources::instance->textures.GetLoaded(textureIndex)) materialReady = false;
+                                if (!GlobalResources::instance->textures.GetLoaded(textureIndex)) 
+                                    materialReady = false;
                                 material.texturesSRV[texIndex] = GlobalResources::instance->textures.GetData(textureIndex).srv;
                             }
                         }
@@ -1044,9 +1055,21 @@ public:
     void LoadShaders(assetID i)
     {
         ZoneScoped;
+        /*
+        // shader compile work across the entire frame. but GlobalResources::instance->shaders storage vectors can be resize in the same time
+        // so the ptr of auto& shadercan no longer point to something good anymore during or after the compilation
         auto& shader = GlobalResources::instance->shaders.GetData(i);
         bool compiled = ShaderLoader::instance->Load(shader, AssetLibrary::instance->Get(i));
         GlobalResources::instance->shaders.SetLoaded(i, compiled);
+        */
+        // so to be thread safe : do the compilation on a tmp Shader object and then copy the result after
+        // and why not lock the shaders map ..
+        Shader shader;
+        bool compiled = ShaderLoader::instance->Load(shader, AssetLibrary::instance->Get(i));
+        GlobalResources::instance->shaders.lock.lock();
+        GlobalResources::instance->shaders.GetData(i) = shader;
+        GlobalResources::instance->shaders.SetLoaded(i, compiled);
+        GlobalResources::instance->shaders.lock.unlock();
     }
     void LoadMeshes(uint i)
     {

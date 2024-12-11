@@ -79,24 +79,74 @@ struct Material
     SRV texturesSRV[16];
 };
 
+template<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE SubObjectType, typename T>
+struct alignas(void*) StreamSubObject
+{
+    StreamSubObject() = default;
+
+    StreamSubObject(const T& rhs)
+        : Type(SubObjectType), InnerObject(rhs)
+    {
+    }
+    operator T& () { return InnerObject; }
+
+private:
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Type = SubObjectType;
+    T InnerObject{};
+};
+
+struct PipelineStateStream
+{
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS, D3D12_SHADER_BYTECODE> VS;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, D3D12_SHADER_BYTECODE> PS;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CS, D3D12_SHADER_BYTECODE> CS;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_AS, D3D12_SHADER_BYTECODE> AS;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, D3D12_SHADER_BYTECODE> MS;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS, D3D12_RT_FORMAT_ARRAY> RTFormats;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT, DXGI_FORMAT> DSVFormat;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL1, D3D12_DEPTH_STENCIL_DESC1> DepthStencil;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, D3D12_RASTERIZER_DESC> Rasterizer;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, D3D12_BLEND_DESC> Blend;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY, D3D12_PRIMITIVE_TOPOLOGY_TYPE> PrimitiveTopology;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT, D3D12_INPUT_LAYOUT_DESC> InputLayout;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, ID3D12RootSignature*> pRootSignature;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, UINT> SampleMask;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, DXGI_SAMPLE_DESC> SampleDesc;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE, D3D12_INDEX_BUFFER_STRIP_CUT_VALUE> StripCutValue;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_STREAM_OUTPUT, D3D12_STREAM_OUTPUT_DESC> StreamOutput;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS, D3D12_PIPELINE_STATE_FLAGS> Flags;
+    StreamSubObject<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_NODE_MASK, UINT> NodeMask;
+
+    PipelineStateStream()
+    {
+        PrimitiveTopology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+
+        D3D12_RASTERIZER_DESC& raster = Rasterizer;
+        raster.CullMode = D3D12_CULL_MODE_BACK;
+        raster.FillMode = D3D12_FILL_MODE_SOLID;
+    }
+};
+
 struct Shader
 {
     ID3D12RootSignature* rootSignature;
-    ID3D12StateObject* pso;
+    ID3D12PipelineState* pso;
 
-    // for reload
     std::map<String, __time64_t> creationTime;
     bool NeedReload()
     {
-        for (auto& item : creationTime)
+        if (editorState.shaderReload)
         {
-            auto file = item.first;
-            struct stat result;
-            if (stat(file.c_str(), &result) == 0)
+            for (auto& item : creationTime)
             {
-                auto mod_time = result.st_mtime;
-                if (mod_time != item.second)
-                    return true;
+                auto file = item.first;
+                struct stat result;
+                if (stat(file.c_str(), &result) == 0)
+                {
+                    auto mod_time = result.st_mtime;
+                    if (mod_time != item.second)
+                        return true;
+                }
             }
         }
         return false;
@@ -113,41 +163,16 @@ struct Fence
 struct CommandBuffer
 {
     // everything is a graphic command, why no compute list ?
-    ID3D12GraphicsCommandList6* cmd = NULL;
+    ID3D12GraphicsCommandList10* cmd = NULL;
     ID3D12CommandAllocator* cmdAlloc = NULL;
     ID3D12CommandQueue* queue = NULL;
     Fence passEnd;
     Fence waitFor;
     uint profileIdx;
     bool open;
-    
+
     void Set(Shader& shader);
 };
-
-
-// c´est crade, c´est parceque GPU est pas encore definit et j´ai pas acces a GPU::frameIndex;
-uint g_frameIndex;
-template<class T>
-class PerFrame
-{
-    T data[FRAMEBUFFERING];
-public:
-    T* Get(uint frameIndex)
-    {
-        return &data[frameIndex];
-    }
-    T* Get()
-    {
-        return Get(g_frameIndex);
-    }
-    T* operator -> ()
-    {
-        return Get();
-    }
-};
-
-
-// FUCK this the first forward declaration I need to make :(
 
 class Resource
 {
@@ -188,7 +213,7 @@ struct DescriptorHeap
     Slots rtvDescriptorHeapSlots;
     int rtvdescriptorIncrementSize;
 
-    void On(ID3D12Device9* device)
+    void On(ID3D12Device14* device)
     {
         {
             D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
@@ -228,7 +253,11 @@ struct DescriptorHeap
 
         //descriptorDSVIncrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
     }
-
+    void Off()
+    {
+        globalDescriptorHeap->Release();
+        rtvDescriptorHeap->Release();
+    }
     D3D12_CPU_DESCRIPTOR_HANDLE GetSlot(uint* offset, Slots* slots, ID3D12DescriptorHeap* heap, int descriptorIncrementSize)
     {
         D3D12_CPU_DESCRIPTOR_HANDLE handle;
@@ -256,13 +285,34 @@ struct DescriptorHeap
     }
 };
 
+// cï¿½est crade, cï¿½est parceque GPU est pas encore definit et jï¿½ai pas acces a GPU::frameIndex;
+uint g_frameIndex;
+template<class T>
+class PerFrame
+{
+    T data[FRAMEBUFFERING];
+public:
+    T* Get(uint frameIndex)
+    {
+        return &data[frameIndex];
+    }
+    T* Get()
+    {
+        return Get(g_frameIndex);
+    }
+    T* operator -> ()
+    {
+        return Get();
+    }
+};
+
 class GPU
 {
 public:
     static GPU* instance;
     IDXGIFactory4* dxgiFactory{};
     IDXGIAdapter3* adapter{};
-    ID3D12Device9* device{};
+    ID3D12Device14* device{};
 
     struct Features
     {
@@ -284,10 +334,9 @@ public:
 
     DescriptorHeap descriptorHeap;
 
-    ID3D12CommandSignature* commandSignature; // just for the drawIndirect ?!
-
     uint frameIndex{};
     uint frameNumber{};
+
 
     void On(IOs::WindowInformation* window)
     {
@@ -298,6 +347,19 @@ public:
         CreateSwapChain(window);
         CreateMemoryAllocator();
 
+    }
+
+    void Off()
+    {
+        ZoneScoped;
+        descriptorHeap.Off();
+        graphicQueue->Release();
+        computeQueue->Release();
+        allocator->Release();
+        //swapChain->Release();
+        device->Release();
+        adapter->Release();
+        dxgiFactory->Release();
     }
 
     void CreateDevice(IOs::WindowInformation* window)
@@ -328,7 +390,7 @@ public:
             if (String(WCharToString(desc.Description)).find("NVIDIA") == -1) continue;
             if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
 
-            hr = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_2, _uuidof(ID3D12Device9), nullptr);
+            hr = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_2, _uuidof(ID3D12Device14), nullptr);
             if (SUCCEEDED(hr))
             {
                 adapterFound = true;
@@ -457,23 +519,24 @@ public:
         }
     }
 
-    void Off()
-    {
-        ZoneScoped;
-        graphicQueue->Release();
-        computeQueue->Release();
-        allocator->Release();
-        //swapChain->Release();
-        device->Release();
-        adapter->Release();
-        dxgiFactory->Release();
-    }
-
     void FrameStart()
     {
         frameNumber++;
         frameIndex = swapChain->GetCurrentBackBufferIndex();
         g_frameIndex = frameIndex;
+    }
+
+    ID3D12PipelineState* CreatePSO(PipelineStateStream& stream)
+    {
+        ID3D12PipelineState* pso;
+        D3D12_PIPELINE_STATE_STREAM_DESC pipelineStateStreamDesc = { sizeof(PipelineStateStream), &stream };
+        HRESULT hr = GPU::instance->device->CreatePipelineState(&pipelineStateStreamDesc, IID_PPV_ARGS(&pso));
+        if (FAILED(hr))
+        {
+            GPU::PrintDeviceRemovedReason(hr);
+            pso = nullptr;
+        }
+        return pso;
     }
 
     static __declspec(noinline) void PrintDeviceRemovedReason(HRESULT hr)
@@ -839,7 +902,7 @@ std::vector<String> Resource::allResourcesNames;
 void CommandBuffer::Set(Shader& shader)
 {
     cmd->SetGraphicsRootSignature(shader.rootSignature);
-    cmd->SetPipelineState1(shader.pso);
+    cmd->SetPipelineState(shader.pso);
     cmd->SetDescriptorHeaps(1, &GPU::instance->descriptorHeap.globalDescriptorHeap);
     //cmd->SetGraphicsRootDescriptorTable();
 }
@@ -990,7 +1053,7 @@ public:
         ZoneScoped;
         if (gpuData.GetResource() == nullptr)
         {
-            // can´t use resource.allocation->GetSize().... it give the entire DMA page size ?
+            // canï¿½t use resource.allocation->GetSize().... it give the entire DMA page size ?
             auto descsource = resource.GetResource()->GetDesc();
             gpuData.CreateReadBackBuffer((uint)descsource.Width);
         }

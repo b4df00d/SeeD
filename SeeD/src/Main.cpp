@@ -26,6 +26,29 @@ void operator delete(void* ptr) noexcept
 }
 #endif
 
+struct EditorState
+{
+    bool show;
+    bool shaderReload =
+#ifdef _DEBUG
+        true;
+#else
+        false;
+#endif
+    /*
+    ECS::Entity selectedObject = { 0 };
+    ECS::Entity lastSelectedObject = { 0 };
+    uint activeWorld = 0;
+    ImGui::FileBrowser fileDialog;
+    float gizmoScale = 0.1f;
+    bool showEditorCamera;
+    ECS::Entity browseEntity = { 0 };
+    int browseSavedWorld = -1;
+    char filter[512];
+    */
+};
+EditorState editorState;
+
 #include "Containers.h"
 #include "String.h"
 

@@ -134,19 +134,21 @@ public :
         instance = nullptr;
 	}
 
-    bool Compile(Shader& shader, String file, String entry)
+    D3D12_SHADER_BYTECODE Compile(String file, String entry, String type, ID3D12RootSignature** rootSignature = nullptr)
     {
 		ZoneScoped;
         bool compiled = false;
 
-        std::wstring wfile = file.ToWString();
+        auto wfile = file.ToWString();
+        auto includePath = std::wstring(L"src\\Shaders\\");
+        auto entryName = std::wstring(entry.ToWString());
+        auto typeName = std::wstring(type.ToWString());
 
         HRESULT hr;
         ID3DBlob* errorBuff = NULL; // a buffer holding the error data if any
         ID3DBlob* signature = NULL;
 
-        
-        D3D12_SHADER_BYTECODE meshShaderBytecode{};
+        D3D12_SHADER_BYTECODE shaderBytecode{};
         IDxcBlobEncoding* source = nullptr;
         DxcUtils->LoadFile(wfile.c_str(), nullptr, &source);
         DxcBuffer Source;
@@ -154,24 +156,19 @@ public :
         Source.Size = source->GetBufferSize();
         Source.Encoding = DXC_CP_ACP;
 
-
         // Create default include handler.
         IDxcIncludeHandler* pIncludeHandler;
         DxcUtils->CreateDefaultIncludeHandler(&pIncludeHandler);
         IDxcBlob* pincludes = nullptr;
         pIncludeHandler->LoadSource(wfile.c_str(), &pincludes);
 
-
-        auto includePath = std::wstring(L"src\\Shaders\\");
-        auto entryName = std::wstring(entry.ToWString());
         std::vector<LPCWSTR> vArgs;
-        //vArgs.push_back(shaderFileName);
         vArgs.push_back(L"-I");
         vArgs.push_back(includePath.c_str());
         vArgs.push_back(L"-E");
         vArgs.push_back(entryName.c_str());
         vArgs.push_back(L"-T");
-        vArgs.push_back(L"ms_6_8");
+        vArgs.push_back(typeName.c_str());
         vArgs.push_back(DXC_ARG_ALL_RESOURCES_BOUND);
         vArgs.push_back(L"-no-warnings");
 #ifdef _DEBUG
@@ -211,14 +208,14 @@ public :
             std::string errorMsg = std::string((char*)pErrors->GetStringPointer());
             IOs::Log("---------------------- {} COMPILE FAILED -------------------", file.c_str());
             IOs::Log(errorMsg);
-            return false;
+            return D3D12_SHADER_BYTECODE{};
         }
         // Quit if the compilation failed.
         HRESULT hrStatus;
         pResults->GetStatus(&hrStatus);
         if (!SUCCEEDED(hrStatus))
         {
-            return false;
+            return D3D12_SHADER_BYTECODE{};
         }
 
         // Save shader binary.
@@ -227,31 +224,30 @@ public :
         pResults->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&pShader), &pShaderName);
         if (pShader == nullptr)
         {
-            return false;
+            return D3D12_SHADER_BYTECODE{};
         }
         // fill out shader bytecode structure for pixel shader
-        meshShaderBytecode = {};
-        meshShaderBytecode.BytecodeLength = pShader->GetBufferSize();
-        meshShaderBytecode.pShaderBytecode = pShader->GetBufferPointer();
+        shaderBytecode = {};
+        shaderBytecode.BytecodeLength = pShader->GetBufferSize();
+        shaderBytecode.pShaderBytecode = pShader->GetBufferPointer();
 
         IDxcBlob* sig = nullptr;
         pResults->GetOutput(DXC_OUT_ROOT_SIGNATURE, IID_PPV_ARGS(&sig), &pShaderName);
         if (sig == nullptr)
         {
-            return false;
+            return D3D12_SHADER_BYTECODE{};
         }
 
-        hr = GPU::instance->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&(shader.rootSignature)));
+        hr = GPU::instance->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(rootSignature));
+        if (!SUCCEEDED(hr))
+        {
+            return D3D12_SHADER_BYTECODE{};
+        }
 
-
-        D3D12_SHADER_BYTECODE vertexShaderBytecode{};
-        D3D12_SHADER_BYTECODE pixelShaderBytecode{};
-
-        return compiled;
+        return shaderBytecode;
     }
 
-
-    bool Load(Shader& shader, String file)
+    bool Parse(Shader& shader, String file)
     {
 		ZoneScoped;
         bool compiled = false;
@@ -274,8 +270,8 @@ public :
 					if (index != -1)
 					{
 						// open include file
-						String includeFile = String(("Shaders\\" + line.substr(index + 1, line.find_last_of("\"") - 1 - index)).c_str());
-                        compiled = Load(shader, includeFile);
+						String includeFile = String(("src\\Shaders\\" + line.substr(index + 1, line.find_last_of("\"") - 1 - index)).c_str());
+                        compiled = Parse(shader, includeFile);
 					}
 				}
 
@@ -291,23 +287,47 @@ public :
 					/*
 					#pragma gBuffer meshMain pixelBuffers
 					#pragma zPrepass vertexDepth
-					#pragma transparent meshMain pixelMain
+					#pragma forward meshMain pixelMain
 					*/
 					if (tokens[1] == "gBuffer")
 					{
-                        compiled = Compile(shader, file, tokens[2]);
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature);
+                        D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[3], "ps_6_8");
+                        PipelineStateStream stream{};
+                        stream.MS = meshShaderBytecode;
+                        stream.PS = bufferShaderBytecode;
+                        shader.pso = GPU::instance->CreatePSO(stream);
+                        compiled = shader.pso != nullptr;
 					}
 					else if (tokens[1] == "zPrepass")
 					{
-                        compiled = Compile(shader, file, tokens[2]);
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature);
+                        PipelineStateStream stream{};
+                        stream.MS = meshShaderBytecode;
+                        shader.pso = GPU::instance->CreatePSO(stream);
+                        compiled = shader.pso != nullptr;
 					}
-                    else if (tokens[1] == "transparent")
+                    else if (tokens[1] == "forward")
                     {
-                        compiled = Compile(shader, file, tokens[2]);
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature);
+                        D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[3], "ps_6_8");
+                        PipelineStateStream stream{};
+                        stream.MS = meshShaderBytecode;
+                        stream.PS = forwardShaderBytecode;
+                        shader.pso = GPU::instance->CreatePSO(stream);
+                        compiled = shader.pso != nullptr;
                     }
 				}
 			}
 		}
+        return compiled;
+    }
+
+    bool Load(Shader& shader, String file)
+    {
+        bool compiled = Parse(shader, file);
+        if (compiled)
+            IOs::Log("compiled {}", file.c_str());
         return compiled;
     }
 };

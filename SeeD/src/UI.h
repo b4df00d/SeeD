@@ -70,22 +70,6 @@ public:
 UI* UI::instance;
 
 
-struct EditorState
-{
-    bool show;
-    /*
-    ECS::Entity selectedObject = { 0 };
-    ECS::Entity lastSelectedObject = { 0 };
-    uint activeWorld = 0;
-    ImGui::FileBrowser fileDialog;
-    float gizmoScale = 0.1f;
-    bool showEditorCamera;
-    ECS::Entity browseEntity = { 0 };
-    int browseSavedWorld = -1;
-    char filter[512];
-    */
-};
-EditorState editorState;
 
 class EditorWindow
 {
