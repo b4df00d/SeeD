@@ -229,9 +229,13 @@ class Pass
 {
 public:
     PerFrame<CommandBuffer> commandBuffer;
+    Resource renderTargets[8];
+    Resource depthBuffer;
+
+    // debug only ?
     String name;
 
-    virtual void On(bool asyncCompute, String _name)
+    virtual void On(View* view, bool asyncCompute, String _name)
     {
         ZoneScoped;
         name = _name;
@@ -457,13 +461,16 @@ class Forward : public Pass
 {
     Components::Handle<Components::Shader> meshShader;
 public:
-    virtual void On(bool asyncCompute, String _name) override
+    virtual void On(View* view, bool asyncCompute, String _name) override
     {
-        Pass::On(asyncCompute, _name);
+        Pass::On(view, asyncCompute, _name);
         ZoneScoped;
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
         uint index;
         GlobalResources::instance->shaders.Add(meshShader.Get().id, index);
+
+        renderTargets[0] = *GPU::instance->backBuffer.Get();
+        depthBuffer.CreateDepthTarget(view->resolution, "Depth");
     }
     void Setup(View* view) override
     {
@@ -474,7 +481,7 @@ public:
         ZoneScoped;
         Open();
 
-
+        renderTargets[0] = *GPU::instance->backBuffer.Get();
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         UINT64 w = view->resolution.x;
@@ -499,23 +506,31 @@ public:
         commandBuffer->cmd->RSSetScissorRects(1, &rect);
 
         // USE : commandBuffer->cmd->BeginRenderPass(); ?
-        commandBuffer->cmd->OMSetRenderTargets(1, &GPU::instance->backBuffer->rtv.handle, false, nullptr);
+        commandBuffer->cmd->OMSetRenderTargets(1, &renderTargets[0].rtv.handle, false, &depthBuffer.dsv.handle);
 
         float4 clearColor(0.4f, 0.1f, 0.2f, 0.0f);
-        commandBuffer->cmd->ClearRenderTargetView(GPU::instance->backBuffer->rtv.handle, clearColor.f32, 1, &rect);
+        commandBuffer->cmd->ClearRenderTargetView(renderTargets[0].rtv.handle, clearColor.f32, 1, &rect);
 
+        float clearDepth(0.0f);
+        UINT8 clearStencil(0);
+        commandBuffer->cmd->ClearDepthStencilView(depthBuffer.dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepth, clearStencil, 1, &rect);
 
-        auto& instances = view->rendererWorld->instances;
-        for (uint i = 0; i < instances.Size(); i++)
+        bool loaded = GlobalResources::instance->shaders.GetLoaded(meshShader.Get().id);
+        if (loaded)
         {
-            bool loaded = GlobalResources::instance->shaders.GetLoaded(meshShader.Get().id);
-            if (loaded)
+            Shader& shader = GlobalResources::instance->shaders.GetData(meshShader.Get().id);
+            commandBuffer->Set(shader);
+
+            auto& instances = view->rendererWorld->instances;
+            for (uint i = 0; i < instances.Size(); i++)
             {
-                Shader& shader = GlobalResources::instance->shaders.GetData(meshShader.Get().id);
-                commandBuffer->Set(shader);
+                uint instanceValues[] = { instances.gpuData.srv.offset, i };
+                commandBuffer->cmd->SetGraphicsRoot32BitConstants(0, 2, instanceValues, 0);
+                commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, instances.GetGPUVirtualAddress(i));
                 commandBuffer->cmd->DispatchMesh(1, 1, 1);
             }
         }
+
 
         Close();
     }
@@ -577,16 +592,16 @@ public:
     {
         resolution = window.windowResolution;
 
-        skinning.On(false, "skinning");
-        particles.On(false, "particles");
-        spawning.On(false, "spawning");
-        culling.On(false, "culling");
-        zPrepass.On(false, "zPrepass");
-        gBuffers.On(false, "gBuffers");
-        lighting.On(false, "lighting");
-        forward.On(false, "forward");
-        postProcess.On(false, "postProcess");
-        present.On(false, "present");
+        skinning.On(this, false, "skinning");
+        particles.On(this, false, "particles");
+        spawning.On(this, false, "spawning");
+        culling.On(this, false, "culling");
+        zPrepass.On(this, false, "zPrepass");
+        gBuffers.On(this, false, "gBuffers");
+        lighting.On(this, false, "lighting");
+        forward.On(this, false, "forward");
+        postProcess.On(this, false, "postProcess");
+        present.On(this, false, "present");
     }
 
     void Off() override
@@ -914,7 +929,6 @@ public:
     }
 };
 
-
 class Editor : public Pass
 {
 public:
@@ -947,7 +961,7 @@ public:
     {
         resolution = window.windowResolution;
 
-        editor.On(false, "editor");
+        editor.On(this, false, "editor");
     }
 
     void Off() override
@@ -975,8 +989,6 @@ public:
     GlobalResources globalResources;
     MainView mainView;
     EditorView editorView;
-
-    PerFrame<Resource> backBuffer;
 
     void On(IOs::WindowInformation& window)
     {

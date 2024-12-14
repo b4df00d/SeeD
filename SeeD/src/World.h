@@ -535,10 +535,10 @@ namespace Systems
         {
             //return;
             uint shaderCount = 10;
-            uint meshCount = 1000;
-            uint materialCount = 1000;
-            uint textureCount = 100;
-            uint instanceCount = 100000;
+            uint meshCount = 10;
+            uint materialCount = 100;
+            uint textureCount = 10;
+            uint instanceCount = 10000;
 
             std::vector<World::Entity> shaderEnt;
             std::vector<World::Entity> meshEnt;

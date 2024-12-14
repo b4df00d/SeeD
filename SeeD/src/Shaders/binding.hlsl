@@ -4,7 +4,7 @@
 //https://devblogs.microsoft.com/directx/in-the-works-hlsl-shader-model-6-6/
 
 #define GlobalRootSignature "RootFlags( ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT | DENY_VERTEX_SHADER_ROOT_ACCESS | CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED), " \
-            "CBV(b0, space = 0), "\
+            "RootConstants(b0, num32BitConstants = 2), "\
 			"CBV(b1, space = 0), "\
 			"CBV(b2, space = 0), "\
 			"CBV(b3, space = 0), "\
@@ -75,14 +75,15 @@
                                   "visibility     = SHADER_VISIBILITY_ALL)"
 
 //---------------------------------------------------------------------------------------------
-cbuffer ObjectBuffer : register(b0)
+cbuffer Instances : register(b0)
 {
-    HLSL::DrawCall drawCall; // peut importe la taille du tableau, ca ira out of bounds si instanceID est plus grand, mais de toute facon la resource doit etre assez longue
+    uint instancesHeapIndex;
+    uint instanceIndex;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer CameraBuffer : register(b1)
+cbuffer InstancesView : register(b1)
 {
-    HLSL::Camera camera;
+    HLSL::Instance instanceBuffer[1];
 }
 //---------------------------------------------------------------------------------------------
 cbuffer GlobalBuffer : register(b2)

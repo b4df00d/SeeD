@@ -231,17 +231,20 @@ public :
         shaderBytecode.BytecodeLength = pShader->GetBufferSize();
         shaderBytecode.pShaderBytecode = pShader->GetBufferPointer();
 
-        IDxcBlob* sig = nullptr;
-        pResults->GetOutput(DXC_OUT_ROOT_SIGNATURE, IID_PPV_ARGS(&sig), &pShaderName);
-        if (sig == nullptr)
+        if (rootSignature != nullptr)
         {
-            return D3D12_SHADER_BYTECODE{};
-        }
+            IDxcBlob* sig = nullptr;
+            pResults->GetOutput(DXC_OUT_ROOT_SIGNATURE, IID_PPV_ARGS(&sig), &pShaderName);
+            if (sig == nullptr)
+            {
+                return D3D12_SHADER_BYTECODE{};
+            }
 
-        hr = GPU::instance->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(rootSignature));
-        if (!SUCCEEDED(hr))
-        {
-            return D3D12_SHADER_BYTECODE{};
+            hr = GPU::instance->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(rootSignature));
+            if (!SUCCEEDED(hr))
+            {
+                return D3D12_SHADER_BYTECODE{};
+            }
         }
 
         return shaderBytecode;
@@ -292,7 +295,7 @@ public :
 					if (tokens[1] == "gBuffer")
 					{
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature);
-                        D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[3], "ps_6_8");
+                        D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[3], "ps_6_6");
                         PipelineStateStream stream{};
                         stream.MS = meshShaderBytecode;
                         stream.PS = bufferShaderBytecode;
@@ -310,10 +313,11 @@ public :
                     else if (tokens[1] == "forward")
                     {
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature);
-                        D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[3], "ps_6_8");
-                        PipelineStateStream stream{};
+                        D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[3], "ps_6_6");
+                        PipelineStateStream stream;
                         stream.MS = meshShaderBytecode;
                         stream.PS = forwardShaderBytecode;
+                        shader.rootSignature = shader.rootSignature;
                         shader.pso = GPU::instance->CreatePSO(stream);
                         compiled = shader.pso != nullptr;
                     }

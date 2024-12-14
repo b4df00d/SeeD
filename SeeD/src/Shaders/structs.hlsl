@@ -34,9 +34,10 @@ namespace HLSL
     
     struct Instance
     {
+        float4x4 worldMatrix;
         uint meshIndex;
         uint materialIndex;
-        float4x4 worldMatrix;
+        uint pad[2];
     };
     
     struct Camera
@@ -51,13 +52,6 @@ namespace HLSL
         float3 color;
         float range;
         float angle;
-    };
-    
-    struct DrawCall
-    {
-        float4x4 world;
-        uint meshIndex;
-        uint materialIndex;
     };
     
     struct Globals

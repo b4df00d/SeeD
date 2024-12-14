@@ -1,8 +1,8 @@
 #include "structs.hlsl"
 #include "binding.hlsl"
 
+//#pragma gBuffer MeshMain PixelgBuffer
 #pragma forward MeshMain PixelForward
-#pragma gBuffer MeshMain PixelgBuffer
 
 
 [RootSignature(GlobalRootSignature)]
@@ -12,16 +12,33 @@ void MeshMain(in uint groupThreadId : SV_GroupThreadID, out vertices HLSL::MSVer
 {
     SetMeshOutputCounts(8, 12);
     
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[instancesHeapIndex];
+    HLSL::Instance instance = instances[instanceIndex];
+    //instance = instanceBuffer[0];
+    
     if(groupThreadId < 8)
     {
+        float3 v[8] =
+        {
+            float3(-0.2, 0.2, 0.2), float3(0.2, 0.2, 0.2), float3(-0.2, 0.2, 0.8), float3(0.2, 0.2, 0.8),
+            float3(0.2, -0.2, 0.2), float3(0.2, -0.2, 0.2), float3(-0.2, -0.2, 0.2), float3(-0.2, -0.2, 0.8)
+        };
         StructuredBuffer<HLSL::Vertex> cubeVertices = ResourceDescriptorHeap[5];
-        float4 pos = float4(cubeVertices[groupThreadId].pos, 1);
-        outVerts[groupThreadId].pos = mul(drawCall.world, pos);
-        outVerts[groupThreadId].color = float4(1, 0, 1, 1);// cubeColors[ groupThreadId];
+        //float4 pos = float4(cubeVertices[groupThreadId].pos, 1);
+        //outVerts[groupThreadId].pos = mul(drawCall.world, pos);
+        float4 pos = float4(v[groupThreadId], 1);
+        outVerts[groupThreadId].pos = mul(instance.worldMatrix, pos);
+        outVerts[groupThreadId].color = float4(1, 1, 1, 1);// cubeColors[ groupThreadId];
     }
     
+    uint3 i[12] =
+    {
+        uint3(0, 1, 2), uint3(3, 1, 2), uint3(3, 4, 5), uint3(6, 4, 5), uint3(6, 7, 8), uint3(9, 7, 8),
+        uint3(10, 11, 2), uint3(1, 11, 2), uint3(10, 4, 7), uint3(3, 6, 2), uint3(8, 2, 6), uint3(5, 2, 9)
+    };
     StructuredBuffer<uint3> cubeIndices = ResourceDescriptorHeap[6];
-    outIndices[groupThreadId] = cubeIndices[groupThreadId];
+    //outIndices[groupThreadId] = cubeIndices[groupThreadId];
+    outIndices[groupThreadId] = i[groupThreadId];
 }
 
 struct PayloadData
@@ -41,14 +58,14 @@ void Amplification(in uint groupIndex : SV_GroupIndex)
 struct PS_OUTPUT_FORWARD
 {
     float4 albedo : SV_Target0;
-    uint entityID : SV_Target1;
+    //uint entityID : SV_Target1;
 };
 
-PS_OUTPUT_FORWARD PixelForward()
+PS_OUTPUT_FORWARD PixelForward(HLSL::MSVert inVerts)
 {
     PS_OUTPUT_FORWARD o;
     o.albedo = 1;
-    o.entityID = 1;
+    //o.entityID = 1;
     return o;
 }
 
@@ -56,6 +73,6 @@ PS_OUTPUT_FORWARD PixelgBuffer()
 {
     PS_OUTPUT_FORWARD o;
     o.albedo = 1;
-    o.entityID = 1;
+    //o.entityID = 1;
     return o;
 }

@@ -41,6 +41,12 @@ struct RTV
     ID3D12Resource* raw;
 };
 
+struct DSV
+{
+    uint offset;
+    D3D12_CPU_DESCRIPTOR_HANDLE handle;
+};
+
 struct BLAS
 {
 
@@ -122,8 +128,56 @@ struct PipelineStateStream
         PrimitiveTopology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 
         D3D12_RASTERIZER_DESC& raster = Rasterizer;
-        raster.CullMode = D3D12_CULL_MODE_BACK;
         raster.FillMode = D3D12_FILL_MODE_SOLID;
+        raster.CullMode = D3D12_CULL_MODE_NONE;
+        raster.FrontCounterClockwise = TRUE;
+        raster.DepthBias = D3D12_DEFAULT_DEPTH_BIAS;
+        raster.DepthBiasClamp = D3D12_DEFAULT_DEPTH_BIAS_CLAMP;
+        raster.SlopeScaledDepthBias = D3D12_DEFAULT_SLOPE_SCALED_DEPTH_BIAS;
+        raster.DepthClipEnable = FALSE;
+        raster.MultisampleEnable = FALSE;
+        raster.AntialiasedLineEnable = FALSE;
+        raster.ForcedSampleCount = 0;
+
+        D3D12_RT_FORMAT_ARRAY& rts = RTFormats;
+        rts.NumRenderTargets = 1;
+        rts.RTFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+        DXGI_SAMPLE_DESC& samples = SampleDesc;
+        samples.Count = 1;
+        samples.Quality = 0;
+
+        DXGI_FORMAT& dsv = DSVFormat;
+        dsv = DXGI_FORMAT_D32_FLOAT;
+
+        D3D12_DEPTH_STENCIL_DESC1& ds = DepthStencil;
+        ds.DepthEnable = TRUE;
+        ds.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        ds.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        ds.StencilEnable = FALSE;
+        ds.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+        ds.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+        ds.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
+        ds.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
+        ds.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+        ds.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_NEVER;
+        ds.BackFace = ds.FrontFace;
+
+        D3D12_BLEND_DESC& blend = Blend;
+        blend.AlphaToCoverageEnable = FALSE;
+        blend.IndependentBlendEnable = FALSE;
+        blend.RenderTarget[0].BlendEnable = FALSE;
+        blend.RenderTarget[0].LogicOpEnable = FALSE;
+        blend.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_COLOR;
+        blend.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
+        blend.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+        blend.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_SRC_ALPHA;
+        blend.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.RenderTarget[0].LogicOp = D3D12_LOGIC_OP_NOOP;
+        blend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+        SampleMask = D3D12_DEFAULT_SAMPLE_MASK;
     }
 };
 
@@ -182,8 +236,11 @@ public:
     SRV srv{ UINT32_MAX };
     UAV uav{ UINT32_MAX };
     RTV rtv{ UINT32_MAX, 0, 0 };
+    DSV dsv{ UINT32_MAX, 0 };
 
-    void CreateTexture(uint2 resolution, String name = "Texture");
+    void CreateTexture(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
+    void CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
+    void CreateDepthTarget(uint2 resolution, String name = "Texture");
     void CreateBuffer(uint size, uint stride, bool upload = false, String name = "Buffer");
     template <typename T>
     void CreateBuffer(uint count, String name = "Buffer");
@@ -212,6 +269,9 @@ struct DescriptorHeap
     ID3D12DescriptorHeap* rtvDescriptorHeap;
     Slots rtvDescriptorHeapSlots;
     int rtvdescriptorIncrementSize;
+    ID3D12DescriptorHeap* dsvDescriptorHeap;
+    Slots dsvDescriptorHeapSlots;
+    int dsvdescriptorIncrementSize;
 
     void On(ID3D12Device14* device)
     {
@@ -251,12 +311,29 @@ struct DescriptorHeap
             rtvdescriptorIncrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         }
 
-        //descriptorDSVIncrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+            heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+            heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+            heapDesc.NumDescriptors = maxDescriptorCount;
+
+            auto hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&dsvDescriptorHeap));
+            if (FAILED(hr))
+            {
+                //GPU::PrintDeviceRemovedReason(hr);
+            }
+            dsvDescriptorHeap->SetName(L"DSV Desc Heap");
+
+            dsvDescriptorHeapSlots.On(maxDescriptorCount);
+
+            dsvdescriptorIncrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        }
     }
     void Off()
     {
         globalDescriptorHeap->Release();
         rtvDescriptorHeap->Release();
+        dsvDescriptorHeap->Release();
     }
     D3D12_CPU_DESCRIPTOR_HANDLE GetSlot(uint* offset, Slots* slots, ID3D12DescriptorHeap* heap, int descriptorIncrementSize)
     {
@@ -282,6 +359,10 @@ struct DescriptorHeap
     D3D12_CPU_DESCRIPTOR_HANDLE GetRTVSlot(RTV& rtv)
     {
         return GetSlot(&rtv.offset, &rtvDescriptorHeapSlots, rtvDescriptorHeap, rtvdescriptorIncrementSize);
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE GetDSVSlot(DSV& dsv)
+    {
+        return GetSlot(&dsv.offset, &dsvDescriptorHeapSlots, dsvDescriptorHeap, dsvdescriptorIncrementSize);
     }
 };
 
@@ -548,7 +629,7 @@ public:
 GPU* GPU::instance;
 
 // definitions of Resource
-void Resource::CreateTexture(uint2 resolution, String name)
+void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, String name)
 {
     //ZoneScoped;
     D3D12_RESOURCE_DESC resourceDesc = {};
@@ -558,7 +639,7 @@ void Resource::CreateTexture(uint2 resolution, String name)
     resourceDesc.Height = resolution.y;
     resourceDesc.DepthOrArraySize = 1;
     resourceDesc.MipLevels = 1;
-    resourceDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    resourceDesc.Format = format;
     resourceDesc.SampleDesc.Count = 1;
     resourceDesc.SampleDesc.Quality = 0;
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -608,7 +689,158 @@ void Resource::CreateTexture(uint2 resolution, String name)
         UAVDesc.Texture2D.MipSlice = 0;
         GPU::instance->device->CreateUnorderedAccessView(GetResource(), nullptr, &UAVDesc, handle);
     }
+}
 
+void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String name)
+{
+    //ZoneScoped;
+    D3D12_RESOURCE_DESC resourceDesc = {};
+    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    resourceDesc.Alignment = 0;
+    resourceDesc.Width = resolution.x;
+    resourceDesc.Height = resolution.y;
+    resourceDesc.DepthOrArraySize = 1;
+    resourceDesc.MipLevels = 1;
+    resourceDesc.Format = format;
+    resourceDesc.SampleDesc.Count = 1;
+    resourceDesc.SampleDesc.Quality = 0;
+    resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+    D3D12MA::ALLOCATION_DESC allocationDesc = {};
+    allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+
+    HRESULT hr = GPU::instance->allocator->CreateResource(
+        &allocationDesc,
+        &resourceDesc,
+        D3D12_RESOURCE_STATE_COMMON,
+        NULL,
+        &allocation,
+        IID_NULL, NULL);
+
+    std::wstring wname = name.ToWString();
+    allocation->SetName(wname.c_str());
+    lock.lock();
+    allResources.push_back(allocation);
+    allResourcesNames.push_back(name);
+    lock.unlock();
+
+    {
+        auto desc = GetResource()->GetDesc();
+        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+        srv.offset = (uint)GPU::instance->descriptorHeap.globalDescriptorHeapSlots.Get();
+        handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
+        SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        SRVDesc.Format = desc.Format == DXGI_FORMAT_D32_FLOAT ? DXGI_FORMAT_R32_FLOAT : desc.Format;
+        SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        SRVDesc.Texture2D.MipLevels = desc.MipLevels;
+        GPU::instance->device->CreateShaderResourceView(GetResource(), &SRVDesc, handle);
+    }
+
+    /*
+    {
+        auto desc = GetResource()->GetDesc();
+        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+        uav.offset = (uint)GPU::instance->descriptorHeap.globalDescriptorHeapSlots.Get();
+        handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(uav.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC UAVDesc = {};
+        UAVDesc.Format = desc.Format == DXGI_FORMAT_D32_FLOAT ? DXGI_FORMAT_R32_FLOAT : desc.Format;
+        UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        UAVDesc.Texture2D.MipSlice = 0;
+        GPU::instance->device->CreateUnorderedAccessView(GetResource(), nullptr, &UAVDesc, handle);
+    }
+    */
+
+    {
+        rtv.handle = GPU::instance->descriptorHeap.GetRTVSlot(rtv);
+
+        auto desc = GetResource()->GetDesc();
+        D3D12_RENDER_TARGET_VIEW_DESC RTVDesc = {};
+        RTVDesc.Format = desc.Format;
+        RTVDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        GPU::instance->device->CreateRenderTargetView(GetResource(), &RTVDesc, rtv.handle);
+    }
+}
+
+void Resource::CreateDepthTarget(uint2 resolution, String name)
+{
+    //ZoneScoped;
+    D3D12_RESOURCE_DESC resourceDesc = {};
+    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    resourceDesc.Alignment = 0;
+    resourceDesc.Width = resolution.x;
+    resourceDesc.Height = resolution.y;
+    resourceDesc.DepthOrArraySize = 1;
+    resourceDesc.MipLevels = 1;
+    resourceDesc.Format = DXGI_FORMAT_D32_FLOAT;
+    resourceDesc.SampleDesc.Count = 1;
+    resourceDesc.SampleDesc.Quality = 0;
+    resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+    D3D12MA::ALLOCATION_DESC allocationDesc = {};
+    allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_CLEAR_VALUE clear;
+    clear.DepthStencil = { 0,0 };
+    clear.Format = resourceDesc.Format;
+
+    HRESULT hr = GPU::instance->allocator->CreateResource(
+        &allocationDesc,
+        &resourceDesc,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE,
+        &clear,
+        &allocation,
+        IID_NULL, NULL);
+
+    std::wstring wname = name.ToWString();
+    allocation->SetName(wname.c_str());
+    lock.lock();
+    allResources.push_back(allocation);
+    allResourcesNames.push_back(name);
+    lock.unlock();
+
+    {
+        auto desc = GetResource()->GetDesc();
+        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+        srv.offset = (uint)GPU::instance->descriptorHeap.globalDescriptorHeapSlots.Get();
+        handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
+        SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        SRVDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        SRVDesc.Texture2D.MipLevels = desc.MipLevels;
+        GPU::instance->device->CreateShaderResourceView(GetResource(), &SRVDesc, handle);
+    }
+
+    /*
+    {
+        auto desc = GetResource()->GetDesc();
+        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+        uav.offset = (uint)GPU::instance->descriptorHeap.globalDescriptorHeapSlots.Get();
+        handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(uav.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC UAVDesc = {};
+        UAVDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        UAVDesc.Texture2D.MipSlice = 0;
+        GPU::instance->device->CreateUnorderedAccessView(GetResource(), nullptr, &UAVDesc, handle);
+    }
+    */
+
+    {
+        dsv.handle = GPU::instance->descriptorHeap.GetDSVSlot(dsv);
+
+        auto desc = GetResource()->GetDesc();
+        D3D12_DEPTH_STENCIL_VIEW_DESC DepthDesc = {};
+        DepthDesc.Format = desc.Format;
+        DepthDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        GPU::instance->device->CreateDepthStencilView(GetResource(), &DepthDesc, dsv.handle);
+    }
 }
 
 void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
@@ -646,6 +878,10 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
         NULL,
         &allocation,
         IID_NULL, NULL);
+    if (FAILED(hr))
+    {
+        IOs::Log("Buffer creation failed {}", hr);
+    }
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
@@ -1005,6 +1241,12 @@ public:
     ID3D12Resource* GetResourcePtr()
     {
         return gpuData.GetResource();
+    }
+    D3D12_GPU_VIRTUAL_ADDRESS GetGPUVirtualAddress(uint index)
+    {
+        if (gpuData.GetResource() == 0)
+            return 0;
+        return gpuData.GetResource()->GetGPUVirtualAddress() + (index * gpuData.stride);
     }
     void Upload()
     {
