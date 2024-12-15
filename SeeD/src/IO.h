@@ -98,8 +98,8 @@ public:
 
 	Keys _keys{};
 	Keys keys{};
-    Mouse _mouse;
-    Mouse mouse;
+	Mouse _mouse{};
+	Mouse mouse{};
     WindowInformation window;
 
 	WNDPROC imgGUIProc = nullptr;

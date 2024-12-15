@@ -528,7 +528,7 @@ namespace Systems
         bool loaded = false;
         World::Entity camera;
         float sensibility = 1.0f;
-        float sensibilityLook = 0.001f;
+        float sensibilityLook = 0.003f;
 
         void On()
         {
@@ -675,16 +675,22 @@ namespace Systems
             float3 forward = float3(0, 0, 1);
             if (IOs::instance->mouse.mouseButtonLeft)
             {
-                trans.rotation = mul(trans.rotation, quaternion::rotation_axis(float3(mat.matrix[0].xyz), (float)IOs::instance->mouse.mouseDelta.x * sensLookDt));
+                trans.rotation = mul(quaternion::rotation_axis(float3(mat.matrix[0].xyz), (float)IOs::instance->mouse.mouseDelta.y * sensLookDt), trans.rotation);
                 mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
-                trans.rotation = mul(trans.rotation, quaternion::rotation_axis(float3(mat.matrix[1].xyz), (float)IOs::instance->mouse.mouseDelta.y * sensLookDt));
+                trans.rotation = mul(quaternion::rotation_axis(float3(mat.matrix[1].xyz), (float)IOs::instance->mouse.mouseDelta.x * sensLookDt), trans.rotation);
                 mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
             }
 
             //reset the up for the cam
-            //LookAt(trans, trans.position + float3(mat.matrix[2].xyz), float3(0.0f, 1.0f, 0.0f));
+            float3 right = mat.matrix[0].xyz;
+            right.y = 0;
+            right = normalize(right);
+            float3 up = cross(mat.matrix[2].xyz, right);
+            mat.matrix[0].xyz = right;
+            mat.matrix[1].xyz = up;
+            trans.rotation = MatrixToQuaternion(float3x3(mat.matrix));
+            mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
 
-            //IOs::Log("pos {}, {}, {} | rot {}, {}, {}, {} | scale {}, {}, {}", (float)trans.position.x, (float)trans.position.y, (float)trans.position.z, (float)trans.rotation.x, (float)trans.rotation.y, (float)trans.rotation.z, (float)trans.rotation.w, (float)trans.scale.x, (float)trans.scale.y, (float)trans.scale.z);
         }
 
         /*

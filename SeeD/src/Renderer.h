@@ -511,7 +511,7 @@ public:
         float4 clearColor(0.4f, 0.1f, 0.2f, 0.0f);
         commandBuffer->cmd->ClearRenderTargetView(renderTargets[0].rtv.handle, clearColor.f32, 1, &rect);
 
-        float clearDepth(0.0f);
+        float clearDepth(1.0f);
         UINT8 clearStencil(0);
         commandBuffer->cmd->ClearDepthStencilView(depthBuffer.dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepth, clearStencil, 1, &rect);
 

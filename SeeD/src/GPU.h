@@ -153,7 +153,7 @@ struct PipelineStateStream
         D3D12_DEPTH_STENCIL_DESC1& ds = DepthStencil;
         ds.DepthEnable = TRUE;
         ds.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        ds.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        ds.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
         ds.StencilEnable = FALSE;
         ds.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
         ds.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
@@ -791,7 +791,7 @@ void Resource::CreateDepthTarget(uint2 resolution, String name)
     allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
 
     D3D12_CLEAR_VALUE clear;
-    clear.DepthStencil = { 0,0 };
+    clear.DepthStencil = { 1,0 };
     clear.Format = resourceDesc.Format;
 
     HRESULT hr = GPU::instance->allocator->CreateResource(

@@ -32,7 +32,7 @@ void MeshMain(in uint groupThreadId : SV_GroupThreadID, out vertices HLSL::MSVer
         float4 pos = float4(v[groupThreadId], 1);
         float4 worldPos = mul(instance.worldMatrix, pos);
         outVerts[groupThreadId].pos = mul(camera.viewProj, worldPos);
-        outVerts[groupThreadId].color = float4(1, 1, 1, 1);// cubeColors[ groupThreadId];
+        outVerts[groupThreadId].color = worldPos.xyz * 0.5; // cubeColors[ groupThreadId];
     }
     
     uint3 i[12] =
@@ -71,12 +71,7 @@ PS_OUTPUT_FORWARD PixelForward(HLSL::MSVert inVerts)
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
-    //instance = instanceBuffer[0];
-    //if (instancesHeapIndex == 8)
-    if (instance.worldMatrix[0][0] == 1)
-        o.albedo = float4(0, 1, 0, 1);
-    else
-        o.albedo = float4(1, 0, 0, 1);
+    o.albedo = float4(inVerts.color, 1);
     //o.entityID = 1;
     return o;
 }
