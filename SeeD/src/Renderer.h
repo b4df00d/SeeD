@@ -209,7 +209,7 @@ struct CullingContext
 class View
 {
 public:
-    PerFrame<ViewWorld> rendererWorld;
+    PerFrame<ViewWorld> viewWorld;
     CullingContext cullingContext;
     uint2 resolution;
 
@@ -218,7 +218,7 @@ public:
     {
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            rendererWorld.Get(i)->Release();
+            viewWorld.Get(i)->Release();
         }
     }
     virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
@@ -521,12 +521,18 @@ public:
             Shader& shader = GlobalResources::instance->shaders.GetData(meshShader.Get().id);
             commandBuffer->Set(shader);
 
-            auto& instances = view->rendererWorld->instances;
+            // make a function for setting cameras and global
+            uint cameraValues[] = { view->viewWorld->cameras.gpuData.srv.offset, 0 };
+            commandBuffer->cmd->SetGraphicsRoot32BitConstants(0, 2, cameraValues, 0);
+
+            auto& instances = view->viewWorld->instances;
             for (uint i = 0; i < instances.Size(); i++)
             {
+                //make a function
                 uint instanceValues[] = { instances.gpuData.srv.offset, i };
-                commandBuffer->cmd->SetGraphicsRoot32BitConstants(0, 2, instanceValues, 0);
-                commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, instances.GetGPUVirtualAddress(i));
+                commandBuffer->cmd->SetGraphicsRoot32BitConstants(1, 2, instanceValues, 0);
+
+                //commandBuffer->cmd->SetGraphicsRootConstantBufferView(2, instances.GetGPUVirtualAddress(i));
                 commandBuffer->cmd->DispatchMesh(1, 1, 1);
             }
         }
@@ -644,6 +650,8 @@ public:
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
+        updateCameras.precede(particlesTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+
         updateInstances.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
         presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
@@ -672,13 +680,13 @@ public:
     tf::Task UpdateInstances(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
-        rendererWorld->instances.Clear();
+        viewWorld->instances.Clear();
 
 
 #define UpdateInstancesStepSize 128
-        ViewWorld* frameWorld = rendererWorld.Get();
+        ViewWorld* frameWorld = viewWorld.Get();
         
-        uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::Transform::mask, 0);
+        uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::WorldMatrix::mask, 0);
         uint entityCount = (uint)world.frameQueries[instanceQueryIndex].size();
         frameWorld->instances.Reserve(entityCount);
 
@@ -706,7 +714,7 @@ public:
                 {
                     auto& queryResult = world.frameQueries[instanceQueryIndex];
                     if ((i + subQuery) > (queryResult.size() - 1)) 
-                        return;
+                        break;
 
                     Components::Instance& instanceCmp = queryResult[i + subQuery].Get<Components::Instance>();
                     Components::Mesh& meshCmp = instanceCmp.mesh.Get();
@@ -730,11 +738,11 @@ public:
 
                     // everything should be loaded to be able to draw the instance
 
-                    Components::Transform& transformCmp = queryResult[i + subQuery].Get<Components::Transform>();
+                    Components::WorldMatrix& transformCmp = queryResult[i + subQuery].Get<Components::WorldMatrix>();
 
                     HLSL::Instance& instance = localInstances[instanceCount];
-                    instance.meshIndex = meshIndex;
-                    instance.materialIndex = materialIndex;
+                    //instance.meshIndex = meshIndex;
+                    //instance.materialIndex = materialIndex;
                     instance.worldMatrix = transformCmp.matrix;
 
                     // if in range (depending on distance and BC size)
@@ -765,7 +773,7 @@ public:
 
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
 #define UpdateMaterialsStepSize 1024
-        ViewWorld* frameWorld = rendererWorld.Get();
+        ViewWorld* frameWorld = viewWorld.Get();
 
         tf::Task task = subflow.for_each_index(0, entityCount, UpdateMaterialsStepSize,
             [&world, frameWorld, queryIndex](int i)
@@ -822,7 +830,7 @@ public:
 
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
-        ViewWorld* frameWorld = rendererWorld.Get();
+        ViewWorld* frameWorld = viewWorld.Get();
 
         tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
             {
@@ -838,29 +846,59 @@ public:
         ZoneScoped;
         // upload camera
 
+        /*
         uint queryIndex = world.Query(Components::Camera::mask, 0);
 
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
-        ViewWorld* frameWorld = rendererWorld.Get();
+        ViewWorld* frameWorld = viewWorld.Get();
 
         tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
             {
                 ZoneScopedN("UpdateCameras");
-
+                this->viewWorld->instances.Upload();
             }
         );
+        */
+
+        tf::Task task = subflow.emplace(
+            [this, &world]()
+            {
+                ZoneScoped;
+                uint queryIndex = world.Query(Components::Camera::mask, 0);
+
+                uint entityCount = (uint)world.frameQueries[queryIndex].size();
+                uint entityStep = 1;
+                ViewWorld* frameWorld = viewWorld.Get();
+                auto& queryResult = world.frameQueries[queryIndex];
+
+                this->viewWorld->cameras.Clear();
+                for (uint i = 0; i < entityCount; i++)
+                {
+                    auto& cam = queryResult[i].Get<Components::Camera>();
+                    auto& trans = queryResult[i].Get<Components::WorldMatrix>();
+                    float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip);
+                    float4x4 viewProj = mul(inverse(trans.matrix), proj);
+                    HLSL::Camera hlslcam;
+                    hlslcam.viewProj = viewProj;
+                    this->viewWorld->cameras.Add(hlslcam);
+                }
+
+                this->viewWorld->cameras.Upload();
+            }
+        ).name("Update cameras");
+
         return task;
     }
 
     tf::Task UploadInstancesBuffers(World& world, tf::Subflow& subflow)
     {
-        ZoneScoped;
 
         tf::Task task = subflow.emplace(
             [this]()
             {
-                this->rendererWorld->instances.Upload();
+                ZoneScoped;
+                this->viewWorld->instances.Upload();
             }
         ).name("upload instances buffer");
 
@@ -1111,6 +1149,8 @@ public:
     {
         ZoneScoped;
         Resource::CleanUploadResources();
+
+        //Sleep(500);
 
         HRESULT hr;
         // if the current fence value is still less than "fenceValue", then we know the GPU has not finished executing

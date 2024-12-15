@@ -317,7 +317,8 @@ public :
                         PipelineStateStream stream;
                         stream.MS = meshShaderBytecode;
                         stream.PS = forwardShaderBytecode;
-                        shader.rootSignature = shader.rootSignature;
+                        stream.pRootSignature = shader.rootSignature;
+                        shader.pso = nullptr;
                         shader.pso = GPU::instance->CreatePSO(stream);
                         compiled = shader.pso != nullptr;
                     }

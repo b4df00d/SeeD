@@ -6,6 +6,7 @@
 
 #include "../../Third/hlslpp-master/include/hlsl++.h"
 using namespace hlslpp;
+#include "HLSL_Extension.h"
 
 #define TRACY_ENABLE
 #define TRACY_ON_DEMAND
@@ -78,6 +79,8 @@ public:
     TextureLoader textureLoader;
     ShaderLoader shaderLoader;
 
+    Systems::Player player;
+
     void On(IOs::WindowInformation window)
     {
         time.On();
@@ -91,6 +94,8 @@ public:
         assetLoader.On();
         textureLoader.On();
         shaderLoader.On();
+
+        player.On();
     }
 
     void Loop()
@@ -99,6 +104,7 @@ public:
         {
             ZoneScoped;
 
+            Time::instance->Update();
             gpu.FrameStart();
             ui.FrameStart();
             ios.ProcessMessages();
@@ -127,6 +133,8 @@ public:
         renderer.WaitFrame(); // wait previous frame
         gpu.FrameStart();
         renderer.WaitFrame(); // wait current frame
+
+        player.Off();
 
         shaderLoader.Off();
         textureLoader.Off();

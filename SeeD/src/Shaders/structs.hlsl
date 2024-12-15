@@ -35,9 +35,9 @@ namespace HLSL
     struct Instance
     {
         float4x4 worldMatrix;
-        uint meshIndex;
-        uint materialIndex;
-        uint pad[2];
+        //uint meshIndex;
+        //uint materialIndex;
+        //uint pad[2];
     };
     
     struct Camera

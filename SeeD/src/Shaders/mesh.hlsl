@@ -16,6 +16,9 @@ void MeshMain(in uint groupThreadId : SV_GroupThreadID, out vertices HLSL::MSVer
     HLSL::Instance instance = instances[instanceIndex];
     //instance = instanceBuffer[0];
     
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[camerasHeapIndex];
+    HLSL::Camera camera = cameras[cameraIndex];
+    
     if(groupThreadId < 8)
     {
         float3 v[8] =
@@ -23,11 +26,12 @@ void MeshMain(in uint groupThreadId : SV_GroupThreadID, out vertices HLSL::MSVer
             float3(-0.2, 0.2, 0.2), float3(0.2, 0.2, 0.2), float3(-0.2, 0.2, 0.8), float3(0.2, 0.2, 0.8),
             float3(0.2, -0.2, 0.2), float3(0.2, -0.2, 0.2), float3(-0.2, -0.2, 0.2), float3(-0.2, -0.2, 0.8)
         };
-        StructuredBuffer<HLSL::Vertex> cubeVertices = ResourceDescriptorHeap[5];
+        //StructuredBuffer<HLSL::Vertex> cubeVertices = ResourceDescriptorHeap[5];
         //float4 pos = float4(cubeVertices[groupThreadId].pos, 1);
         //outVerts[groupThreadId].pos = mul(drawCall.world, pos);
         float4 pos = float4(v[groupThreadId], 1);
-        outVerts[groupThreadId].pos = mul(instance.worldMatrix, pos);
+        float4 worldPos = mul(instance.worldMatrix, pos);
+        outVerts[groupThreadId].pos = mul(camera.viewProj, worldPos);
         outVerts[groupThreadId].color = float4(1, 1, 1, 1);// cubeColors[ groupThreadId];
     }
     
@@ -36,7 +40,7 @@ void MeshMain(in uint groupThreadId : SV_GroupThreadID, out vertices HLSL::MSVer
         uint3(0, 1, 2), uint3(3, 1, 2), uint3(3, 4, 5), uint3(6, 4, 5), uint3(6, 7, 8), uint3(9, 7, 8),
         uint3(10, 11, 2), uint3(1, 11, 2), uint3(10, 4, 7), uint3(3, 6, 2), uint3(8, 2, 6), uint3(5, 2, 9)
     };
-    StructuredBuffer<uint3> cubeIndices = ResourceDescriptorHeap[6];
+    //StructuredBuffer<uint3> cubeIndices = ResourceDescriptorHeap[6];
     //outIndices[groupThreadId] = cubeIndices[groupThreadId];
     outIndices[groupThreadId] = i[groupThreadId];
 }
@@ -64,7 +68,15 @@ struct PS_OUTPUT_FORWARD
 PS_OUTPUT_FORWARD PixelForward(HLSL::MSVert inVerts)
 {
     PS_OUTPUT_FORWARD o;
-    o.albedo = 1;
+    
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[instancesHeapIndex];
+    HLSL::Instance instance = instances[instanceIndex];
+    //instance = instanceBuffer[0];
+    //if (instancesHeapIndex == 8)
+    if (instance.worldMatrix[0][0] == 1)
+        o.albedo = float4(0, 1, 0, 1);
+    else
+        o.albedo = float4(1, 0, 0, 1);
     //o.entityID = 1;
     return o;
 }

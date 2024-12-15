@@ -609,13 +609,19 @@ public:
 
     ID3D12PipelineState* CreatePSO(PipelineStateStream& stream)
     {
-        ID3D12PipelineState* pso;
-        D3D12_PIPELINE_STATE_STREAM_DESC pipelineStateStreamDesc = { sizeof(PipelineStateStream), &stream };
-        HRESULT hr = GPU::instance->device->CreatePipelineState(&pipelineStateStreamDesc, IID_PPV_ARGS(&pso));
-        if (FAILED(hr))
+        ID3D12PipelineState* pso = nullptr;
+        D3D12_SHADER_BYTECODE& vs = stream.VS;
+        D3D12_SHADER_BYTECODE& ms = stream.MS;
+        D3D12_SHADER_BYTECODE& cs = stream.CS;
+        if (vs.pShaderBytecode != nullptr || ms.pShaderBytecode != nullptr || cs.pShaderBytecode != nullptr)
         {
-            GPU::PrintDeviceRemovedReason(hr);
-            pso = nullptr;
+            D3D12_PIPELINE_STATE_STREAM_DESC pipelineStateStreamDesc = { sizeof(PipelineStateStream), &stream };
+            HRESULT hr = GPU::instance->device->CreatePipelineState(&pipelineStateStreamDesc, IID_PPV_ARGS(&pso));
+            if (FAILED(hr))
+            {
+                GPU::PrintDeviceRemovedReason(hr);
+                pso = nullptr;
+            }
         }
         return pso;
     }
@@ -1137,9 +1143,10 @@ std::vector<String> Resource::allResourcesNames;
 // definitions of CommandBuffer   
 void CommandBuffer::Set(Shader& shader)
 {
+    // SetDescriptorHeaps must be set before SetPipelineState because of dynamic indexing in descriptorHeap
+    cmd->SetDescriptorHeaps(1, &GPU::instance->descriptorHeap.globalDescriptorHeap);
     cmd->SetGraphicsRootSignature(shader.rootSignature);
     cmd->SetPipelineState(shader.pso);
-    cmd->SetDescriptorHeaps(1, &GPU::instance->descriptorHeap.globalDescriptorHeap);
     //cmd->SetGraphicsRootDescriptorTable();
 }
 // end of definitions of CommandBuffer
@@ -1246,11 +1253,13 @@ public:
     {
         if (gpuData.GetResource() == 0)
             return 0;
-        return gpuData.GetResource()->GetGPUVirtualAddress() + (index * gpuData.stride);
+        return gpuData.GetResource()->GetGPUVirtualAddress() + (index * sizeof(T));
     }
     void Upload()
     {
         ZoneScoped;
+        if (cpuData.size() <= 0)
+            return;
         if (gpuData.allocation == nullptr || gpuData.allocation->GetSize() < cpuData.size() * sizeof(T))
         {
             gpuData.CreateUploadBuffer<T>(max(uint1(cpuData.size()), uint1(1)), typeid(T).name());

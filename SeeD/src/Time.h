@@ -13,7 +13,7 @@
 class Time
 {
 public:
-	Time* instance;
+	static Time* instance;
 	INT64 startTicks{};
 	INT64 frequency{};
 	float ticksPerMs{};
@@ -41,11 +41,14 @@ public:
 
 		currentTicks = 0;
 		deltaTicks = 0;
+
+		instance = this;
 	}
 
 	void Off()
 	{
 		ZoneScoped;
+		instance = nullptr;
 	}
 
 	void Update()
@@ -61,3 +64,4 @@ public:
 		deltaSeconds = deltaTicks / ticksPerMs / 1000.0f;
 	}
 };
+Time* Time::instance;

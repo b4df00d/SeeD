@@ -3,9 +3,9 @@
 //https://learn.microsoft.com/en-us/windows/win32/direct3d12/dynamic-indexing-using-hlsl-5-1
 //https://devblogs.microsoft.com/directx/in-the-works-hlsl-shader-model-6-6/
 
-#define GlobalRootSignature "RootFlags( ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT | DENY_VERTEX_SHADER_ROOT_ACCESS | CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED), " \
+#define GlobalRootSignature "RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED), " \
             "RootConstants(b0, num32BitConstants = 2), "\
-			"CBV(b1, space = 0), "\
+            "RootConstants(b1, num32BitConstants = 2), "\
 			"CBV(b2, space = 0), "\
 			"CBV(b3, space = 0), "\
                     "StaticSampler(s0, "\
@@ -75,18 +75,24 @@
                                   "visibility     = SHADER_VISIBILITY_ALL)"
 
 //---------------------------------------------------------------------------------------------
-cbuffer Instances : register(b0)
+cbuffer Cameras : register(b0)
+{
+    uint camerasHeapIndex;
+    uint cameraIndex;
+};
+//---------------------------------------------------------------------------------------------
+cbuffer Instances : register(b1)
 {
     uint instancesHeapIndex;
     uint instanceIndex;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer InstancesView : register(b1)
+cbuffer InstancesView : register(b2)
 {
     HLSL::Instance instanceBuffer[1];
 }
 //---------------------------------------------------------------------------------------------
-cbuffer GlobalBuffer : register(b2)
+cbuffer GlobalBuffer : register(b3)
 {
     HLSL::Globals globals;
 }

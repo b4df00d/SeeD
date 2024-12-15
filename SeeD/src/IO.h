@@ -51,6 +51,8 @@ class IOs
 {
 public:
 
+	static IOs* instance;
+
     struct WindowInformation
     {
         float2 windowResolution;
@@ -110,11 +112,6 @@ public:
     void GetWindow()
     {
         ZoneScoped;
-    }
-
-    bool GetKeyPress(Keys key)
-    {
-        return false;
     }
 
     bool Resize()
@@ -474,12 +471,13 @@ public:
 		if (window.windowResolution.x <= 0 || window.windowResolution.y <= 0)
 			IOs::Log("bad resolution {} {}", (int)window.windowResolution.x, (int)window.windowResolution.y);
 
+		instance = this;
 		return;
 	}
 
 	void Off()
 	{
-
+		instance = nullptr;
 	}
 
 	void ProcessMessages()
@@ -568,3 +566,4 @@ public:
 		OutputDebugStringW(message.c_str());
 	}
 };
+IOs* IOs::instance;
