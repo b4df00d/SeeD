@@ -47,44 +47,6 @@ struct DSV
     D3D12_CPU_DESCRIPTOR_HANDLE handle;
 };
 
-struct BLAS
-{
-
-};
-
-struct TLAS
-{
-    ~TLAS()
-    {
-
-    }
-};
-
-struct Meshlet
-{
-    /* offsets within meshlet_vertices and meshlet_triangles arrays with meshlet data */
-    uint vertexOffset;
-    uint triangleOffset;
-
-    /* number of vertices and triangles used in the meshlet; data is stored in consecutive range defined by offset and count */
-    uint vertexCount;
-    uint triangleCount;
-};
-
-struct Mesh
-{
-    uint meshOffset;
-    uint meshletCount;
-    BLAS blas;
-};
-
-struct Material
-{
-    uint shaderIndex;
-    float parameters[15];
-    SRV texturesSRV[16];
-};
-
 template<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE SubObjectType, typename T>
 struct alignas(void*) StreamSubObject
 {
@@ -1197,12 +1159,12 @@ public:
     {
         cpuData.clear();
     }
-    uint Add(T value)
+    uint Add(const T& value)
     {
         cpuData.push_back(value);
         return (uint)cpuData.size();
     }
-    uint AddUnique(T value)
+    uint AddUnique(const T& value)
     {
         uint index = 0;
         for (; index < cpuData.size(); index++)

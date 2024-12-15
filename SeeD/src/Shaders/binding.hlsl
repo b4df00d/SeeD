@@ -89,7 +89,7 @@ cbuffer Instances : register(b1)
 //---------------------------------------------------------------------------------------------
 cbuffer InstancesView : register(b2)
 {
-    HLSL::Instance instanceBuffer[1];
+    HLSL::Instance instanceBuffer[10];
 }
 //---------------------------------------------------------------------------------------------
 cbuffer GlobalBuffer : register(b3)

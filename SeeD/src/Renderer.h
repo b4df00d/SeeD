@@ -4,37 +4,6 @@
 #include "Shaders/structs.hlsl"
 
 
-static uint fixedArraySize = 65536;
-template<typename T>
-class FixedArray
-{
-public:
-    T* data = 0;
-
-    FixedArray()
-    {
-        data = new T[fixedArraySize];
-    }
-
-    ~FixedArray()
-    {
-        // destroy if this was a non POD ?
-        // or let the user destroy the entries before shutdown ?
-        /*
-        for (uint i = 0; i < count; i++)
-        {
-            delete data[i];
-        }
-        */
-        delete[] data;
-    }
-
-    inline T& operator[] (uint i)
-    {
-        return data[i];
-    }
-};
-
 static constexpr uint invalidMapIndex = UINT_MAX;
 // is this is thread safe only because we allocate the max number of stuff we will find before the MT part
 // with the reserve in the lock this should now be ok ?
@@ -148,6 +117,71 @@ public:
     }
     auto begin() { return keys.begin(); }
     auto end() { return keys.end(); }
+};
+
+
+struct BLAS
+{
+
+};
+
+struct TLAS
+{
+    ~TLAS()
+    {
+
+    }
+};
+
+struct Meshlet
+{
+    /* offsets within meshlet_vertices and meshlet_triangles arrays with meshlet data */
+    uint vertexOffset;
+    uint triangleOffset;
+
+    /* number of vertices and triangles used in the meshlet; data is stored in consecutive range defined by offset and count */
+    uint vertexCount;
+    uint triangleCount;
+};
+
+struct Mesh
+{
+    uint meshletOffset;
+    uint meshletCount;
+    BLAS blas;
+};
+
+struct Material
+{
+    uint shaderIndex;
+    float parameters[15];
+    SRV texturesSRV[16];
+};
+
+struct MeshStorage
+{
+    Resource meshlets;
+    Resource vertices;
+    Resource indicies;
+
+    Resource blasVertices;
+    Resource blasIndicies;
+
+    void On()
+    {
+        meshlets.CreateBuffer<HLSL::Meshlet>(1000, "meshlets");
+        meshlets.CreateBuffer<float3>(1000, "vertices");
+    }
+
+    void Off()
+    {
+
+    }
+
+    Mesh Load(String path, CommandBuffer commandBuffer)
+    {
+
+    }
 };
 
 // life time : program
@@ -531,8 +565,8 @@ public:
                 //make a function
                 uint instanceValues[] = { instances.gpuData.srv.offset, i };
                 commandBuffer->cmd->SetGraphicsRoot32BitConstants(1, 2, instanceValues, 0);
-
                 //commandBuffer->cmd->SetGraphicsRootConstantBufferView(2, instances.GetGPUVirtualAddress(i));
+
                 commandBuffer->cmd->DispatchMesh(1, 1, 1);
             }
         }
@@ -846,21 +880,6 @@ public:
         ZoneScoped;
         // upload camera
 
-        /*
-        uint queryIndex = world.Query(Components::Camera::mask, 0);
-
-        uint entityCount = (uint)world.frameQueries[queryIndex].size();
-        uint entityStep = 1;
-        ViewWorld* frameWorld = viewWorld.Get();
-
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
-            {
-                ZoneScopedN("UpdateCameras");
-                this->viewWorld->instances.Upload();
-            }
-        );
-        */
-
         tf::Task task = subflow.emplace(
             [this, &world]()
             {
@@ -916,7 +935,7 @@ public:
                 {
                     auto& cpu = GlobalResources::instance->meshes.GetData(i);
                     auto& gpu = GlobalResources::instance->meshes.GetGPUData(i);
-                    gpu.meshOffset = cpu.meshOffset;
+                    gpu.meshletOffset = cpu.meshletOffset;
                     gpu.meshletCount = cpu.meshletCount;
                 }
                 GlobalResources::instance->meshes.Upload();

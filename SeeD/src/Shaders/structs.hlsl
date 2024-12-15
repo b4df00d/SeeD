@@ -1,5 +1,15 @@
 #pragma once
 
+#ifdef __cplusplus // bah c´est surtout pour par avoir ca dans le HLSL
+#define align __declspec(align(16))
+#else
+#define align
+#endif
+
+// CAREFULL OF ALIGNEMENT !
+// AVX 1 or 2 is not 16bytes aligned with hlsl++
+// sse2 is. and thus can have a similar memory layout as hlsl compilation
+
 namespace HLSL
 {
     struct Shader
@@ -14,9 +24,17 @@ namespace HLSL
         float2 uv;
     };
     
+    struct Meshlet
+    {
+        uint vertexOffset;
+        uint triangleOffset;
+        uint vertexCount;
+        uint triangleCount;
+    };
+
     struct Mesh
     {
-        uint meshOffset;
+        uint meshletOffset;
         uint meshletCount;
     };
     
@@ -35,9 +53,9 @@ namespace HLSL
     struct Instance
     {
         float4x4 worldMatrix;
-        //uint meshIndex;
-        //uint materialIndex;
-        //uint pad[2];
+        uint meshIndex;
+        uint materialIndex;
+        uint pad[2];
     };
     
     struct Camera

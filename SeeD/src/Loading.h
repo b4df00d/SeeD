@@ -30,11 +30,9 @@ public:
 
     struct Vertex
     {
-        float x;
-        float y;
-        float z;
-        float u;
-        float v;
+        float px, py, pz;
+        float nx, ny, nz;
+        float u, v;
     };
 
     struct MeshOriginal
@@ -79,7 +77,7 @@ public:
         std::vector<unsigned int> meshlet_vertices(max_meshlets * max_vertices);
         std::vector<unsigned char> meshlet_triangles(max_meshlets * max_triangles * 3);
 
-        size_t meshlet_count = meshopt_buildMeshlets(meshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(), originalMesh.indices.data(), originalMesh.indices.size(), &originalMesh.vertices[0].x, originalMesh.vertices.size(), sizeof(Vertex), max_vertices, max_triangles, cone_weight);
+        size_t meshlet_count = meshopt_buildMeshlets(meshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(), originalMesh.indices.data(), originalMesh.indices.size(), &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex), max_vertices, max_triangles, cone_weight);
 
         const meshopt_Meshlet& last = meshlets[meshlet_count - 1];
 
@@ -91,7 +89,7 @@ public:
         {
             auto& m = meshlets[i];
             meshopt_optimizeMeshlet(&meshlet_vertices[m.vertex_offset], &meshlet_triangles[m.triangle_offset], m.triangle_count, m.vertex_count);
-            meshopt_Bounds bounds = meshopt_computeMeshletBounds(&meshlet_vertices[m.vertex_offset], &meshlet_triangles[m.triangle_offset], m.triangle_count, &originalMesh.vertices[0].x, originalMesh.vertices.size(), sizeof(Vertex));
+            meshopt_Bounds bounds = meshopt_computeMeshletBounds(&meshlet_vertices[m.vertex_offset], &meshlet_triangles[m.triangle_offset], m.triangle_count, &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex));
         }
 
         Mesh optimizedMesh;
