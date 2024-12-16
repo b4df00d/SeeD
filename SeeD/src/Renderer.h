@@ -111,6 +111,10 @@ public:
         assert(present);
         return GetGPUData(index);
     }
+    Resource& GetResource()
+    {
+        return gpuData.GetResource();
+    }
     void Upload()
     {
         gpuData.Upload();
@@ -162,7 +166,7 @@ struct MeshStorage
 {
     Resource meshlets;
     Resource vertices;
-    Resource indicies;
+    Resource indices;
 
     Resource blasVertices;
     Resource blasIndicies;
@@ -170,7 +174,8 @@ struct MeshStorage
     void On()
     {
         meshlets.CreateBuffer<HLSL::Meshlet>(1000, "meshlets");
-        meshlets.CreateBuffer<float3>(1000, "vertices");
+        vertices.CreateBuffer<HLSL::Vertex>(1000, "vertices");
+        indices.CreateBuffer<HLSL::Index>(1000, "indices");
     }
 
     void Off()
@@ -178,9 +183,33 @@ struct MeshStorage
 
     }
 
-    Mesh Load(String path, CommandBuffer commandBuffer)
+    Mesh Load(String path, CommandBuffer& commandBuffer)
     {
+        ZoneScoped;
+        HLSL::Meshlet newMeshlets[10];
+        meshlets.Upload(newMeshlets, sizeof(newMeshlets), commandBuffer);
 
+        HLSL::Vertex newVertices[8] =
+        {
+            {float3(-0.2, 0.2, 0.2), float3(-0.2, 0.2, 0.2), float2(0,0)}, 
+            {float3(0.2, 0.2, 0.2), float3(0.2, 0.2, 0.2), float2(0,0)},
+            {float3(-0.2, 0.2, 0.8), float3(0,0,0), float2(0,0)},
+            {float3(0.2, 0.2, 0.8), float3(0,0,0), float2(0,0)},
+            {float3(0.2, -0.2, 0.2), float3(0,0,0), float2(0,0)},
+            {float3(0.2, -0.2, 0.2), float3(0,0,0), float2(0,0)},
+            {float3(-0.2, -0.2, 0.2), float3(0,0,0), float2(0,0)},
+            {float3(-0.2, -0.2, 0.8), float3(0,0,0), float2(0,0)}
+        };
+        vertices.Upload(newVertices, sizeof(newVertices), commandBuffer);
+
+        HLSL::Index newIndices[12] =
+        {
+            uint3(0, 1, 2), uint3(3, 1, 2), uint3(3, 4, 5), uint3(6, 4, 5), uint3(6, 7, 8), uint3(9, 7, 8),
+            uint3(10, 11, 2), uint3(1, 11, 2), uint3(10, 4, 7), uint3(3, 6, 2), uint3(8, 2, 6), uint3(5, 2, 9)
+        };
+        indices.Upload(newIndices, sizeof(newIndices), commandBuffer);
+
+        return Mesh();
     }
 };
 
@@ -190,15 +219,18 @@ struct GlobalResources
     static GlobalResources* instance;
     Map<assetID, Shader, HLSL::Shader> shaders;
     Map<assetID, Mesh, HLSL::Mesh> meshes;
+    MeshStorage meshStorage;
     Map<assetID, Resource, HLSL::Texture> textures;
 
     void On()
     {
         instance = this;
+        meshStorage.On();
     }
 
     void Off()
     {
+        meshStorage.Off();
         Release();
         instance = nullptr;
     }
@@ -252,7 +284,7 @@ public:
     {
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            viewWorld.Get(i)->Release();
+            viewWorld.Get(i).Release();
         }
     }
     virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
@@ -278,41 +310,41 @@ public:
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
             D3D12_COMMAND_LIST_TYPE type = asyncCompute ? D3D12_COMMAND_LIST_TYPE_COMPUTE : D3D12_COMMAND_LIST_TYPE_DIRECT;
-            commandBuffer.Get(i)->queue = asyncCompute ? GPU::instance->computeQueue : GPU::instance->graphicQueue;
-            HRESULT hr = GPU::instance->device->CreateCommandAllocator(type, IID_PPV_ARGS(&commandBuffer.Get(i)->cmdAlloc));
+            commandBuffer.Get(i).queue = asyncCompute ? GPU::instance->computeQueue : GPU::instance->graphicQueue;
+            HRESULT hr = GPU::instance->device->CreateCommandAllocator(type, IID_PPV_ARGS(&commandBuffer.Get(i).cmdAlloc));
             if (FAILED(hr))
             {
                 GPU::PrintDeviceRemovedReason(hr);
             }
             std::wstring wname = name.ToWString();
-            hr = commandBuffer.Get(i)->cmdAlloc->SetName(wname.c_str());
+            hr = commandBuffer.Get(i).cmdAlloc->SetName(wname.c_str());
             if (FAILED(hr))
             {
                 GPU::PrintDeviceRemovedReason(hr);
             }
-            hr = GPU::instance->device->CreateCommandList(0, type, commandBuffer.Get(i)->cmdAlloc, NULL, IID_PPV_ARGS(&commandBuffer.Get(i)->cmd));
+            hr = GPU::instance->device->CreateCommandList(0, type, commandBuffer.Get(i).cmdAlloc, NULL, IID_PPV_ARGS(&commandBuffer.Get(i).cmd));
             if (FAILED(hr))
             {
                 GPU::PrintDeviceRemovedReason(hr);
             }
             std::wstring wname2 = name.ToWString();
-            hr = commandBuffer.Get(i)->cmd->SetName(wname2.c_str());
+            hr = commandBuffer.Get(i).cmd->SetName(wname2.c_str());
             if (FAILED(hr))
             {
                 GPU::PrintDeviceRemovedReason(hr);
             }
-            hr = commandBuffer.Get(i)->cmd->Close();
+            hr = commandBuffer.Get(i).cmd->Close();
             if (FAILED(hr))
             {
                 GPU::PrintDeviceRemovedReason(hr);
             }
-            hr = GPU::instance->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&commandBuffer.Get(i)->passEnd.fence));
+            hr = GPU::instance->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&commandBuffer.Get(i).passEnd.fence));
             if (FAILED(hr))
             {
                 GPU::PrintDeviceRemovedReason(hr);
             }
-            commandBuffer.Get(i)->passEnd.fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-            if (commandBuffer.Get(i)->passEnd.fenceEvent == nullptr)
+            commandBuffer.Get(i).passEnd.fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            if (commandBuffer.Get(i).passEnd.fenceEvent == nullptr)
             {
                 GPU::PrintDeviceRemovedReason(hr);
             }
@@ -323,9 +355,9 @@ public:
     {
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            commandBuffer.Get(i)->cmd->Release();
-            commandBuffer.Get(i)->cmdAlloc->Release();
-            commandBuffer.Get(i)->passEnd.fence->Release();
+            commandBuffer.Get(i).cmd->Release();
+            commandBuffer.Get(i).cmdAlloc->Release();
+            commandBuffer.Get(i).passEnd.fence->Release();
         }
     }
 
@@ -348,14 +380,14 @@ public:
 #ifdef USE_PIX
         PIXBeginEvent(commandBuffer->cmd, PIX_COLOR_INDEX((BYTE)name.c_str()), name.c_str());
 #endif
-        Profiler::instance->StartProfile(*commandBuffer.Get(), name.c_str());
+        Profiler::instance->StartProfile(commandBuffer.Get(), name.c_str());
     }
 
     void Close()
     {
         ZoneScoped;
 
-        Profiler::instance->EndProfile(*commandBuffer.Get());
+        Profiler::instance->EndProfile(commandBuffer.Get());
 #ifdef USE_PIX
         PIXEndEvent(commandBuffer->cmd);
 #endif
@@ -378,6 +410,23 @@ public:
 
     virtual void Setup(View* view) = 0;
     virtual void Render(View* view) = 0;
+};
+
+// globalResources upload (meshes, textures)
+class Upload : public Pass
+{
+public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+        GlobalResources::instance->meshStorage.Load("", commandBuffer.Get());
+        Close();
+    }
 };
 
 class Skinning : public Pass
@@ -503,7 +552,7 @@ public:
         uint index;
         GlobalResources::instance->shaders.Add(meshShader.Get().id, index);
 
-        renderTargets[0] = *GPU::instance->backBuffer.Get();
+        renderTargets[0] = GPU::instance->backBuffer.Get();
         depthBuffer.CreateDepthTarget(view->resolution, "Depth");
     }
     void Setup(View* view) override
@@ -515,7 +564,7 @@ public:
         ZoneScoped;
         Open();
 
-        renderTargets[0] = *GPU::instance->backBuffer.Get();
+        renderTargets[0] = GPU::instance->backBuffer.Get();
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         UINT64 w = view->resolution.x;
@@ -555,17 +604,28 @@ public:
             Shader& shader = GlobalResources::instance->shaders.GetData(meshShader.Get().id);
             commandBuffer->Set(shader);
 
+            HLSL::CommonResourcesIndices commonResourcesIndices;
+            commonResourcesIndices.meshletsHeapIndex = GlobalResources::instance->meshStorage.meshlets.srv.offset;
+            commonResourcesIndices.verticesHeapIndex = GlobalResources::instance->meshStorage.vertices.srv.offset;
+            commonResourcesIndices.indicesHeapIndex = GlobalResources::instance->meshStorage.indices.srv.offset;
+            commonResourcesIndices.camerasHeapIndex = view->viewWorld->cameras.gpuData.srv.offset;
+            commonResourcesIndices.lightsHeapIndex = view->viewWorld->lights.gpuData.srv.offset;
+            commonResourcesIndices.materialsHeapIndex = view->viewWorld->materials.GetResource().srv.offset;
+            commonResourcesIndices.instancesHeapIndex = view->viewWorld->instances.gpuData.srv.offset;
+            commonResourcesIndices.instancesGPUHeapIndex = view->viewWorld->instancesGPU.gpuData.srv.offset;
+            commandBuffer->cmd->SetGraphicsRoot32BitConstants(0, 8, &commonResourcesIndices, 0);
+
             // make a function for setting cameras and global
-            uint cameraValues[] = { view->viewWorld->cameras.gpuData.srv.offset, 0 };
-            commandBuffer->cmd->SetGraphicsRoot32BitConstants(0, 2, cameraValues, 0);
+            uint cameraValues[] = { 0 };
+            commandBuffer->cmd->SetGraphicsRoot32BitConstants(1, 1, cameraValues, 0);
 
             auto& instances = view->viewWorld->instances;
             for (uint i = 0; i < instances.Size(); i++)
             {
                 //make a function
-                uint instanceValues[] = { instances.gpuData.srv.offset, i };
-                commandBuffer->cmd->SetGraphicsRoot32BitConstants(1, 2, instanceValues, 0);
-                //commandBuffer->cmd->SetGraphicsRootConstantBufferView(2, instances.GetGPUVirtualAddress(i));
+                uint instanceValues[] = { i };
+                commandBuffer->cmd->SetGraphicsRoot32BitConstants(2, 1, instanceValues, 0);
+                //commandBuffer->cmd->SetGraphicsRootConstantBufferView(3, instances.GetGPUVirtualAddress(i));
 
                 commandBuffer->cmd->DispatchMesh(1, 1, 1);
             }
@@ -617,6 +677,7 @@ public:
 class MainView : public View
 {
 public:
+    Upload upload;
     Skinning skinning;
     Particles particles;
     Spawning spawning;
@@ -632,6 +693,7 @@ public:
     {
         resolution = window.windowResolution;
 
+        upload.On(this, false, "upload");
         skinning.On(this, false, "skinning");
         particles.On(this, false, "particles");
         spawning.On(this, false, "spawning");
@@ -646,6 +708,7 @@ public:
 
     void Off() override
     {
+        upload.Off();
         skinning.Off();
         particles.Off();
         spawning.Off();
@@ -673,6 +736,7 @@ public:
         tf::Task uploadShadersBuffers = UploadShadersBuffers(world, subflow);
         tf::Task uploadTexturesBuffers = UploadTexturesBuffers(world, subflow);
 
+        SUBTASKVIEWPASS(upload);
         SUBTASKVIEWPASS(skinning);
         SUBTASKVIEWPASS(particles);
         SUBTASKVIEWPASS(spawning);
@@ -684,13 +748,13 @@ public:
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
-        updateCameras.precede(particlesTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
-
+        //updateCameras.precede(particlesTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
         updateInstances.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
-        presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
-
         updateInstances.precede(updateMaterials, updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
-        presentTask.succeed(updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
+        //uploadTask.succeed(updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
+
+        presentTask.succeed(updateInstances, updateMaterials, updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
+        presentTask.succeed(uploadTask, skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
     }
@@ -698,6 +762,7 @@ public:
     void Execute() override
     {
         ZoneScoped;
+        upload.Execute();
         skinning.Execute();
         particles.Execute();
         spawning.Execute();
@@ -718,14 +783,14 @@ public:
 
 
 #define UpdateInstancesStepSize 128
-        ViewWorld* frameWorld = viewWorld.Get();
+        ViewWorld& frameWorld = viewWorld.Get();
         
         uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::WorldMatrix::mask, 0);
         uint entityCount = (uint)world.frameQueries[instanceQueryIndex].size();
-        frameWorld->instances.Reserve(entityCount);
+        frameWorld.instances.Reserve(entityCount);
 
         uint materialsCount = world.CountQuery(Components::Material::mask, 0);
-        frameWorld->materials.Reserve(materialsCount);
+        frameWorld.materials.Reserve(materialsCount);
 
         uint meshesCount = world.CountQuery(Components::Mesh::mask, 0);
         GlobalResources::instance->meshes.Reserve(meshesCount);
@@ -738,7 +803,7 @@ public:
 
         
         tf::Task task = subflow.for_each_index(0, entityCount, UpdateInstancesStepSize,
-            [&world, frameWorld, instanceQueryIndex](int i)
+            [&world, &frameWorld, instanceQueryIndex](int i)
             {
                 ZoneScopedN("UpdateInstance");
 
@@ -766,8 +831,8 @@ public:
                         continue;
 
                     uint materialIndex;
-                    bool materialAdded = frameWorld->materials.Add(World::Entity(instanceCmp.material.index), materialIndex);
-                    if (!frameWorld->materials.GetLoaded(materialIndex))
+                    bool materialAdded = frameWorld.materials.Add(World::Entity(instanceCmp.material.index), materialIndex);
+                    if (!frameWorld.materials.GetLoaded(materialIndex))
                         continue;
 
                     // everything should be loaded to be able to draw the instance
@@ -786,7 +851,7 @@ public:
                     instanceCount++;
                 }
 
-                frameWorld->instances.AddRange(localInstances.data(), instanceCount);
+                frameWorld.instances.AddRange(localInstances.data(), instanceCount);
 
             }
         );
@@ -807,10 +872,10 @@ public:
 
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
 #define UpdateMaterialsStepSize 1024
-        ViewWorld* frameWorld = viewWorld.Get();
+        ViewWorld& frameWorld = viewWorld.Get();
 
         tf::Task task = subflow.for_each_index(0, entityCount, UpdateMaterialsStepSize,
-            [&world, frameWorld, queryIndex](int i)
+            [&world, &frameWorld, queryIndex](int i)
             {
                 ZoneScopedN("UpdateMaterials");
                 for (uint subQuery = 0; subQuery < UpdateMaterialsStepSize; subQuery++)
@@ -820,10 +885,10 @@ public:
                         return;
 
                     uint materialIndex;
-                    if (frameWorld->materials.Contains(World::Entity(queryResult[i + subQuery].Get<Components::Entity>().index), materialIndex))
+                    if (frameWorld.materials.Contains(World::Entity(queryResult[i + subQuery].Get<Components::Entity>().index), materialIndex))
                     {
                         Components::Material& materialCmp = queryResult[i + subQuery].Get<Components::Material>();
-                        Material& material = frameWorld->materials.GetData(materialIndex);
+                        Material& material = frameWorld.materials.GetData(materialIndex);
 
                         uint shaderIndex;
                         bool shaderAdded = GlobalResources::instance->shaders.Contains(materialCmp.shader.Get().id, shaderIndex);
@@ -848,7 +913,7 @@ public:
                             }
                         }
 
-                        frameWorld->materials.SetLoaded(materialIndex, materialReady);
+                        frameWorld.materials.SetLoaded(materialIndex, materialReady);
                     }
                 }
             }
@@ -864,9 +929,9 @@ public:
 
         uint entityCount = (uint)world.frameQueries[queryIndex].size();
         uint entityStep = 1;
-        ViewWorld* frameWorld = viewWorld.Get();
+        ViewWorld& frameWorld = viewWorld.Get();
 
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, frameWorld, queryIndex](int i)
+        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, &frameWorld, queryIndex](int i)
             {
                 ZoneScopedN("UpdateLights");
 
@@ -888,7 +953,7 @@ public:
 
                 uint entityCount = (uint)world.frameQueries[queryIndex].size();
                 uint entityStep = 1;
-                ViewWorld* frameWorld = viewWorld.Get();
+                ViewWorld& frameWorld = viewWorld.Get();
                 auto& queryResult = world.frameQueries[queryIndex];
 
                 this->viewWorld->cameras.Clear();
@@ -1174,7 +1239,7 @@ public:
         HRESULT hr;
         // if the current fence value is still less than "fenceValue", then we know the GPU has not finished executing
         // the command queue since it has not reached the "commandQueue->Signal(fence, fenceValue)" command
-        Fence& previousFrame = editorView.editor.commandBuffer.Get(GPU::instance->frameIndex ? 0 : 1)->passEnd;
+        Fence& previousFrame = editorView.editor.commandBuffer.Get(GPU::instance->frameIndex ? 0 : 1).passEnd;
         auto v = previousFrame.fence->GetCompletedValue();
         if (v < previousFrame.fenceValue)
         {

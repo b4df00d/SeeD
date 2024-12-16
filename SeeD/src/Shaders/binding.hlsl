@@ -1,12 +1,13 @@
 #pragma once
+//#include "structs.hlsl"
 
 //https://learn.microsoft.com/en-us/windows/win32/direct3d12/dynamic-indexing-using-hlsl-5-1
 //https://devblogs.microsoft.com/directx/in-the-works-hlsl-shader-model-6-6/
 
 #define GlobalRootSignature "RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED), " \
-            "RootConstants(b0, num32BitConstants = 2), "\
-            "RootConstants(b1, num32BitConstants = 2), "\
-			"CBV(b2, space = 0), "\
+            "RootConstants(b0, num32BitConstants = 8), "\
+            "RootConstants(b1, num32BitConstants = 1), "\
+            "RootConstants(b2, num32BitConstants = 1), "\
 			"CBV(b3, space = 0), "\
                     "StaticSampler(s0, "\
                                   "filter         = FILTER_MIN_MAG_LINEAR_MIP_POINT, "\
@@ -75,24 +76,22 @@
                                   "visibility     = SHADER_VISIBILITY_ALL)"
 
 //---------------------------------------------------------------------------------------------
-cbuffer Cameras : register(b0)
+cbuffer GlobalResources : register(b0)
 {
-    uint camerasHeapIndex;
+    HLSL::CommonResourcesIndices commonResourcesIndices;
+};
+//---------------------------------------------------------------------------------------------
+cbuffer Cameras : register(b1)
+{
     uint cameraIndex;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer Instances : register(b1)
+cbuffer Instances : register(b2)
 {
-    uint instancesHeapIndex;
     uint instanceIndex;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer InstancesView : register(b2)
+cbuffer InstancesView : register(b3)
 {
     HLSL::Instance instanceBuffer[10];
-}
-//---------------------------------------------------------------------------------------------
-cbuffer GlobalBuffer : register(b3)
-{
-    HLSL::Globals globals;
 }

@@ -12,6 +12,18 @@
 
 namespace HLSL
 {
+    struct CommonResourcesIndices
+    {
+        uint meshletsHeapIndex;
+        uint verticesHeapIndex;
+        uint indicesHeapIndex;
+        uint camerasHeapIndex;
+        uint lightsHeapIndex;
+        uint materialsHeapIndex;
+        uint instancesHeapIndex;
+        uint instancesGPUHeapIndex; // only for instances created on GPU
+    };
+    
     struct Shader
     {
         uint id;
@@ -22,6 +34,11 @@ namespace HLSL
         float3 pos;
         float3 normal;
         float2 uv;
+    };
+    
+    struct Index
+    {
+        uint3 index;
     };
     
     struct Meshlet
@@ -45,7 +62,7 @@ namespace HLSL
     
     struct Material
     {
-        Shader shader;
+        uint shaderIndex;
         float parameters[15];
         Texture textures[16];
     };

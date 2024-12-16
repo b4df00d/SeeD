@@ -12,11 +12,11 @@ void MeshMain(in uint groupThreadId : SV_GroupThreadID, out vertices HLSL::MSVer
 {
     SetMeshOutputCounts(8, 12);
     
-    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[instancesHeapIndex];
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
     //instance = instanceBuffer[0];
     
-    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[camerasHeapIndex];
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[cameraIndex];
     
     if(groupThreadId < 8)
@@ -69,7 +69,7 @@ PS_OUTPUT_FORWARD PixelForward(HLSL::MSVert inVerts)
 {
     PS_OUTPUT_FORWARD o;
     
-    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[instancesHeapIndex];
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
     o.albedo = float4(inVerts.color, 1);
     //o.entityID = 1;

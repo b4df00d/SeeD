@@ -212,8 +212,8 @@ public:
     void BackBuffer(ID3D12Resource* backBuffer);
     void Release();
     ID3D12Resource* GetResource();
-    void Upload(void* data, CommandBuffer* cb);
-    void Transition(CommandBuffer* cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
+    void Upload(void* data, uint dataSize, CommandBuffer& cb);
+    void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
     static void CleanUploadResources();
 
     static std::mutex lock;
@@ -335,17 +335,17 @@ class PerFrame
 {
     T data[FRAMEBUFFERING];
 public:
-    T* Get(uint frameIndex)
+    T& Get(uint frameIndex)
     {
-        return &data[frameIndex];
+        return data[frameIndex];
     }
-    T* Get()
+    T& Get()
     {
         return Get(g_frameIndex);
     }
     T* operator -> ()
     {
-        return Get();
+        return &Get();
     }
 };
 
@@ -520,7 +520,7 @@ public:
         {
             ID3D12Resource2* res;
             HRESULT hr = swapChain->GetBuffer(i, IID_PPV_ARGS(&res));
-            backBuffer.Get(i)->BackBuffer(res);
+            backBuffer.Get(i).BackBuffer(res);
         }
     }
 
@@ -557,7 +557,7 @@ public:
             {
                 ID3D12Resource2* res;
                 HRESULT hr = swapChain->GetBuffer(i, IID_PPV_ARGS(&res));
-                backBuffer.Get(i)->BackBuffer(res);
+                backBuffer.Get(i).BackBuffer(res);
             }
         }
     }
@@ -1021,15 +1021,15 @@ ID3D12Resource* Resource::GetResource()
     return nullptr;
 }
 
-void Resource::Upload(void* data, CommandBuffer* cb)
+void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb)
 {
-    //ZoneScoped;
+    ZoneScoped;
     D3D12MA::Allocation* uploadAllocation;
 
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     resourceDesc.Alignment = 0;
-    resourceDesc.Width = allocation->GetSize();
+    resourceDesc.Width = dataSize;
     resourceDesc.Height = 1;
     resourceDesc.DepthOrArraySize = 1;
     resourceDesc.MipLevels = 1;
@@ -1037,7 +1037,7 @@ void Resource::Upload(void* data, CommandBuffer* cb)
     resourceDesc.SampleDesc.Count = 1;
     resourceDesc.SampleDesc.Quality = 0;
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
     D3D12MA::ALLOCATION_DESC allocationDesc = {};
     allocationDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
@@ -1059,18 +1059,18 @@ void Resource::Upload(void* data, CommandBuffer* cb)
 
     void* buf;
     uploadAllocation->GetResource()->Map(0, nullptr, &buf);
-    memcpy(buf, data, uploadAllocation->GetSize());
+    memcpy(buf, data, dataSize);
     uploadAllocation->GetResource()->Unmap(0, nullptr);
 
     Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    cb->cmd->CopyResource(allocation->GetResource(), uploadAllocation->GetResource());
+    cb.cmd->CopyResource(allocation->GetResource(), uploadAllocation->GetResource());
     Transition(cb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
 }
 
-void Resource::Transition(CommandBuffer* cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter)
+void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter)
 {
     D3D12_RESOURCE_BARRIER trans{ D3D12_RESOURCE_BARRIER_TYPE_TRANSITION , D3D12_RESOURCE_BARRIER_FLAG_NONE , {GetResource(), 0, stateBefore, stateAfter} };
-    cb->cmd->ResourceBarrier(1, &trans);
+    cb.cmd->ResourceBarrier(1, &trans);
 }
 
 void Resource::CleanUploadResources()
@@ -1261,7 +1261,7 @@ public:
         return gpuData.GetResource();
     }
     // resource must be in common state. Always ?
-    void ReadBack(Resource& resource, CommandBuffer* cb)
+    void ReadBack(Resource& resource, CommandBuffer& cb)
     {
         ZoneScoped;
         if (gpuData.GetResource() == nullptr)
@@ -1271,7 +1271,7 @@ public:
             gpuData.CreateReadBackBuffer((uint)descsource.Width);
         }
         resource.Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        cb->cmd->CopyResource(GetResourcePtr(), resource.GetResource());
+        cb.cmd->CopyResource(GetResourcePtr(), resource.GetResource());
         resource.Transition(cb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
     }
     template <class T>
@@ -1429,13 +1429,13 @@ struct Profiler
         profile.Active = false;
     }
 
-    void EndProfilerFrame(CommandBuffer* cb)
+    void EndProfilerFrame(CommandBuffer& cb)
     {
         ZoneScoped;
         UINT64 gpuFrequency = 0;
         const UINT64* frameQueryData = nullptr;
 
-        cb->queue->GetTimestampFrequency(&gpuFrequency);
+        cb.queue->GetTimestampFrequency(&gpuFrequency);
 
         readbackBuffer.ReadBack(buffer, cb);
 
