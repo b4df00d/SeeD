@@ -24,7 +24,7 @@ public:
 
 
 #include "../../Third/meshoptimizer-master/src/meshoptimizer.h"
-class AssetLoader
+class MeshLoader
 {
 public:
 
@@ -101,6 +101,108 @@ public:
         return optimizedMesh;
 
         //use if (dot(normalize(cone_apex - camera_position), cone_axis) >= cone_cutoff) reject(); in mesh shader for cone culling
+    }
+};
+
+#include "../../Third/assimp-master/include/assimp/Importer.hpp"
+#include "../../Third/assimp-master/include/assimp/Exporter.hpp"
+#include "../../Third/assimp-master/include/assimp/scene.h"
+#include "../../Third/assimp-master/include/assimp/postprocess.h"
+class SceneLoader
+{
+public:
+    void On()
+    {
+
+    }
+
+    void Off()
+    {
+
+    }
+
+    void Load(String path)
+    {
+        ZoneScoped;
+
+        IOs::Log("Loading : {}", path.c_str());
+
+        Assimp::Importer importer;
+        importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, true);
+        importer.SetPropertyBool(AI_CONFIG_FBX_CONVERT_TO_M, true);
+        const aiScene* _scene = importer.ReadFile(path,
+            // for DX
+            aiProcess_MakeLeftHanded
+            | aiProcess_FlipWindingOrder
+            | aiProcess_FlipUVs
+
+
+            | aiProcess_CalcTangentSpace
+            | aiProcess_FixInfacingNormals
+            | aiProcess_GenSmoothNormals
+            //| aiProcess_GenNormals
+            | aiProcess_Triangulate
+            | aiProcess_JoinIdenticalVertices
+            | aiProcess_SortByPType
+            | aiProcess_FindInvalidData
+            | aiProcess_FindInstances
+            | aiProcess_GlobalScale
+            | aiProcess_GenBoundingBoxes
+
+
+            | aiProcess_PopulateArmatureData
+            //| aiProcess_LimitBoneWeights
+            //| aiProcess_Debone
+
+            //| aiProcess_RemoveRedundantMaterials
+            //| aiProcess_OptimizeGraph
+            //| aiProcess_OptimizeMeshes
+        );
+
+        if (!_scene)
+        {
+            return;
+        }
+
+        ai_real unitSize(0.0);
+        _scene->mMetaData->Get("UnitScaleFactor", unitSize);
+        if (unitSize == 0)
+            _scene->mMetaData->Get("OriginalUnitScaleFactor", unitSize);
+
+        if (unitSize != 0)
+        {
+            unitSize = 1 / unitSize;
+            _scene->mRootNode->mTransformation *= aiMatrix4x4(unitSize, 0, 0, 0,
+                0, unitSize, 0, 0,
+                0, 0, unitSize, 0,
+                0, 0, 0, 1);
+        }
+        IOs::Log("File unit scale : {}", unitSize);
+
+        CreateAnimations();
+        CreateMeshes();
+        CreateMaterials();
+        CreateEntities();
+    }
+
+    void CreateEntities()
+    {
+        ZoneScoped;
+    }
+
+    void CreateMeshes()
+    {
+        ZoneScoped;
+    }
+
+    void CreateMaterials()
+    {
+        ZoneScoped;
+    }
+
+    void CreateAnimations()
+    {
+        ZoneScoped;
     }
 };
 

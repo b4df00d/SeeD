@@ -75,7 +75,8 @@ public:
     World world;
     Renderer renderer;
     UI ui;
-    AssetLoader assetLoader;
+    MeshLoader meshLoader;
+    SceneLoader sceneLoader;
     TextureLoader textureLoader;
     ShaderLoader shaderLoader;
 
@@ -91,7 +92,8 @@ public:
         profiler.On();
         renderer.On(ios.window);
         ui.On(&ios.window, gpu.device, gpu.swapChain);
-        assetLoader.On();
+        meshLoader.On();
+        sceneLoader.On();
         textureLoader.On();
         shaderLoader.On();
 
@@ -109,15 +111,15 @@ public:
             ui.FrameStart();
             ios.ProcessMessages();
 
-            TASKWITHSUBFLOW(ScheduleInputs);
             TASK(UpdateWindow);
+            TASKWITHSUBFLOW(ScheduleInputs);
             TASKWITHSUBFLOW(ScheduleWorld);
             TASKWITHSUBFLOW(ScheduleEditor);
             TASKWITHSUBFLOW(ScheduleRenderer);
             tf::Task ScheduleRendererLoading = taskflow.emplace([this](tf::Subflow& subflow) {this->renderer.ScheduleLoading(subflow); }).name("ScheduleLoading");
 
-            ScheduleInputs.precede(UpdateWindow);
-            UpdateWindow.precede(ScheduleWorld);
+            UpdateWindow.precede(ScheduleInputs);
+            ScheduleInputs.precede(ScheduleWorld);
             ScheduleWorld.precede(ScheduleEditor);
             ScheduleEditor.precede(ScheduleRenderer);
 
@@ -138,7 +140,8 @@ public:
 
         shaderLoader.Off();
         textureLoader.Off();
-        assetLoader.Off();
+        meshLoader.Off();
+        sceneLoader.Off();
         ui.Off();
         profiler.Off();
         renderer.Off();
@@ -169,7 +172,7 @@ public:
         }
         if (ios.DropFile())
         {
-            Load();
+            sceneLoader.Load(ios.window.dropFile);
         }
     }
 
@@ -191,11 +194,6 @@ public:
     void ScheduleRenderer(tf::Subflow& subflow)
     {
         renderer.Schedule(world, subflow);
-    }
-
-    void Load()
-    {
-
     }
 
     bool IsRunning()
