@@ -117,7 +117,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>..\Third\meshoptimizer-master\out\build\x64-Debug\meshoptimizer.lib;..\Third\assimp-master\out\build\x64-Debug\lib\assimp-vc143-mt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>..\Third\meshoptimizer-master\out\build\x64-Debug\meshoptimizer.lib;..\Third\assimp-master\out\build\x64-Debug\lib\assimp-vc143-mtd.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "..\Third\DirectXShaderCompiler-main\bin\x64\*.*" "..\x64\Debug\"

@@ -34,6 +34,7 @@ class AssetLibrary
 public:
     static AssetLibrary* instance;
     std::unordered_map<assetID, String> map;
+    String assetsPath = "..\\Assets\\";
     String file = "..\\assetLibrary.txt";
 
     void On()
@@ -585,7 +586,7 @@ namespace Systems
                 {
                     World::Entity ent;
                     ent.Make(Components::Mesh::mask);
-                    ent.Get<Components::Mesh>().id = AssetLibrary::instance->Add("..\\Cache\\mesh.mesh");
+                    ent.Get<Components::Mesh>().id = AssetLibrary::instance->Add("..\\Assets\\mesh.mesh");
                     meshEnt[i] = ent;
                 }
 
@@ -594,7 +595,7 @@ namespace Systems
                 {
                     World::Entity ent;
                     ent.Make(Components::Texture::mask);
-                    ent.Get<Components::Texture>().id = AssetLibrary::instance->Add("..\\Cache\\texture.dds");
+                    ent.Get<Components::Texture>().id = AssetLibrary::instance->Add("..\\Assets\\texture.dds");
                     textureEnt[i] = ent;
                 }
 

@@ -17,7 +17,7 @@ class Map
 public:
     std::atomic_uint32_t count = 0;
     std::recursive_mutex lock;
-    uint maxLoading = 10;
+    uint maxLoading = 3;
 
     Map()
     {
@@ -164,12 +164,17 @@ struct Material
 
 struct MeshStorage
 {
+    uint nextMeshletOffset;
     Resource meshlets;
+    uint nextVertexOffset;
     Resource vertices;
+    uint nextIndexOffset;
     Resource indices;
 
     Resource blasVertices;
     Resource blasIndicies;
+
+    std::recursive_mutex lock;
 
     void On()
     {
@@ -185,7 +190,18 @@ struct MeshStorage
         indices.Release();
     }
 
-    Mesh Load(String path, CommandBuffer& commandBuffer)
+    Mesh Add(MeshLoader::Mesh mesh)
+    {
+        Mesh newMesh;
+        lock.lock();
+        newMesh.meshletCount = mesh.meshlets.size();
+        newMesh.meshletOffset = nextMeshletOffset;
+        nextMeshletOffset += newMesh.meshletCount;
+        lock.unlock();
+        return newMesh;
+    }
+
+    Mesh Load(CommandBuffer& commandBuffer)
     {
         ZoneScoped;
         HLSL::Meshlet newMeshlets[10];
@@ -426,7 +442,7 @@ public:
     {
         ZoneScoped;
         Open();
-        GlobalResources::instance->meshStorage.Load("", commandBuffer.Get());
+        GlobalResources::instance->meshStorage.Load(commandBuffer.Get());
         Close();
     }
 };
@@ -676,7 +692,6 @@ public:
 class MainView : public View
 {
 public:
-    Upload upload;
     Skinning skinning;
     Particles particles;
     Spawning spawning;
@@ -696,7 +711,6 @@ public:
 
         depthBuffer.CreateDepthTarget(resolution, "Depth");
 
-        upload.On(this, false, "upload");
         skinning.On(this, false, "skinning");
         particles.On(this, false, "particles");
         spawning.On(this, false, "spawning");
@@ -713,7 +727,6 @@ public:
 
     void Off() override
     {
-        upload.Off();
         skinning.Off();
         particles.Off();
         spawning.Off();
@@ -744,7 +757,6 @@ public:
         tf::Task uploadShadersBuffers = UploadShadersBuffers(world, subflow);
         tf::Task uploadTexturesBuffers = UploadTexturesBuffers(world, subflow);
 
-        SUBTASKVIEWPASS(upload);
         SUBTASKVIEWPASS(skinning);
         SUBTASKVIEWPASS(particles);
         SUBTASKVIEWPASS(spawning);
@@ -762,7 +774,7 @@ public:
         //uploadTask.succeed(updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
 
         presentTask.succeed(updateInstances, updateMaterials, updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
-        presentTask.succeed(uploadTask, skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+        presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
     }
@@ -770,7 +782,6 @@ public:
     void Execute() override
     {
         ZoneScoped;
-        upload.Execute();
         skinning.Execute();
         particles.Execute();
         spawning.Execute();
@@ -1117,6 +1128,7 @@ class Renderer
 {
 public:
     GlobalResources globalResources;
+    Upload upload;
     MainView mainView;
     EditorView editorView;
 
@@ -1125,12 +1137,14 @@ public:
         globalResources.On();
         mainView.On(window);
         editorView.On(window);
+        upload.On(nullptr, false, "upload");
     }
     
     void Off()
     {
-        mainView.Off();
+        upload.Off();
         editorView.Off();
+        mainView.Off();
         globalResources.Off();
     }
 
@@ -1141,11 +1155,12 @@ public:
         auto mainViewEndTask = mainView.Schedule(world, subflow);
         auto editorViewEndTask = editorView.Schedule(world, subflow);
 
+        SUBTASKPASS(upload);
         SUBTASKRENDERER(ExecuteFrame);
         SUBTASKRENDERER(WaitFrame);
         SUBTASKRENDERER(PresentFrame);
 
-        ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
+        ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask, uploadTask);
         ExecuteFrame.precede(WaitFrame);
         WaitFrame.precede(PresentFrame);
     }
@@ -1168,10 +1183,12 @@ public:
                 break;
         }
         loadingLeft = GlobalResources::instance->meshes.maxLoading;
-        for (uint i = 0; i < GlobalResources::instance->meshes.count; i++)
+        for (auto& item : GlobalResources::instance->meshes)
         {
-            if (!GlobalResources::instance->meshes.GetLoaded(i))
+            auto& shader = GlobalResources::instance->meshes.GetData(item.first);
+            if (!GlobalResources::instance->meshes.GetLoaded(item.second))
             {
+                assetID i = item.first;
                 // load mesh
                 tf::Task pass = subflow.emplace([this, i]() {this->LoadMeshes(i); }).name("LoadMeshes");
                 loadingLeft--;
@@ -1213,12 +1230,15 @@ public:
         GlobalResources::instance->shaders.SetLoaded(i, compiled);
         GlobalResources::instance->shaders.lock.unlock();
     }
-    void LoadMeshes(uint i)
+    void LoadMeshes(assetID i)
     {
         ZoneScoped;
-        IOs::Log("mesh");
-        GlobalResources::instance->meshes.GetData(i);
+        MeshLoader::Mesh mesh = MeshLoader::instance->Read(AssetLibrary::instance->Get(i));
+        GlobalResources::instance->meshes.lock.lock();
+        Mesh mesh2 = GlobalResources::instance->meshStorage.Add(mesh);
+        GlobalResources::instance->meshes.GetData(i) = mesh2;
         GlobalResources::instance->meshes.SetLoaded(i, true);
+        GlobalResources::instance->meshes.lock.unlock();
     }
     void LoadTextures(uint i)
     {
@@ -1233,6 +1253,7 @@ public:
         ZoneScoped;
         HRESULT hr;
 
+        upload.Execute();
         mainView.Execute();
         editorView.Execute();
     }
