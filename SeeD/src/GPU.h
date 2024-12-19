@@ -214,7 +214,7 @@ public:
     ID3D12Resource* GetResource();
     void Upload(void* data, uint dataSize, CommandBuffer& cb);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
-    static void CleanUploadResources();
+    static void CleanUploadResources(bool everything = false);
 
     static std::mutex lock;
     static std::vector<std::tuple<uint, D3D12MA::Allocation*>> uploadResources;
@@ -398,6 +398,13 @@ public:
         descriptorHeap.Off();
         graphicQueue->Release();
         computeQueue->Release();
+
+        Resource::CleanUploadResources(true);
+        for (uint i = 0; i < Resource::allResourcesNames.size(); i++)
+        {
+            IOs::Log("{}", Resource::allResourcesNames[i].c_str());
+        }
+
         allocator->Release();
         //swapChain->Release();
         device->Release();
@@ -1023,7 +1030,7 @@ ID3D12Resource* Resource::GetResource()
 
 void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb)
 {
-    ZoneScoped;
+    //ZoneScopedN("Resource::Upload");
     D3D12MA::Allocation* uploadAllocation;
 
     D3D12_RESOURCE_DESC resourceDesc = {};
@@ -1073,10 +1080,12 @@ void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, 
     cb.cmd->ResourceBarrier(1, &trans);
 }
 
-void Resource::CleanUploadResources()
+void Resource::CleanUploadResources(bool everything)
 {
     //ZoneScoped;
     uint frameNumberThreshold = GPU::instance->frameNumber - 2;
+    if (everything)
+        frameNumberThreshold = UINT_MAX;
     for (int i = (int)uploadResources.size() - 1; i >= 0 ; i--)
     {
         if (std::get<0>(uploadResources[i]) < frameNumberThreshold)

@@ -180,7 +180,9 @@ struct MeshStorage
 
     void Off()
     {
-
+        meshlets.Release();
+        vertices.Release();
+        indices.Release();
     }
 
     Mesh Load(String path, CommandBuffer& commandBuffer)
@@ -551,9 +553,6 @@ public:
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
         uint index;
         GlobalResources::instance->shaders.Add(meshShader.Get().id, index);
-
-        renderTargets[0] = GPU::instance->backBuffer.Get();
-        depthBuffer.CreateDepthTarget(view->resolution, "Depth");
     }
     void Setup(View* view) override
     {
@@ -689,9 +688,13 @@ public:
     PostProcess postProcess;
     Present present;
 
+    Resource depthBuffer;
+
     void On(IOs::WindowInformation& window) override
     {
         resolution = window.windowResolution;
+
+        depthBuffer.CreateDepthTarget(resolution, "Depth");
 
         upload.On(this, false, "upload");
         skinning.On(this, false, "skinning");
@@ -702,6 +705,8 @@ public:
         gBuffers.On(this, false, "gBuffers");
         lighting.On(this, false, "lighting");
         forward.On(this, false, "forward");
+        forward.renderTargets[0] = GPU::instance->backBuffer.Get();
+        forward.depthBuffer = depthBuffer;
         postProcess.On(this, false, "postProcess");
         present.On(this, false, "present");
     }
@@ -719,6 +724,9 @@ public:
         forward.Off();
         postProcess.Off();
         present.Off();
+
+        depthBuffer.Release();
+
         View::Off();
     }
 
