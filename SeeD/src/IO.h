@@ -55,7 +55,7 @@ public:
 
     struct WindowInformation
     {
-        float2 windowResolution;
+        int2 windowResolution;
 
         HINSTANCE windowInstance;
         HWND windowHandle;
@@ -420,10 +420,12 @@ public:
 			float2 pos = (float2((float)screenSize.x, (float)screenSize.y) - float2((float)window.windowResolution.x, (float)window.windowResolution.y)) / 2.0f;
 			windowPosition = int2((int)pos.x, (int)pos.y);
 
-			int px = (int)pos.x;
-			int py = (int)pos.y;
+			int px = (float)screenSize.x - (float)window.windowResolution.x * 0.5f;
+			int py = (float)screenSize.y - (float)window.windowResolution.y * 0.5f;
 			int sx = (int)window.windowResolution.x;
 			int sy = (int)window.windowResolution.y;
+			sx = 1600;
+			sy = 900;
 			HINSTANCE instance = window.windowInstance;
 			HWND handle = window.windowHandle;
 			window.windowHandle = CreateWindowEx(WS_EX_APPWINDOW | WS_EX_ACCEPTFILES,
@@ -435,6 +437,10 @@ public:
 				,
 				px, py, sx, sy,
 				NULL, NULL, window.windowInstance, this);
+
+			/*
+			//::GetClientRect(window.windowHandle, &r); is fucked up in release, why ?!
+			*/
 
 			RECT r;
 			::GetClientRect(window.windowHandle, &r);
@@ -452,7 +458,7 @@ public:
 				WS_POPUPWINDOW | WS_CAPTION
 				//| WS_VISIBLE
 				,
-				(int)windowPosition.x, (int)windowPosition.y, (int)window.windowResolution.x, (int)window.windowResolution.y,
+				px, py, (int)window.windowResolution.x, (int)window.windowResolution.y,
 				NULL, NULL, window.windowInstance, this);
 		}
 

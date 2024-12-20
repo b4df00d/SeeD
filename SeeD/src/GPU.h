@@ -179,7 +179,7 @@ struct Fence
 struct CommandBuffer
 {
     // everything is a graphic command, why no compute list ?
-    ID3D12GraphicsCommandList10* cmd = NULL;
+    ID3D12GraphicsCommandList7* cmd = NULL;
     ID3D12CommandAllocator* cmdAlloc = NULL;
     ID3D12CommandQueue* queue = NULL;
     Fence passEnd;
@@ -235,7 +235,7 @@ struct DescriptorHeap
     Slots dsvDescriptorHeapSlots;
     int dsvdescriptorIncrementSize;
 
-    void On(ID3D12Device14* device)
+    void On(ID3D12Device10* device)
     {
         {
             D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
@@ -355,7 +355,7 @@ public:
     static GPU* instance;
     IDXGIFactory4* dxgiFactory{};
     IDXGIAdapter3* adapter{};
-    ID3D12Device14* device{};
+    ID3D12Device10* device{};
 
     struct Features
     {
