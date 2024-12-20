@@ -1,0 +1,18 @@
+# ninja log v6
+3	80	7539261250814825	CMakeFiles/meshoptimizer.dir/src/allocator.cpp.obj	a1854b3dce23ed67
+16	100	7539261250940779	CMakeFiles/meshoptimizer.dir/src/quantization.cpp.obj	f750f3ab65aa2c24
+24	123	7539261251021828	CMakeFiles/meshoptimizer.dir/src/vcacheanalyzer.cpp.obj	15eaa0ac962ec672
+35	125	7539261251128385	CMakeFiles/meshoptimizer.dir/src/vfetchoptimizer.cpp.obj	aa19c76af0efda95
+22	137	7539261251001793	CMakeFiles/meshoptimizer.dir/src/stripifier.cpp.obj	65d9ca019ce1acda
+33	138	7539261251108378	CMakeFiles/meshoptimizer.dir/src/vfetchanalyzer.cpp.obj	71cdb7417b214912
+14	145	7539261250910772	CMakeFiles/meshoptimizer.dir/src/overdrawoptimizer.cpp.obj	b05f49f221172e5a
+12	146	7539261250889866	CMakeFiles/meshoptimizer.dir/src/overdrawanalyzer.cpp.obj	c900304bb7c22a09
+8	148	7539261250854859	CMakeFiles/meshoptimizer.dir/src/indexcodec.cpp.obj	2fc12c57020c3de7
+10	152	7539261250874823	CMakeFiles/meshoptimizer.dir/src/indexgenerator.cpp.obj	d919b4662a5a17c2
+20	154	7539261250980775	CMakeFiles/meshoptimizer.dir/src/spatialorder.cpp.obj	118c1c1be7250c50
+26	157	7539261251041806	CMakeFiles/meshoptimizer.dir/src/vcacheoptimizer.cpp.obj	9a2afeff08b163f4
+6	167	7539261250834823	CMakeFiles/meshoptimizer.dir/src/clusterizer.cpp.obj	2a78cc9f22a1eb01
+31	171	7539261251086855	CMakeFiles/meshoptimizer.dir/src/vertexfilter.cpp.obj	5627c36d447bcde3
+29	173	7539261251061795	CMakeFiles/meshoptimizer.dir/src/vertexcodec.cpp.obj	872bb97ae0ad5203
+18	215	7539261250960777	CMakeFiles/meshoptimizer.dir/src/simplifier.cpp.obj	8b7dc3b330d89650
+215	240	7539261252929507	meshoptimizer.lib	20330930662e6ab1

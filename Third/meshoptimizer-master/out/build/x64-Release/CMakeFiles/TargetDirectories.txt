@@ -1,0 +1,6 @@
+G:/Work/Dev/SeeD15/Third/meshoptimizer-master/out/build/x64-Release/CMakeFiles/meshoptimizer.dir
+G:/Work/Dev/SeeD15/Third/meshoptimizer-master/out/build/x64-Release/CMakeFiles/edit_cache.dir
+G:/Work/Dev/SeeD15/Third/meshoptimizer-master/out/build/x64-Release/CMakeFiles/rebuild_cache.dir
+G:/Work/Dev/SeeD15/Third/meshoptimizer-master/out/build/x64-Release/CMakeFiles/list_install_components.dir
+G:/Work/Dev/SeeD15/Third/meshoptimizer-master/out/build/x64-Release/CMakeFiles/install.dir
+G:/Work/Dev/SeeD15/Third/meshoptimizer-master/out/build/x64-Release/CMakeFiles/install/local.dir
