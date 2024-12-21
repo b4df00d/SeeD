@@ -208,7 +208,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     window.usevSync = false;
     window.fullScreen = false;
     window.windowInstance = hInstance;
-    window.windowResolution = int2(1600, 900);
+    window.windowResolution = uint2(1600, 900);
     //window.windowResolution *= 2.f;
 
     Engine engine;

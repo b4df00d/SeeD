@@ -55,19 +55,18 @@ public:
 
     struct WindowInformation
     {
-        int2 windowResolution;
-
-        HINSTANCE windowInstance;
-        HWND windowHandle;
-        LPCWSTR windowName;
-		bool windowResized;
+		HINSTANCE windowInstance{};
+		HWND windowHandle{};
+		LPCWSTR windowName{};
 
         bool fullScreen;
         bool usevSync;
+		bool windowResized;
 
         char dropFile[256] = "";
 
-        float3 windowPos;
+        uint2 windowResolution;
+        int2 windowPos;
     };
 
     struct Keys
@@ -193,8 +192,8 @@ public:
 
 		WINDOWPLACEMENT plcmt;
 		GetWindowPlacement(hwnd, &plcmt);
-		window.windowPos.x = (float)plcmt.rcNormalPosition.left;
-		window.windowPos.y = (float)plcmt.rcNormalPosition.top;
+		window.windowPos.x = (int)plcmt.rcNormalPosition.left;
+		window.windowPos.y = (int)plcmt.rcNormalPosition.top;
 
 		if (pThis->imgGUIProc != nullptr && pThis->imgGUIProc(hwnd, umessage, wparam, lparam))
 			return 1;
@@ -241,15 +240,18 @@ public:
 
 		case WM_SIZE:
 		{
-			RECT r;
-			::GetClientRect(window.windowHandle, &r);
-			if (r.right > 0)
+			if (window.windowHandle != nullptr)
 			{
-				if (window.windowResolution.x != r.right || window.windowResolution.y != r.bottom)
+				RECT r;
+				::GetClientRect(window.windowHandle, &r);
+				if (r.left == 0 && r.left < r.right)
 				{
-					window.windowResolution.x = (float)r.right;
-					window.windowResolution.y = (float)r.bottom;
-					window.windowResized = true;
+					if (window.windowResolution.x != r.right || window.windowResolution.y != r.bottom)
+					{
+						window.windowResolution.x = (float)r.right;
+						window.windowResolution.y = (float)r.bottom;
+						window.windowResized = true;
+					}
 				}
 			}
 			break;
@@ -339,7 +341,8 @@ public:
 
 		WNDCLASSEX wc;
 		//DEVMODE dmScreenSettings;
-		int2 windowPosition, screenSize;
+		int2 windowPosition;
+		uint2 screenSize;
 
 		window.windowName = L"SeeD";
 
@@ -364,7 +367,7 @@ public:
 
 		if (window.fullScreen)
 		{
-			window.windowResolution = int2(screenSize.x, screenSize.y);
+			window.windowResolution = uint2(screenSize.x, screenSize.y);
 			if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
 				std::cout << "SetProcessDpiAwarenessContext failed : ";
 			/*
@@ -417,17 +420,13 @@ public:
 		}
 		else
 		{
-			float2 pos = (float2((float)screenSize.x, (float)screenSize.y) - float2((float)window.windowResolution.x, (float)window.windowResolution.y)) / 2.0f;
-			windowPosition = int2((int)pos.x, (int)pos.y);
-
+			
 			int px = (float)screenSize.x - (float)window.windowResolution.x * 0.5f;
 			int py = (float)screenSize.y - (float)window.windowResolution.y * 0.5f;
+			windowPosition = int2(px, py);
 			int sx = (int)window.windowResolution.x;
 			int sy = (int)window.windowResolution.y;
-			sx = 1600;
-			sy = 900;
-			HINSTANCE instance = window.windowInstance;
-			HWND handle = window.windowHandle;
+
 			window.windowHandle = CreateWindowEx(WS_EX_APPWINDOW | WS_EX_ACCEPTFILES,
 				window.windowName, window.windowName,
 				//WS_POPUP
@@ -442,9 +441,9 @@ public:
 			//::GetClientRect(window.windowHandle, &r); is fucked up in release, why ?!
 			*/
 
-			RECT r;
+			RECT r{};
 			::GetClientRect(window.windowHandle, &r);
-			window.windowResolution += int2((int)window.windowResolution.x - r.right, (int)window.windowResolution.y - r.bottom);
+			window.windowResolution += uint2((int)window.windowResolution.x - r.right, (int)window.windowResolution.y - r.bottom);
 
 			if (window.windowResolution.x <= 0 || window.windowResolution.y <= 0)
 				IOs::Log("bad resolution {} {}", (int)window.windowResolution.x, (int)window.windowResolution.y);
@@ -469,13 +468,6 @@ public:
 		SetForegroundWindow(window.windowHandle);
 		SetFocus(window.windowHandle);
 		UpdateWindow(window.windowHandle);
-
-		RECT r;
-		::GetClientRect(window.windowHandle, &r);
-		window.windowResolution = int2(r.right, r.bottom);
-
-		if (window.windowResolution.x <= 0 || window.windowResolution.y <= 0)
-			IOs::Log("bad resolution {} {}", (int)window.windowResolution.x, (int)window.windowResolution.y);
 
 		instance = this;
 		return;

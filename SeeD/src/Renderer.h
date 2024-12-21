@@ -295,7 +295,7 @@ class View
 public:
     PerFrame<ViewWorld> viewWorld;
     CullingContext cullingContext;
-    int2 resolution;
+    uint2 resolution;
 
     virtual void On(IOs::WindowInformation& window) = 0;
     virtual void Off()
