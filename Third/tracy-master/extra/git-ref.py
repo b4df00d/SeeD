@@ -1,4 +1,4 @@
-#!/bin/env python3
+# py
 
 import filecmp
 import subprocess

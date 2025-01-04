@@ -421,8 +421,8 @@ public:
 		else
 		{
 			
-			int px = (float)screenSize.x - (float)window.windowResolution.x * 0.5f;
-			int py = (float)screenSize.y - (float)window.windowResolution.y * 0.5f;
+			int px = ((float)screenSize.x - (float)window.windowResolution.x) * 0.5f;
+			int py = ((float)screenSize.y - (float)window.windowResolution.y) * 0.5f;
 			windowPosition = int2(px, py);
 			int sx = (int)window.windowResolution.x;
 			int sy = (int)window.windowResolution.y;

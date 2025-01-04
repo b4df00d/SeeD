@@ -2,6 +2,7 @@
 #include <bitset>
 #include <concepts>
 #include <type_traits>
+#include <filesystem>
 
 #define SUBTASKWORLD(system) tf::Task system##Task = subflow.emplace([this, &system](){system->Update(this);}).name(#system)
 
@@ -40,6 +41,8 @@ public:
     void On()
     {
         instance = this;
+        namespace fs = std::filesystem;
+        fs::create_directories("..\\Assets");
         Load();
     }
 
@@ -563,9 +566,9 @@ namespace Systems
 
                 uint shaderCount = 10;
                 uint meshCount = 10;
-                uint materialCount = 100;
+                uint materialCount = 10;
                 uint textureCount = 10;
-                uint instanceCount = 10000;
+                uint instanceCount = 10;
 
                 std::vector<World::Entity> shaderEnt;
                 std::vector<World::Entity> meshEnt;
@@ -586,7 +589,13 @@ namespace Systems
                 {
                     World::Entity ent;
                     ent.Make(Components::Mesh::mask);
-                    ent.Get<Components::Mesh>().id = AssetLibrary::instance->Add("..\\Assets\\mesh.mesh");
+                    uint count = 0;
+                    for (auto& item : AssetLibrary::instance->map)
+                    {
+                        ent.Get<Components::Mesh>().id = item.first;//AssetLibrary::instance->Add("..\\Assets\\mesh.mesh");
+                        if (count++ > 6 && Rand01() > 0.5f)
+                            break;
+                    }
                     meshEnt[i] = ent;
                 }
 

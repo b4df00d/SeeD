@@ -176,6 +176,8 @@ struct MeshStorage
 
     std::recursive_mutex lock;
 
+    Map<assetID, Mesh, HLSL::Mesh> meshes;
+
     void On()
     {
         meshlets.CreateBuffer<HLSL::Meshlet>(1000, "meshlets");
@@ -190,44 +192,24 @@ struct MeshStorage
         indices.Release();
     }
 
-    Mesh Add(MeshLoader::Mesh mesh)
-    {
-        Mesh newMesh;
-        lock.lock();
-        newMesh.meshletCount = mesh.meshlets.size();
-        newMesh.meshletOffset = nextMeshletOffset;
-        nextMeshletOffset += newMesh.meshletCount;
-        lock.unlock();
-        return newMesh;
-    }
-
-    Mesh Load(CommandBuffer& commandBuffer)
+    Mesh Load(MeshLoader::MeshData& meshData, CommandBuffer& commandBuffer)
     {
         ZoneScoped;
+
+        Mesh newMesh;
+        lock.lock();
+        newMesh.meshletCount = meshData.meshlets.size();
+        newMesh.meshletOffset = nextMeshletOffset;
+        nextMeshletOffset += newMesh.meshletCount;
+
         HLSL::Meshlet newMeshlets[10];
         meshlets.Upload(newMeshlets, sizeof(newMeshlets), commandBuffer);
+        vertices.Upload(meshData.vertices.data(), meshData.vertices.size() * sizeof(meshData.vertices[0]), commandBuffer);
+        indices.Upload(meshData.meshlet_vertices.data(), meshData.meshlet_vertices.size() * sizeof(meshData.meshlet_vertices[0]), commandBuffer);
+        indices.Upload(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size() * sizeof(meshData.meshlet_triangles[0]), commandBuffer);
 
-        HLSL::Vertex newVertices[8] =
-        {
-            {float3(-0.2, 0.2, 0.2), float3(-0.2, 0.2, 0.2), float2(0,0)}, 
-            {float3(0.2, 0.2, 0.2), float3(0.2, 0.2, 0.2), float2(0,0)},
-            {float3(-0.2, 0.2, 0.8), float3(0,0,0), float2(0,0)},
-            {float3(0.2, 0.2, 0.8), float3(0,0,0), float2(0,0)},
-            {float3(0.2, -0.2, 0.2), float3(0,0,0), float2(0,0)},
-            {float3(0.2, -0.2, 0.2), float3(0,0,0), float2(0,0)},
-            {float3(-0.2, -0.2, 0.2), float3(0,0,0), float2(0,0)},
-            {float3(-0.2, -0.2, 0.8), float3(0,0,0), float2(0,0)}
-        };
-        vertices.Upload(newVertices, sizeof(newVertices), commandBuffer);
-
-        HLSL::Index newIndices[12] =
-        {
-            uint3(0, 1, 2), uint3(3, 1, 2), uint3(3, 4, 5), uint3(6, 4, 5), uint3(6, 7, 8), uint3(9, 7, 8),
-            uint3(10, 11, 2), uint3(1, 11, 2), uint3(10, 4, 7), uint3(3, 6, 2), uint3(8, 2, 6), uint3(5, 2, 9)
-        };
-        indices.Upload(newIndices, sizeof(newIndices), commandBuffer);
-
-        return Mesh();
+        lock.unlock();
+        return newMesh;
     }
 };
 
@@ -327,45 +309,7 @@ public:
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            D3D12_COMMAND_LIST_TYPE type = asyncCompute ? D3D12_COMMAND_LIST_TYPE_COMPUTE : D3D12_COMMAND_LIST_TYPE_DIRECT;
-            commandBuffer.Get(i).queue = asyncCompute ? GPU::instance->computeQueue : GPU::instance->graphicQueue;
-            HRESULT hr = GPU::instance->device->CreateCommandAllocator(type, IID_PPV_ARGS(&commandBuffer.Get(i).cmdAlloc));
-            if (FAILED(hr))
-            {
-                GPU::PrintDeviceRemovedReason(hr);
-            }
-            std::wstring wname = name.ToWString();
-            hr = commandBuffer.Get(i).cmdAlloc->SetName(wname.c_str());
-            if (FAILED(hr))
-            {
-                GPU::PrintDeviceRemovedReason(hr);
-            }
-            hr = GPU::instance->device->CreateCommandList(0, type, commandBuffer.Get(i).cmdAlloc, NULL, IID_PPV_ARGS(&commandBuffer.Get(i).cmd));
-            if (FAILED(hr))
-            {
-                GPU::PrintDeviceRemovedReason(hr);
-            }
-            std::wstring wname2 = name.ToWString();
-            hr = commandBuffer.Get(i).cmd->SetName(wname2.c_str());
-            if (FAILED(hr))
-            {
-                GPU::PrintDeviceRemovedReason(hr);
-            }
-            hr = commandBuffer.Get(i).cmd->Close();
-            if (FAILED(hr))
-            {
-                GPU::PrintDeviceRemovedReason(hr);
-            }
-            hr = GPU::instance->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&commandBuffer.Get(i).passEnd.fence));
-            if (FAILED(hr))
-            {
-                GPU::PrintDeviceRemovedReason(hr);
-            }
-            commandBuffer.Get(i).passEnd.fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-            if (commandBuffer.Get(i).passEnd.fenceEvent == nullptr)
-            {
-                GPU::PrintDeviceRemovedReason(hr);
-            }
+            commandBuffer.Get(i).On(asyncCompute, name);
         }
     }
 
@@ -373,9 +317,7 @@ public:
     {
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            commandBuffer.Get(i).cmd->Release();
-            commandBuffer.Get(i).cmdAlloc->Release();
-            commandBuffer.Get(i).passEnd.fence->Release();
+            commandBuffer.Get(i).Off();
         }
     }
 
@@ -434,6 +376,8 @@ public:
 class Upload : public Pass
 {
 public:
+    PerFrame<CommandBuffer> updloadCommandBuffer;
+
     void Setup(View* view) override
     {
         ZoneScoped;
@@ -442,7 +386,7 @@ public:
     {
         ZoneScoped;
         Open();
-        GlobalResources::instance->meshStorage.Load(commandBuffer.Get());
+        //GlobalResources::instance->meshStorage.Load(commandBuffer.Get());
         Close();
     }
 };
@@ -859,8 +803,8 @@ public:
                     Components::WorldMatrix& transformCmp = queryResult[i + subQuery].Get<Components::WorldMatrix>();
 
                     HLSL::Instance& instance = localInstances[instanceCount];
-                    //instance.meshIndex = meshIndex;
-                    //instance.materialIndex = materialIndex;
+                    instance.meshIndex = meshIndex;
+                    instance.materialIndex = materialIndex;
                     instance.worldMatrix = transformCmp.matrix;
 
                     // if in range (depending on distance and BC size)
@@ -1155,7 +1099,7 @@ public:
         auto mainViewEndTask = mainView.Schedule(world, subflow);
         auto editorViewEndTask = editorView.Schedule(world, subflow);
 
-        SUBTASKPASS(upload);
+        tf::Task uploadTask = ScheduleLoading(subflow);
         SUBTASKRENDERER(ExecuteFrame);
         SUBTASKRENDERER(WaitFrame);
         SUBTASKRENDERER(PresentFrame);
@@ -1165,10 +1109,11 @@ public:
         WaitFrame.precede(PresentFrame);
     }
 
-    void ScheduleLoading(tf::Subflow& subflow)
+    tf::Task ScheduleLoading(tf::Subflow& subflow)
     {
         ZoneScoped;
         uint loadingLeft = GlobalResources::instance->shaders.maxLoading;
+        SUBTASKPASS(upload);
         for (auto& item : GlobalResources::instance->shaders)
         {
             auto& shader = GlobalResources::instance->shaders.GetData(item.first);
@@ -1177,6 +1122,7 @@ public:
                 assetID i = item.first;
                 // load shader
                 tf::Task pass = subflow.emplace([this, i]() {this->LoadShaders(i); }).name("LoadShaders");
+                uploadTask.succeed(pass);
                 loadingLeft--;
             }
             if (loadingLeft == 0)
@@ -1185,12 +1131,12 @@ public:
         loadingLeft = GlobalResources::instance->meshes.maxLoading;
         for (auto& item : GlobalResources::instance->meshes)
         {
-            auto& shader = GlobalResources::instance->meshes.GetData(item.first);
             if (!GlobalResources::instance->meshes.GetLoaded(item.second))
             {
                 assetID i = item.first;
                 // load mesh
                 tf::Task pass = subflow.emplace([this, i]() {this->LoadMeshes(i); }).name("LoadMeshes");
+                uploadTask.succeed(pass);
                 loadingLeft--;
             }
             if (loadingLeft == 0)
@@ -1203,11 +1149,14 @@ public:
             {
                 // load texture
                 tf::Task pass = subflow.emplace([this, i]() {this->LoadTextures(i); }).name("LoadTextures");
+                uploadTask.succeed(pass);
                 loadingLeft--;
             }
             if (loadingLeft == 0)
                 break;
         }
+
+        return uploadTask;
     }
 
     // do that in backgroud task ?
@@ -1233,10 +1182,12 @@ public:
     void LoadMeshes(assetID i)
     {
         ZoneScoped;
-        MeshLoader::Mesh mesh = MeshLoader::instance->Read(AssetLibrary::instance->Get(i));
+        MeshLoader::MeshData meshData = MeshLoader::instance->Read(AssetLibrary::instance->Get(i));
+        if (meshData.meshlets.size() == 0)
+            return;
+        Mesh mesh = GlobalResources::instance->meshStorage.Load(meshData, upload.commandBuffer.Get());
         GlobalResources::instance->meshes.lock.lock();
-        Mesh mesh2 = GlobalResources::instance->meshStorage.Add(mesh);
-        GlobalResources::instance->meshes.GetData(i) = mesh2;
+        GlobalResources::instance->meshes.GetData(i) = mesh;
         GlobalResources::instance->meshes.SetLoaded(i, true);
         GlobalResources::instance->meshes.lock.unlock();
     }

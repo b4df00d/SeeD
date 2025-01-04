@@ -188,6 +188,8 @@ struct CommandBuffer
     bool open;
 
     void Set(Shader& shader);
+    void On(bool asyncCompute, String name);
+    void Off();
 };
 
 class Resource
@@ -212,8 +214,9 @@ public:
     void BackBuffer(ID3D12Resource* backBuffer);
     void Release();
     ID3D12Resource* GetResource();
-    void Upload(void* data, uint dataSize, CommandBuffer& cb);
+    void Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset = 0);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
+    void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter, ID3D12Resource* resource);
     static void CleanUploadResources(bool everything = false);
 
     static std::mutex lock;
@@ -1028,7 +1031,7 @@ ID3D12Resource* Resource::GetResource()
     return nullptr;
 }
 
-void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb)
+void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset)
 {
     //ZoneScopedN("Resource::Upload");
     D3D12MA::Allocation* uploadAllocation;
@@ -1069,14 +1072,17 @@ void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb)
     memcpy(buf, data, dataSize);
     uploadAllocation->GetResource()->Unmap(0, nullptr);
 
-    Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    cb.cmd->CopyResource(allocation->GetResource(), uploadAllocation->GetResource());
-    Transition(cb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+    cb.cmd->CopyBufferRegion(allocation->GetResource(), 0 , uploadAllocation->GetResource(), 0, dataSize);
 }
 
 void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter)
 {
-    D3D12_RESOURCE_BARRIER trans{ D3D12_RESOURCE_BARRIER_TYPE_TRANSITION , D3D12_RESOURCE_BARRIER_FLAG_NONE , {GetResource(), 0, stateBefore, stateAfter} };
+    Transition(cb, stateBefore, stateAfter, GetResource());
+}
+
+void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter, ID3D12Resource* resource)
+{
+    D3D12_RESOURCE_BARRIER trans{ D3D12_RESOURCE_BARRIER_TYPE_TRANSITION , D3D12_RESOURCE_BARRIER_FLAG_NONE , {resource, 0, stateBefore, stateAfter} };
     cb.cmd->ResourceBarrier(1, &trans);
 }
 
@@ -1119,6 +1125,54 @@ void CommandBuffer::Set(Shader& shader)
     cmd->SetGraphicsRootSignature(shader.rootSignature);
     cmd->SetPipelineState(shader.pso);
     //cmd->SetGraphicsRootDescriptorTable();
+}
+void CommandBuffer::On(bool asyncCompute, String name)
+{
+    D3D12_COMMAND_LIST_TYPE type = asyncCompute ? D3D12_COMMAND_LIST_TYPE_COMPUTE : D3D12_COMMAND_LIST_TYPE_DIRECT;
+    queue = asyncCompute ? GPU::instance->computeQueue : GPU::instance->graphicQueue;
+    HRESULT hr = GPU::instance->device->CreateCommandAllocator(type, IID_PPV_ARGS(&cmdAlloc));
+    if (FAILED(hr))
+    {
+        GPU::PrintDeviceRemovedReason(hr);
+    }
+    std::wstring wname = name.ToWString();
+    hr = cmdAlloc->SetName(wname.c_str());
+    if (FAILED(hr))
+    {
+        GPU::PrintDeviceRemovedReason(hr);
+    }
+    hr = GPU::instance->device->CreateCommandList(0, type, cmdAlloc, NULL, IID_PPV_ARGS(&cmd));
+    if (FAILED(hr))
+    {
+        GPU::PrintDeviceRemovedReason(hr);
+    }
+    std::wstring wname2 = name.ToWString();
+    hr = cmd->SetName(wname2.c_str());
+    if (FAILED(hr))
+    {
+        GPU::PrintDeviceRemovedReason(hr);
+    }
+    hr = cmd->Close();
+    if (FAILED(hr))
+    {
+        GPU::PrintDeviceRemovedReason(hr);
+    }
+    hr = GPU::instance->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&passEnd.fence));
+    if (FAILED(hr))
+    {
+        GPU::PrintDeviceRemovedReason(hr);
+    }
+    passEnd.fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (passEnd.fenceEvent == nullptr)
+    {
+        GPU::PrintDeviceRemovedReason(hr);
+    }
+}
+void CommandBuffer::Off()
+{
+    cmd->Release();
+    cmdAlloc->Release();
+    passEnd.fence->Release();
 }
 // end of definitions of CommandBuffer
 

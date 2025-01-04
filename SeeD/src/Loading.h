@@ -52,11 +52,12 @@ public:
         unsigned int triangle_count;
     };
 
-    struct Mesh
+    struct MeshData
     {
         std::vector<Meshlet> meshlets;
         std::vector<unsigned int> meshlet_vertices;
         std::vector<unsigned char> meshlet_triangles;
+        std::vector<Vertex> vertices;
     };
 
 	void On()
@@ -71,10 +72,10 @@ public:
         instance = nullptr;
 	}
 
-    Mesh Read(String path)
+    MeshData Read(String path)
     {
 		ZoneScoped;
-        Mesh mesh;
+        MeshData mesh;
 
         std::ifstream fin(path, std::ios::binary);
         if (fin.is_open())
@@ -83,6 +84,7 @@ public:
             READ_VECTOR(mesh.meshlets);
             READ_VECTOR(mesh.meshlet_triangles);
             READ_VECTOR(mesh.meshlet_vertices);
+            READ_VECTOR(mesh.vertices);
             fin.close();
         }
 
@@ -90,7 +92,7 @@ public:
     }
 
 
-    assetID Write(Mesh& mesh, String name)
+    assetID Write(MeshData& mesh, String name)
     {
         ZoneScoped;
         String path;
@@ -105,6 +107,7 @@ public:
             WRITE_VECTOR(mesh.meshlets);
             WRITE_VECTOR(mesh.meshlet_triangles);
             WRITE_VECTOR(mesh.meshlet_vertices);
+            WRITE_VECTOR(mesh.vertices);
             fout.close();
         }
 
@@ -112,7 +115,7 @@ public:
     }
 
     // also DirectXMesh can do meshlets https://github.com/microsoft/DirectXMesh
-    Mesh Process(MeshOriginal& originalMesh)
+    MeshData Process(MeshOriginal& originalMesh)
     {
 		ZoneScoped;
         const size_t max_vertices = 64;
@@ -143,10 +146,11 @@ public:
             meshlets[i] = *(Meshlet*)&m;
         }
 
-        Mesh optimizedMesh;
+        MeshData optimizedMesh;
         optimizedMesh.meshlets = meshlets;
         optimizedMesh.meshlet_vertices = meshlet_vertices;
         optimizedMesh.meshlet_triangles = meshlet_triangles;
+        optimizedMesh.vertices = originalMesh.vertices;
 
         return optimizedMesh;
 
@@ -289,7 +293,7 @@ public:
                     }
                 }
 
-                MeshLoader::Mesh mesh = MeshLoader::instance->Process(originalMesh);
+                MeshLoader::MeshData mesh = MeshLoader::instance->Process(originalMesh);
                 MeshLoader::instance->Write(mesh, m->mName.C_Str());
             }
         }

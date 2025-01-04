@@ -116,7 +116,6 @@ public:
             TASKWITHSUBFLOW(ScheduleWorld);
             TASKWITHSUBFLOW(ScheduleEditor);
             TASKWITHSUBFLOW(ScheduleRenderer);
-            tf::Task ScheduleRendererLoading = taskflow.emplace([this](tf::Subflow& subflow) {this->renderer.ScheduleLoading(subflow); }).name("ScheduleLoading");
 
             UpdateWindow.precede(ScheduleInputs);
             ScheduleInputs.precede(ScheduleWorld);
