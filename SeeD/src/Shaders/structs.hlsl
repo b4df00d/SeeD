@@ -14,9 +14,11 @@ namespace HLSL
 {
     struct CommonResourcesIndices
     {
+        uint meshesHeapIndex;
         uint meshletsHeapIndex;
+        uint meshletVerticesHeapIndex;
+        uint meshletTrianglesHeapIndex;
         uint verticesHeapIndex;
-        uint indicesHeapIndex;
         uint camerasHeapIndex;
         uint lightsHeapIndex;
         uint materialsHeapIndex;
@@ -29,6 +31,7 @@ namespace HLSL
         uint id;
     };
     
+    // must be similar to MeshLoader::Vertex
     struct Vertex
     {
         float3 pos;
@@ -36,11 +39,13 @@ namespace HLSL
         float2 uv;
     };
     
-    struct Index
+    // must be similar to MeshLoader::Triangles (unsigned char)
+    struct triangleIndices
     {
-        uint3 index;
+        uint a, b, c;
     };
     
+    // must be similar to MeshLoader::Mehslet
     struct Meshlet
     {
         uint vertexOffset;

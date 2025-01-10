@@ -568,7 +568,7 @@ namespace Systems
                 uint meshCount = 10;
                 uint materialCount = 10;
                 uint textureCount = 10;
-                uint instanceCount = 10;
+                uint instanceCount = 100000;
 
                 std::vector<World::Entity> shaderEnt;
                 std::vector<World::Entity> meshEnt;
@@ -593,7 +593,7 @@ namespace Systems
                     for (auto& item : AssetLibrary::instance->map)
                     {
                         ent.Get<Components::Mesh>().id = item.first;//AssetLibrary::instance->Add("..\\Assets\\mesh.mesh");
-                        if (count++ > 6 && Rand01() > 0.5f)
+                        if (count++ > 6 && Rand01() > 0.85f)
                             break;
                     }
                     meshEnt[i] = ent;

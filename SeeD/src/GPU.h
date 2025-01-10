@@ -636,6 +636,7 @@ void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, String name)
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
+    allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
     allResources.push_back(allocation);
     allResourcesNames.push_back(name);
@@ -698,6 +699,7 @@ void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String n
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
+    allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
     allResources.push_back(allocation);
     allResourcesNames.push_back(name);
@@ -776,6 +778,7 @@ void Resource::CreateDepthTarget(uint2 resolution, String name)
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
+    allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
     allResources.push_back(allocation);
     allResourcesNames.push_back(name);
@@ -863,6 +866,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
+    allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
     allResources.push_back(allocation);
     allResourcesNames.push_back(name.c_str());
@@ -873,12 +877,26 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
 
         auto desc = GetResource()->GetDesc();
         D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
-        SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        SRVDesc.Buffer = {};
-        SRVDesc.Buffer.FirstElement = 0;
-        SRVDesc.Buffer.NumElements = (UINT)(desc.Width / stride);
-        SRVDesc.Buffer.StructureByteStride = (UINT)stride;
-        SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        if (stride > 1)
+        {
+            SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            SRVDesc.Buffer = {};
+            SRVDesc.Buffer.FirstElement = 0;
+            SRVDesc.Buffer.NumElements = (UINT)(desc.Width / stride);
+            SRVDesc.Buffer.StructureByteStride = (UINT)stride;
+            SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        }
+        else
+        {
+            SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            SRVDesc.Buffer = {};
+            SRVDesc.Buffer.FirstElement = 0;
+            SRVDesc.Buffer.NumElements = (UINT)(desc.Width / 4);
+            SRVDesc.Buffer.StructureByteStride = 0;
+            SRVDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+            SRVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+            SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        }
         GPU::instance->device->CreateShaderResourceView(GetResource(), &SRVDesc, handle);
     }
 
@@ -888,11 +906,24 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
 
         auto desc = GetResource()->GetDesc();
         D3D12_UNORDERED_ACCESS_VIEW_DESC UAVDesc = {};
-        UAVDesc.Buffer = {};
-        UAVDesc.Buffer.FirstElement = 0;
-        UAVDesc.Buffer.NumElements = (UINT)(desc.Width / stride);
-        UAVDesc.Buffer.StructureByteStride = (UINT)stride;
-        UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        if (stride >= 1)
+        {
+            UAVDesc.Buffer = {};
+            UAVDesc.Buffer.FirstElement = 0;
+            UAVDesc.Buffer.NumElements = (UINT)(desc.Width / stride);
+            UAVDesc.Buffer.StructureByteStride = (UINT)stride;
+            UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        }
+        else
+        {
+            UAVDesc.Buffer = {};
+            UAVDesc.Buffer.FirstElement = 0;
+            UAVDesc.Buffer.NumElements = (UINT)(desc.Width / 4);
+            UAVDesc.Buffer.StructureByteStride = 0;
+            UAVDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            UAVDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+            UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        }
         GPU::instance->device->CreateUnorderedAccessView(GetResource(), nullptr, &UAVDesc, handle);
     }
 }
@@ -1072,7 +1103,7 @@ void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset)
     memcpy(buf, data, dataSize);
     uploadAllocation->GetResource()->Unmap(0, nullptr);
 
-    cb.cmd->CopyBufferRegion(allocation->GetResource(), 0 , uploadAllocation->GetResource(), 0, dataSize);
+    cb.cmd->CopyBufferRegion(allocation->GetResource(), offset, uploadAllocation->GetResource(), 0, dataSize);
 }
 
 void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter)

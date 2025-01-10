@@ -3,7 +3,6 @@
 #include <map>
 #include "Shaders/structs.hlsl"
 
-
 static constexpr uint invalidMapIndex = UINT_MAX;
 // is this is thread safe only because we allocate the max number of stuff we will find before the MT part
 // with the reserve in the lock this should now be ok ?
@@ -123,7 +122,6 @@ public:
     auto end() { return keys.end(); }
 };
 
-
 struct BLAS
 {
 
@@ -164,12 +162,14 @@ struct Material
 
 struct MeshStorage
 {
-    uint nextMeshletOffset;
+    uint nextMeshletOffset = 0;
     Resource meshlets;
-    uint nextVertexOffset;
+    uint nextMeshletVertexOffset = 0;
+    Resource meshletVertices;
+    uint nextMeshletTriangleOffset = 0;
+    Resource meshletTriangles;
+    uint nextVertexOffset = 0;
     Resource vertices;
-    uint nextIndexOffset;
-    Resource indices;
 
     Resource blasVertices;
     Resource blasIndicies;
@@ -178,18 +178,25 @@ struct MeshStorage
 
     Map<assetID, Mesh, HLSL::Mesh> meshes;
 
+    uint meshletMaxCount = 10000;
+    uint meshletVertexMaxCount = meshletMaxCount * 64;
+    uint meshletTrianglesMaxCount = meshletMaxCount * 124;
+    uint vertexMaxCount = meshletVertexMaxCount;
+
     void On()
     {
-        meshlets.CreateBuffer<HLSL::Meshlet>(1000, "meshlets");
-        vertices.CreateBuffer<HLSL::Vertex>(1000, "vertices");
-        indices.CreateBuffer<HLSL::Index>(1000, "indices");
+        meshlets.CreateBuffer<MeshLoader::Meshlet>(meshletMaxCount, "meshlets");
+        meshletVertices.CreateBuffer<unsigned int>(meshletVertexMaxCount, "meshlet vertices");
+        meshletTriangles.CreateBuffer<unsigned char>(meshletTrianglesMaxCount, "meshlet triangles");
+        vertices.CreateBuffer<MeshLoader::Vertex>(vertexMaxCount, "vertices");
     }
 
     void Off()
     {
         meshlets.Release();
+        meshletVertices.Release();
+        meshletTriangles.Release();
         vertices.Release();
-        indices.Release();
     }
 
     Mesh Load(MeshLoader::MeshData& meshData, CommandBuffer& commandBuffer)
@@ -198,15 +205,36 @@ struct MeshStorage
 
         Mesh newMesh;
         lock.lock();
+
         newMesh.meshletCount = meshData.meshlets.size();
         newMesh.meshletOffset = nextMeshletOffset;
-        nextMeshletOffset += newMesh.meshletCount;
+        for (uint i = 0; i < meshData.meshlets.size(); i++)
+        {
+            meshData.meshlets[i].triangle_offset += nextMeshletTriangleOffset;
+            meshData.meshlets[i].vertex_offset += nextMeshletVertexOffset;
+        }
 
-        HLSL::Meshlet newMeshlets[10];
-        meshlets.Upload(newMeshlets, sizeof(newMeshlets), commandBuffer);
-        vertices.Upload(meshData.vertices.data(), meshData.vertices.size() * sizeof(meshData.vertices[0]), commandBuffer);
-        indices.Upload(meshData.meshlet_vertices.data(), meshData.meshlet_vertices.size() * sizeof(meshData.meshlet_vertices[0]), commandBuffer);
-        indices.Upload(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size() * sizeof(meshData.meshlet_triangles[0]), commandBuffer);
+        if (nextMeshletOffset > meshletMaxCount)
+            IOs::Log("Too much meshlets");
+        meshlets.Upload(meshData.meshlets.data(), meshData.meshlets.size() * sizeof(meshData.meshlets[0]), commandBuffer, nextMeshletOffset * sizeof(meshData.meshlets[0]));
+        nextMeshletOffset += meshData.meshlets.size();
+
+        if (nextMeshletVertexOffset > meshletVertexMaxCount)
+            IOs::Log("Too much meshlets vertices");
+        meshletVertices.Upload(meshData.meshlet_vertices.data(), meshData.meshlet_vertices.size() * sizeof(meshData.meshlet_vertices[0]), commandBuffer, nextMeshletVertexOffset * sizeof(meshData.meshlet_vertices[0]));
+        nextMeshletVertexOffset += meshData.meshlet_vertices.size();
+
+        if (nextMeshletTriangleOffset > meshletTrianglesMaxCount)
+            IOs::Log("Too much meshlets triangles");
+        meshletTriangles.Upload(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size() * sizeof(meshData.meshlet_triangles[0]), commandBuffer, nextMeshletTriangleOffset * sizeof(meshData.meshlet_triangles[0]));
+        nextMeshletTriangleOffset += meshData.meshlet_triangles.size();
+
+        if (nextVertexOffset > vertexMaxCount)
+            IOs::Log("Too much vertices");
+        vertices.Upload(meshData.vertices.data(), meshData.vertices.size() * sizeof(meshData.vertices[0]), commandBuffer, nextVertexOffset * sizeof(meshData.vertices[0]));
+        nextVertexOffset += meshData.vertices.size();
+
+        meshes.Upload();
 
         lock.unlock();
         return newMesh;
@@ -376,7 +404,6 @@ public:
 class Upload : public Pass
 {
 public:
-    PerFrame<CommandBuffer> updloadCommandBuffer;
 
     void Setup(View* view) override
     {
@@ -385,8 +412,7 @@ public:
     void Render(View* view) override
     {
         ZoneScoped;
-        Open();
-        //GlobalResources::instance->meshStorage.Load(commandBuffer.Get());
+        //Open(); // this is open earlier during the scheduling
         Close();
     }
 };
@@ -564,21 +590,25 @@ public:
             commandBuffer->Set(shader);
 
             HLSL::CommonResourcesIndices commonResourcesIndices;
+            commonResourcesIndices.meshesHeapIndex = GlobalResources::instance->meshStorage.meshes.GetResource().srv.offset;
             commonResourcesIndices.meshletsHeapIndex = GlobalResources::instance->meshStorage.meshlets.srv.offset;
+            commonResourcesIndices.meshletVerticesHeapIndex = GlobalResources::instance->meshStorage.meshletVertices.srv.offset;
+            commonResourcesIndices.meshletTrianglesHeapIndex = GlobalResources::instance->meshStorage.meshletTriangles.srv.offset;
             commonResourcesIndices.verticesHeapIndex = GlobalResources::instance->meshStorage.vertices.srv.offset;
-            commonResourcesIndices.indicesHeapIndex = GlobalResources::instance->meshStorage.indices.srv.offset;
             commonResourcesIndices.camerasHeapIndex = view->viewWorld->cameras.gpuData.srv.offset;
             commonResourcesIndices.lightsHeapIndex = view->viewWorld->lights.gpuData.srv.offset;
             commonResourcesIndices.materialsHeapIndex = view->viewWorld->materials.GetResource().srv.offset;
             commonResourcesIndices.instancesHeapIndex = view->viewWorld->instances.gpuData.srv.offset;
             commonResourcesIndices.instancesGPUHeapIndex = view->viewWorld->instancesGPU.gpuData.srv.offset;
-            commandBuffer->cmd->SetGraphicsRoot32BitConstants(0, 8, &commonResourcesIndices, 0);
+            commandBuffer->cmd->SetGraphicsRoot32BitConstants(0, 10, &commonResourcesIndices, 0);
 
             // make a function for setting cameras and global
             uint cameraValues[] = { 0 };
             commandBuffer->cmd->SetGraphicsRoot32BitConstants(1, 1, cameraValues, 0);
 
             auto& instances = view->viewWorld->instances;
+            commandBuffer->cmd->DispatchMesh(instances.Size() / 32, 1, 1);
+            /*
             for (uint i = 0; i < instances.Size(); i++)
             {
                 //make a function
@@ -588,6 +618,7 @@ public:
 
                 commandBuffer->cmd->DispatchMesh(1, 1, 1);
             }
+            */
         }
 
 
@@ -1113,7 +1144,9 @@ public:
     {
         ZoneScoped;
         uint loadingLeft = GlobalResources::instance->shaders.maxLoading;
-        SUBTASKPASS(upload);
+        upload.Open();
+        SUBTASKPASS(upload); // this will be executed after all loading task and will close the cmd
+
         for (auto& item : GlobalResources::instance->shaders)
         {
             auto& shader = GlobalResources::instance->shaders.GetData(item.first);

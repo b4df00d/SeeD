@@ -56,7 +56,7 @@ public:
     {
         std::vector<Meshlet> meshlets;
         std::vector<unsigned int> meshlet_vertices;
-        std::vector<unsigned char> meshlet_triangles;
+        std::vector<unsigned int> meshlet_triangles;
         std::vector<Vertex> vertices;
     };
 
@@ -149,7 +149,11 @@ public:
         MeshData optimizedMesh;
         optimizedMesh.meshlets = meshlets;
         optimizedMesh.meshlet_vertices = meshlet_vertices;
-        optimizedMesh.meshlet_triangles = meshlet_triangles;
+        optimizedMesh.meshlet_triangles.resize(meshlet_triangles.size());
+        for (uint i = 0; i < meshlet_triangles.size(); i++)
+        {
+            optimizedMesh.meshlet_triangles[i] = meshlet_triangles[i];
+        }
         optimizedMesh.vertices = originalMesh.vertices;
 
         return optimizedMesh;
@@ -258,9 +262,9 @@ public:
                 {
                     MeshLoader::Vertex& v = originalMesh.vertices[j];
 
-                    v.px = m->mVertices[j].x;
-                    v.py = m->mVertices[j].y;
-                    v.pz = m->mVertices[j].z;
+                    v.px = m->mVertices[j].x * 1000;
+                    v.py = m->mVertices[j].y * 1000;
+                    v.pz = m->mVertices[j].z * 1000;
                     if (m->HasNormals())
                     {
                         v.nx = m->mNormals[j].x;
@@ -374,10 +378,10 @@ public :
         vArgs.push_back(L"-T");
         vArgs.push_back(typeName.c_str());
         vArgs.push_back(DXC_ARG_ALL_RESOURCES_BOUND);
-        vArgs.push_back(L"-no-warnings");
+        //vArgs.push_back(L"-no-warnings");
 #ifdef _DEBUG
-        vArgs.push_back(L"/Zi");
-        vArgs.push_back(L"/Zss");
+        vArgs.push_back(L"-Zi");
+        vArgs.push_back(L"-Zss");
         vArgs.push_back(L"-Qembed_debug");
         vArgs.push_back(DXC_ARG_DEBUG);
         vArgs.push_back(DXC_ARG_SKIP_OPTIMIZATIONS);
@@ -451,6 +455,19 @@ public :
             }
         }
 
+        /*
+        // Save pdb.
+        IDxcBlob* pPDB = nullptr;
+        IDxcBlobUtf16* pPDBName = nullptr;
+        pResults->GetOutput(DXC_OUT_PDB, IID_PPV_ARGS(&pPDB), &pPDBName);
+        {
+            FILE* fp = NULL;
+            _wfopen_s(&fp, pPDBName->GetStringPointer(), L"wb");
+            fwrite(pPDB->GetBufferPointer(), pPDB->GetBufferSize(), 1, fp);
+            fclose(fp);
+        }
+        */
+
         return shaderBytecode;
     }
 
@@ -516,9 +533,11 @@ public :
 					}
                     else if (tokens[1] == "forward")
                     {
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature);
-                        D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[3], "ps_6_6");
+                        D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader.rootSignature);
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader.rootSignature);
+                        D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6");
                         PipelineStateStream stream;
+                        stream.AS = amplificationShaderBytecode;
                         stream.MS = meshShaderBytecode;
                         stream.PS = forwardShaderBytecode;
                         stream.pRootSignature = shader.rootSignature;

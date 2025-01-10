@@ -244,7 +244,7 @@ public:
 			{
 				RECT r;
 				::GetClientRect(window.windowHandle, &r);
-				if (r.left == 0 && r.left < r.right)
+				if (r.right > 0 && r.right < 4096 && r.left > 0 && r.left < 4096)
 				{
 					if (window.windowResolution.x != r.right || window.windowResolution.y != r.bottom)
 					{
@@ -443,10 +443,11 @@ public:
 
 			RECT r{};
 			::GetClientRect(window.windowHandle, &r);
-			window.windowResolution += uint2((int)window.windowResolution.x - r.right, (int)window.windowResolution.y - r.bottom);
+			uint2 windowResolution = window.windowResolution;
+			windowResolution += uint2((int)window.windowResolution.x - r.right, (int)window.windowResolution.y - r.bottom);
 
-			if (window.windowResolution.x <= 0 || window.windowResolution.y <= 0)
-				IOs::Log("bad resolution {} {}", (int)window.windowResolution.x, (int)window.windowResolution.y);
+			if (windowResolution.x <= 0 || windowResolution.y <= 0)
+				IOs::Log("bad resolution {} {}", (int)windowResolution.x, (int)windowResolution.y);
 
 			DestroyWindow(window.windowHandle);
 
@@ -457,7 +458,7 @@ public:
 				WS_POPUPWINDOW | WS_CAPTION
 				//| WS_VISIBLE
 				,
-				px, py, (int)window.windowResolution.x, (int)window.windowResolution.y,
+				px, py, (int)windowResolution.x, (int)windowResolution.y,
 				NULL, NULL, window.windowInstance, this);
 		}
 

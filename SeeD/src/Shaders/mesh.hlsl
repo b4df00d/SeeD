@@ -1,48 +1,80 @@
 #include "structs.hlsl"
 #include "binding.hlsl"
+#include "common.hlsl"
 
 //#pragma gBuffer MeshMain PixelgBuffer
-#pragma forward MeshMain PixelForward
+#pragma forward AmplificationMain MeshMain PixelForward
 
+struct Payload
+{
+    float4x4 worldMatrix[128];
+    uint MeshletIndices[128];
+};
+
+groupshared Payload sPayload;
+groupshared uint payloadIndex;
+
+[RootSignature(GlobalRootSignature)]
+[numthreads(16, 1, 1)]
+void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
+{
+    payloadIndex = 0;
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+    HLSL::Instance instance = instances[dtid];
+    
+    StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+    HLSL::Mesh mesh = meshes[instance.meshIndex];
+    
+    StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
+    HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset];
+    
+    uint index = 0;
+    uint meshletCount = min(8, mesh.meshletCount);
+    for (uint i = 0; i < meshletCount; i++)
+    {
+        InterlockedAdd(payloadIndex, 1, index);
+        sPayload.worldMatrix[index] = instance.worldMatrix;
+        sPayload.MeshletIndices[index] = mesh.meshletOffset + i;
+    }
+    DispatchMesh(min(index, 128), 1, 1, sPayload);
+}
 
 [RootSignature(GlobalRootSignature)]
 [outputtopology("triangle")]
-[numthreads(12, 1, 1)]
-void MeshMain(in uint groupThreadId : SV_GroupThreadID, out vertices HLSL::MSVert outVerts[8], out indices uint3 outIndices[12])
+[numthreads(124, 1, 1)]
+void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[64], out indices uint3 outIndices[124])
 {
-    SetMeshOutputCounts(8, 12);
+    float4x4 worldMatrix = payload.worldMatrix[groupId];
+    uint meshletIndex = payload.MeshletIndices[groupId];
     
-    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[instanceIndex];
-    //instance = instanceBuffer[0];
+    StructuredBuffer<HLSL:: Meshlet > meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
+    HLSL::Meshlet meshlet = meshlets[meshletIndex];
+    SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[cameraIndex];
     
-    if(groupThreadId < 8)
+    StructuredBuffer<uint> meshletVertices = ResourceDescriptorHeap[commonResourcesIndices.meshletVerticesHeapIndex];
+    StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
+    if (groupThreadId < meshlet.vertexCount)
     {
-        float3 v[8] =
-        {
-            float3(-0.2, 0.2, 0.2), float3(0.2, 0.2, 0.2), float3(-0.2, 0.2, 0.8), float3(0.2, 0.2, 0.8),
-            float3(0.2, -0.2, 0.2), float3(0.2, -0.2, 0.2), float3(-0.2, -0.2, 0.2), float3(-0.2, -0.2, 0.8)
-        };
-        //StructuredBuffer<HLSL::Vertex> cubeVertices = ResourceDescriptorHeap[5];
-        //float4 pos = float4(cubeVertices[groupThreadId].pos, 1);
-        //outVerts[groupThreadId].pos = mul(drawCall.world, pos);
-        float4 pos = float4(v[groupThreadId], 1);
-        float4 worldPos = mul(instance.worldMatrix, pos);
+        uint tmpIndex = meshlet.vertexOffset + groupThreadId;
+        uint index = meshletVertices[tmpIndex];
+        float4 pos = float4(verticesData[index].pos, 1);
+        float4 worldPos = mul(worldMatrix, pos);
         outVerts[groupThreadId].pos = mul(camera.viewProj, worldPos);
-        outVerts[groupThreadId].color = worldPos.xyz * 0.5; // cubeColors[ groupThreadId];
+        outVerts[groupThreadId].color = RandUINT(meshletIndex);
     }
-    
-    uint3 i[12] =
+    StructuredBuffer<uint> trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
+    if (groupThreadId < meshlet.triangleCount)
     {
-        uint3(0, 1, 2), uint3(3, 1, 2), uint3(3, 4, 5), uint3(6, 4, 5), uint3(6, 7, 8), uint3(9, 7, 8),
-        uint3(10, 11, 2), uint3(1, 11, 2), uint3(10, 4, 7), uint3(3, 6, 2), uint3(8, 2, 6), uint3(5, 2, 9)
-    };
-    //StructuredBuffer<uint3> cubeIndices = ResourceDescriptorHeap[6];
-    //outIndices[groupThreadId] = cubeIndices[groupThreadId];
-    outIndices[groupThreadId] = i[groupThreadId];
+        uint offset = meshlet.triangleOffset + groupThreadId * 3;
+        uint a = trianglesData[offset];
+        uint b = trianglesData[offset + 1];
+        uint c = trianglesData[offset + 2];
+        uint3 abc = uint3(a, b, c);
+        outIndices[groupThreadId] = abc;
+    }
 }
 
 struct PayloadData
