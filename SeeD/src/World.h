@@ -148,6 +148,12 @@ namespace Components
         uint index = entityInvalid;
     };
 
+    struct Name : ComponentBase<Name>
+    {
+        #define ECS_NAME_LENGTH 256
+        char name[ECS_NAME_LENGTH] = {};
+    };
+
     struct Shader : ComponentBase<Shader>
     {
         assetID id;
@@ -188,6 +194,11 @@ namespace Components
     {
         Handle<Mesh> mesh;
         Handle<Material> material;
+    };
+
+    struct Parent : ComponentBase<Parent>
+    {
+        Handle<Entity> id;
     };
 
     struct Light : ComponentBase<Light>
@@ -536,6 +547,15 @@ namespace Systems
 
         void On()
         {
+            auto& cam = camera.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Camera::mask).Get<Components::Camera>();
+            cam.fovY = 90;
+            cam.nearClip = 0.1;
+            cam.farClip = 100.0f;
+            auto& trans = camera.Get<Components::Transform>();
+            trans.position = 0;
+            trans.rotation = quaternion::identity();
+            trans.scale = 1;
+
             World::instance->systems.push_back(this);
         }
 
@@ -549,103 +569,6 @@ namespace Systems
         void Update(World* world) override
         {
             ZoneScoped;
-            //ZoneScopedN("Player::Update");
-            if (!loaded)
-            {
-                //return;
-
-                auto& cam = camera.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Camera::mask).Get<Components::Camera>();
-                cam.fovY = 90;
-                cam.nearClip = 0.1;
-                cam.farClip = 100.0f;
-                auto& trans = camera.Get<Components::Transform>();
-                trans.position = 0;
-                trans.rotation = quaternion::identity();
-                trans.scale = 1;
-
-
-                uint shaderCount = 10;
-                uint meshCount = 10;
-                uint materialCount = 10;
-                uint textureCount = 10;
-                uint instanceCount = 100000;
-
-                std::vector<World::Entity> shaderEnt;
-                std::vector<World::Entity> meshEnt;
-                std::vector<World::Entity> materialEnt;
-                std::vector<World::Entity> textureEnt;
-
-                shaderEnt.resize(shaderCount);
-                for (uint i = 0; i < shaderCount; i++)
-                {
-                    World::Entity ent;
-                    ent.Make(Components::Shader::mask);
-                    ent.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
-                    shaderEnt[i] = ent;
-                }
-
-                meshEnt.resize(meshCount);
-                for (uint i = 0; i < meshCount; i++)
-                {
-                    World::Entity ent;
-                    ent.Make(Components::Mesh::mask);
-                    uint count = 0;
-                    for (auto& item : AssetLibrary::instance->map)
-                    {
-                        ent.Get<Components::Mesh>().id = item.first;//AssetLibrary::instance->Add("..\\Assets\\mesh.mesh");
-                        if (count++ > 6 && Rand01() > 0.85f)
-                            break;
-                    }
-                    meshEnt[i] = ent;
-                }
-
-                textureEnt.resize(textureCount);
-                for (uint i = 0; i < textureCount; i++)
-                {
-                    World::Entity ent;
-                    ent.Make(Components::Texture::mask);
-                    ent.Get<Components::Texture>().id = AssetLibrary::instance->Add("..\\Assets\\texture.dds");
-                    textureEnt[i] = ent;
-                }
-
-                materialEnt.resize(materialCount);
-                for (uint i = 0; i < materialCount; i++)
-                {
-                    World::Entity ent;
-                    ent.Make(Components::Material::mask);
-                    auto& material = ent.Get<Components::Material>();
-                    material.shader = Components::Handle<Components::Shader>{ shaderEnt[Rand(shaderCount)].id };
-                    for (uint j = 0; j < 16; j++)
-                    {
-                        material.textures[j] = Components::Handle<Components::Texture>{ textureEnt[Rand(textureCount)].id };
-                    }
-                    for (uint j = 0; j < 15; j++)
-                    {
-                        material.prameters[j] = j;
-                    }
-                    materialEnt[i] = ent;
-                }
-
-                for (uint i = 0; i < instanceCount; i++)
-                {
-                    World::Entity ent;
-                    ent.Make(Components::Instance::mask | Components::WorldMatrix::mask);
-                    auto& instance = ent.Get<Components::Instance>();
-                    uint meshIndex = Rand(meshCount);
-                    uint materialIndex = Rand(materialCount);
-                    instance.mesh = Components::Handle<Components::Mesh>{ meshEnt[meshIndex].id };
-                    instance.material = Components::Handle<Components::Material>{ materialEnt[materialIndex].id };
-
-                    auto& transform = ent.Get<Components::WorldMatrix>();
-                    transform.matrix = float4x4(1, 0, 0, 0,
-                        0, 1, 0, 0,
-                        0, 0, 1, 0,
-                        Rand01() - 0.5f, Rand01() - 0.5f, Rand01(), 1);
-                }
-
-
-                loaded = true;
-            }
 
             auto& cam = camera.Get<Components::Camera>();
             auto& trans = camera.Get<Components::Transform>();

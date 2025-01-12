@@ -162,6 +162,8 @@ struct Material
 
 struct MeshStorage
 {
+    uint nextMeshOffset = 0;
+    Resource meshes;
     uint nextMeshletOffset = 0;
     Resource meshlets;
     uint nextMeshletVertexOffset = 0;
@@ -176,8 +178,7 @@ struct MeshStorage
 
     std::recursive_mutex lock;
 
-    Map<assetID, Mesh, HLSL::Mesh> meshes;
-
+    uint meshesMaxCount = 10000;
     uint meshletMaxCount = 10000;
     uint meshletVertexMaxCount = meshletMaxCount * 64;
     uint meshletTrianglesMaxCount = meshletMaxCount * 124;
@@ -185,6 +186,7 @@ struct MeshStorage
 
     void On()
     {
+        meshes.CreateBuffer<MeshLoader::Mesh>(meshesMaxCount, "meshes");
         meshlets.CreateBuffer<MeshLoader::Meshlet>(meshletMaxCount, "meshlets");
         meshletVertices.CreateBuffer<unsigned int>(meshletVertexMaxCount, "meshlet vertices");
         meshletTriangles.CreateBuffer<unsigned char>(meshletTrianglesMaxCount, "meshlet triangles");
@@ -193,6 +195,7 @@ struct MeshStorage
 
     void Off()
     {
+        meshes.Release();
         meshlets.Release();
         meshletVertices.Release();
         meshletTriangles.Release();
@@ -214,6 +217,11 @@ struct MeshStorage
             meshData.meshlets[i].vertex_offset += nextMeshletVertexOffset;
         }
 
+        if (nextMeshOffset > meshesMaxCount)
+            IOs::Log("Too much meshes");
+        meshes.Upload(&newMesh, sizeof(newMesh), commandBuffer, nextMeshOffset * sizeof(newMesh));
+        nextMeshOffset += 1;
+
         if (nextMeshletOffset > meshletMaxCount)
             IOs::Log("Too much meshlets");
         meshlets.Upload(meshData.meshlets.data(), meshData.meshlets.size() * sizeof(meshData.meshlets[0]), commandBuffer, nextMeshletOffset * sizeof(meshData.meshlets[0]));
@@ -233,8 +241,6 @@ struct MeshStorage
             IOs::Log("Too much vertices");
         vertices.Upload(meshData.vertices.data(), meshData.vertices.size() * sizeof(meshData.vertices[0]), commandBuffer, nextVertexOffset * sizeof(meshData.vertices[0]));
         nextVertexOffset += meshData.vertices.size();
-
-        meshes.Upload();
 
         lock.unlock();
         return newMesh;
@@ -590,7 +596,7 @@ public:
             commandBuffer->Set(shader);
 
             HLSL::CommonResourcesIndices commonResourcesIndices;
-            commonResourcesIndices.meshesHeapIndex = GlobalResources::instance->meshStorage.meshes.GetResource().srv.offset;
+            commonResourcesIndices.meshesHeapIndex = GlobalResources::instance->meshStorage.meshes.srv.offset;
             commonResourcesIndices.meshletsHeapIndex = GlobalResources::instance->meshStorage.meshlets.srv.offset;
             commonResourcesIndices.meshletVerticesHeapIndex = GlobalResources::instance->meshStorage.meshletVertices.srv.offset;
             commonResourcesIndices.meshletTrianglesHeapIndex = GlobalResources::instance->meshStorage.meshletTriangles.srv.offset;

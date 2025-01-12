@@ -60,6 +60,12 @@ public:
         std::vector<Vertex> vertices;
     };
 
+    struct Mesh
+    {
+        uint meshletOffset;
+        uint meshletCount;
+    };
+
 	void On()
 	{
 		ZoneScoped;
@@ -169,6 +175,11 @@ MeshLoader* MeshLoader::instance;
 #include "../../Third/assimp-master/include/assimp/postprocess.h"
 class SceneLoader
 {
+    std::vector<World::Entity> meshIndexToEntity;
+    std::vector<World::Entity> matIndexToEntity;
+    std::vector<World::Entity> animationIndexToEntity;
+    std::vector<World::Entity> skeletonIndexToEntity;
+
 public:
     void On()
     {
@@ -238,12 +249,80 @@ public:
         CreateAnimations(_scene);
         CreateMeshes(_scene);
         CreateMaterials(_scene);
-        CreateEntities(_scene);
+        CreateEntities(_scene, _scene->mRootNode);
     }
 
-    void CreateEntities(const aiScene* _scene)
+    World::Entity CreateEntities(const aiScene* _scene, aiNode* node, World::Entity parentEntity = entityInvalid)
     {
         ZoneScoped;
+
+        //need to transpose matrices ?
+        aiVector3D _pos;
+        aiQuaternion _rot;
+        aiVector3D _scale;
+        node->mTransformation.Decompose(_scale, _rot, _pos);
+
+
+        float3 pos;
+        quaternion rot;
+        float3 scale;
+
+        pos.x = _pos.x;
+        pos.y = _pos.y;
+        pos.z = _pos.z;
+
+        rot.x = _rot.x;
+        rot.y = _rot.y;
+        rot.z = _rot.z;
+        rot.w = _rot.w;
+
+        scale.x = _scale.x;
+        scale.y = _scale.y;
+        scale.z = _scale.z;
+
+        World::Entity ent;
+
+        // if node has meshes, create a new scene object for it
+        for (unsigned int i = 0; i < node->mNumMeshes; i++)
+        {
+            if(parentEntity != entityInvalid)
+            {
+                ent.Make(Components::Instance::mask | Components::Transform::mask | Components::WorldMatrix::mask | Components::Name::mask | Components::Parent::mask);
+            }
+            else
+            {
+                ent.Make(Components::Instance::mask | Components::Transform::mask | Components::WorldMatrix::mask | Components::Name::mask);
+            }
+
+            auto& name = ent.Get<Components::Name>();
+            strcpy_s(name.name, 256, node->mName.C_Str());
+
+            auto& transform = ent.Get<Components::Transform>();
+            transform.position = pos;
+            transform.rotation = rot;
+            transform.scale = scale;
+
+            auto& matrix = ent.Get<Components::WorldMatrix>();
+            matrix.matrix = float4x4(1, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 1, 0,
+                Rand01() - 0.5f, Rand01() - 0.5f, Rand01(), 1);
+
+            auto& parent = ent.Get<Components::Parent>();
+            parent.id = { parentEntity.id };
+
+            auto& instance = ent.Get<Components::Instance>();
+            instance.mesh = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i]].id };
+            instance.material = Components::Handle<Components::Material>{ matIndexToEntity[_scene->mMeshes[node->mMeshes[i]]->mMaterialIndex].id };
+        }
+
+
+        for (unsigned int i = 0; i < node->mNumChildren; i++)
+        {
+            CreateEntities(_scene, node->mChildren[i], ent);
+        }
+
+        return ent;
     }
 
     void CreateMeshes(const aiScene* _scene)
@@ -298,7 +377,13 @@ public:
                 }
 
                 MeshLoader::MeshData mesh = MeshLoader::instance->Process(originalMesh);
-                MeshLoader::instance->Write(mesh, m->mName.C_Str());
+                assetID id = MeshLoader::instance->Write(mesh, m->mName.C_Str());
+
+                World::Entity ent;
+                ent.Make(Components::Mesh::mask);
+                ent.Get<Components::Mesh>().id = id;
+
+                meshIndexToEntity.push_back(ent);
             }
         }
     }
@@ -306,6 +391,98 @@ public:
     void CreateMaterials(const aiScene* _scene)
     {
         ZoneScoped;
+
+        World::Entity shader;
+        shader.Make(Components::Shader::mask);
+        shader.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
+
+        IOs::Log("  materials : {}", _scene->mNumMaterials);
+        for (unsigned int i = 0; i < _scene->mNumMaterials; i++)
+        {
+            std::cout << ".";
+            auto m = _scene->mMaterials[i];
+            World::Entity ent;
+            ent.Make(Components::Material::mask | Components::Name::mask);
+
+            auto& name = ent.Get<Components::Name>();
+            strcpy_s(name.name, 256, m->GetName().C_Str());
+
+            auto& newMat = ent.Get<Components::Material>();
+
+            aiString texName;
+
+            for (unsigned int j = 0; j < 17; j++)
+            {
+                for (unsigned int k = 0; k < m->GetTextureCount((aiTextureType)j); k++)
+                {
+                    texName = "";
+                    m->GetTexture((aiTextureType)j, k, &texName);
+                    std::cout << texName.C_Str() << "\n";
+                }
+            }
+
+            newMat.shader = { shader.id };
+
+            for (uint j = 0; j < newMat.maxTextures; j++)
+            {
+                newMat.textures[j] = { entityInvalid };
+            }
+
+            /*
+            texName = "";
+            m->GetTexture(aiTextureType_DIFFUSE, 0, &texName);
+            if (texName.length == 0) m->GetTexture(aiTextureType_BASE_COLOR, 0, &texName);
+            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Albedo" + ".jpg";
+            auto res = GetOrCreateResource(world, texName.C_Str());
+            //newMat.textures[0] = res;
+            AssignTexture(gpuShader, newMat.textures, "albedo", res);
+
+            texName = "";
+            m->GetTexture(aiTextureType_NORMALS, 0, &texName);
+            if (texName.length == 0) m->GetTexture(aiTextureType_HEIGHT, 0, &texName);
+            if (texName.length == 0) m->GetTexture(aiTextureType_NORMAL_CAMERA, 0, &texName);
+            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Normal_LOD0" + ".jpg";
+            res = GetOrCreateResource(world, texName.C_Str());
+            //newMat.textures[1] = res;
+            AssignTexture(gpuShader, newMat.textures, "normal", res);
+
+            texName = "";
+            m->GetTexture(aiTextureType_METALNESS, 0, &texName);
+            if (texName.length == 0) m->GetTexture(aiTextureType_SPECULAR, 0, &texName);
+            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Albedo" + ".jpg";
+            res = GetOrCreateResource(world, texName.C_Str());
+            //newMat.textures[2] = res;
+            AssignTexture(gpuShader, newMat.textures, "metalness", res);
+
+            texName = "";
+            m->GetTexture(aiTextureType_SHININESS, 0, &texName);
+            if (texName.length == 0) m->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texName);
+            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Roughness" + ".jpg";
+            res = GetOrCreateResource(world, texName.C_Str());
+            //newMat.textures[3] = res;
+            AssignTexture(gpuShader, newMat.textures, "smoothness", res);
+
+            texName = "";
+            m->GetTexture(aiTextureType_AMBIENT, 0, &texName);
+            if (texName.length == 0) m->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texName);
+            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Cavity" + ".jpg";
+            res = GetOrCreateResource(world, texName.C_Str());
+            //newMat.textures[4] = res;
+            AssignTexture(gpuShader, newMat.textures, "occlusion", res);
+
+            texName = "";
+            m->GetTexture(aiTextureType_EMISSIVE, 0, &texName);
+            if (texName.length == 0) m->GetTexture(aiTextureType_EMISSION_COLOR, 0, &texName);
+            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Cavity" + ".jpg";
+            res = GetOrCreateResource(world, texName.C_Str());
+            //newMat.textures[5] = res;
+            AssignTexture(gpuShader, newMat.textures, "emission", res);
+
+            AssignVector(gpuShader, newMat, "color", float4(1, 1, 1, 0));
+            */
+
+            matIndexToEntity.push_back(ent);
+        }
     }
 
     void CreateAnimations(const aiScene* _scene)

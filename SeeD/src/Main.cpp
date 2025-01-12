@@ -212,6 +212,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 
     Engine engine;
     engine.On(window);
+    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\buggy.fbx");
     engine.Loop();
     engine.Off();
 
