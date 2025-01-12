@@ -114,6 +114,10 @@ public:
     {
         return gpuData.GetResource();
     }
+    uint Size()
+    {
+        return data.size();
+    }
     void Upload()
     {
         gpuData.Upload();
@@ -150,7 +154,7 @@ struct Mesh
 {
     uint meshletOffset;
     uint meshletCount;
-    BLAS blas;
+    //BLAS blas;
 };
 
 struct Material
@@ -189,7 +193,7 @@ struct MeshStorage
         meshes.CreateBuffer<MeshLoader::Mesh>(meshesMaxCount, "meshes");
         meshlets.CreateBuffer<MeshLoader::Meshlet>(meshletMaxCount, "meshlets");
         meshletVertices.CreateBuffer<unsigned int>(meshletVertexMaxCount, "meshlet vertices");
-        meshletTriangles.CreateBuffer<unsigned char>(meshletTrianglesMaxCount, "meshlet triangles");
+        meshletTriangles.CreateBuffer<unsigned int>(meshletTrianglesMaxCount, "meshlet triangles");
         vertices.CreateBuffer<MeshLoader::Vertex>(vertexMaxCount, "vertices");
     }
 
@@ -206,7 +210,7 @@ struct MeshStorage
     {
         ZoneScoped;
 
-        Mesh newMesh;
+        MeshLoader::Mesh newMesh;
         lock.lock();
 
         newMesh.meshletCount = meshData.meshlets.size();
@@ -215,6 +219,11 @@ struct MeshStorage
         {
             meshData.meshlets[i].triangle_offset += nextMeshletTriangleOffset;
             meshData.meshlets[i].vertex_offset += nextMeshletVertexOffset;
+
+        }
+        for (uint j = 0; j < meshData.meshlet_vertices.size(); j++)
+        {
+            meshData.meshlet_vertices[j] += nextVertexOffset;
         }
 
         if (nextMeshOffset > meshesMaxCount)
@@ -243,7 +252,9 @@ struct MeshStorage
         nextVertexOffset += meshData.vertices.size();
 
         lock.unlock();
-        return newMesh;
+
+        Mesh result{ newMesh.meshletOffset, newMesh.meshletCount };
+        return result;
     }
 };
 
@@ -597,23 +608,33 @@ public:
 
             HLSL::CommonResourcesIndices commonResourcesIndices;
             commonResourcesIndices.meshesHeapIndex = GlobalResources::instance->meshStorage.meshes.srv.offset;
+            commonResourcesIndices.meshCount = GlobalResources::instance->meshStorage.nextMeshOffset;
             commonResourcesIndices.meshletsHeapIndex = GlobalResources::instance->meshStorage.meshlets.srv.offset;
+            commonResourcesIndices.meshletCount = GlobalResources::instance->meshStorage.nextMeshletOffset;
             commonResourcesIndices.meshletVerticesHeapIndex = GlobalResources::instance->meshStorage.meshletVertices.srv.offset;
+            commonResourcesIndices.meshletVertexCount = GlobalResources::instance->meshStorage.nextMeshletVertexOffset;
             commonResourcesIndices.meshletTrianglesHeapIndex = GlobalResources::instance->meshStorage.meshletTriangles.srv.offset;
+            commonResourcesIndices.meshletTriangleCount = GlobalResources::instance->meshStorage.nextMeshletTriangleOffset;
             commonResourcesIndices.verticesHeapIndex = GlobalResources::instance->meshStorage.vertices.srv.offset;
+            commonResourcesIndices.vertexCount = GlobalResources::instance->meshStorage.nextVertexOffset;
             commonResourcesIndices.camerasHeapIndex = view->viewWorld->cameras.gpuData.srv.offset;
+            commonResourcesIndices.cameraCount = view->viewWorld->cameras.Size();
             commonResourcesIndices.lightsHeapIndex = view->viewWorld->lights.gpuData.srv.offset;
+            commonResourcesIndices.lightCount = view->viewWorld->lights.Size();
             commonResourcesIndices.materialsHeapIndex = view->viewWorld->materials.GetResource().srv.offset;
+            commonResourcesIndices.materialCount = view->viewWorld->materials.Size();
             commonResourcesIndices.instancesHeapIndex = view->viewWorld->instances.gpuData.srv.offset;
+            commonResourcesIndices.instanceCount = view->viewWorld->instances.Size();
             commonResourcesIndices.instancesGPUHeapIndex = view->viewWorld->instancesGPU.gpuData.srv.offset;
-            commandBuffer->cmd->SetGraphicsRoot32BitConstants(0, 10, &commonResourcesIndices, 0);
+            commonResourcesIndices.instanceGPUCount = view->viewWorld->instancesGPU.Size();
+            commandBuffer->cmd->SetGraphicsRoot32BitConstants(0, 20, &commonResourcesIndices, 0);
 
             // make a function for setting cameras and global
             uint cameraValues[] = { 0 };
             commandBuffer->cmd->SetGraphicsRoot32BitConstants(1, 1, cameraValues, 0);
 
             auto& instances = view->viewWorld->instances;
-            commandBuffer->cmd->DispatchMesh(instances.Size() / 32, 1, 1);
+            commandBuffer->cmd->DispatchMesh(instances.Size(), 1, 1);
             /*
             for (uint i = 0; i < instances.Size(); i++)
             {

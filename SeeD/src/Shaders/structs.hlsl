@@ -15,15 +15,25 @@ namespace HLSL
     struct CommonResourcesIndices
     {
         uint meshesHeapIndex;
+        uint meshCount;
         uint meshletsHeapIndex;
+        uint meshletCount;
         uint meshletVerticesHeapIndex;
+        uint meshletVertexCount;
         uint meshletTrianglesHeapIndex;
+        uint meshletTriangleCount;
         uint verticesHeapIndex;
+        uint vertexCount;
         uint camerasHeapIndex;
+        uint cameraCount;
         uint lightsHeapIndex;
+        uint lightCount;
         uint materialsHeapIndex;
+        uint materialCount;
         uint instancesHeapIndex;
+        uint instanceCount;
         uint instancesGPUHeapIndex; // only for instances created on GPU
+        uint instanceGPUCount;
     };
     
     struct Shader

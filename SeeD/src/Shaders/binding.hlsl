@@ -6,7 +6,7 @@
 //https://devblogs.microsoft.com/directx/in-the-works-hlsl-shader-model-6-6/
 
 #define GlobalRootSignature "RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED), " \
-            "RootConstants(b0, num32BitConstants = 10), "\
+            "RootConstants(b0, num32BitConstants = 20), "\
             "RootConstants(b1, num32BitConstants = 1), "\
             "RootConstants(b2, num32BitConstants = 1), "\
 			"CBV(b3, space = 0), "\

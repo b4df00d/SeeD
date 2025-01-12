@@ -7,20 +7,23 @@
 
 struct Payload
 {
-    float4x4 worldMatrix[128];
-    uint MeshletIndices[128];
+    uint instanceIndex[128];
+    uint meshletIndices[128];
 };
 
 groupshared Payload sPayload;
 groupshared uint payloadIndex;
 
 [RootSignature(GlobalRootSignature)]
-[numthreads(16, 1, 1)]
+[numthreads(1, 1, 1)]
 void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
 {
-    payloadIndex = 0;
+    uint instanceIndex = dtid;
+    
+    //if(instanceIndex >= commonResourcesIndices.instanceCount) return;
+    
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[dtid];
+    HLSL::Instance instance = instances[instanceIndex];
     
     StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
@@ -28,15 +31,16 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
     HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset];
     
+    payloadIndex = 0;
     uint index = 0;
-    uint meshletCount = min(8, mesh.meshletCount);
+    uint meshletCount = min(128, mesh.meshletCount);
     for (uint i = 0; i < meshletCount; i++)
     {
         InterlockedAdd(payloadIndex, 1, index);
-        sPayload.worldMatrix[index] = instance.worldMatrix;
-        sPayload.MeshletIndices[index] = mesh.meshletOffset + i;
+        sPayload.instanceIndex[index] = instanceIndex;
+        sPayload.meshletIndices[index] = mesh.meshletOffset + i;
     }
-    DispatchMesh(min(index, 128), 1, 1, sPayload);
+    DispatchMesh(min(128, payloadIndex), 1, 1, sPayload);
 }
 
 [RootSignature(GlobalRootSignature)]
@@ -44,8 +48,11 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
 [numthreads(124, 1, 1)]
 void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[64], out indices uint3 outIndices[124])
 {
-    float4x4 worldMatrix = payload.worldMatrix[groupId];
-    uint meshletIndex = payload.MeshletIndices[groupId];
+    uint instanceIndex = payload.instanceIndex[groupId];
+    uint meshletIndex = payload.meshletIndices[groupId];
+    
+    StructuredBuffer<HLSL:: Instance > instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+    HLSL::Instance instance = instances[instanceIndex];
     
     StructuredBuffer<HLSL:: Meshlet > meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
     HLSL::Meshlet meshlet = meshlets[meshletIndex];
@@ -61,7 +68,7 @@ void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThre
         uint tmpIndex = meshlet.vertexOffset + groupThreadId;
         uint index = meshletVertices[tmpIndex];
         float4 pos = float4(verticesData[index].pos, 1);
-        float4 worldPos = mul(worldMatrix, pos);
+        float4 worldPos = mul(instance.worldMatrix, pos);
         outVerts[groupThreadId].pos = mul(camera.viewProj, worldPos);
         outVerts[groupThreadId].color = RandUINT(meshletIndex);
     }
