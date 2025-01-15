@@ -125,6 +125,9 @@ public:
             RUN();
             CLEAR();
 
+            if (options.stepMotion)
+                Sleep(1000);
+
             FrameMark;
         }
     }
@@ -205,6 +208,9 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 {
     IOs::WindowInformation window;
     window.usevSync = false;
+#ifdef _DEBUG
+    window.usevSync = true;
+#endif
     window.fullScreen = false;
     window.windowInstance = hInstance;
     window.windowResolution = uint2(1600, 900);

@@ -1129,6 +1129,7 @@ public:
 class Renderer
 {
 public:
+    static Renderer* instance;
     GlobalResources globalResources;
     Upload upload;
     MainView mainView;
@@ -1136,6 +1137,7 @@ public:
 
     void On(IOs::WindowInformation& window)
     {
+        instance = this;
         globalResources.On();
         mainView.On(window);
         editorView.On(window);
@@ -1148,6 +1150,7 @@ public:
         editorView.Off();
         mainView.Off();
         globalResources.Off();
+        instance = nullptr;
     }
 
     void Schedule(World& world, tf::Subflow& subflow)
@@ -1326,3 +1329,4 @@ public:
     }
 
 };
+Renderer* Renderer::instance;

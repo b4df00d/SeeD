@@ -20,10 +20,9 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
 {
     uint instanceIndex = dtid;
     
-    //if(instanceIndex >= commonResourcesIndices.instanceCount) return;
-    
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
+    //HLSL::Instance instance = { { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1 * instanceIndex, 1, 1 }, instanceIndex, 0, 0, 0 };
     
     StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
@@ -37,9 +36,12 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     for (uint i = 0; i < meshletCount; i++)
     {
         InterlockedAdd(payloadIndex, 1, index);
+        if (instanceIndex >= commonResourcesIndices.instanceCount) 
+            instanceIndex = HLSL::invalidUINT;
         sPayload.instanceIndex[index] = instanceIndex;
         sPayload.meshletIndices[index] = mesh.meshletOffset + i;
     }
+    
     DispatchMesh(min(128, payloadIndex), 1, 1, sPayload);
 }
 
@@ -51,8 +53,12 @@ void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThre
     uint instanceIndex = payload.instanceIndex[groupId];
     uint meshletIndex = payload.meshletIndices[groupId];
     
+    if (instanceIndex == HLSL::invalidUINT)
+        return;
+    
     StructuredBuffer<HLSL:: Instance > instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
+    //HLSL::Instance instance = { { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1 * instanceIndex, 1, 1 }, instanceIndex, 0, 0, 0 };
     
     StructuredBuffer<HLSL:: Meshlet > meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
     HLSL::Meshlet meshlet = meshlets[meshletIndex];
@@ -83,20 +89,6 @@ void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThre
         outIndices[groupThreadId] = abc;
     }
 }
-
-struct PayloadData
-{
-    uint count;
-};
-
-[numthreads(32, 1, 1)]
-void Amplification(in uint groupIndex : SV_GroupIndex)
-{
-    PayloadData data;
-    data.count = 32;
-    DispatchMesh(1, 1, 1, data);
-}
-
 
 struct PS_OUTPUT_FORWARD
 {

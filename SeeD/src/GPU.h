@@ -22,6 +22,8 @@ extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"
 #include "pix3.h"
 #endif
 
+#include "Shaders/structs.hlsl"
+
 #define FRAMEBUFFERING 2
 
 struct SRV
@@ -214,6 +216,7 @@ public:
     void BackBuffer(ID3D12Resource* backBuffer);
     void Release();
     ID3D12Resource* GetResource();
+    uint BufferSize();
     void Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset = 0);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter, ID3D12Resource* resource);
@@ -386,8 +389,10 @@ public:
 
     void On(IOs::WindowInformation* window)
     {
-        instance = this;
         ZoneScoped;
+        instance = this;
+        features.vSync = window->usevSync;
+        features.fullscreen = window->fullScreen;
         CreateDevice(window);
         descriptorHeap.On(device);
         CreateSwapChain(window);
@@ -504,7 +509,7 @@ public:
         swapChainDescFullscreen.RefreshRate = { 0, 0 }; // forcing 1, 60 screw the thing ups and we end up at 30hz https://www.gamedev.net/forums/topic/687484-correct-way-of-creating-the-swapchain-fullscreenwindowedvsync-about-refresh-rate/5337872/
         swapChainDescFullscreen.Scaling = DXGI_MODE_SCALING_UNSPECIFIED;
         swapChainDescFullscreen.ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_PROGRESSIVE;
-        swapChainDescFullscreen.Windowed = !window->fullScreen;
+        swapChainDescFullscreen.Windowed = !features.fullscreen;
 
         IDXGISwapChain1* tempSwapChain;
 
@@ -512,7 +517,7 @@ public:
             graphicQueue, // the queue will be flushed once the swap chain is created
             window->windowHandle,
             &swapChainDesc, // give it the swap chain description we created above
-            window->fullScreen ? &swapChainDescFullscreen : nullptr,
+            features.fullscreen ? &swapChainDescFullscreen : nullptr,
             nullptr,
             &tempSwapChain // store the created swap chain in a temp IDXGISwapChain interface
         );
@@ -1051,6 +1056,7 @@ void Resource::Release()
         }
         allocation->Release();
     }
+    allocation = nullptr;
 }
 
 ID3D12Resource* Resource::GetResource()
@@ -1062,8 +1068,15 @@ ID3D12Resource* Resource::GetResource()
     return nullptr;
 }
 
+uint Resource::BufferSize()
+{
+    return GetResource()->GetDesc().Width;
+}
+
 void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset)
 {
+    if (options.stopBufferUpload)
+        return;
     //ZoneScopedN("Resource::Upload");
     D3D12MA::Allocation* uploadAllocation;
 
@@ -1314,17 +1327,14 @@ public:
     void Upload()
     {
         ZoneScoped;
+        if (options.stopBufferUpload)
+            return;
         if (cpuData.size() <= 0)
             return;
-        if (gpuData.allocation == nullptr || gpuData.allocation->GetSize() < cpuData.size() * sizeof(T))
+        if (gpuData.allocation == nullptr || gpuData.BufferSize() < cpuData.size() * sizeof(T))
         {
+            gpuData.Release();
             gpuData.CreateUploadBuffer<T>(max(uint1(cpuData.size()), uint1(1)), typeid(T).name());
-        }
-        if (sizeof(T) * cpuData.size() > GetResource().allocation->GetSize())
-        {
-            IOs::Log("{} allocation smaller than cpu data ... why", typeid(T).name());
-            gpuData.CreateUploadBuffer<T>(max(uint1(cpuData.size()), uint1(1)), typeid(T).name());
-            return;
         }
         void* buf;
         auto hr = GetResourcePtr()->Map(0, nullptr, &buf);

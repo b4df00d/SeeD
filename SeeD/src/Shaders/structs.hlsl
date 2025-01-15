@@ -10,8 +10,15 @@
 // AVX 1 or 2 is not 16bytes aligned with hlsl++
 // sse2 is. and thus can have a similar memory layout as hlsl compilation
 
+struct Options
+{
+    bool stopBufferUpload;
+    bool stepMotion;
+} options;
+
 namespace HLSL
 {
+    static const uint invalidUINT = 4294967295;
     struct CommonResourcesIndices
     {
         uint meshesHeapIndex;

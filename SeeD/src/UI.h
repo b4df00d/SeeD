@@ -182,6 +182,29 @@ public:
 };
 AssetLibraryWindow assetLibraryWindowWindow;
 
+#include "Shaders/structs.hlsl"
+class OptionWindow : public EditorWindow
+{
+public:
+    OptionWindow() : EditorWindow("Option") {}
+    void Update() override final
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("Option", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+        
+        ImGui::Checkbox("stopBufferUpload", &options.stopBufferUpload);
+        ImGui::Checkbox("stepMotion", &options.stepMotion);
+
+        ImGui::End();
+    }
+};
+OptionWindow optionWindow;
+
+/*
 class AboutWindow : public EditorWindow
 {
 public:
@@ -363,3 +386,4 @@ public:
     }
 };
 AboutWindow aboutWindow;
+*/
