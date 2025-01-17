@@ -1,8 +1,21 @@
-//#undef NDEBUG
 #define WIN32_LEAN_AND_MEAN
 #include <iostream>
 #include <vector>
 #include <unordered_map>
+#include <cassert>
+
+#ifdef _X86_
+#define BreakPoint()        _asm { int 3h }
+#else
+#define BreakPoint()        DebugBreak()
+#endif
+
+
+#ifdef _DEBUG
+#define seedAssert(condition) if(!(condition)) BreakPoint();
+#else
+#define seedAssert(condition) (void)0
+#endif
 
 #include "../../Third/hlslpp-master/include/hlsl++.h"
 using namespace hlslpp;
@@ -218,7 +231,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 
     Engine engine;
     engine.On(window);
-    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\buggy.fbx");
+    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
     engine.Loop();
     engine.Off();
 

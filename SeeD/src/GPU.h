@@ -1075,6 +1075,7 @@ uint Resource::BufferSize()
 
 void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset)
 {
+    ZoneScoped;
     if (options.stopBufferUpload)
         return;
     //ZoneScopedN("Resource::Upload");
@@ -1116,7 +1117,9 @@ void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset)
     memcpy(buf, data, dataSize);
     uploadAllocation->GetResource()->Unmap(0, nullptr);
 
+    lock.lock();
     cb.cmd->CopyBufferRegion(allocation->GetResource(), offset, uploadAllocation->GetResource(), 0, dataSize);
+    lock.unlock();
 }
 
 void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter)
@@ -1132,7 +1135,7 @@ void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, 
 
 void Resource::CleanUploadResources(bool everything)
 {
-    //ZoneScoped;
+    ZoneScoped;
     uint frameNumberThreshold = GPU::instance->frameNumber - 2;
     if (everything)
         frameNumberThreshold = UINT_MAX;
@@ -1149,7 +1152,10 @@ void Resource::CleanUploadResources(bool everything)
                     allResourcesNames.erase(allResourcesNames.begin() + j);
                 }
             }
-            alloc->Release();
+            {
+                ZoneScoped;
+                alloc->Release();
+            }
             uploadResources.erase(uploadResources.begin() + i);
         }
     }
@@ -1469,8 +1475,8 @@ struct Profiler
             profiles[profileIdx].name = name;
         }
 
-        assert(profileIdx != UINT64(-1));
-        assert(profileIdx < maxProfiles);
+        seedAssert(profileIdx != UINT64(-1));
+        seedAssert(profileIdx < maxProfiles);
 
         ProfileData& profileData = profiles[profileIdx];
         profileData.Active = true;

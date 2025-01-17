@@ -63,7 +63,7 @@ public:
 
     String Get(assetID id)
     {
-        assert(map.contains(id));
+        seedAssert(map.contains(id));
         return map[id];
     }
 
@@ -100,7 +100,7 @@ public:
 AssetLibrary* AssetLibrary::instance;
 
 
-static constexpr uint entityInvalid = 65535;
+static constexpr uint entityInvalid = ~0;
 namespace Components
 {
     static constexpr uint componentMaxCount = 64;
@@ -198,7 +198,7 @@ namespace Components
 
     struct Parent : ComponentBase<Parent>
     {
-        Handle<Entity> id;
+        Handle<Entity> entity;
     };
 
     struct Light : ComponentBase<Light>
@@ -285,13 +285,20 @@ public:
         */
 
         template <Components::IsComponent T>
+        bool Has()
+        {
+            auto& poolpool = World::instance->components[pool];
+            return (poolpool.mask & T::mask) != 0;
+        }
+
+        template <Components::IsComponent T>
         T& Get()
         {
             auto& poolpool = World::instance->components[pool];
             // TODO : check that the pool have the right mask (debug assert ?)
-            assert(T::bucketIndex < Components::componentMaxCount);
-            assert(poolpool.data[T::bucketIndex] != nullptr);
-            assert((poolpool.mask & T::mask) != 0);
+            seedAssert(T::bucketIndex < Components::componentMaxCount);
+            seedAssert(poolpool.data[T::bucketIndex] != nullptr);
+            seedAssert((poolpool.mask & T::mask) != 0);
             T* data = (T*)poolpool.data[T::bucketIndex];
             auto& res = data[index];
             return res;
@@ -304,10 +311,10 @@ public:
 
         Entity()
         {
-            id = ~0;
+            id = entityInvalid;
         }
 
-        Entity(const int& i)
+        Entity(const uint& i)
         {
             id = i;
         }
@@ -365,6 +372,14 @@ public:
             World::instance->entitySlots[id].index = poolInvalid;
             World::instance->entitySlots[id].pool = poolInvalid;
             World::instance->entityFreeSlots.push_back(id);
+        }
+
+        template <Components::IsComponent T>
+        bool Has()
+        {
+            // TODO : check that the pool have the right mask (debug assert ?)
+            auto& slot = World::instance->entitySlots[id];
+            return slot.Has<T>();
         }
 
         template <Components::IsComponent T>
@@ -524,6 +539,40 @@ namespace Components
         return World::Entity(index);
     }
     */
+}
+
+float4x4 ComputeLocalMatrix(World::Entity ent)
+{
+    auto& trans = ent.Get<Components::Transform>();
+
+    float4x4 rotationMat;
+    float4x4 translationMat;
+    float4x4 scaleMat;
+
+    rotationMat = float4x4(trans.rotation);
+    translationMat = float4x4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, trans.position.x, trans.position.y, trans.position.z, 1);
+    scaleMat = float4x4(trans.scale.x, 0, 0, 0, 0, trans.scale.y, 0, 0, 0, 0, trans.scale.z, 0, 0, 0, 0, 1);
+
+    float4x4 matrix = mul(scaleMat, mul(rotationMat, translationMat));
+    return matrix;
+}
+
+float4x4 ComputeWorldMatrix(World::Entity ent)
+{
+    float4x4 matrix = ComputeLocalMatrix(ent);
+
+    if (ent.Has<Components::Parent>())
+    {
+        auto& parentCmp = ent.Get<Components::Parent>();
+        auto parentEnt = World::Entity(parentCmp.entity.Get().index);
+        if (parentEnt != entityInvalid)
+        {
+            float4x4 parentMatrix = ComputeWorldMatrix(parentEnt);
+            matrix = mul(matrix, parentMatrix);
+        }
+    }
+
+    return matrix;
 }
 
 uint Rand(uint max)

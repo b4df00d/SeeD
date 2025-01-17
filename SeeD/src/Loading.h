@@ -201,27 +201,28 @@ public:
         importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, true);
         importer.SetPropertyBool(AI_CONFIG_FBX_CONVERT_TO_M, true);
         const aiScene* _scene = importer.ReadFile(path,
+            0x0
             // for DX
-            aiProcess_MakeLeftHanded
+            | aiProcess_MakeLeftHanded
             | aiProcess_FlipWindingOrder
             | aiProcess_FlipUVs
             
-            | aiProcess_CalcTangentSpace
-            | aiProcess_FixInfacingNormals
-            | aiProcess_GenSmoothNormals
+            //| aiProcess_CalcTangentSpace
+            //| aiProcess_FixInfacingNormals
+            //| aiProcess_GenSmoothNormals
             //| aiProcess_GenNormals
             | aiProcess_Triangulate
-            | aiProcess_JoinIdenticalVertices
-            | aiProcess_SortByPType
-            | aiProcess_FindInvalidData
+            //| aiProcess_JoinIdenticalVertices
+            //| aiProcess_SortByPType
+            //| aiProcess_FindInvalidData
             | aiProcess_FindInstances
             | aiProcess_GlobalScale
-            | aiProcess_GenBoundingBoxes
+            //| aiProcess_GenBoundingBoxes
             //| aiProcess_RemoveRedundantMaterials
-            //| aiProcess_OptimizeGraph
+            | aiProcess_OptimizeGraph
             //| aiProcess_OptimizeMeshes
 
-            | aiProcess_PopulateArmatureData
+            //| aiProcess_PopulateArmatureData
             //| aiProcess_LimitBoneWeights
             //| aiProcess_Debone
         );
@@ -262,7 +263,6 @@ public:
         aiVector3D _scale;
         node->mTransformation.Decompose(_scale, _rot, _pos);
 
-
         float3 pos;
         quaternion rot;
         float3 scale;
@@ -281,18 +281,12 @@ public:
         scale.z = _scale.z;
 
         World::Entity ent;
-
-        // if node has meshes, create a new scene object for it
-        for (unsigned int i = 0; i < node->mNumMeshes; i++)
+        Components::Mask mask = (Components::Transform::mask | Components::WorldMatrix::mask | Components::Name::mask);
+        if (parentEntity != entityInvalid)
+            mask |= Components::Parent::mask;
+        if (node->mNumMeshes == 0)
         {
-            if(parentEntity != entityInvalid)
-            {
-                ent.Make(Components::Instance::mask | Components::Transform::mask | Components::WorldMatrix::mask | Components::Name::mask | Components::Parent::mask);
-            }
-            else
-            {
-                ent.Make(Components::Instance::mask | Components::Transform::mask | Components::WorldMatrix::mask | Components::Name::mask);
-            }
+            ent.Make(mask);
 
             auto& name = ent.Get<Components::Name>();
             strcpy_s(name.name, 256, node->mName.C_Str());
@@ -302,18 +296,39 @@ public:
             transform.rotation = rot;
             transform.scale = scale;
 
-            auto& matrix = ent.Get<Components::WorldMatrix>();
-            matrix.matrix = float4x4(1, 0, 0, 0,
-                0, 1, 0, 0,
-                0, 0, 1, 0,
-                Rand01() - 0.5f, Rand01() - 0.5f, Rand01(), 1);
+            if (parentEntity != entityInvalid)
+            {
+                auto& parent = ent.Get<Components::Parent>();
+                parent.entity = { parentEntity.id };
+            }
+        }
+        else
+        {
+            mask |= Components::Instance::mask;
 
-            auto& parent = ent.Get<Components::Parent>();
-            parent.id = { parentEntity.id };
+            // if node has meshes, create a new scene object for it
+            for (unsigned int i = 0; i < node->mNumMeshes; i++)
+            {
+                ent.Make(mask);
 
-            auto& instance = ent.Get<Components::Instance>();
-            instance.mesh = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i]].id };
-            instance.material = Components::Handle<Components::Material>{ matIndexToEntity[_scene->mMeshes[node->mMeshes[i]]->mMaterialIndex].id };
+                auto& name = ent.Get<Components::Name>();
+                strcpy_s(name.name, 256, node->mName.C_Str());
+
+                auto& transform = ent.Get<Components::Transform>();
+                transform.position = pos;
+                transform.rotation = rot;
+                transform.scale = scale;
+
+                if (parentEntity != entityInvalid)
+                {
+                    auto& parent = ent.Get<Components::Parent>();
+                    parent.entity = { parentEntity.id };
+                }
+
+                auto& instance = ent.Get<Components::Instance>();
+                instance.mesh = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i]].id };
+                instance.material = Components::Handle<Components::Material>{ matIndexToEntity[_scene->mMeshes[node->mMeshes[i]]->mMaterialIndex].id };
+            }
         }
 
 
@@ -341,9 +356,9 @@ public:
                 {
                     MeshLoader::Vertex& v = originalMesh.vertices[j];
 
-                    v.px = m->mVertices[j].x * 1000;
-                    v.py = m->mVertices[j].y * 1000;
-                    v.pz = m->mVertices[j].z * 1000;
+                    v.px = m->mVertices[j].x;
+                    v.py = m->mVertices[j].y;
+                    v.pz = m->mVertices[j].z;
                     if (m->HasNormals())
                     {
                         v.nx = m->mNormals[j].x;

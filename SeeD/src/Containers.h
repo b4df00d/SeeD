@@ -14,7 +14,7 @@ public:
     }
     uint16_t Get()
     {
-        assert(freeslots.size() > 0);
+        seedAssert(freeslots.size() > 0);
         uint16_t slot = freeslots[freeslots.size() - 1];
         freeslots.pop_back();
         return slot;

@@ -74,7 +74,7 @@ public:
     {
         uint index;
         bool present = Contains(key, index);
-        assert(present);
+        seedAssert(present);
         return loaded[index];
     }
     void SetLoaded(uint index, bool value)
@@ -85,7 +85,7 @@ public:
     {
         uint index;
         bool present = Contains(key, index);
-        assert(present);
+        seedAssert(present);
         loaded[index] = value;
     }
     cpuType& GetData(uint index)
@@ -96,7 +96,7 @@ public:
     {
         uint index;
         bool present = Contains(key, index);
-        assert(present);
+        seedAssert(present);
         return GetData(index);
     }
     gpuType& GetGPUData(uint index)
@@ -107,7 +107,7 @@ public:
     {
         uint index;
         bool present = Contains(key, index);
-        assert(present);
+        seedAssert(present);
         return GetGPUData(index);
     }
     Resource& GetResource()
@@ -182,8 +182,8 @@ struct MeshStorage
 
     std::recursive_mutex lock;
 
-    uint meshesMaxCount = 10000;
-    uint meshletMaxCount = 10000;
+    uint meshesMaxCount = 100000;
+    uint meshletMaxCount = 100000;
     uint meshletVertexMaxCount = meshletMaxCount * 64;
     uint meshletTrianglesMaxCount = meshletMaxCount * 124;
     uint vertexMaxCount = meshletVertexMaxCount;
@@ -210,48 +210,53 @@ struct MeshStorage
     {
         ZoneScoped;
 
-        MeshLoader::Mesh newMesh;
         lock.lock();
+        uint _nextMeshOffset = nextMeshOffset;
+        uint _nextMeshletOffset = nextMeshletOffset;
+        uint _nextMeshletVertexOffset = nextMeshletVertexOffset;
+        uint _nextMeshletTriangleOffset = nextMeshletTriangleOffset;
+        uint _nextVertexOffset = nextVertexOffset;
 
+        nextMeshOffset += 1;
+        nextMeshletOffset += meshData.meshlets.size();
+        nextMeshletVertexOffset += meshData.meshlet_vertices.size();
+        nextMeshletTriangleOffset += meshData.meshlet_triangles.size();
+        nextVertexOffset += meshData.vertices.size();
+        lock.unlock();
+
+        MeshLoader::Mesh newMesh;
         newMesh.meshletCount = meshData.meshlets.size();
-        newMesh.meshletOffset = nextMeshletOffset;
+        newMesh.meshletOffset = _nextMeshletOffset;
         for (uint i = 0; i < meshData.meshlets.size(); i++)
         {
-            meshData.meshlets[i].triangle_offset += nextMeshletTriangleOffset;
-            meshData.meshlets[i].vertex_offset += nextMeshletVertexOffset;
+            meshData.meshlets[i].triangle_offset += _nextMeshletTriangleOffset;
+            meshData.meshlets[i].vertex_offset += _nextMeshletVertexOffset;
 
         }
         for (uint j = 0; j < meshData.meshlet_vertices.size(); j++)
         {
-            meshData.meshlet_vertices[j] += nextVertexOffset;
+            meshData.meshlet_vertices[j] += _nextVertexOffset;
         }
 
         if (nextMeshOffset > meshesMaxCount)
             IOs::Log("Too much meshes");
-        meshes.Upload(&newMesh, sizeof(newMesh), commandBuffer, nextMeshOffset * sizeof(newMesh));
-        nextMeshOffset += 1;
+        meshes.Upload(&newMesh, sizeof(newMesh), commandBuffer, _nextMeshOffset * sizeof(newMesh));
 
         if (nextMeshletOffset > meshletMaxCount)
             IOs::Log("Too much meshlets");
-        meshlets.Upload(meshData.meshlets.data(), meshData.meshlets.size() * sizeof(meshData.meshlets[0]), commandBuffer, nextMeshletOffset * sizeof(meshData.meshlets[0]));
-        nextMeshletOffset += meshData.meshlets.size();
+        meshlets.Upload(meshData.meshlets.data(), meshData.meshlets.size() * sizeof(meshData.meshlets[0]), commandBuffer, _nextMeshletOffset * sizeof(meshData.meshlets[0]));
 
         if (nextMeshletVertexOffset > meshletVertexMaxCount)
             IOs::Log("Too much meshlets vertices");
-        meshletVertices.Upload(meshData.meshlet_vertices.data(), meshData.meshlet_vertices.size() * sizeof(meshData.meshlet_vertices[0]), commandBuffer, nextMeshletVertexOffset * sizeof(meshData.meshlet_vertices[0]));
-        nextMeshletVertexOffset += meshData.meshlet_vertices.size();
+        meshletVertices.Upload(meshData.meshlet_vertices.data(), meshData.meshlet_vertices.size() * sizeof(meshData.meshlet_vertices[0]), commandBuffer, _nextMeshletVertexOffset * sizeof(meshData.meshlet_vertices[0]));
 
         if (nextMeshletTriangleOffset > meshletTrianglesMaxCount)
             IOs::Log("Too much meshlets triangles");
-        meshletTriangles.Upload(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size() * sizeof(meshData.meshlet_triangles[0]), commandBuffer, nextMeshletTriangleOffset * sizeof(meshData.meshlet_triangles[0]));
-        nextMeshletTriangleOffset += meshData.meshlet_triangles.size();
+        meshletTriangles.Upload(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size() * sizeof(meshData.meshlet_triangles[0]), commandBuffer, _nextMeshletTriangleOffset * sizeof(meshData.meshlet_triangles[0]));
 
         if (nextVertexOffset > vertexMaxCount)
             IOs::Log("Too much vertices");
-        vertices.Upload(meshData.vertices.data(), meshData.vertices.size() * sizeof(meshData.vertices[0]), commandBuffer, nextVertexOffset * sizeof(meshData.vertices[0]));
-        nextVertexOffset += meshData.vertices.size();
-
-        lock.unlock();
+        vertices.Upload(meshData.vertices.data(), meshData.vertices.size() * sizeof(meshData.vertices[0]), commandBuffer, _nextVertexOffset * sizeof(meshData.vertices[0]));
 
         Mesh result{ newMesh.meshletOffset, newMesh.meshletCount };
         return result;
@@ -836,7 +841,10 @@ public:
                     if ((i + subQuery) > (queryResult.size() - 1)) 
                         break;
 
-                    Components::Instance& instanceCmp = queryResult[i + subQuery].Get<Components::Instance>();
+                    auto& slot = queryResult[i + subQuery];
+                    World::Entity ent = World::Entity(slot.Get<Components::Entity>().index);
+
+                    Components::Instance& instanceCmp = slot.Get<Components::Instance>();
                     Components::Mesh& meshCmp = instanceCmp.mesh.Get();
                     Components::Material& materialCmp = instanceCmp.material.Get();
                     Components::Shader& shaderCmp = materialCmp.shader.Get();
@@ -857,13 +865,12 @@ public:
                         continue;
 
                     // everything should be loaded to be able to draw the instance
-
-                    Components::WorldMatrix& transformCmp = queryResult[i + subQuery].Get<Components::WorldMatrix>();
+                    float4x4 worldMatrix = ComputeWorldMatrix(ent);
 
                     HLSL::Instance& instance = localInstances[instanceCount];
                     instance.meshIndex = meshIndex;
                     instance.materialIndex = materialIndex;
-                    instance.worldMatrix = transformCmp.matrix;
+                    instance.worldMatrix = worldMatrix;
 
                     // if in range (depending on distance and BC size)
                         // Add to TLAS
