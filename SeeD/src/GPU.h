@@ -147,6 +147,7 @@ struct PipelineStateStream
 
 struct Shader
 {
+    ID3D12CommandSignature* commandSignature;
     ID3D12RootSignature* rootSignature;
     ID3D12PipelineState* pso;
 
@@ -582,25 +583,6 @@ public:
         frameNumber++;
         frameIndex = swapChain->GetCurrentBackBufferIndex();
         g_frameIndex = frameIndex;
-    }
-
-    ID3D12PipelineState* CreatePSO(PipelineStateStream& stream)
-    {
-        ID3D12PipelineState* pso = nullptr;
-        D3D12_SHADER_BYTECODE& vs = stream.VS;
-        D3D12_SHADER_BYTECODE& ms = stream.MS;
-        D3D12_SHADER_BYTECODE& cs = stream.CS;
-        if (vs.pShaderBytecode != nullptr || ms.pShaderBytecode != nullptr || cs.pShaderBytecode != nullptr)
-        {
-            D3D12_PIPELINE_STATE_STREAM_DESC pipelineStateStreamDesc = { sizeof(PipelineStateStream), &stream };
-            HRESULT hr = GPU::instance->device->CreatePipelineState(&pipelineStateStreamDesc, IID_PPV_ARGS(&pso));
-            if (FAILED(hr))
-            {
-                GPU::PrintDeviceRemovedReason(hr);
-                pso = nullptr;
-            }
-        }
-        return pso;
     }
 
     static __declspec(noinline) void PrintDeviceRemovedReason(HRESULT hr)
@@ -1075,7 +1057,7 @@ uint Resource::BufferSize()
 
 void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset)
 {
-    ZoneScoped;
+    //ZoneScoped;
     if (options.stopBufferUpload)
         return;
     //ZoneScopedN("Resource::Upload");
@@ -1135,7 +1117,7 @@ void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, 
 
 void Resource::CleanUploadResources(bool everything)
 {
-    ZoneScoped;
+    //ZoneScoped;
     uint frameNumberThreshold = GPU::instance->frameNumber - 2;
     if (everything)
         frameNumberThreshold = UINT_MAX;
@@ -1153,7 +1135,6 @@ void Resource::CleanUploadResources(bool everything)
                 }
             }
             {
-                ZoneScoped;
                 alloc->Release();
             }
             uploadResources.erase(uploadResources.begin() + i);

@@ -250,7 +250,15 @@ public:
         CreateAnimations(_scene);
         CreateMeshes(_scene);
         CreateMaterials(_scene);
-        CreateEntities(_scene, _scene->mRootNode);
+
+        for (uint i = 0; i < 100; i++)
+        {
+            _scene->mRootNode->mTransformation.a4 = Rand01() * 10.0f;
+            _scene->mRootNode->mTransformation.b4 = Rand01() * 10.0f;
+            _scene->mRootNode->mTransformation.c4 = Rand01() * 10.0f;
+
+            CreateEntities(_scene, _scene->mRootNode);
+        }
     }
 
     World::Entity CreateEntities(const aiScene* _scene, aiNode* node, World::Entity parentEntity = entityInvalid)
@@ -379,7 +387,7 @@ public:
                     */
                 }
 
-                // pour le moment ca marche que pour du triangulé (le 3)
+                // pour le moment ca marche que pour du triangulï¿½ (le 3)
                 originalMesh.indices.resize(m->mNumFaces * 3);
                 unsigned int index = 0;
                 for (unsigned int j = 0; j < m->mNumFaces; j++)
@@ -534,7 +542,7 @@ public :
         instance = nullptr;
 	}
 
-    D3D12_SHADER_BYTECODE Compile(String file, String entry, String type, ID3D12RootSignature** rootSignature = nullptr)
+    D3D12_SHADER_BYTECODE Compile(String file, String entry, String type, ID3D12RootSignature** rootSignature = nullptr, ID3D12CommandSignature** commandSignature = nullptr)
     {
 		ZoneScoped;
         bool compiled = false;
@@ -646,8 +654,31 @@ public :
                 return D3D12_SHADER_BYTECODE{};
             }
         }
-
         /*
+        if (commandSignature != nullptr)
+        {
+            // Create the command signature used for indirect drawing.
+            // Each command consists of a CBV update and a DrawInstanced call.
+            D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[2] = {};
+            argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
+            argumentDescs[0].ConstantBufferView.RootParameterIndex = 0;
+            argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+
+            D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
+            commandSignatureDesc.pArgumentDescs = argumentDescs;
+            commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+            commandSignatureDesc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+
+            auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, *rootSignature, IID_PPV_ARGS(&commandSignature));
+            if (FAILED(hr))
+            {
+                GPU::PrintDeviceRemovedReason(hr);
+                return D3D12_SHADER_BYTECODE{};
+            }
+        }
+        */
+
+#if 0
         // Save pdb.
         IDxcBlob* pPDB = nullptr;
         IDxcBlobUtf16* pPDBName = nullptr;
@@ -658,9 +689,29 @@ public :
             fwrite(pPDB->GetBufferPointer(), pPDB->GetBufferSize(), 1, fp);
             fclose(fp);
         }
-        */
+#endif
 
         return shaderBytecode;
+    }
+
+    ID3D12PipelineState* CreatePSO(PipelineStateStream& stream)
+    {
+        ID3D12PipelineState* pso = nullptr;
+        D3D12_SHADER_BYTECODE& vs = stream.VS;
+        D3D12_SHADER_BYTECODE& ms = stream.MS;
+        D3D12_SHADER_BYTECODE& cs = stream.CS;
+        if (vs.pShaderBytecode != nullptr || ms.pShaderBytecode != nullptr || cs.pShaderBytecode != nullptr)
+        {
+            D3D12_PIPELINE_STATE_STREAM_DESC pipelineStateStreamDesc = { sizeof(PipelineStateStream), &stream };
+            HRESULT hr = GPU::instance->device->CreatePipelineState(&pipelineStateStreamDesc, IID_PPV_ARGS(&pso));
+            if (FAILED(hr))
+            {
+                GPU::PrintDeviceRemovedReason(hr);
+                pso = nullptr;
+            }
+        }
+
+        return pso;
     }
 
     bool Parse(Shader& shader, String file)
@@ -707,26 +758,26 @@ public :
 					*/
 					if (tokens[1] == "gBuffer")
 					{
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature);
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature, &shader.commandSignature);
                         D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[3], "ps_6_6");
                         PipelineStateStream stream{};
                         stream.MS = meshShaderBytecode;
                         stream.PS = bufferShaderBytecode;
-                        shader.pso = GPU::instance->CreatePSO(stream);
+                        shader.pso = CreatePSO(stream);
                         compiled = shader.pso != nullptr;
 					}
 					else if (tokens[1] == "zPrepass")
 					{
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature);
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature, &shader.commandSignature);
                         PipelineStateStream stream{};
                         stream.MS = meshShaderBytecode;
-                        shader.pso = GPU::instance->CreatePSO(stream);
+                        shader.pso = CreatePSO(stream);
                         compiled = shader.pso != nullptr;
 					}
                     else if (tokens[1] == "forward")
                     {
                         D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader.rootSignature);
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader.rootSignature);
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader.rootSignature, &shader.commandSignature);
                         D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6");
                         PipelineStateStream stream;
                         stream.AS = amplificationShaderBytecode;
@@ -734,7 +785,7 @@ public :
                         stream.PS = forwardShaderBytecode;
                         stream.pRootSignature = shader.rootSignature;
                         shader.pso = nullptr;
-                        shader.pso = GPU::instance->CreatePSO(stream);
+                        shader.pso = CreatePSO(stream);
                         compiled = shader.pso != nullptr;
                     }
 				}

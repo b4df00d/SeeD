@@ -22,7 +22,6 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
-    //HLSL::Instance instance = { { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1 * instanceIndex, 1, 1 }, instanceIndex, 0, 0, 0 };
     
     StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
@@ -58,7 +57,6 @@ void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThre
     
     StructuredBuffer<HLSL:: Instance > instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
-    //HLSL::Instance instance = { { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1 * instanceIndex, 1, 1 }, instanceIndex, 0, 0, 0 };
     
     StructuredBuffer<HLSL:: Meshlet > meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
     HLSL::Meshlet meshlet = meshlets[meshletIndex];

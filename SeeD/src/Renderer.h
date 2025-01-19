@@ -1031,7 +1031,7 @@ public:
                     gpu.meshletOffset = cpu.meshletOffset;
                     gpu.meshletCount = cpu.meshletCount;
                 }
-                GlobalResources::instance->meshes.Upload();
+                GlobalResources::instance->meshes.Upload(); // WRONG !! on peut pas se permettre d upload des nouvelles data (surtout si ca demande un resize) pendant qu on a encore une frame en vole
             }
         ).name("upload meshes buffer");
 
