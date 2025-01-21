@@ -1,15 +1,164 @@
 #pragma once
 
+class AssetLibrary
+{
+    std::shared_mutex lock;
+public:
+    enum class AssetType
+    {
+        mesh,
+        shader,
+        texture
+    };
+    struct Asset
+    {
+        String path;
+        AssetLibrary::AssetType type;
+        uint indexInVector = ~0;
+    };
+    static AssetLibrary* instance;
+    std::unordered_map<assetID, Asset> map;
+    String assetsPath = "..\\Assets\\";
+    String file = "..\\assetLibrary.txt";
+    std::unordered_map<assetID, uint> loadingRequest;
+    int meshLoadingLimit = 3;
+    int shaderLoadingLimit = 3;
+    int textureLoadingLimit = 3;
+
+    std::vector<Mesh> meshes;
+    std::vector<Shader> shaders;
+    std::vector<Resource> textures;
+
+
+    void On()
+    {
+        instance = this;
+        namespace fs = std::filesystem;
+        fs::create_directories("..\\Assets");
+        Load();
+    }
+
+    void Off()
+    {
+        Save();
+        instance = nullptr;
+    }
+
+    AssetLibrary::AssetType GetType(assetID id)
+    {
+        String path = GetPath(id);
+        int extentionStart = path.find_last_of('.') + 1;
+        String extenstion = path.substr(extentionStart);
+        AssetLibrary::AssetType type;
+        if (extenstion == "mesh") type = AssetLibrary::AssetType::mesh;
+        else if (extenstion == "hlsl") type = AssetLibrary::AssetType::shader;
+        else if (extenstion == "dds") type = AssetLibrary::AssetType::texture;
+
+        return type;
+    }
+
+    assetID Add(String path)
+    {
+        ZoneScoped;
+        assetID id;
+        id.hash = std::hash<std::string>{}(path);
+        lock.lock();
+        map[id].path = path;
+        map[id].type = GetType(id);
+        lock.unlock();
+        return id;
+    }
+
+    String GetPath(assetID id)
+    {
+        seedAssert(map.contains(id));
+        return map[id].path;
+    }
+
+    uint GetIndex(assetID id)
+    {
+        seedAssert(map.contains(id));
+        auto& asset = map[id];
+        if (asset.indexInVector == ~0)
+        {
+            lock.lock();
+            loadingRequest[id]++;
+            lock.unlock();
+        }
+        return asset.indexInVector;
+    }
+
+    template<typename T>
+    T* Get(assetID id)
+    {
+        seedAssert(map.contains(id));
+        auto& asset = map[id];
+        if (asset.indexInVector == ~0)
+        {
+            lock.lock();
+            loadingRequest[id]++;
+            lock.unlock();
+        }
+        else
+        {
+            if (asset.type == AssetLibrary::AssetType::mesh)
+                return (T*)&meshes[asset.indexInVector];
+            else if (asset.type == AssetLibrary::AssetType::shader)
+                return (T*)&shaders[asset.indexInVector];
+            else if (asset.type == AssetLibrary::AssetType::texture)
+                return (T*)&textures[asset.indexInVector];
+        }
+        return nullptr;
+    }
+
+
+    void LoadAssets(CommandBuffer& commandBuffer);
+
+    void Save()
+    {
+        ZoneScoped;
+        String line;
+        std::ofstream myfile(file);
+        if (myfile.is_open())
+        {
+            for (auto& item : map)
+            {
+                myfile << item.first.hash << " " << item.second.path << std::endl;
+            }
+        }
+    }
+
+    void Load()
+    {
+        ZoneScoped;
+        String line;
+        std::ifstream myfile(file);
+        if (myfile.is_open())
+        {
+            assetID id;
+            String path;
+            while (myfile >> id.hash >> path)
+            {
+                map[id].path = path;
+                map[id].type = GetType(id);
+            }
+        }
+    }
+};
+AssetLibrary* AssetLibrary::instance = nullptr;
+
 #include <wincodec.h>
 #include "../../Third/DirectXTex-main/WICTextureLoader/WICTextureLoader12.h"
 #include "../../Third/DirectXTex-main/DDSTextureLoader/DDSTextureLoader12.h"
 class TextureLoader
 {
 public:
+    static TextureLoader* instance;
     IWICImagingFactory* wicFactory = NULL;
     void On()
     {
 		ZoneScoped;
+        instance = this;
         HRESULT hr;
         CoInitialize(NULL);// Initialize the COM library
         hr = CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFactory));// create the WIC factory
@@ -19,21 +168,21 @@ public:
     {
 		ZoneScoped;
         wicFactory->Release();
+        instance = nullptr;
+    }
+
+    bool Load(Resource& resource, String path)
+    {
+        return false;
     }
 };
-
+TextureLoader* TextureLoader::instance = nullptr;
 
 #include "../../Third/meshoptimizer-master/src/meshoptimizer.h"
 class MeshLoader
 {
 public:
     static MeshLoader* instance;
-    struct Vertex
-    {
-        float px, py, pz;
-        float nx, ny, nz;
-        float u, v;
-    };
 
     struct MeshOriginal
     {
@@ -41,30 +190,6 @@ public:
         std::vector<Vertex> vertices;
     };
 
-    struct Meshlet // same as meshoptimizer meshlet
-    {
-        /* offsets within meshlet_vertices and meshlet_triangles arrays with meshlet data */
-        unsigned int vertex_offset;
-        unsigned int triangle_offset;
-
-        /* number of vertices and triangles used in the meshlet; data is stored in consecutive range defined by offset and count */
-        unsigned int vertex_count;
-        unsigned int triangle_count;
-    };
-
-    struct MeshData
-    {
-        std::vector<Meshlet> meshlets;
-        std::vector<unsigned int> meshlet_vertices;
-        std::vector<unsigned int> meshlet_triangles;
-        std::vector<Vertex> vertices;
-    };
-
-    struct Mesh
-    {
-        uint meshletOffset;
-        uint meshletCount;
-    };
 
 	void On()
 	{
@@ -167,7 +292,7 @@ public:
         //use if (dot(normalize(cone_apex - camera_position), cone_axis) >= cone_cutoff) reject(); in mesh shader for cone culling
     }
 };
-MeshLoader* MeshLoader::instance;
+MeshLoader* MeshLoader::instance = nullptr;
 
 #include "../../Third/assimp-master/include/assimp/Importer.hpp"
 #include "../../Third/assimp-master/include/assimp/Exporter.hpp"
@@ -181,14 +306,15 @@ class SceneLoader
     std::vector<World::Entity> skeletonIndexToEntity;
 
 public:
+    static SceneLoader* instance;
     void On()
     {
-
+        instance = this;
     }
 
     void Off()
     {
-
+        instance = nullptr;
     }
 
     void Load(String path)
@@ -362,7 +488,7 @@ public:
                 originalMesh.vertices.resize(m->mNumVertices);
                 for (unsigned int j = 0; j < m->mNumVertices; j++)
                 {
-                    MeshLoader::Vertex& v = originalMesh.vertices[j];
+                    Vertex& v = originalMesh.vertices[j];
 
                     v.px = m->mVertices[j].x;
                     v.py = m->mVertices[j].y;
@@ -399,7 +525,7 @@ public:
                     }
                 }
 
-                MeshLoader::MeshData mesh = MeshLoader::instance->Process(originalMesh);
+                MeshData mesh = MeshLoader::instance->Process(originalMesh);
                 assetID id = MeshLoader::instance->Write(mesh, m->mName.C_Str());
 
                 World::Entity ent;
@@ -513,6 +639,7 @@ public:
         ZoneScoped;
     }
 };
+SceneLoader* SceneLoader::instance = nullptr;
 
 #pragma comment(lib, "dxcompiler.lib")
 #include "../../Third/DirectXShaderCompiler-main/inc/dxcapi.h"
@@ -803,3 +930,77 @@ public :
     }
 };
 ShaderLoader* ShaderLoader::instance = nullptr;
+
+
+inline void AssetLibrary::LoadAssets(CommandBuffer& commandBuffer)
+{
+    //ZoneScoped;
+    int meshLoaded = meshLoadingLimit;
+    int shaderLoaded = shaderLoadingLimit;
+    int textureLoaded = textureLoadingLimit;
+    for (auto& item : loadingRequest)
+    {
+        assetID id = item.first;
+        switch (map[id].type)
+        {
+        case AssetLibrary::AssetType::mesh:
+        {
+            if (meshLoaded >= 0)
+            {
+                MeshData meshData = MeshLoader::instance->Read(map[id].path);
+                if (meshData.meshlets.size() > 0)
+                {
+                    Mesh mesh = GlobalResources::instance->meshStorage.Load(meshData, commandBuffer);
+                    lock.lock();
+                    meshes.push_back(mesh);
+                    map[id].indexInVector = meshes.size() - 1;
+                    meshLoaded--;
+                    lock.unlock();
+                }
+            }
+        }
+            break;
+        case AssetLibrary::AssetType::shader:
+        {
+            if (shaderLoaded >= 0)
+            {
+                Shader shader;
+                bool compiled = ShaderLoader::instance->Load(shader, map[id].path);
+                if (compiled)
+                {
+                    lock.lock();
+                    shaders.push_back(shader);
+                    map[id].indexInVector = shaders.size() - 1;
+                    shaderLoaded--;
+                    lock.unlock();
+                }
+            }
+        }
+            break;
+        case AssetLibrary::AssetType::texture:
+        {
+            if (textureLoaded >= 0)
+            {
+                Resource texture;
+                bool loaded = TextureLoader::instance->Load(texture, map[id].path);
+                if (loaded)
+                {
+                    lock.lock();
+                    textures.push_back(texture);
+                    map[id].indexInVector = textures.size() - 1;
+                    textureLoaded--;
+                    lock.unlock();
+                }
+            }
+        }
+            break;
+        default:
+            seedAssert(false);
+            break;
+        }
+
+        if (meshLoaded <= 0 && shaderLoaded <= 0 && textureLoaded <= 0)
+            break;
+    }
+    loadingRequest.clear();
+}

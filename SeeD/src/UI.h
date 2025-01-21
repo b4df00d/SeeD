@@ -174,7 +174,9 @@ public:
 
         for (auto& item : AssetLibrary::instance->map)
         {
-            ImGui::Text("%ul %s", item.first, item.second.c_str());
+            ImGui::RadioButton("##radio", item.second.indexInVector != ~0);
+            ImGui::SameLine();
+            ImGui::Text("%ul %s", item.first, item.second.path.c_str());
         }
 
         ImGui::End();

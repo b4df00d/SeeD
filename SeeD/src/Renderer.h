@@ -126,173 +126,7 @@ public:
     auto end() { return keys.end(); }
 };
 
-struct BLAS
-{
 
-};
-
-struct TLAS
-{
-    ~TLAS()
-    {
-
-    }
-};
-
-struct Meshlet
-{
-    /* offsets within meshlet_vertices and meshlet_triangles arrays with meshlet data */
-    uint vertexOffset;
-    uint triangleOffset;
-
-    /* number of vertices and triangles used in the meshlet; data is stored in consecutive range defined by offset and count */
-    uint vertexCount;
-    uint triangleCount;
-};
-
-struct Mesh
-{
-    uint meshletOffset;
-    uint meshletCount;
-    //BLAS blas;
-};
-
-struct Material
-{
-    uint shaderIndex;
-    float parameters[15];
-    SRV texturesSRV[16];
-};
-
-struct MeshStorage
-{
-    uint nextMeshOffset = 0;
-    Resource meshes;
-    uint nextMeshletOffset = 0;
-    Resource meshlets;
-    uint nextMeshletVertexOffset = 0;
-    Resource meshletVertices;
-    uint nextMeshletTriangleOffset = 0;
-    Resource meshletTriangles;
-    uint nextVertexOffset = 0;
-    Resource vertices;
-
-    Resource blasVertices;
-    Resource blasIndicies;
-
-    std::recursive_mutex lock;
-
-    uint meshesMaxCount = 100000;
-    uint meshletMaxCount = 100000;
-    uint meshletVertexMaxCount = meshletMaxCount * 64;
-    uint meshletTrianglesMaxCount = meshletMaxCount * 124;
-    uint vertexMaxCount = meshletVertexMaxCount;
-
-    void On()
-    {
-        meshes.CreateBuffer<MeshLoader::Mesh>(meshesMaxCount, "meshes");
-        meshlets.CreateBuffer<MeshLoader::Meshlet>(meshletMaxCount, "meshlets");
-        meshletVertices.CreateBuffer<unsigned int>(meshletVertexMaxCount, "meshlet vertices");
-        meshletTriangles.CreateBuffer<unsigned int>(meshletTrianglesMaxCount, "meshlet triangles");
-        vertices.CreateBuffer<MeshLoader::Vertex>(vertexMaxCount, "vertices");
-    }
-
-    void Off()
-    {
-        meshes.Release();
-        meshlets.Release();
-        meshletVertices.Release();
-        meshletTriangles.Release();
-        vertices.Release();
-    }
-
-    Mesh Load(MeshLoader::MeshData& meshData, CommandBuffer& commandBuffer)
-    {
-        ZoneScoped;
-
-        lock.lock();
-        uint _nextMeshOffset = nextMeshOffset;
-        uint _nextMeshletOffset = nextMeshletOffset;
-        uint _nextMeshletVertexOffset = nextMeshletVertexOffset;
-        uint _nextMeshletTriangleOffset = nextMeshletTriangleOffset;
-        uint _nextVertexOffset = nextVertexOffset;
-
-        nextMeshOffset += 1;
-        nextMeshletOffset += meshData.meshlets.size();
-        nextMeshletVertexOffset += meshData.meshlet_vertices.size();
-        nextMeshletTriangleOffset += meshData.meshlet_triangles.size();
-        nextVertexOffset += meshData.vertices.size();
-        lock.unlock();
-
-        MeshLoader::Mesh newMesh;
-        newMesh.meshletCount = meshData.meshlets.size();
-        newMesh.meshletOffset = _nextMeshletOffset;
-        for (uint i = 0; i < meshData.meshlets.size(); i++)
-        {
-            meshData.meshlets[i].triangle_offset += _nextMeshletTriangleOffset;
-            meshData.meshlets[i].vertex_offset += _nextMeshletVertexOffset;
-
-        }
-        for (uint j = 0; j < meshData.meshlet_vertices.size(); j++)
-        {
-            meshData.meshlet_vertices[j] += _nextVertexOffset;
-        }
-
-        if (nextMeshOffset > meshesMaxCount)
-            IOs::Log("Too much meshes");
-        meshes.Upload(&newMesh, sizeof(newMesh), commandBuffer, _nextMeshOffset * sizeof(newMesh));
-
-        if (nextMeshletOffset > meshletMaxCount)
-            IOs::Log("Too much meshlets");
-        meshlets.Upload(meshData.meshlets.data(), meshData.meshlets.size() * sizeof(meshData.meshlets[0]), commandBuffer, _nextMeshletOffset * sizeof(meshData.meshlets[0]));
-
-        if (nextMeshletVertexOffset > meshletVertexMaxCount)
-            IOs::Log("Too much meshlets vertices");
-        meshletVertices.Upload(meshData.meshlet_vertices.data(), meshData.meshlet_vertices.size() * sizeof(meshData.meshlet_vertices[0]), commandBuffer, _nextMeshletVertexOffset * sizeof(meshData.meshlet_vertices[0]));
-
-        if (nextMeshletTriangleOffset > meshletTrianglesMaxCount)
-            IOs::Log("Too much meshlets triangles");
-        meshletTriangles.Upload(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size() * sizeof(meshData.meshlet_triangles[0]), commandBuffer, _nextMeshletTriangleOffset * sizeof(meshData.meshlet_triangles[0]));
-
-        if (nextVertexOffset > vertexMaxCount)
-            IOs::Log("Too much vertices");
-        vertices.Upload(meshData.vertices.data(), meshData.vertices.size() * sizeof(meshData.vertices[0]), commandBuffer, _nextVertexOffset * sizeof(meshData.vertices[0]));
-
-        Mesh result{ newMesh.meshletOffset, newMesh.meshletCount };
-        return result;
-    }
-};
-
-// life time : program
-struct GlobalResources
-{
-    static GlobalResources* instance;
-    Map<assetID, Shader, HLSL::Shader> shaders;
-    Map<assetID, Mesh, HLSL::Mesh> meshes;
-    MeshStorage meshStorage;
-    Map<assetID, Resource, HLSL::Texture> textures;
-
-    void On()
-    {
-        instance = this;
-        meshStorage.On();
-    }
-
-    void Off()
-    {
-        meshStorage.Off();
-        Release();
-        instance = nullptr;
-    }
-
-    void Release()
-    {
-        shaders.Release();
-        meshes.Release();
-        textures.Release();
-    }
-};
-GlobalResources* GlobalResources::instance = nullptr;
 
 // life time : frame
 struct ViewWorld
@@ -559,8 +393,6 @@ public:
         Pass::On(view, asyncCompute, _name);
         ZoneScoped;
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
-        uint index;
-        GlobalResources::instance->shaders.Add(meshShader.Get().id, index);
     }
     void Setup(View* view) override
     {
@@ -605,10 +437,10 @@ public:
         UINT8 clearStencil(0);
         commandBuffer->cmd->ClearDepthStencilView(depthBuffer.dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepth, clearStencil, 1, &rect);
 
-        bool loaded = GlobalResources::instance->shaders.GetLoaded(meshShader.Get().id);
-        if (loaded)
+        Shader* _shader = AssetLibrary::instance->Get<Shader>(meshShader.Get().id);
+        if (_shader != nullptr)
         {
-            Shader& shader = GlobalResources::instance->shaders.GetData(meshShader.Get().id);
+            Shader& shader = *_shader;
             commandBuffer->Set(shader);
 
             HLSL::CommonResourcesIndices commonResourcesIndices;
@@ -819,13 +651,13 @@ public:
         frameWorld.materials.Reserve(materialsCount);
 
         uint meshesCount = world.CountQuery(Components::Mesh::mask, 0);
-        GlobalResources::instance->meshes.Reserve(meshesCount);
+        //GlobalResources::instance->meshes.Reserve(meshesCount);
 
         uint texturesCount = world.CountQuery(Components::Texture::mask, 0);
-        GlobalResources::instance->textures.Reserve(texturesCount);
+        //GlobalResources::instance->textures.Reserve(texturesCount);
 
         uint shadersCount = world.CountQuery(Components::Shader::mask, 0);
-        GlobalResources::instance->shaders.Reserve(shadersCount);
+        //GlobalResources::instance->shaders.Reserve(shadersCount);
 
         
         tf::Task task = subflow.for_each_index(0, entityCount, UpdateInstancesStepSize,
@@ -849,14 +681,13 @@ public:
                     Components::Material& materialCmp = instanceCmp.material.Get();
                     Components::Shader& shaderCmp = materialCmp.shader.Get();
 
-                    uint meshIndex;
-                    bool meshAdded = GlobalResources::instance->meshes.Add(meshCmp.id, meshIndex);
-                    if (!GlobalResources::instance->meshes.GetLoaded(meshIndex)) 
+
+                    uint meshIndex = AssetLibrary::instance->GetIndex(meshCmp.id);
+                    if (meshIndex == ~0)
                         continue;
 
-                    uint shaderIndex;
-                    bool shaderAdded = GlobalResources::instance->shaders.Add(shaderCmp.id, shaderIndex);
-                    if (!GlobalResources::instance->shaders.GetLoaded(shaderIndex)) 
+                    Shader* shader = AssetLibrary::instance->Get<Shader>(shaderCmp.id);
+                    if (!shader) 
                         continue;
 
                     uint materialIndex;
@@ -918,10 +749,7 @@ public:
                         Components::Material& materialCmp = queryResult[i + subQuery].Get<Components::Material>();
                         Material& material = frameWorld.materials.GetData(materialIndex);
 
-                        uint shaderIndex;
-                        bool shaderAdded = GlobalResources::instance->shaders.Contains(materialCmp.shader.Get().id, shaderIndex);
-
-                        material.shaderIndex = shaderIndex;
+                        material.shaderIndex = AssetLibrary::instance->GetIndex(materialCmp.shader.Get().id);
                         for (uint paramIndex = 0; paramIndex < Components::Material::maxParameters; paramIndex++)
                         {
                             // memcpy ? it is even just a cashline 
@@ -933,11 +761,11 @@ public:
                             if (materialCmp.textures[texIndex].index != entityInvalid)
                             {
                                 Components::Texture& textureCmp = materialCmp.textures[texIndex].Get();
-                                uint textureIndex;
-                                bool textureAdded = GlobalResources::instance->textures.Add(textureCmp.id, textureIndex);
-                                if (!GlobalResources::instance->textures.GetLoaded(textureIndex)) 
+                                Resource* texture = AssetLibrary::instance->Get<Resource>(textureCmp.id);
+                                if (!texture)
                                     materialReady = false;
-                                material.texturesSRV[texIndex] = GlobalResources::instance->textures.GetData(textureIndex).srv;
+                                else
+                                    material.texturesSRV[texIndex] = texture->srv;
                             }
                         }
 
@@ -1024,14 +852,18 @@ public:
         tf::Task task = subflow.emplace(
             []() 
             {
-                for (uint i = 0; i < GlobalResources::instance->meshes.count; i++)
+                auto& meshesAssetLibrary = AssetLibrary::instance->meshes;
+                auto& meshesHLSL = GlobalResources::instance->meshes;
+                meshesHLSL.Resize(meshesAssetLibrary.size());
+
+                for (uint i = 0; i < meshesAssetLibrary.size(); i++)
                 {
-                    auto& cpu = GlobalResources::instance->meshes.GetData(i);
-                    auto& gpu = GlobalResources::instance->meshes.GetGPUData(i);
+                    auto& cpu = meshesAssetLibrary[i];
+                    auto& gpu = meshesHLSL[i];
                     gpu.meshletOffset = cpu.meshletOffset;
                     gpu.meshletCount = cpu.meshletCount;
                 }
-                GlobalResources::instance->meshes.Upload(); // WRONG !! on peut pas se permettre d upload des nouvelles data (surtout si ca demande un resize) pendant qu on a encore une frame en vole
+                meshesHLSL.Upload(); // WRONG !! on peut pas se permettre d upload des nouvelles data (surtout si ca demande un resize) pendant qu on a encore une frame en vole
             }
         ).name("upload meshes buffer");
 
@@ -1045,13 +877,17 @@ public:
         tf::Task task = subflow.emplace(
             []()
             {
-                for (uint i = 0; i < GlobalResources::instance->shaders.count; i++)
+                auto& shadersAssetLibrary = AssetLibrary::instance->shaders;
+                auto& shadersHLSL = GlobalResources::instance->shaders;
+                shadersHLSL.Resize(shadersAssetLibrary.size());
+
+                for (uint i = 0; i < shadersAssetLibrary.size(); i++)
                 {
-                    auto& cpu = GlobalResources::instance->shaders.GetData(i);
-                    auto& gpu = GlobalResources::instance->shaders.GetGPUData(i);
+                    auto& cpu = shadersAssetLibrary[i];
+                    auto& gpu = shadersHLSL[i];
                     gpu.id = i;//cpu.something;
                 }
-                GlobalResources::instance->shaders.Upload();
+                shadersHLSL.Upload();
             }
         ).name("upload shaders buffer");
 
@@ -1065,13 +901,17 @@ public:
         tf::Task task = subflow.emplace(
             []()
             {
-                for (uint i = 0; i < GlobalResources::instance->textures.count; i++)
+                auto& texturesAssetLibrary = AssetLibrary::instance->textures;
+                auto& texturesHLSL = GlobalResources::instance->textures;
+                texturesHLSL.Resize(texturesAssetLibrary.size());
+
+                for (uint i = 0; i < texturesAssetLibrary.size(); i++)
                 {
-                    auto& cpu = GlobalResources::instance->textures.GetData(i);
-                    auto& gpu = GlobalResources::instance->textures.GetGPUData(i);
+                    auto& cpu = texturesAssetLibrary[i];
+                    auto& gpu = texturesHLSL[i];
                     gpu.index = cpu.srv.offset;
                 }
-                GlobalResources::instance->textures.Upload();
+                texturesHLSL.Upload();
             }
         ).name("upload textures buffer");
 
@@ -1167,7 +1007,7 @@ public:
         auto mainViewEndTask = mainView.Schedule(world, subflow);
         auto editorViewEndTask = editorView.Schedule(world, subflow);
 
-        tf::Task uploadTask = ScheduleLoading(subflow);
+        SUBTASKPASS(upload); // this must be executed after all loading task and will close the cmd
         SUBTASKRENDERER(ExecuteFrame);
         SUBTASKRENDERER(WaitFrame);
         SUBTASKRENDERER(PresentFrame);
@@ -1177,97 +1017,6 @@ public:
         WaitFrame.precede(PresentFrame);
     }
 
-    tf::Task ScheduleLoading(tf::Subflow& subflow)
-    {
-        ZoneScoped;
-        uint loadingLeft = GlobalResources::instance->shaders.maxLoading;
-        upload.Open();
-        SUBTASKPASS(upload); // this will be executed after all loading task and will close the cmd
-
-        for (auto& item : GlobalResources::instance->shaders)
-        {
-            auto& shader = GlobalResources::instance->shaders.GetData(item.first);
-            if (!GlobalResources::instance->shaders.GetLoaded(item.second) || shader.NeedReload())
-            {
-                assetID i = item.first;
-                // load shader
-                tf::Task pass = subflow.emplace([this, i]() {this->LoadShaders(i); }).name("LoadShaders");
-                uploadTask.succeed(pass);
-                loadingLeft--;
-            }
-            if (loadingLeft == 0)
-                break;
-        }
-        loadingLeft = GlobalResources::instance->meshes.maxLoading;
-        for (auto& item : GlobalResources::instance->meshes)
-        {
-            if (!GlobalResources::instance->meshes.GetLoaded(item.second))
-            {
-                assetID i = item.first;
-                // load mesh
-                tf::Task pass = subflow.emplace([this, i]() {this->LoadMeshes(i); }).name("LoadMeshes");
-                uploadTask.succeed(pass);
-                loadingLeft--;
-            }
-            if (loadingLeft == 0)
-                break;
-        }
-        loadingLeft = GlobalResources::instance->textures.maxLoading;
-        for (uint i = 0; i < GlobalResources::instance->textures.count; i++)
-        {
-            if (!GlobalResources::instance->textures.GetLoaded(i))
-            {
-                // load texture
-                tf::Task pass = subflow.emplace([this, i]() {this->LoadTextures(i); }).name("LoadTextures");
-                uploadTask.succeed(pass);
-                loadingLeft--;
-            }
-            if (loadingLeft == 0)
-                break;
-        }
-
-        return uploadTask;
-    }
-
-    // do that in backgroud task ?
-    void LoadShaders(assetID i)
-    {
-        ZoneScoped;
-        /*
-        // shader compile work across the entire frame. but GlobalResources::instance->shaders storage vectors can be resize in the same time
-        // so the ptr of auto& shadercan no longer point to something good anymore during or after the compilation
-        auto& shader = GlobalResources::instance->shaders.GetData(i);
-        bool compiled = ShaderLoader::instance->Load(shader, AssetLibrary::instance->Get(i));
-        GlobalResources::instance->shaders.SetLoaded(i, compiled);
-        */
-        // so to be thread safe : do the compilation on a tmp Shader object and then copy the result after
-        // and why not lock the shaders map ..
-        Shader shader;
-        bool compiled = ShaderLoader::instance->Load(shader, AssetLibrary::instance->Get(i));
-        GlobalResources::instance->shaders.lock.lock();
-        GlobalResources::instance->shaders.GetData(i) = shader;
-        GlobalResources::instance->shaders.SetLoaded(i, compiled);
-        GlobalResources::instance->shaders.lock.unlock();
-    }
-    void LoadMeshes(assetID i)
-    {
-        ZoneScoped;
-        MeshLoader::MeshData meshData = MeshLoader::instance->Read(AssetLibrary::instance->Get(i));
-        if (meshData.meshlets.size() == 0)
-            return;
-        Mesh mesh = GlobalResources::instance->meshStorage.Load(meshData, upload.commandBuffer.Get());
-        GlobalResources::instance->meshes.lock.lock();
-        GlobalResources::instance->meshes.GetData(i) = mesh;
-        GlobalResources::instance->meshes.SetLoaded(i, true);
-        GlobalResources::instance->meshes.lock.unlock();
-    }
-    void LoadTextures(uint i)
-    {
-        ZoneScoped;
-        IOs::Log("texture");
-        GlobalResources::instance->textures.GetData(i);
-        GlobalResources::instance->textures.SetLoaded(i, true);
-    }
 
     void ExecuteFrame()
     {

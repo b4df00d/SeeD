@@ -1028,6 +1028,7 @@ void Resource::Release()
 {
     if (allocation)
     {
+        lock.lock();
         for (int j = (int)allResources.size() - 1; j >= 0; j--)
         {
             if (allResources[j] == allocation)
@@ -1036,6 +1037,7 @@ void Resource::Release()
                 allResourcesNames.erase(allResourcesNames.begin() + j);
             }
         }
+        lock.unlock();
         allocation->Release();
     }
     allocation = nullptr;
@@ -1550,3 +1552,189 @@ struct Profiler
     }
 };
 Profiler* Profiler::instance;
+
+struct BLAS
+{
+
+};
+
+struct TLAS
+{
+    ~TLAS()
+    {
+
+    }
+};
+
+struct Vertex
+{
+    float px, py, pz;
+    float nx, ny, nz;
+    float u, v;
+};
+
+struct Meshlet
+{
+    /* offsets within meshlet_vertices and meshlet_triangles arrays with meshlet data */
+    uint vertexOffset;
+    uint triangleOffset;
+
+    /* number of vertices and triangles used in the meshlet; data is stored in consecutive range defined by offset and count */
+    uint vertexCount;
+    uint triangleCount;
+};
+
+struct Mesh
+{
+    uint meshletOffset;
+    uint meshletCount;
+    //BLAS blas;
+};
+
+struct MeshData
+{
+    std::vector<Meshlet> meshlets;
+    std::vector<unsigned int> meshlet_vertices;
+    std::vector<unsigned int> meshlet_triangles;
+    std::vector<Vertex> vertices;
+};
+
+struct Material
+{
+    uint shaderIndex;
+    float parameters[15];
+    SRV texturesSRV[16];
+};
+
+struct MeshStorage
+{
+    uint nextMeshOffset = 0;
+    Resource meshes;
+    uint nextMeshletOffset = 0;
+    Resource meshlets;
+    uint nextMeshletVertexOffset = 0;
+    Resource meshletVertices;
+    uint nextMeshletTriangleOffset = 0;
+    Resource meshletTriangles;
+    uint nextVertexOffset = 0;
+    Resource vertices;
+
+    Resource blasVertices;
+    Resource blasIndicies;
+
+    std::recursive_mutex lock;
+
+    uint meshesMaxCount = 100000;
+    uint meshletMaxCount = 100000;
+    uint meshletVertexMaxCount = meshletMaxCount * 64;
+    uint meshletTrianglesMaxCount = meshletMaxCount * 124;
+    uint vertexMaxCount = meshletVertexMaxCount;
+
+    void On()
+    {
+        meshes.CreateBuffer<Mesh>(meshesMaxCount, "meshes");
+        meshlets.CreateBuffer<Meshlet>(meshletMaxCount, "meshlets");
+        meshletVertices.CreateBuffer<unsigned int>(meshletVertexMaxCount, "meshlet vertices");
+        meshletTriangles.CreateBuffer<unsigned int>(meshletTrianglesMaxCount, "meshlet triangles");
+        vertices.CreateBuffer<Vertex>(vertexMaxCount, "vertices");
+    }
+
+    void Off()
+    {
+        meshes.Release();
+        meshlets.Release();
+        meshletVertices.Release();
+        meshletTriangles.Release();
+        vertices.Release();
+    }
+
+    Mesh Load(MeshData& meshData, CommandBuffer& commandBuffer)
+    {
+        ZoneScoped;
+
+        lock.lock();
+        uint _nextMeshOffset = nextMeshOffset;
+        uint _nextMeshletOffset = nextMeshletOffset;
+        uint _nextMeshletVertexOffset = nextMeshletVertexOffset;
+        uint _nextMeshletTriangleOffset = nextMeshletTriangleOffset;
+        uint _nextVertexOffset = nextVertexOffset;
+
+        nextMeshOffset += 1;
+        nextMeshletOffset += meshData.meshlets.size();
+        nextMeshletVertexOffset += meshData.meshlet_vertices.size();
+        nextMeshletTriangleOffset += meshData.meshlet_triangles.size();
+        nextVertexOffset += meshData.vertices.size();
+        lock.unlock();
+
+        Mesh newMesh;
+        newMesh.meshletCount = meshData.meshlets.size();
+        newMesh.meshletOffset = _nextMeshletOffset;
+        for (uint i = 0; i < meshData.meshlets.size(); i++)
+        {
+            meshData.meshlets[i].triangleOffset += _nextMeshletTriangleOffset;
+            meshData.meshlets[i].vertexOffset += _nextMeshletVertexOffset;
+
+        }
+        for (uint j = 0; j < meshData.meshlet_vertices.size(); j++)
+        {
+            meshData.meshlet_vertices[j] += _nextVertexOffset;
+        }
+
+        if (nextMeshOffset > meshesMaxCount)
+            IOs::Log("Too much meshes");
+        meshes.Upload(&newMesh, sizeof(newMesh), commandBuffer, _nextMeshOffset * sizeof(newMesh));
+
+        if (nextMeshletOffset > meshletMaxCount)
+            IOs::Log("Too much meshlets");
+        meshlets.Upload(meshData.meshlets.data(), meshData.meshlets.size() * sizeof(meshData.meshlets[0]), commandBuffer, _nextMeshletOffset * sizeof(meshData.meshlets[0]));
+
+        if (nextMeshletVertexOffset > meshletVertexMaxCount)
+            IOs::Log("Too much meshlets vertices");
+        meshletVertices.Upload(meshData.meshlet_vertices.data(), meshData.meshlet_vertices.size() * sizeof(meshData.meshlet_vertices[0]), commandBuffer, _nextMeshletVertexOffset * sizeof(meshData.meshlet_vertices[0]));
+
+        if (nextMeshletTriangleOffset > meshletTrianglesMaxCount)
+            IOs::Log("Too much meshlets triangles");
+        meshletTriangles.Upload(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size() * sizeof(meshData.meshlet_triangles[0]), commandBuffer, _nextMeshletTriangleOffset * sizeof(meshData.meshlet_triangles[0]));
+
+        if (nextVertexOffset > vertexMaxCount)
+            IOs::Log("Too much vertices");
+        vertices.Upload(meshData.vertices.data(), meshData.vertices.size() * sizeof(meshData.vertices[0]), commandBuffer, _nextVertexOffset * sizeof(meshData.vertices[0]));
+
+        Mesh result{ newMesh.meshletOffset, newMesh.meshletCount };
+        return result;
+    }
+};
+
+// life time : program
+struct GlobalResources
+{
+    static GlobalResources* instance;
+    
+    // various 'tables' of asset desc
+    StructuredUploadBuffer<HLSL::Shader> shaders;
+    StructuredUploadBuffer<HLSL::Mesh> meshes;
+    StructuredUploadBuffer<HLSL::Texture> textures;
+
+    MeshStorage meshStorage;
+
+    void On()
+    {
+        instance = this;
+        meshStorage.On();
+    }
+
+    void Off()
+    {
+        meshStorage.Off();
+        Release();
+        instance = nullptr;
+    }
+
+    void Release()
+    {
+        shaders.Release();
+        meshes.Release();
+        textures.Release();
+    }
+};
+GlobalResources* GlobalResources::instance = nullptr;
