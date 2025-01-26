@@ -131,6 +131,7 @@ public:
 // life time : frame
 struct ViewWorld
 {
+    StructuredUploadBuffer<HLSL::CommonResourcesIndices> commonResourcesIndices;
     StructuredUploadBuffer<HLSL::Camera> cameras;
     StructuredUploadBuffer<HLSL::Light> lights;
     Map<World::Entity, Material, HLSL::Material> materials;
@@ -140,6 +141,7 @@ struct ViewWorld
 
     void Release()
     {
+        commonResourcesIndices.Release();
         cameras.Release();
         lights.Release();
         instances.Release();
@@ -151,9 +153,22 @@ struct ViewWorld
 // life time : view (only updated on GPU)
 struct CullingContext
 {
-    StructuredUploadBuffer<HLSL::Camera> camera;
-    StructuredUploadBuffer<HLSL::Instance> instancesInView;
-    StructuredUploadBuffer<HLSL::Light> lights;
+    PerFrame<StructuredUploadBuffer<HLSL::CullingContext>> cullingContext; // to bind to rootSig
+
+    StructuredBuffer<HLSL::Camera> camera;
+    StructuredBuffer<HLSL::Light> lights;
+    StructuredBuffer<HLSL::Instance> instancesInView;
+
+    void Release()
+    {
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            cullingContext.Get(i).Release();
+        }
+        camera.Release();
+        lights.Release();
+        instancesInView.Release();
+    }
 };
 
 class View
@@ -170,9 +185,51 @@ public:
         {
             viewWorld.Get(i).Release();
         }
+        cullingContext.Release();
     }
     virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
     virtual void Execute() = 0;
+    void SetupViewParams()
+    {
+        HLSL::CommonResourcesIndices commonResourcesIndices;
+
+        commonResourcesIndices.meshesHeapIndex = GlobalResources::instance->meshStorage.meshes.srv.offset;
+        commonResourcesIndices.meshCount = GlobalResources::instance->meshStorage.nextMeshOffset;
+        commonResourcesIndices.meshletsHeapIndex = GlobalResources::instance->meshStorage.meshlets.srv.offset;
+        commonResourcesIndices.meshletCount = GlobalResources::instance->meshStorage.nextMeshletOffset;
+        commonResourcesIndices.meshletVerticesHeapIndex = GlobalResources::instance->meshStorage.meshletVertices.srv.offset;
+        commonResourcesIndices.meshletVertexCount = GlobalResources::instance->meshStorage.nextMeshletVertexOffset;
+        commonResourcesIndices.meshletTrianglesHeapIndex = GlobalResources::instance->meshStorage.meshletTriangles.srv.offset;
+        commonResourcesIndices.meshletTriangleCount = GlobalResources::instance->meshStorage.nextMeshletTriangleOffset;
+        commonResourcesIndices.verticesHeapIndex = GlobalResources::instance->meshStorage.vertices.srv.offset;
+        commonResourcesIndices.vertexCount = GlobalResources::instance->meshStorage.nextVertexOffset;
+        commonResourcesIndices.camerasHeapIndex = viewWorld->cameras.gpuData.srv.offset;
+        commonResourcesIndices.cameraCount = viewWorld->cameras.Size();
+        commonResourcesIndices.lightsHeapIndex = viewWorld->lights.gpuData.srv.offset;
+        commonResourcesIndices.lightCount = viewWorld->lights.Size();
+        commonResourcesIndices.materialsHeapIndex = viewWorld->materials.GetResource().srv.offset;
+        commonResourcesIndices.materialCount = viewWorld->materials.Size();
+        commonResourcesIndices.instancesHeapIndex = viewWorld->instances.gpuData.srv.offset;
+        commonResourcesIndices.instanceCount = viewWorld->instances.Size();
+        commonResourcesIndices.instancesGPUHeapIndex = viewWorld->instancesGPU.gpuData.srv.offset;
+        commonResourcesIndices.instanceGPUCount = viewWorld->instancesGPU.Size();
+
+        viewWorld->commonResourcesIndices.Clear();
+        viewWorld->commonResourcesIndices.Add(commonResourcesIndices);
+        viewWorld->commonResourcesIndices.Upload();
+    }
+    void SetupCullingContextParams()
+    {
+        HLSL::CullingContext cullingContextParams;
+
+        cullingContextParams.cameraIndex = 0;
+        cullingContextParams.culledInstanceIndex = cullingContext.cullingContext->GetResource().uav.offset;
+        cullingContextParams.lightsIndex = 0;
+
+        cullingContext.cullingContext->Clear();
+        cullingContext.cullingContext->Add(cullingContextParams);
+        cullingContext.cullingContext->Upload();
+    }
 };
 
 class Pass
@@ -252,25 +309,43 @@ public:
         commandQueue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
+    void SetupView(View* view, bool clearRT, bool clearDepth)
+    {
+
+        UINT64 w = view->resolution.x;
+        UINT64 h = view->resolution.y;
+
+        float4 panScale(0.0f, 0.0f, 1.0f, 1.0f);
+
+        D3D12_VIEWPORT vp = {};
+        vp.TopLeftX = w * panScale.x;
+        vp.TopLeftY = h * panScale.y;
+        vp.Width = w * panScale.z;
+        vp.Height = h * panScale.w;
+        vp.MinDepth = 0.0f;
+        vp.MaxDepth = 1.0f;
+        commandBuffer->cmd->RSSetViewports(1, &vp);
+
+        D3D12_RECT rect = {};
+        rect.left = (LONG)vp.TopLeftX;
+        rect.top = (LONG)vp.TopLeftY;
+        rect.right = (LONG)(vp.TopLeftX + vp.Width);
+        rect.bottom = (LONG)(vp.TopLeftY + vp.Height);
+        commandBuffer->cmd->RSSetScissorRects(1, &rect);
+
+        // USE : commandBuffer->cmd->BeginRenderPass(); ?
+        commandBuffer->cmd->OMSetRenderTargets(1, &renderTargets[0].rtv.handle, false, &depthBuffer.dsv.handle);
+
+        float4 clearColor(0.4f, 0.1f, 0.2f, 0.0f);
+        commandBuffer->cmd->ClearRenderTargetView(renderTargets[0].rtv.handle, clearColor.f32, 1, &rect);
+
+        float clearDepthValue(1.0f);
+        UINT8 clearStencilValue(0);
+        commandBuffer->cmd->ClearDepthStencilView(depthBuffer.dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepthValue, clearStencilValue, 1, &rect);
+    }
+
     virtual void Setup(View* view) = 0;
     virtual void Render(View* view) = 0;
-};
-
-// globalResources upload (meshes, textures)
-class Upload : public Pass
-{
-public:
-
-    void Setup(View* view) override
-    {
-        ZoneScoped;
-    }
-    void Render(View* view) override
-    {
-        ZoneScoped;
-        //Open(); // this is open earlier during the scheduling
-        Close();
-    }
 };
 
 class Skinning : public Pass
@@ -324,7 +399,14 @@ public:
 
 class Culling : public Pass
 {
+    Components::Handle<Components::Shader> cullingShader;
 public:
+    virtual void On(View* view, bool asyncCompute, String _name) override
+    {
+        Pass::On(view, asyncCompute, _name);
+        ZoneScoped;
+        cullingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\culling.hlsl");
+    }
     void Setup(View* view) override
     {
         ZoneScoped;
@@ -333,6 +415,9 @@ public:
     {
         ZoneScoped;
         Open();
+        Shader& shader = *AssetLibrary::instance->Get<Shader>(cullingShader.Get().id, true);
+        commandBuffer->SetCompute(shader);
+        //commandBuffer->cmd->Dispatch();
         Close();
     }
 };
@@ -406,85 +491,16 @@ public:
         renderTargets[0] = GPU::instance->backBuffer.Get();
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        UINT64 w = view->resolution.x;
-        UINT64 h = view->resolution.y;
+        SetupView(view, true, true);
 
-        float4 panScale(0.0f, 0.0f, 1.0f, 1.0f);
+        Shader& shader = *AssetLibrary::instance->Get<Shader>(meshShader.Get().id, true);
+        commandBuffer->SetGraphic(shader);
 
-        D3D12_VIEWPORT vp = {};
-        vp.TopLeftX = w * panScale.x;
-        vp.TopLeftY = h * panScale.y;
-        vp.Width = w * panScale.z;
-        vp.Height = h * panScale.w;
-        vp.MinDepth = 0.0f;
-        vp.MaxDepth = 1.0f;
-        commandBuffer->cmd->RSSetViewports(1, &vp);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
 
-        D3D12_RECT rect = {};
-        rect.left = (LONG)vp.TopLeftX;
-        rect.top = (LONG)vp.TopLeftY;
-        rect.right = (LONG)(vp.TopLeftX + vp.Width);
-        rect.bottom = (LONG)(vp.TopLeftY + vp.Height);
-        commandBuffer->cmd->RSSetScissorRects(1, &rect);
-
-        // USE : commandBuffer->cmd->BeginRenderPass(); ?
-        commandBuffer->cmd->OMSetRenderTargets(1, &renderTargets[0].rtv.handle, false, &depthBuffer.dsv.handle);
-
-        float4 clearColor(0.4f, 0.1f, 0.2f, 0.0f);
-        commandBuffer->cmd->ClearRenderTargetView(renderTargets[0].rtv.handle, clearColor.f32, 1, &rect);
-
-        float clearDepth(1.0f);
-        UINT8 clearStencil(0);
-        commandBuffer->cmd->ClearDepthStencilView(depthBuffer.dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepth, clearStencil, 1, &rect);
-
-        Shader* _shader = AssetLibrary::instance->Get<Shader>(meshShader.Get().id);
-        if (_shader != nullptr)
-        {
-            Shader& shader = *_shader;
-            commandBuffer->Set(shader);
-
-            HLSL::CommonResourcesIndices commonResourcesIndices;
-            commonResourcesIndices.meshesHeapIndex = GlobalResources::instance->meshStorage.meshes.srv.offset;
-            commonResourcesIndices.meshCount = GlobalResources::instance->meshStorage.nextMeshOffset;
-            commonResourcesIndices.meshletsHeapIndex = GlobalResources::instance->meshStorage.meshlets.srv.offset;
-            commonResourcesIndices.meshletCount = GlobalResources::instance->meshStorage.nextMeshletOffset;
-            commonResourcesIndices.meshletVerticesHeapIndex = GlobalResources::instance->meshStorage.meshletVertices.srv.offset;
-            commonResourcesIndices.meshletVertexCount = GlobalResources::instance->meshStorage.nextMeshletVertexOffset;
-            commonResourcesIndices.meshletTrianglesHeapIndex = GlobalResources::instance->meshStorage.meshletTriangles.srv.offset;
-            commonResourcesIndices.meshletTriangleCount = GlobalResources::instance->meshStorage.nextMeshletTriangleOffset;
-            commonResourcesIndices.verticesHeapIndex = GlobalResources::instance->meshStorage.vertices.srv.offset;
-            commonResourcesIndices.vertexCount = GlobalResources::instance->meshStorage.nextVertexOffset;
-            commonResourcesIndices.camerasHeapIndex = view->viewWorld->cameras.gpuData.srv.offset;
-            commonResourcesIndices.cameraCount = view->viewWorld->cameras.Size();
-            commonResourcesIndices.lightsHeapIndex = view->viewWorld->lights.gpuData.srv.offset;
-            commonResourcesIndices.lightCount = view->viewWorld->lights.Size();
-            commonResourcesIndices.materialsHeapIndex = view->viewWorld->materials.GetResource().srv.offset;
-            commonResourcesIndices.materialCount = view->viewWorld->materials.Size();
-            commonResourcesIndices.instancesHeapIndex = view->viewWorld->instances.gpuData.srv.offset;
-            commonResourcesIndices.instanceCount = view->viewWorld->instances.Size();
-            commonResourcesIndices.instancesGPUHeapIndex = view->viewWorld->instancesGPU.gpuData.srv.offset;
-            commonResourcesIndices.instanceGPUCount = view->viewWorld->instancesGPU.Size();
-            commandBuffer->cmd->SetGraphicsRoot32BitConstants(0, 20, &commonResourcesIndices, 0);
-
-            // make a function for setting cameras and global
-            uint cameraValues[] = { 0 };
-            commandBuffer->cmd->SetGraphicsRoot32BitConstants(1, 1, cameraValues, 0);
-
-            auto& instances = view->viewWorld->instances;
-            commandBuffer->cmd->DispatchMesh(instances.Size(), 1, 1);
-            /*
-            for (uint i = 0; i < instances.Size(); i++)
-            {
-                //make a function
-                uint instanceValues[] = { i };
-                commandBuffer->cmd->SetGraphicsRoot32BitConstants(2, 1, instanceValues, 0);
-                //commandBuffer->cmd->SetGraphicsRootConstantBufferView(3, instances.GetGPUVirtualAddress(i));
-
-                commandBuffer->cmd->DispatchMesh(1, 1, 1);
-            }
-            */
-        }
-
+        auto& instances = view->viewWorld->instances;
+        commandBuffer->cmd->DispatchMesh(instances.Size(), 1, 1);
 
         Close();
     }
@@ -562,6 +578,8 @@ public:
         forward.depthBuffer = depthBuffer;
         postProcess.On(this, false, "postProcess");
         present.On(this, false, "present");
+
+        //AssetLibrary::instance->LoadMandatory();
     }
 
     void Off() override
@@ -585,6 +603,8 @@ public:
     tf::Task Schedule(World& world, tf::Subflow& subflow) override
     {
         ZoneScoped;
+        SetupViewParams(); // je devrais pas essayer de mettre ca dans le execute ? mais a ce moment comment je connais le GPUVirtualAdress dans les pass ?!
+        SetupCullingContextParams(); // je devrais pas essayer de mettre ca dans le execute ? mais a ce moment comment je connais le GPUVirtualAdress dans les pass ?!
 
         tf::Task updateInstances = UpdateInstances(world, subflow);
         tf::Task updateMaterials = UpdateMaterials(world, subflow);
@@ -592,9 +612,6 @@ public:
         tf::Task updateCameras = UpdateCameras(world, subflow);
 
         tf::Task updloadInstancesBuffers = UploadInstancesBuffers(world, subflow);
-        tf::Task updloadMeshesBuffers = UploadMeshesBuffers(world, subflow);
-        tf::Task uploadShadersBuffers = UploadShadersBuffers(world, subflow);
-        tf::Task uploadTexturesBuffers = UploadTexturesBuffers(world, subflow);
 
         SUBTASKVIEWPASS(skinning);
         SUBTASKVIEWPASS(particles);
@@ -609,10 +626,10 @@ public:
 
         //updateCameras.precede(particlesTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
         updateInstances.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
-        updateInstances.precede(updateMaterials, updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
-        //uploadTask.succeed(updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
+        updateInstances.precede(updateMaterials, updloadInstancesBuffers);
+        //uploadTask.succeed(updloadInstancesBuffers);
 
-        presentTask.succeed(updateInstances, updateMaterials, updloadInstancesBuffers, updloadMeshesBuffers, uploadShadersBuffers, uploadTexturesBuffers);
+        presentTask.succeed(updateInstances, updateMaterials, updloadInstancesBuffers);
         presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
@@ -649,16 +666,6 @@ public:
 
         uint materialsCount = world.CountQuery(Components::Material::mask, 0);
         frameWorld.materials.Reserve(materialsCount);
-
-        uint meshesCount = world.CountQuery(Components::Mesh::mask, 0);
-        //GlobalResources::instance->meshes.Reserve(meshesCount);
-
-        uint texturesCount = world.CountQuery(Components::Texture::mask, 0);
-        //GlobalResources::instance->textures.Reserve(texturesCount);
-
-        uint shadersCount = world.CountQuery(Components::Shader::mask, 0);
-        //GlobalResources::instance->shaders.Reserve(shadersCount);
-
         
         tf::Task task = subflow.for_each_index(0, entityCount, UpdateInstancesStepSize,
             [&world, &frameWorld, instanceQueryIndex](int i)
@@ -812,6 +819,12 @@ public:
                 ViewWorld& frameWorld = viewWorld.Get();
                 auto& queryResult = world.frameQueries[queryIndex];
 
+                HLSL::Camera hlslcamPrevious = {};
+                if (this->viewWorld->cameras.Size() > 0)
+                {
+                    hlslcamPrevious = this->viewWorld->cameras[0];
+                }
+
                 this->viewWorld->cameras.Clear();
                 for (uint i = 0; i < entityCount; i++)
                 {
@@ -819,8 +832,62 @@ public:
                     auto& trans = queryResult[i].Get<Components::WorldMatrix>();
                     float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip);
                     float4x4 viewProj = mul(inverse(trans.matrix), proj);
+
+                    float4 planes[6];
+                    float3 worldCorners[8];
+                    float sizeCulling;
+
+                    // compute planes
+                    float4x4 mat = mul(inverse(proj), trans.matrix);
+
+                    //create the 8 points of a cube in unit-space
+                    float4 cube[8];
+                    cube[0] = float4(-1.0f, -1.0f, 0.0f, 1.0f); // xyz
+                    cube[1] = float4(1.0f, -1.0f, 0.0f, 1.0f); // Xyz
+                    cube[2] = float4(-1.0f, 1.0f, 0.0f, 1.0f); // xYz
+                    cube[3] = float4(1.0f, 1.0f, 0.0f, 1.0f); // XYz
+                    cube[4] = float4(-1.0f, -1.0f, 1.0f, 1.0f); // xyZ
+                    cube[5] = float4(1.0f, -1.0f, 1.0f, 1.0f); // XyZ
+                    cube[6] = float4(-1.0f, 1.0f, 1.0f, 1.0f); // xYZ
+                    cube[7] = float4(1.0f, 1.0f, 1.0f, 1.0f); // XYZ
+
+                    //transform all 8 points by the view/proj matrix. Doing this
+                    //gives us that ACTUAL 8 corners of the frustum area.
+                    float4 tmp;
+                    for (int i = 0; i < 8; i++)
+                    {
+                        tmp = float4(mul(cube[i], mat).vec);
+                        worldCorners[i] = float3((tmp / tmp.w).vec);
+                    }
+
+                    //4. generate and store the 6 planes that make up the frustum
+                    planes[0] = PlaneFromPoints(worldCorners[0], worldCorners[1], worldCorners[2]); // Near
+                    planes[2] = PlaneFromPoints(worldCorners[2], worldCorners[6], worldCorners[4]); // Left
+                    planes[3] = PlaneFromPoints(worldCorners[7], worldCorners[3], worldCorners[5]); // Right
+                    planes[5] = PlaneFromPoints(worldCorners[1], worldCorners[0], worldCorners[4]); // Bottom
+                    planes[1] = PlaneFromPoints(worldCorners[6], worldCorners[7], worldCorners[5]); // Far
+                    planes[4] = PlaneFromPoints(worldCorners[2], worldCorners[3], worldCorners[6]); // Top
+
                     HLSL::Camera hlslcam;
+
                     hlslcam.viewProj = viewProj;
+                    hlslcam.planes[0] = planes[0];
+                    hlslcam.planes[1] = planes[1];
+                    hlslcam.planes[2] = planes[2];
+                    hlslcam.planes[3] = planes[3];
+                    hlslcam.planes[4] = planes[4];
+                    hlslcam.planes[5] = planes[5];
+
+                    if (options.stopFrustumUpdate)
+                    {
+                        hlslcam.planes[0] = hlslcamPrevious.planes[0];
+                        hlslcam.planes[1] = hlslcamPrevious.planes[1];
+                        hlslcam.planes[2] = hlslcamPrevious.planes[2];
+                        hlslcam.planes[3] = hlslcamPrevious.planes[3];
+                        hlslcam.planes[4] = hlslcamPrevious.planes[4];
+                        hlslcam.planes[5] = hlslcamPrevious.planes[5];
+                    }
+
                     this->viewWorld->cameras.Add(hlslcam);
                 }
 
@@ -841,79 +908,6 @@ public:
                 this->viewWorld->instances.Upload();
             }
         ).name("upload instances buffer");
-
-        return task;
-    }
-
-    tf::Task UploadMeshesBuffers(World& world, tf::Subflow& subflow)
-    {
-        ZoneScoped;
-
-        tf::Task task = subflow.emplace(
-            []() 
-            {
-                auto& meshesAssetLibrary = AssetLibrary::instance->meshes;
-                auto& meshesHLSL = GlobalResources::instance->meshes;
-                meshesHLSL.Resize(meshesAssetLibrary.size());
-
-                for (uint i = 0; i < meshesAssetLibrary.size(); i++)
-                {
-                    auto& cpu = meshesAssetLibrary[i];
-                    auto& gpu = meshesHLSL[i];
-                    gpu.meshletOffset = cpu.meshletOffset;
-                    gpu.meshletCount = cpu.meshletCount;
-                }
-                meshesHLSL.Upload(); // WRONG !! on peut pas se permettre d upload des nouvelles data (surtout si ca demande un resize) pendant qu on a encore une frame en vole
-            }
-        ).name("upload meshes buffer");
-
-        return task;
-    }
-
-    tf::Task UploadShadersBuffers(World& world, tf::Subflow& subflow)
-    {
-        ZoneScoped;
-
-        tf::Task task = subflow.emplace(
-            []()
-            {
-                auto& shadersAssetLibrary = AssetLibrary::instance->shaders;
-                auto& shadersHLSL = GlobalResources::instance->shaders;
-                shadersHLSL.Resize(shadersAssetLibrary.size());
-
-                for (uint i = 0; i < shadersAssetLibrary.size(); i++)
-                {
-                    auto& cpu = shadersAssetLibrary[i];
-                    auto& gpu = shadersHLSL[i];
-                    gpu.id = i;//cpu.something;
-                }
-                shadersHLSL.Upload();
-            }
-        ).name("upload shaders buffer");
-
-        return task;
-    }
-
-    tf::Task UploadTexturesBuffers(World& world, tf::Subflow& subflow)
-    {
-        ZoneScoped;
-
-        tf::Task task = subflow.emplace(
-            []()
-            {
-                auto& texturesAssetLibrary = AssetLibrary::instance->textures;
-                auto& texturesHLSL = GlobalResources::instance->textures;
-                texturesHLSL.Resize(texturesAssetLibrary.size());
-
-                for (uint i = 0; i < texturesAssetLibrary.size(); i++)
-                {
-                    auto& cpu = texturesAssetLibrary[i];
-                    auto& gpu = texturesHLSL[i];
-                    gpu.index = cpu.srv.offset;
-                }
-                texturesHLSL.Upload();
-            }
-        ).name("upload textures buffer");
 
         return task;
     }
@@ -978,7 +972,6 @@ class Renderer
 public:
     static Renderer* instance;
     GlobalResources globalResources;
-    Upload upload;
     MainView mainView;
     EditorView editorView;
 
@@ -988,12 +981,10 @@ public:
         globalResources.On();
         mainView.On(window);
         editorView.On(window);
-        upload.On(nullptr, false, "upload");
     }
     
     void Off()
     {
-        upload.Off();
         editorView.Off();
         mainView.Off();
         globalResources.Off();
@@ -1007,23 +998,99 @@ public:
         auto mainViewEndTask = mainView.Schedule(world, subflow);
         auto editorViewEndTask = editorView.Schedule(world, subflow);
 
-        SUBTASKPASS(upload); // this must be executed after all loading task and will close the cmd
         SUBTASKRENDERER(ExecuteFrame);
         SUBTASKRENDERER(WaitFrame);
         SUBTASKRENDERER(PresentFrame);
 
-        ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask, uploadTask);
+        UploadMeshesBuffers(subflow).precede(ExecuteFrame);
+        UploadShadersBuffers(subflow).precede(ExecuteFrame);
+        UploadTexturesBuffers(subflow).precede(ExecuteFrame);
+
+        ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
         ExecuteFrame.precede(WaitFrame);
         WaitFrame.precede(PresentFrame);
     }
 
+    tf::Task UploadMeshesBuffers(tf::Subflow& subflow)
+    {
+        ZoneScoped;
+
+        tf::Task task = subflow.emplace(
+            []()
+            {
+                auto& meshesAssetLibrary = AssetLibrary::instance->meshes;
+                auto& meshesHLSL = GlobalResources::instance->meshes;
+                meshesHLSL.Resize(meshesAssetLibrary.size());
+
+                for (uint i = 0; i < meshesAssetLibrary.size(); i++)
+                {
+                    auto& cpu = meshesAssetLibrary[i];
+                    auto& gpu = meshesHLSL[i];
+                    gpu.meshletOffset = cpu.meshletOffset;
+                    gpu.meshletCount = cpu.meshletCount;
+                }
+                meshesHLSL.Upload(); // WRONG !! on peut pas se permettre d upload des nouvelles data (surtout si ca demande un resize) pendant qu on a encore une frame en vole
+            }
+        ).name("upload meshes buffer");
+
+        return task;
+    }
+
+    tf::Task UploadShadersBuffers(tf::Subflow& subflow)
+    {
+        ZoneScoped;
+
+        tf::Task task = subflow.emplace(
+            []()
+            {
+                auto& shadersAssetLibrary = AssetLibrary::instance->shaders;
+                auto& shadersHLSL = GlobalResources::instance->shaders;
+                shadersHLSL.Resize(shadersAssetLibrary.size());
+
+                for (uint i = 0; i < shadersAssetLibrary.size(); i++)
+                {
+                    auto& cpu = shadersAssetLibrary[i];
+                    auto& gpu = shadersHLSL[i];
+                    gpu.id = i;//cpu.something;
+                }
+                shadersHLSL.Upload();
+            }
+        ).name("upload shaders buffer");
+
+        return task;
+    }
+
+    tf::Task UploadTexturesBuffers(tf::Subflow& subflow)
+    {
+        ZoneScoped;
+
+        tf::Task task = subflow.emplace(
+            []()
+            {
+                auto& texturesAssetLibrary = AssetLibrary::instance->textures;
+                auto& texturesHLSL = GlobalResources::instance->textures;
+                texturesHLSL.Resize(texturesAssetLibrary.size());
+
+                for (uint i = 0; i < texturesAssetLibrary.size(); i++)
+                {
+                    auto& cpu = texturesAssetLibrary[i];
+                    auto& gpu = texturesHLSL[i];
+                    gpu.index = cpu.srv.offset;
+                }
+                texturesHLSL.Upload();
+            }
+        ).name("upload textures buffer");
+
+        return task;
+    }
 
     void ExecuteFrame()
     {
         ZoneScoped;
         HRESULT hr;
 
-        upload.Execute();
+        AssetLibrary::instance->Close();
+        AssetLibrary::instance->Execute();
         mainView.Execute();
         editorView.Execute();
     }

@@ -99,9 +99,9 @@ public:
     {
         time.On();
         ios.On(window);
-        assetLibrary.On();
         world.On();
         gpu.On(&ios.window);
+        assetLibrary.On();
         profiler.On();
         renderer.On(ios.window);
         ui.On(&ios.window, gpu.device, gpu.swapChain);
@@ -196,57 +196,10 @@ public:
     {
         ZoneScoped;
 
-        Renderer::instance->upload.Open();
-        CommandBuffer& commandBuffer = Renderer::instance->upload.commandBuffer.Get();
-
-        tf::Task loadingTask = subflow.emplace([&commandBuffer]() {AssetLibrary::instance->LoadAssets(commandBuffer); }).name("Loading");
+        AssetLibrary::instance->Open();
+        tf::Task loadingTask = subflow.emplace([]() {AssetLibrary::instance->LoadAssets(); }).name("Loading");
 
         return loadingTask;
-        /*
-        uint loadingLeft = GlobalResources::instance->shaders.maxLoading;
-        for (auto& item : GlobalResources::instance->shaders)
-        {
-            auto& shader = GlobalResources::instance->shaders.GetData(item.first);
-            if (!GlobalResources::instance->shaders.GetLoaded(item.second) || shader.NeedReload())
-            {
-                assetID i = item.first;
-                // load shader
-                tf::Task pass = subflow.emplace([this, i]() {this->LoadShaders(i); }).name("LoadShaders");
-                uploadTask.succeed(pass);
-                loadingLeft--;
-            }
-            if (loadingLeft == 0)
-                break;
-        }
-        loadingLeft = GlobalResources::instance->meshes.maxLoading;
-        for (auto& item : GlobalResources::instance->meshes)
-        {
-            if (!GlobalResources::instance->meshes.GetLoaded(item.second))
-            {
-                assetID i = item.first;
-                // load mesh
-                tf::Task pass = subflow.emplace([this, i]() {this->LoadMeshes(i); }).name("LoadMeshes");
-                uploadTask.succeed(pass);
-                loadingLeft--;
-            }
-            if (loadingLeft == 0)
-                break;
-        }
-        loadingLeft = GlobalResources::instance->textures.maxLoading;
-        for (uint i = 0; i < GlobalResources::instance->textures.count; i++)
-        {
-            if (!GlobalResources::instance->textures.GetLoaded(i))
-            {
-                // load texture
-                tf::Task pass = subflow.emplace([this, i]() {this->LoadTextures(i); }).name("LoadTextures");
-                uploadTask.succeed(pass);
-                loadingLeft--;
-            }
-            if (loadingLeft == 0)
-                break;
-        }
-        */
-
     }
 
     void ScheduleWorld(tf::Subflow& subflow)
@@ -289,6 +242,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 
     Engine engine;
     engine.On(window);
+    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\5v5GameMap.fbx"); 
     engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
     engine.Loop();
     engine.Off();

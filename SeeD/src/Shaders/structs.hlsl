@@ -12,6 +12,7 @@
 
 struct Options
 {
+    bool stopFrustumUpdate;
     bool stopBufferUpload;
     bool stepMotion;
 } options;
@@ -43,6 +44,13 @@ namespace HLSL
         uint instanceGPUCount;
     };
     
+    struct CullingContext
+    {
+        uint cameraIndex;
+        uint lightsIndex;
+        uint culledInstanceIndex;
+    };
+    
     struct Shader
     {
         uint id;
@@ -69,12 +77,15 @@ namespace HLSL
         uint triangleOffset;
         uint vertexCount;
         uint triangleCount;
+        float4 boundingSphere;
     };
 
     struct Mesh
     {
+        float4 boundingSphere;
         uint meshletOffset;
         uint meshletCount;
+        uint pad[2];
     };
     
     struct Texture
@@ -100,6 +111,7 @@ namespace HLSL
     struct Camera
     {
         float4x4 viewProj;
+        float4 planes[6];
     };
 
     struct Light

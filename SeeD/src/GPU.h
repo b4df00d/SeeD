@@ -190,7 +190,8 @@ struct CommandBuffer
     uint profileIdx;
     bool open;
 
-    void Set(Shader& shader);
+    void SetCompute(Shader& shader);
+    void SetGraphic(Shader& shader);
     void On(bool asyncCompute, String name);
     void Off();
 };
@@ -198,8 +199,8 @@ struct CommandBuffer
 class Resource
 {
 public:
-    D3D12MA::Allocation* allocation{};
-    uint stride{};
+    D3D12MA::Allocation* allocation{ 0 };
+    uint stride{ 0 };
     SRV srv{ UINT32_MAX };
     UAV uav{ UINT32_MAX };
     RTV rtv{ UINT32_MAX, 0, 0 };
@@ -212,7 +213,9 @@ public:
     template <typename T>
     void CreateBuffer(uint count, String name = "Buffer");
     template <typename T>
-    void CreateUploadBuffer(uint count, String name = "Buffer");
+    void CreateUploadBuffer(uint count, String name = "UploadBuffer");
+    template <typename T>
+    void CreateAppendBuffer(uint count, String name = "AppendBuffer");
     void CreateReadBackBuffer(uint size, String name = "ReadBackBuffer");
     void BackBuffer(ID3D12Resource* backBuffer);
     void Release();
@@ -221,6 +224,11 @@ public:
     void Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset = 0);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter, ID3D12Resource* resource);
+    uint AlignForUavCounter(uint bufferSize)
+    {
+        const uint alignment = D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT;
+        return (bufferSize + (alignment - 1)) & ~(alignment - 1);
+    }
     static void CleanUploadResources(bool everything = false);
 
     static std::mutex lock;
@@ -924,6 +932,12 @@ void Resource::CreateUploadBuffer(uint count, String name)
 {
     CreateBuffer(sizeof(T) * count, sizeof(T), true, name);
 }
+template <typename T>
+void Resource::CreateAppendBuffer(uint count, String name)
+{
+    uint size = AlignForUavCounter(sizeof(T) * count);
+    CreateBuffer(size, sizeof(T), false, name);
+}
 
 void Resource::CreateReadBackBuffer(uint size, String name)
 {
@@ -1150,8 +1164,16 @@ std::vector<D3D12MA::Allocation*> Resource::allResources;
 std::vector<String> Resource::allResourcesNames;
 // end of definitions of Resource
 
-// definitions of CommandBuffer   
-void CommandBuffer::Set(Shader& shader)
+// definitions of CommandBuffer      
+void CommandBuffer::SetCompute(Shader& shader)
+{
+    // SetDescriptorHeaps must be set before SetPipelineState because of dynamic indexing in descriptorHeap
+    cmd->SetDescriptorHeaps(1, &GPU::instance->descriptorHeap.globalDescriptorHeap);
+    cmd->SetComputeRootSignature(shader.rootSignature);
+    //cmd->SetPipelineState(shader.pso);
+    //cmd->SetGraphicsRootDescriptorTable();
+}
+void CommandBuffer::SetGraphic(Shader& shader)
 {
     // SetDescriptorHeaps must be set before SetPipelineState because of dynamic indexing in descriptorHeap
     cmd->SetDescriptorHeaps(1, &GPU::instance->descriptorHeap.globalDescriptorHeap);
@@ -1209,39 +1231,22 @@ void CommandBuffer::Off()
 }
 // end of definitions of CommandBuffer
 
-/*
 template <class T>
-class StructuredBuffer // JUST use Resource !!!!
+class StructuredBuffer
 {
 public:
     Resource gpuData;
 
-    uint Size()
+    void CreateBuffer(uint elementCount, String name)
     {
-        return cpuData.size();
+        gpuData.CreateBuffer(sizeof(T) * elementCount, sizeof(T), false, name);
     }
-    void Resize(uint size)
-    {
-        cpuData.resize(size);
-    }
-    void Reserve(uint size)
-    {
-        cpuData.reserve(size);
-    }
-    Resource& GetResource()
-    {
-        return gpuData;
-    }
-    ID3D12Resource* GetResourcePtr()
-    {
-        return gpuData.GetResource();
-    }
+
     void Release()
     {
         gpuData.Release();
     }
 };
-*/
 
 template <class T>
 class StructuredUploadBuffer
@@ -1573,22 +1578,28 @@ struct Vertex
     float u, v;
 };
 
-struct Meshlet
+struct Meshlet : HLSL::Meshlet
 {
-    /* offsets within meshlet_vertices and meshlet_triangles arrays with meshlet data */
+    /*
+    // offsets within meshlet_vertices and meshlet_triangles arrays with meshlet data
     uint vertexOffset;
     uint triangleOffset;
 
-    /* number of vertices and triangles used in the meshlet; data is stored in consecutive range defined by offset and count */
+    // number of vertices and triangles used in the meshlet; data is stored in consecutive range defined by offset and count
     uint vertexCount;
     uint triangleCount;
+
+    float4 boundingSphere;
+    */
 };
 
-struct Mesh
+struct Mesh : HLSL::Mesh
 {
+    /*
+    float4 boundingSphere;
     uint meshletOffset;
     uint meshletCount;
-    //BLAS blas;
+    */
 };
 
 struct MeshData
@@ -1597,6 +1608,7 @@ struct MeshData
     std::vector<unsigned int> meshlet_vertices;
     std::vector<unsigned int> meshlet_triangles;
     std::vector<Vertex> vertices;
+    float4 boundingSphere;
 };
 
 struct Material

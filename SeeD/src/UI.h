@@ -197,7 +197,8 @@ public:
             ImGui::End();
             return;
         }
-        
+
+        ImGui::Checkbox("stopFrustumUpdate", &options.stopFrustumUpdate);
         ImGui::Checkbox("stopBufferUpload", &options.stopBufferUpload);
         ImGui::Checkbox("stepMotion", &options.stepMotion);
 

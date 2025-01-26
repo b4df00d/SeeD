@@ -24,15 +24,24 @@ public:
     int meshLoadingLimit = 3;
     int shaderLoadingLimit = 3;
     int textureLoadingLimit = 3;
+    int meshLoaded;
+    int shaderLoaded;
+    int textureLoaded;
 
     std::vector<Mesh> meshes;
     std::vector<Shader> shaders;
     std::vector<Resource> textures;
 
+    PerFrame<CommandBuffer> commandBuffer;
+    const char* name = "AssetLibraryUpload";
 
     void On()
     {
         instance = this;
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            commandBuffer.Get(i).On(false, name);
+        }
         namespace fs = std::filesystem;
         fs::create_directories("..\\Assets");
         Load();
@@ -41,7 +50,58 @@ public:
     void Off()
     {
         Save();
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            commandBuffer.Get(i).Off();
+        }
         instance = nullptr;
+    }
+
+    void Open()
+    {
+        ZoneScoped;
+
+        auto hr = commandBuffer->cmdAlloc->Reset();
+        commandBuffer->open = true;
+        if (FAILED(hr))
+        {
+            GPU::PrintDeviceRemovedReason(hr);
+        }
+        hr = commandBuffer->cmd->Reset(commandBuffer->cmdAlloc, nullptr);
+        if (FAILED(hr))
+        {
+            GPU::PrintDeviceRemovedReason(hr);
+        }
+
+#ifdef USE_PIX
+        PIXBeginEvent(commandBuffer->cmd, PIX_COLOR_INDEX((BYTE)name), name);
+#endif
+        Profiler::instance->StartProfile(commandBuffer.Get(), name);
+    }
+
+    void Close()
+    {
+        ZoneScoped;
+
+        Profiler::instance->EndProfile(commandBuffer.Get());
+#ifdef USE_PIX
+        PIXEndEvent(commandBuffer->cmd);
+#endif
+        auto hr = commandBuffer->cmd->Close();
+        if (FAILED(hr))
+        {
+            GPU::PrintDeviceRemovedReason(hr);
+        }
+        commandBuffer->open = false;
+    }
+
+    void Execute()
+    {
+        if (commandBuffer->open)
+            IOs::Log("{} OPEN !!", name);
+        ID3D12CommandQueue* commandQueue = GPU::instance->graphicQueue;
+        commandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
+        commandQueue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
     AssetLibrary::AssetType GetType(assetID id)
@@ -89,17 +149,26 @@ public:
     }
 
     template<typename T>
-    T* Get(assetID id)
+    T* Get(assetID id, bool immediate = false)
     {
         seedAssert(map.contains(id));
         auto& asset = map[id];
         if (asset.indexInVector == ~0)
         {
-            lock.lock();
-            loadingRequest[id]++;
-            lock.unlock();
+            if (!immediate)
+            {
+                lock.lock();
+                loadingRequest[id]++;
+                lock.unlock();
+                return nullptr;
+            }
+            else
+            {
+                LoadAsset(id, true);
+            }
         }
-        else
+
+        if (asset.indexInVector != ~0)
         {
             if (asset.type == AssetLibrary::AssetType::mesh)
                 return (T*)&meshes[asset.indexInVector];
@@ -108,11 +177,12 @@ public:
             else if (asset.type == AssetLibrary::AssetType::texture)
                 return (T*)&textures[asset.indexInVector];
         }
+
         return nullptr;
     }
 
-
-    void LoadAssets(CommandBuffer& commandBuffer);
+    void LoadAssets();
+    void LoadAsset(assetID id, bool ignoreBudget);
 
     void Save()
     {
@@ -188,6 +258,7 @@ public:
     {
         std::vector<uint> indices;
         std::vector<Vertex> vertices;
+        float4 boundingSphere;
     };
 
 
@@ -216,6 +287,7 @@ public:
             READ_VECTOR(mesh.meshlet_triangles);
             READ_VECTOR(mesh.meshlet_vertices);
             READ_VECTOR(mesh.vertices);
+            fin.read((char*)&mesh.boundingSphere, sizeof(mesh.boundingSphere));
             fin.close();
         }
 
@@ -239,6 +311,7 @@ public:
             WRITE_VECTOR(mesh.meshlet_triangles);
             WRITE_VECTOR(mesh.meshlet_vertices);
             WRITE_VECTOR(mesh.vertices);
+            fout.write((char*)&mesh.boundingSphere, sizeof(mesh.boundingSphere));
             fout.close();
         }
 
@@ -274,7 +347,11 @@ public:
             meshopt_optimizeMeshlet(&meshlet_vertices[m.vertex_offset], &meshlet_triangles[m.triangle_offset], m.triangle_count, m.vertex_count);
             meshopt_Bounds bounds = meshopt_computeMeshletBounds(&meshlet_vertices[m.vertex_offset], &meshlet_triangles[m.triangle_offset], m.triangle_count, &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex));
 
-            meshlets[i] = *(Meshlet*)&m;
+            meshlets[i].triangleCount = m.triangle_count;
+            meshlets[i].triangleOffset = m.triangle_offset;
+            meshlets[i].vertexCount = m.vertex_count;
+            meshlets[i].vertexOffset = m.vertex_offset;
+            meshlets[i].boundingSphere = float4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
         }
 
         MeshData optimizedMesh;
@@ -286,6 +363,7 @@ public:
             optimizedMesh.meshlet_triangles[i] = meshlet_triangles[i];
         }
         optimizedMesh.vertices = originalMesh.vertices;
+        optimizedMesh.boundingSphere = originalMesh.boundingSphere;
 
         return optimizedMesh;
 
@@ -377,14 +455,19 @@ public:
         CreateMeshes(_scene);
         CreateMaterials(_scene);
 
-        for (uint i = 0; i < 100; i++)
+        //for (uint i = 0; i < 2; i++)
         {
-            _scene->mRootNode->mTransformation.a4 = Rand01() * 10.0f;
-            _scene->mRootNode->mTransformation.b4 = Rand01() * 10.0f;
-            _scene->mRootNode->mTransformation.c4 = Rand01() * 10.0f;
+            //_scene->mRootNode->mTransformation.a4 = Rand01() * 3.0f;
+            //_scene->mRootNode->mTransformation.b4 = Rand01() * 10.0f;
+            //_scene->mRootNode->mTransformation.c4 = Rand01() * 3.0f;
 
             CreateEntities(_scene, _scene->mRootNode);
         }
+
+        meshIndexToEntity.clear();
+        matIndexToEntity.clear();
+        animationIndexToEntity.clear();
+        skeletonIndexToEntity.clear();
     }
 
     World::Entity CreateEntities(const aiScene* _scene, aiNode* node, World::Entity parentEntity = entityInvalid)
@@ -484,6 +567,8 @@ public:
             IOs::Log("    {}", m->mName.C_Str());
             {
                 MeshLoader::MeshOriginal originalMesh;
+                float3 minBB = float3(FLT_MAX);
+                float3 maxBB = float3(FLT_MIN);
 
                 originalMesh.vertices.resize(m->mNumVertices);
                 for (unsigned int j = 0; j < m->mNumVertices; j++)
@@ -493,6 +578,15 @@ public:
                     v.px = m->mVertices[j].x;
                     v.py = m->mVertices[j].y;
                     v.pz = m->mVertices[j].z;
+
+                    minBB.x = min(minBB.x, v.px);
+                    minBB.y = min(minBB.x, v.py);
+                    minBB.z = min(minBB.x, v.pz);
+
+                    maxBB.x = max(maxBB.x, v.px);
+                    maxBB.y = max(maxBB.x, v.py);
+                    maxBB.z = max(maxBB.x, v.pz);
+
                     if (m->HasNormals())
                     {
                         v.nx = m->mNormals[j].x;
@@ -524,6 +618,10 @@ public:
                         index++;
                     }
                 }
+
+                float3 center = (minBB + maxBB) * 0.5f;
+                float radius = length(minBB - maxBB) * 0.5f;
+                originalMesh.boundingSphere = float4(center, radius);
 
                 MeshData mesh = MeshLoader::instance->Process(originalMesh);
                 assetID id = MeshLoader::instance->Write(mesh, m->mName.C_Str());
@@ -915,6 +1013,16 @@ public :
                         shader.pso = CreatePSO(stream);
                         compiled = shader.pso != nullptr;
                     }
+                    else if (tokens[1] == "compute")
+                    {
+                        D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, tokens[2], "cs_6_6", &shader.rootSignature);
+                        PipelineStateStream stream;
+                        stream.CS = computeShaderBytecode;
+                        stream.pRootSignature = shader.rootSignature;
+                        shader.pso = nullptr;
+                        shader.pso = CreatePSO(stream);
+                        compiled = shader.pso != nullptr;
+                    }
 				}
 			}
 		}
@@ -932,75 +1040,81 @@ public :
 ShaderLoader* ShaderLoader::instance = nullptr;
 
 
-inline void AssetLibrary::LoadAssets(CommandBuffer& commandBuffer)
+inline void AssetLibrary::LoadAssets()
 {
     //ZoneScoped;
-    int meshLoaded = meshLoadingLimit;
-    int shaderLoaded = shaderLoadingLimit;
-    int textureLoaded = textureLoadingLimit;
+    meshLoaded = meshLoadingLimit;
+    shaderLoaded = shaderLoadingLimit;
+    textureLoaded = textureLoadingLimit;
+
     for (auto& item : loadingRequest)
     {
         assetID id = item.first;
-        switch (map[id].type)
-        {
-        case AssetLibrary::AssetType::mesh:
-        {
-            if (meshLoaded >= 0)
-            {
-                MeshData meshData = MeshLoader::instance->Read(map[id].path);
-                if (meshData.meshlets.size() > 0)
-                {
-                    Mesh mesh = GlobalResources::instance->meshStorage.Load(meshData, commandBuffer);
-                    lock.lock();
-                    meshes.push_back(mesh);
-                    map[id].indexInVector = meshes.size() - 1;
-                    meshLoaded--;
-                    lock.unlock();
-                }
-            }
-        }
-            break;
-        case AssetLibrary::AssetType::shader:
-        {
-            if (shaderLoaded >= 0)
-            {
-                Shader shader;
-                bool compiled = ShaderLoader::instance->Load(shader, map[id].path);
-                if (compiled)
-                {
-                    lock.lock();
-                    shaders.push_back(shader);
-                    map[id].indexInVector = shaders.size() - 1;
-                    shaderLoaded--;
-                    lock.unlock();
-                }
-            }
-        }
-            break;
-        case AssetLibrary::AssetType::texture:
-        {
-            if (textureLoaded >= 0)
-            {
-                Resource texture;
-                bool loaded = TextureLoader::instance->Load(texture, map[id].path);
-                if (loaded)
-                {
-                    lock.lock();
-                    textures.push_back(texture);
-                    map[id].indexInVector = textures.size() - 1;
-                    textureLoaded--;
-                    lock.unlock();
-                }
-            }
-        }
-            break;
-        default:
-            seedAssert(false);
-            break;
-        }
+        
+        LoadAsset(id, false);
 
         if (meshLoaded <= 0 && shaderLoaded <= 0 && textureLoaded <= 0)
             break;
     }
     loadingRequest.clear();
+}
+inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
+{
+    switch (map[id].type)
+    {
+    case AssetLibrary::AssetType::mesh:
+    {
+        if (ignoreBudget || meshLoaded >= 0)
+        {
+            MeshData meshData = MeshLoader::instance->Read(map[id].path);
+            if (meshData.meshlets.size() > 0)
+            {
+                Mesh mesh = GlobalResources::instance->meshStorage.Load(meshData, commandBuffer.Get());
+                lock.lock();
+                meshes.push_back(mesh);
+                map[id].indexInVector = meshes.size() - 1;
+                meshLoaded--;
+                lock.unlock();
+            }
+        }
+    }
+    break;
+    case AssetLibrary::AssetType::shader:
+    {
+        if (ignoreBudget || shaderLoaded >= 0)
+        {
+            Shader shader;
+            bool compiled = ShaderLoader::instance->Load(shader, map[id].path);
+            if (compiled)
+            {
+                lock.lock();
+                shaders.push_back(shader);
+                map[id].indexInVector = shaders.size() - 1;
+                shaderLoaded--;
+                lock.unlock();
+            }
+        }
+    }
+    break;
+    case AssetLibrary::AssetType::texture:
+    {
+        if (ignoreBudget || textureLoaded >= 0)
+        {
+            Resource texture;
+            bool loaded = TextureLoader::instance->Load(texture, map[id].path);
+            if (loaded)
+            {
+                lock.lock();
+                textures.push_back(texture);
+                map[id].indexInVector = textures.size() - 1;
+                textureLoaded--;
+                lock.unlock();
+            }
+        }
+    }
+    break;
+    default:
+        seedAssert(false);
+        break;
+    }
 }

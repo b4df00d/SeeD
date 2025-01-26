@@ -503,6 +503,17 @@ float3 BoxCubeMapLookup(float3 rayOrigin, float3 unitRayDir, float3 boxCenter, f
 
 }
 
+bool FrustumCulling(float4 planes[6], float4 boundingSphere)
+{
+    bool culled = false;
+    for (uint i = 0; i < 6; ++i)
+    {
+        float distance = dot(planes[i].xyz, boundingSphere.xyz) + planes[i].w;
+        culled |= distance < -boundingSphere.w;
+    }
+    return culled;
+}
+
 /*
 LightComp GetLightComp(in uint globalLightIndex, float3 normal, float3 position, float clipZ, float3 viewDir, bool shadows = true)
 {

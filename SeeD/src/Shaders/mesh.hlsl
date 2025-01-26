@@ -26,19 +26,40 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
     
-    StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
-    HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset];
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
+    
+    uint meshletCount = min(128, mesh.meshletCount);
+    
+    float4 boundingSphere = mul(instance.worldMatrix, float4(mesh.boundingSphere.xyz, 1));
+    boundingSphere.w = mesh.boundingSphere.w;
+    
+    bool culled = FrustumCulling(camera.planes, boundingSphere);
+    
+    if (culled)  meshletCount = 0;
+    
     
     payloadIndex = 0;
     uint index = 0;
-    uint meshletCount = min(128, mesh.meshletCount);
     for (uint i = 0; i < meshletCount; i++)
     {
-        InterlockedAdd(payloadIndex, 1, index);
-        if (instanceIndex >= commonResourcesIndices.instanceCount) 
-            instanceIndex = HLSL::invalidUINT;
-        sPayload.instanceIndex[index] = instanceIndex;
-        sPayload.meshletIndices[index] = mesh.meshletOffset + i;
+        
+        StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
+        HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset + i];
+        
+        boundingSphere = mul(instance.worldMatrix, float4(meshlet.boundingSphere.xyz, 1));
+        boundingSphere.w = mesh.boundingSphere.w;
+    
+        culled = FrustumCulling(camera.planes, boundingSphere);
+    
+        if (!culled)
+        {
+            InterlockedAdd(payloadIndex, 1, index);
+            if (instanceIndex >= commonResourcesIndices.instanceCount) 
+                instanceIndex = HLSL::invalidUINT;
+            sPayload.instanceIndex[index] = instanceIndex;
+            sPayload.meshletIndices[index] = mesh.meshletOffset + i;
+        }
     }
     
     DispatchMesh(min(128, payloadIndex), 1, 1, sPayload);
@@ -63,7 +84,7 @@ void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThre
     SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[cameraIndex];
+    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
     
     StructuredBuffer<uint> meshletVertices = ResourceDescriptorHeap[commonResourcesIndices.meshletVerticesHeapIndex];
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
