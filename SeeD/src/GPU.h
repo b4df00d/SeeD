@@ -218,7 +218,7 @@ public:
     void CreateAppendBuffer(uint count, String name = "AppendBuffer");
     void CreateReadBackBuffer(uint size, String name = "ReadBackBuffer");
     void BackBuffer(ID3D12Resource* backBuffer);
-    void Release();
+    void Release(bool deferred = false);
     ID3D12Resource* GetResource();
     uint BufferSize();
     void Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset = 0);
@@ -230,11 +230,13 @@ public:
         return (bufferSize + (alignment - 1)) & ~(alignment - 1);
     }
     static void CleanUploadResources(bool everything = false);
+    static void ReleaseResources();
 
     static std::mutex lock;
-    static std::vector<std::tuple<uint, D3D12MA::Allocation*>> uploadResources;
+    static std::vector<std::tuple<uint, D3D12MA::Allocation*>> uploadResources; // could we remove that and only use releaseResources ? 
     static std::vector<D3D12MA::Allocation*> allResources;
     static std::vector<String> allResourcesNames;
+    static std::vector<Resource> releaseResources;
 };
 
 struct DescriptorHeap
@@ -315,10 +317,13 @@ struct DescriptorHeap
     D3D12_CPU_DESCRIPTOR_HANDLE GetSlot(uint* offset, Slots* slots, ID3D12DescriptorHeap* heap, int descriptorIncrementSize)
     {
         D3D12_CPU_DESCRIPTOR_HANDLE handle;
+        /*
+        // do we ?!
         if (*offset != UINT32_MAX)
         {
             slots->Release(*offset);
         }
+        */
 
         *offset = (uint)slots->Get();
         handle.ptr = static_cast<SIZE_T>(heap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(*offset) * UINT64(descriptorIncrementSize));
@@ -340,6 +345,31 @@ struct DescriptorHeap
     D3D12_CPU_DESCRIPTOR_HANDLE GetDSVSlot(DSV& dsv)
     {
         return GetSlot(&dsv.offset, &dsvDescriptorHeapSlots, dsvDescriptorHeap, dsvdescriptorIncrementSize);
+    }
+
+    void FreeSlot(uint* offset, Slots* slots, ID3D12DescriptorHeap* heap, int descriptorIncrementSize)
+    {
+        if (*offset != UINT32_MAX)
+        {
+            slots->Release(*offset);
+        }
+        *offset = UINT32_MAX;
+    }
+    void FreeGlobalSlot(SRV& srv)
+    {
+        FreeSlot(&srv.offset, &globalDescriptorHeapSlots, globalDescriptorHeap, descriptorIncrementSize);
+    }
+    void FreeGlobalSlot(UAV& uav)
+    {
+        FreeSlot(&uav.offset, &globalDescriptorHeapSlots, globalDescriptorHeap, descriptorIncrementSize);
+    }
+    void FreeRTVSlot(RTV& rtv)
+    {
+        FreeSlot(&rtv.offset, &rtvDescriptorHeapSlots, rtvDescriptorHeap, rtvdescriptorIncrementSize);
+    }
+    void FreeDSVSlot(DSV& dsv)
+    {
+        FreeSlot(&dsv.offset, &dsvDescriptorHeapSlots, dsvDescriptorHeap, dsvdescriptorIncrementSize);
     }
 };
 
@@ -1038,23 +1068,34 @@ void Resource::BackBuffer(ID3D12Resource* backBuffer)
 
 }
 
-void Resource::Release()
+void Resource::Release(bool deferred)
 {
-    if (allocation)
+    if (deferred)
     {
-        lock.lock();
-        for (int j = (int)allResources.size() - 1; j >= 0; j--)
-        {
-            if (allResources[j] == allocation)
-            {
-                allResources.erase(allResources.begin() + j);
-                allResourcesNames.erase(allResourcesNames.begin() + j);
-            }
-        }
-        lock.unlock();
-        allocation->Release();
+        releaseResources.push_back(*this);
     }
-    allocation = nullptr;
+    else
+    {
+        if (allocation)
+        {
+            lock.lock();
+            for (int j = (int)allResources.size() - 1; j >= 0; j--)
+            {
+                if (allResources[j] == allocation)
+                {
+                    allResources.erase(allResources.begin() + j);
+                    allResourcesNames.erase(allResourcesNames.begin() + j);
+                }
+            }
+            lock.unlock();
+            allocation->Release();
+            GPU::instance->descriptorHeap.FreeGlobalSlot(srv);
+            GPU::instance->descriptorHeap.FreeGlobalSlot(uav);
+            GPU::instance->descriptorHeap.FreeRTVSlot(rtv);
+            GPU::instance->descriptorHeap.FreeDSVSlot(dsv);
+        }
+        allocation = nullptr;
+    }
 }
 
 ID3D12Resource* Resource::GetResource()
@@ -1158,10 +1199,21 @@ void Resource::CleanUploadResources(bool everything)
     }
 }
 
+void Resource::ReleaseResources()
+{
+    //ZoneScoped;
+    for (int i = (int)releaseResources.size() - 1; i >= 0; i--)
+    {
+        releaseResources[i].Release();
+    }
+    releaseResources.clear();
+}
+
 std::mutex Resource::lock;
 std::vector<std::tuple<uint, D3D12MA::Allocation*>> Resource::uploadResources;
 std::vector<D3D12MA::Allocation*> Resource::allResources;
 std::vector<String> Resource::allResourcesNames;
+std::vector<Resource> Resource::releaseResources;
 // end of definitions of Resource
 
 // definitions of CommandBuffer      
@@ -1239,6 +1291,7 @@ public:
 
     void CreateBuffer(uint elementCount, String name)
     {
+        gpuData.Release(true);
         gpuData.CreateBuffer(sizeof(T) * elementCount, sizeof(T), false, name);
     }
 
@@ -1246,15 +1299,30 @@ public:
     {
         gpuData.Release();
     }
+
+    Resource& GetResource()
+    {
+        return gpuData;
+    }
+    ID3D12Resource* GetResourcePtr()
+    {
+        return gpuData.GetResource();
+    }
+
+    D3D12_GPU_VIRTUAL_ADDRESS GetGPUVirtualAddress(uint index)
+    {
+        if (gpuData.GetResource() == 0)
+            return 0;
+        return gpuData.GetResource()->GetGPUVirtualAddress() + (index * sizeof(T));
+    }
 };
 
 template <class T>
-class StructuredUploadBuffer
+class StructuredUploadBuffer : public StructuredBuffer<T>
 {
 public:
-    std::vector<T> cpuData;
-    Resource gpuData;
     std::mutex lock;
+    std::vector<T> cpuData;
 
     void Clear()
     {
@@ -1304,20 +1372,6 @@ public:
     {
         return cpuData[index];
     }
-    Resource& GetResource()
-    {
-        return gpuData;
-    }
-    ID3D12Resource* GetResourcePtr()
-    {
-        return gpuData.GetResource();
-    }
-    D3D12_GPU_VIRTUAL_ADDRESS GetGPUVirtualAddress(uint index)
-    {
-        if (gpuData.GetResource() == 0)
-            return 0;
-        return gpuData.GetResource()->GetGPUVirtualAddress() + (index * sizeof(T));
-    }
     void Upload()
     {
         ZoneScoped;
@@ -1325,22 +1379,18 @@ public:
             return;
         if (cpuData.size() <= 0)
             return;
-        if (gpuData.allocation == nullptr || gpuData.BufferSize() < cpuData.size() * sizeof(T))
+        if (this->gpuData.allocation == nullptr || this->gpuData.BufferSize() < cpuData.size() * sizeof(T))
         {
-            gpuData.Release();
-            gpuData.CreateUploadBuffer<T>(max(uint1(cpuData.size()), uint1(1)), typeid(T).name());
+            this->gpuData.Release(true);
+            this->gpuData.CreateUploadBuffer<T>(max(uint1(cpuData.size()), uint1(1)), typeid(T).name());
         }
         void* buf;
-        auto hr = GetResourcePtr()->Map(0, nullptr, &buf);
+        auto hr = this->GetResourcePtr()->Map(0, nullptr, &buf);
         if (SUCCEEDED(hr))
         {
             memcpy(buf, cpuData.data(), sizeof(T) * cpuData.size());
-            GetResourcePtr()->Unmap(0, nullptr);
+            this->GetResourcePtr()->Unmap(0, nullptr);
         }
-    }
-    void Release()
-    {
-        gpuData.Release();
     }
 };
 

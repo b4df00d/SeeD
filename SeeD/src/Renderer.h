@@ -158,6 +158,7 @@ struct CullingContext
     StructuredBuffer<HLSL::Camera> camera;
     StructuredBuffer<HLSL::Light> lights;
     StructuredBuffer<HLSL::Instance> instancesInView;
+    StructuredBuffer<uint> instancesInViewCounter;
 
     void Release()
     {
@@ -168,6 +169,7 @@ struct CullingContext
         camera.Release();
         lights.Release();
         instancesInView.Release();
+        instancesInViewCounter.Release();
     }
 };
 
@@ -223,8 +225,9 @@ public:
         HLSL::CullingContext cullingContextParams;
 
         cullingContextParams.cameraIndex = 0;
-        cullingContextParams.culledInstanceIndex = cullingContext.cullingContext->GetResource().uav.offset;
         cullingContextParams.lightsIndex = 0;
+        cullingContextParams.culledInstanceIndex = cullingContext.instancesInView.GetResource().uav.offset;
+        cullingContextParams.culledInstanceCounterIndex = cullingContext.instancesInViewCounter.GetResource().uav.offset;
 
         cullingContext.cullingContext->Clear();
         cullingContext.cullingContext->Add(cullingContextParams);
@@ -624,10 +627,8 @@ public:
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
-        //updateCameras.precede(particlesTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
         updateInstances.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
         updateInstances.precede(updateMaterials, updloadInstancesBuffers);
-        //uploadTask.succeed(updloadInstancesBuffers);
 
         presentTask.succeed(updateInstances, updateMaterials, updloadInstancesBuffers);
         presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
@@ -806,7 +807,9 @@ public:
     tf::Task UpdateCameras(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
-        // upload camera
+        // upload camera : no need to schedule that before all other passes for the moment because
+        // the proj and the planes are not used on the CPU
+        // we will need to make the task preced watherver pass needs to have up to date camera data
 
         tf::Task task = subflow.emplace(
             [this, &world]()
@@ -1098,9 +1101,7 @@ public:
     void WaitFrame()
     {
         ZoneScoped;
-        Resource::CleanUploadResources();
 
-        //Sleep(500);
 
         HRESULT hr;
         // if the current fence value is still less than "fenceValue", then we know the GPU has not finished executing
@@ -1121,6 +1122,9 @@ public:
             // has reached "fenceValue", we know the command queue has finished executing
             WaitForSingleObject(previousFrame.fenceEvent, 10000);
         }
+
+        Resource::CleanUploadResources();
+        Resource::ReleaseResources();
     }
 
     void PresentFrame()

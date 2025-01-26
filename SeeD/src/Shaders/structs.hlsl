@@ -49,6 +49,7 @@ namespace HLSL
         uint cameraIndex;
         uint lightsIndex;
         uint culledInstanceIndex;
+        uint culledInstanceCounterIndex;
     };
     
     struct Shader
