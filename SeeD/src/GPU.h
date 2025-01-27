@@ -1098,12 +1098,10 @@ void Resource::Release(bool deferred)
             }
             lock.unlock();
             allocation->Release();
-            /*
             GPU::instance->descriptorHeap.FreeGlobalSlot(srv);
             GPU::instance->descriptorHeap.FreeGlobalSlot(uav);
             GPU::instance->descriptorHeap.FreeRTVSlot(rtv);
             GPU::instance->descriptorHeap.FreeDSVSlot(dsv);
-            */
         }
         allocation = { 0 };
         stride = { 0 };
@@ -1191,7 +1189,7 @@ void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, 
 void Resource::CleanUploadResources(bool everything)
 {
     //ZoneScoped;
-    uint frameNumberThreshold = GPU::instance->frameNumber - 2;
+    uint frameNumberThreshold = GPU::instance->frameNumber - 1;
     if (everything)
         frameNumberThreshold = UINT_MAX;
     for (int i = (int)uploadResources.size() - 1; i >= 0 ; i--)
@@ -1218,7 +1216,7 @@ void Resource::CleanUploadResources(bool everything)
 void Resource::ReleaseResources(bool everything)
 {
     //ZoneScoped; 
-    uint frameNumberThreshold = GPU::instance->frameNumber - 2;
+    uint frameNumberThreshold = GPU::instance->frameNumber - 1;
     if (everything)
         frameNumberThreshold = UINT_MAX;
     for (int i = (int)releaseResources.size() - 1; i >= 0; i--)
