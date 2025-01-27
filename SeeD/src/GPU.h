@@ -1243,7 +1243,7 @@ void CommandBuffer::SetCompute(Shader& shader)
     // SetDescriptorHeaps must be set before SetPipelineState because of dynamic indexing in descriptorHeap
     cmd->SetDescriptorHeaps(1, &GPU::instance->descriptorHeap.globalDescriptorHeap);
     cmd->SetComputeRootSignature(shader.rootSignature);
-    //cmd->SetPipelineState(shader.pso);
+    cmd->SetPipelineState(shader.pso);
     //cmd->SetGraphicsRootDescriptorTable();
 }
 void CommandBuffer::SetGraphic(Shader& shader)

@@ -18,14 +18,44 @@ void Culling(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint
     
     StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
+    uint meshletCount = min(256, mesh.meshletCount);
     
-    StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
-    HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset];
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
+    
+    RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[cullingContext.culledInstanceCounterIndex];
+    RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsInView = ResourceDescriptorHeap[cullingContext.culledInstanceIndex];
     
     
     float3 center = mul(instance.worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
-    // assume uniform scaling
-    float radius = length(instance.worldMatrix[0].xyz) * mesh.boundingSphere.w;
+    float radius = length(instance.worldMatrix[0].xyz) * mesh.boundingSphere.w; // assume uniform scaling
+    float4 boundingSphere = float4(center, radius);
     
+    bool culled = FrustumCulling(camera.planes, boundingSphere);
     
+    if (!culled)
+    {
+        for (uint i = 0; i < meshletCount; i++)
+        {
+            StructuredBuffer<HLSL:: Meshlet > meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
+            HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset + i];
+        
+            center = mul(instance.worldMatrix, float4(meshlet.boundingSphere.xyz, 1)).xyz;
+            radius = length(instance.worldMatrix[0].xyz) * meshlet.boundingSphere.w; // assume uniform scaling
+            boundingSphere = float4(center, radius);
+    
+            culled = FrustumCulling(camera.planes, boundingSphere);
+    
+            if (!culled)
+            {
+                uint index = 0;
+                InterlockedAdd(counters[0], 1, index);
+                HLSL::MeshletDrawCall mdc;
+                mdc.meshletIndex = mesh.meshletOffset + i;
+                mdc.instanceIndex = instanceIndex;
+                meshletsInView[index] = mdc;
+            }
+        }
+    }
+
 }

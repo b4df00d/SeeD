@@ -157,8 +157,8 @@ struct CullingContext
 
     StructuredBuffer<HLSL::Camera> camera;
     StructuredBuffer<HLSL::Light> lights;
-    StructuredBuffer<HLSL::Instance> instancesInView;
-    StructuredBuffer<uint> instancesInViewCounter;
+    StructuredBuffer<HLSL::MeshletDrawCall> meshletsInView;
+    StructuredBuffer<uint> meshletsInViewCounter;
 
     void Release()
     {
@@ -168,8 +168,8 @@ struct CullingContext
         }
         camera.Release();
         lights.Release();
-        instancesInView.Release();
-        instancesInViewCounter.Release();
+        meshletsInView.Release();
+        meshletsInViewCounter.Release();
     }
 };
 
@@ -226,8 +226,8 @@ public:
 
         cullingContextParams.cameraIndex = 0;
         cullingContextParams.lightsIndex = 0;
-        cullingContextParams.culledInstanceIndex = cullingContext.instancesInView.GetResource().uav.offset;
-        cullingContextParams.culledInstanceCounterIndex = cullingContext.instancesInViewCounter.GetResource().uav.offset;
+        cullingContextParams.culledInstanceIndex = cullingContext.meshletsInView.GetResource().uav.offset;
+        cullingContextParams.culledInstanceCounterIndex = cullingContext.meshletsInViewCounter.GetResource().uav.offset;
 
         cullingContext.cullingContext->Clear();
         cullingContext.cullingContext->Add(cullingContextParams);
@@ -403,14 +403,16 @@ public:
 class Culling : public Pass
 {
     Components::Handle<Components::Shader> cullingShader;
+    Components::Handle<Components::Shader> cullingResetShader;
 public:
     virtual void On(View* view, bool asyncCompute, String _name) override
     {
         Pass::On(view, asyncCompute, _name);
         ZoneScoped;
         cullingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\culling.hlsl");
-        view->cullingContext.instancesInView.CreateBuffer(0);
-        view->cullingContext.instancesInViewCounter.CreateBuffer(0);
+        cullingResetShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingReset.hlsl");
+        view->cullingContext.meshletsInView.CreateBuffer(0);
+        view->cullingContext.meshletsInViewCounter.CreateBuffer(0);
     }
     void Setup(View* view) override
     {
@@ -421,11 +423,21 @@ public:
         ZoneScoped;
         Open();
 
-        view->cullingContext.instancesInView.Resize(view->viewWorld->instances.Size());
+        view->cullingContext.meshletsInView.Resize(GlobalResources::instance->meshStorage.nextMeshletVertexOffset);
+        auto& instances = view->viewWorld->instances;
 
-        Shader& shader = *AssetLibrary::instance->Get<Shader>(cullingShader.Get().id, true);
-        commandBuffer->SetCompute(shader);
-        //commandBuffer->cmd->Dispatch();
+        Shader& reset = *AssetLibrary::instance->Get<Shader>(cullingResetShader.Get().id, true);
+        commandBuffer->SetCompute(reset);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
+        commandBuffer->cmd->Dispatch(1, 1, 1);
+
+        Shader& culling = *AssetLibrary::instance->Get<Shader>(cullingShader.Get().id, true);
+        commandBuffer->SetCompute(culling);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
+        commandBuffer->cmd->Dispatch(instances.Size(), 1, 1);
+
         Close();
     }
 };

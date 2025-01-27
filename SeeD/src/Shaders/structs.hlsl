@@ -71,7 +71,6 @@ namespace HLSL
         uint a, b, c;
     };
     
-    // must be similar to MeshLoader::Mehslet
     struct Meshlet
     {
         uint vertexOffset;
@@ -107,6 +106,12 @@ namespace HLSL
         uint meshIndex;
         uint materialIndex;
         uint pad[2];
+    };
+    
+    struct MeshletDrawCall
+    {
+        uint meshletIndex;
+        uint instanceIndex;
     };
     
     struct Camera
