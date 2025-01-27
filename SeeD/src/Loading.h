@@ -813,7 +813,9 @@ public :
         //vArgs.push_back(L"--hlsl-dxil-pix-shader-access-instrumentation");
 #else
         vArgs.push_back(DXC_ARG_OPTIMIZATION_LEVEL3);
-        vArgs.push_back(L"-Qstrip_debug");
+        vArgs.push_back(L"-Zi");
+        vArgs.push_back(L"-Qembed_debug");
+        //vArgs.push_back(L"-Qstrip_debug");
         //vArgs.push_back(L"-Qstrip_reflect");
         //vArgs.push_back(L"-remove-unused-functions");
         //vArgs.push_back(L"-remove-unused-globals");

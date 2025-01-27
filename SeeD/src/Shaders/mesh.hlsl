@@ -29,7 +29,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[cullingContext.cameraIndex];
     
-    uint meshletCount = min(128, mesh.meshletCount);
+    uint meshletCount = min(256, mesh.meshletCount);
     
     float4 boundingSphere = mul(instance.worldMatrix, float4(mesh.boundingSphere.xyz, 1));
     boundingSphere.w = mesh.boundingSphere.w;
@@ -62,7 +62,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
         }
     }
     
-    DispatchMesh(min(128, payloadIndex), 1, 1, sPayload);
+    DispatchMesh(min(256, payloadIndex), 1, 1, sPayload);
 }
 
 [RootSignature(GlobalRootSignature)]

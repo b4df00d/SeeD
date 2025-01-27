@@ -230,13 +230,13 @@ public:
         return (bufferSize + (alignment - 1)) & ~(alignment - 1);
     }
     static void CleanUploadResources(bool everything = false);
-    static void ReleaseResources();
+    static void ReleaseResources(bool everything = false);
 
     static std::mutex lock;
     static std::vector<std::tuple<uint, D3D12MA::Allocation*>> uploadResources; // could we remove that and only use releaseResources ? 
     static std::vector<D3D12MA::Allocation*> allResources;
     static std::vector<String> allResourcesNames;
-    static std::vector<Resource> releaseResources;
+    static std::vector<std::tuple<uint, Resource>> releaseResources;
 };
 
 struct DescriptorHeap
@@ -251,6 +251,8 @@ struct DescriptorHeap
     ID3D12DescriptorHeap* dsvDescriptorHeap;
     Slots dsvDescriptorHeapSlots;
     int dsvdescriptorIncrementSize;
+
+    std::mutex lock;
 
     void On(ID3D12Device10* device)
     {
@@ -325,7 +327,9 @@ struct DescriptorHeap
         }
         */
 
+        lock.lock();
         *offset = (uint)slots->Get();
+        lock.unlock();
         handle.ptr = static_cast<SIZE_T>(heap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(*offset) * UINT64(descriptorIncrementSize));
 
         return handle;
@@ -351,7 +355,9 @@ struct DescriptorHeap
     {
         if (*offset != UINT32_MAX)
         {
+            lock.lock();
             slots->Release(*offset);
+            lock.unlock();
         }
         *offset = UINT32_MAX;
     }
@@ -446,6 +452,7 @@ public:
         graphicQueue->Release();
         computeQueue->Release();
 
+        Resource::ReleaseResources(true);
         Resource::CleanUploadResources(true);
         for (uint i = 0; i < Resource::allResourcesNames.size(); i++)
         {
@@ -1070,13 +1077,15 @@ void Resource::BackBuffer(ID3D12Resource* backBuffer)
 
 void Resource::Release(bool deferred)
 {
-    if (deferred)
+    if (allocation)
     {
-        releaseResources.push_back(*this);
-    }
-    else
-    {
-        if (allocation)
+        if (deferred)
+        {
+            lock.lock();
+            releaseResources.push_back({ GPU::instance->frameNumber , *this });
+            lock.unlock();
+        }
+        else
         {
             lock.lock();
             for (int j = (int)allResources.size() - 1; j >= 0; j--)
@@ -1089,12 +1098,19 @@ void Resource::Release(bool deferred)
             }
             lock.unlock();
             allocation->Release();
+            /*
             GPU::instance->descriptorHeap.FreeGlobalSlot(srv);
             GPU::instance->descriptorHeap.FreeGlobalSlot(uav);
             GPU::instance->descriptorHeap.FreeRTVSlot(rtv);
             GPU::instance->descriptorHeap.FreeDSVSlot(dsv);
+            */
         }
-        allocation = nullptr;
+        allocation = { 0 };
+        stride = { 0 };
+        srv = { UINT32_MAX };
+        uav = { UINT32_MAX };
+        rtv = { UINT32_MAX, 0, 0 };
+        dsv = { UINT32_MAX, 0 };
     }
 }
 
@@ -1199,21 +1215,28 @@ void Resource::CleanUploadResources(bool everything)
     }
 }
 
-void Resource::ReleaseResources()
+void Resource::ReleaseResources(bool everything)
 {
-    //ZoneScoped;
+    //ZoneScoped; 
+    uint frameNumberThreshold = GPU::instance->frameNumber - 2;
+    if (everything)
+        frameNumberThreshold = UINT_MAX;
     for (int i = (int)releaseResources.size() - 1; i >= 0; i--)
     {
-        releaseResources[i].Release();
+        if (std::get<0>(releaseResources[i]) < frameNumberThreshold)
+        {
+            Resource& res = std::get<1>(releaseResources[i]);
+            res.Release();
+            releaseResources.erase(releaseResources.begin() + i);
+        }
     }
-    releaseResources.clear();
 }
 
 std::mutex Resource::lock;
 std::vector<std::tuple<uint, D3D12MA::Allocation*>> Resource::uploadResources;
 std::vector<D3D12MA::Allocation*> Resource::allResources;
 std::vector<String> Resource::allResourcesNames;
-std::vector<Resource> Resource::releaseResources;
+std::vector< std::tuple<uint, Resource>> Resource::releaseResources;
 // end of definitions of Resource
 
 // definitions of CommandBuffer      
@@ -1253,8 +1276,7 @@ void CommandBuffer::On(bool asyncCompute, String name)
     {
         GPU::PrintDeviceRemovedReason(hr);
     }
-    std::wstring wname2 = name.ToWString();
-    hr = cmd->SetName(wname2.c_str());
+    hr = cmd->SetName(wname.c_str());
     if (FAILED(hr))
     {
         GPU::PrintDeviceRemovedReason(hr);
@@ -1265,6 +1287,7 @@ void CommandBuffer::On(bool asyncCompute, String name)
         GPU::PrintDeviceRemovedReason(hr);
     }
     hr = GPU::instance->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&passEnd.fence));
+    passEnd.fence->SetName(wname.c_str());
     if (FAILED(hr))
     {
         GPU::PrintDeviceRemovedReason(hr);
@@ -1289,15 +1312,33 @@ class StructuredBuffer
 public:
     Resource gpuData;
 
-    void CreateBuffer(uint elementCount, String name)
+    void CreateBuffer(uint elementCount)
     {
         gpuData.Release(true);
-        gpuData.CreateBuffer(sizeof(T) * elementCount, sizeof(T), false, name);
+        elementCount = max(uint1(1), uint1(elementCount));
+        gpuData.CreateBuffer(sizeof(T) * elementCount, sizeof(T), false, typeid(T).name());
     }
 
     void Release()
     {
         gpuData.Release();
+    }
+
+    uint Size()
+    {
+        if (gpuData.GetResource() != nullptr)
+        {
+            return (uint)gpuData.GetResource()->GetDesc().Width / sizeof(T);
+        }
+        return 0;
+    }
+
+    void Resize(uint elementCount)
+    {
+        if (elementCount > 0 && Size() < elementCount)
+        {
+            CreateBuffer(elementCount);
+        }
     }
 
     Resource& GetResource()
@@ -1729,6 +1770,7 @@ struct MeshStorage
         lock.unlock();
 
         Mesh newMesh;
+        newMesh.boundingSphere = meshData.boundingSphere;
         newMesh.meshletCount = meshData.meshlets.size();
         newMesh.meshletOffset = _nextMeshletOffset;
         for (uint i = 0; i < meshData.meshlets.size(); i++)
@@ -1762,8 +1804,7 @@ struct MeshStorage
             IOs::Log("Too much vertices");
         vertices.Upload(meshData.vertices.data(), meshData.vertices.size() * sizeof(meshData.vertices[0]), commandBuffer, _nextVertexOffset * sizeof(meshData.vertices[0]));
 
-        Mesh result{ newMesh.meshletOffset, newMesh.meshletCount };
-        return result;
+        return newMesh;
     }
 };
 

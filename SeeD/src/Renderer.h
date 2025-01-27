@@ -409,6 +409,8 @@ public:
         Pass::On(view, asyncCompute, _name);
         ZoneScoped;
         cullingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\culling.hlsl");
+        view->cullingContext.instancesInView.CreateBuffer(0);
+        view->cullingContext.instancesInViewCounter.CreateBuffer(0);
     }
     void Setup(View* view) override
     {
@@ -418,6 +420,9 @@ public:
     {
         ZoneScoped;
         Open();
+
+        view->cullingContext.instancesInView.Resize(view->viewWorld->instances.Size());
+
         Shader& shader = *AssetLibrary::instance->Get<Shader>(cullingShader.Get().id, true);
         commandBuffer->SetCompute(shader);
         //commandBuffer->cmd->Dispatch();
