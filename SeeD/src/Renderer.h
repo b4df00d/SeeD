@@ -411,8 +411,8 @@ public:
         ZoneScoped;
         cullingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\culling.hlsl");
         cullingResetShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingReset.hlsl");
-        view->cullingContext.meshletsInView.CreateBuffer(0);
-        view->cullingContext.meshletsInViewCounter.CreateBuffer(0);
+        view->cullingContext.meshletsInView.CreateBuffer(0, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        view->cullingContext.meshletsInViewCounter.CreateBuffer(0, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     }
     void Setup(View* view) override
     {
@@ -423,7 +423,9 @@ public:
         ZoneScoped;
         Open();
 
-        view->cullingContext.meshletsInView.Resize(GlobalResources::instance->meshStorage.nextMeshletVertexOffset);
+        view->cullingContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+        view->cullingContext.meshletsInViewCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+
         auto& instances = view->viewWorld->instances;
 
         Shader& reset = *AssetLibrary::instance->Get<Shader>(cullingResetShader.Get().id, true);
@@ -433,10 +435,14 @@ public:
         commandBuffer->cmd->Dispatch(1, 1, 1);
 
         Shader& culling = *AssetLibrary::instance->Get<Shader>(cullingShader.Get().id, true);
+        culling.numthreads = uint3(64, 1, 1);
         commandBuffer->SetCompute(culling);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
-        commandBuffer->cmd->Dispatch(instances.Size(), 1, 1);
+        commandBuffer->cmd->Dispatch(culling.DispatchX(instances.Size()), 1, 1);
+
+        view->cullingContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        view->cullingContext.meshletsInViewCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
         Close();
     }
@@ -516,11 +522,11 @@ public:
         Shader& shader = *AssetLibrary::instance->Get<Shader>(meshShader.Get().id, true);
         commandBuffer->SetGraphic(shader);
 
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress());
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
 
-        auto& instances = view->viewWorld->instances;
-        commandBuffer->cmd->DispatchMesh(instances.Size(), 1, 1);
+        uint maxDraw = view->cullingContext.meshletsInView.Size();
+        commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->cullingContext.meshletsInView.GetResourcePtr(), 0, view->cullingContext.meshletsInViewCounter.GetResourcePtr(), 0);
 
         Close();
     }
@@ -644,8 +650,8 @@ public:
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
-        updateInstances.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
         updateInstances.precede(updateMaterials, updloadInstancesBuffers);
+        updloadInstancesBuffers.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         presentTask.succeed(updateInstances, updateMaterials, updloadInstancesBuffers);
         presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
@@ -926,6 +932,7 @@ public:
             {
                 ZoneScoped;
                 this->viewWorld->instances.Upload();
+                this->cullingContext.meshletsInView.Resize(GlobalResources::instance->meshStorage.nextMeshletVertexOffset);
             }
         ).name("upload instances buffer");
 

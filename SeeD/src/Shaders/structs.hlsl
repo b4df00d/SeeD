@@ -112,6 +112,13 @@ namespace HLSL
     {
         uint meshletIndex;
         uint instanceIndex;
+        
+        // for D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH
+        uint ThreadGroupCountX;
+        uint ThreadGroupCountY;
+        uint ThreadGroupCountZ;
+        
+        uint pad[3];
     };
     
     struct Camera

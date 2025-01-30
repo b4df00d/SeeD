@@ -10,6 +10,8 @@
             "CBV(b1, space = 0), "\
             "CBV(b2, space = 0), "\
 			"CBV(b3, space = 0), "\
+            "RootConstants(b4, num32BitConstants = 1), "\
+            "RootConstants(b5, num32BitConstants = 1), "\
             "StaticSampler(s0, "\
                             "filter         = FILTER_MIN_MAG_LINEAR_MIP_POINT, "\
                             "addressU       = TEXTURE_ADDRESS_WRAP, "\
@@ -87,7 +89,22 @@ cbuffer CullingContext : register(b1)
     HLSL::CullingContext cullingContext;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer InstancesParams : register(b2)
+cbuffer Nop1 : register(b2)
+{
+    uint notUsedYet1;
+};
+//---------------------------------------------------------------------------------------------
+cbuffer Nop2 : register(b3)
+{
+    uint notUsedYet2;
+};
+//---------------------------------------------------------------------------------------------
+cbuffer MeshletIndex : register(b4)
+{
+    uint meshletIndex;
+};
+//---------------------------------------------------------------------------------------------
+cbuffer InstanceIndex : register(b5)
 {
     uint instanceIndex;
 };

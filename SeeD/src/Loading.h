@@ -455,11 +455,11 @@ public:
         CreateMeshes(_scene);
         CreateMaterials(_scene);
 
-        //for (uint i = 0; i < 2; i++)
+        for (uint i = 0; i < 100; i++)
         {
-            //_scene->mRootNode->mTransformation.a4 = Rand01() * 3.0f;
-            //_scene->mRootNode->mTransformation.b4 = Rand01() * 10.0f;
-            //_scene->mRootNode->mTransformation.c4 = Rand01() * 3.0f;
+            _scene->mRootNode->mTransformation.a4 = Rand01() * 3.0f;
+            _scene->mRootNode->mTransformation.b4 = Rand01() * 10.0f;
+            _scene->mRootNode->mTransformation.c4 = Rand01() * 3.0f;
 
             CreateEntities(_scene, _scene->mRootNode);
         }
@@ -881,29 +881,33 @@ public :
                 return D3D12_SHADER_BYTECODE{};
             }
         }
-        /*
         if (commandSignature != nullptr)
         {
             // Create the command signature used for indirect drawing.
             // Each command consists of a CBV update and a DrawInstanced call.
-            D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[2] = {};
-            argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
-            argumentDescs[0].ConstantBufferView.RootParameterIndex = 0;
-            argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+            D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
+            argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+            argumentDescs[0].Constant.RootParameterIndex = 4;
+            argumentDescs[0].Constant.Num32BitValuesToSet = 1;
+            argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
+            argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+            argumentDescs[1].Constant.RootParameterIndex = 5;
+            argumentDescs[1].Constant.Num32BitValuesToSet = 1;
+            argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
+            argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
 
             D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
             commandSignatureDesc.pArgumentDescs = argumentDescs;
             commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
-            commandSignatureDesc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+            commandSignatureDesc.ByteStride = sizeof(HLSL::MeshletDrawCall);
 
-            auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, *rootSignature, IID_PPV_ARGS(&commandSignature));
+            auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, *rootSignature, IID_PPV_ARGS(commandSignature));
             if (FAILED(hr))
             {
                 GPU::PrintDeviceRemovedReason(hr);
                 return D3D12_SHADER_BYTECODE{};
             }
         }
-        */
 
 #if 0
         // Save pdb.
@@ -1003,11 +1007,11 @@ public :
 					}
                     else if (tokens[1] == "forward")
                     {
-                        D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader.rootSignature);
+                        //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader.rootSignature);
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader.rootSignature, &shader.commandSignature);
                         D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6");
                         PipelineStateStream stream;
-                        stream.AS = amplificationShaderBytecode;
+                        //stream.AS = amplificationShaderBytecode;
                         stream.MS = meshShaderBytecode;
                         stream.PS = forwardShaderBytecode;
                         stream.pRootSignature = shader.rootSignature;

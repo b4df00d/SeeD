@@ -151,6 +151,8 @@ struct Shader
     ID3D12RootSignature* rootSignature;
     ID3D12PipelineState* pso;
 
+    uint3 numthreads; // read that from shader reflection
+
     std::map<String, __time64_t> creationTime;
     bool NeedReload()
     {
@@ -169,6 +171,21 @@ struct Shader
             }
         }
         return false;
+    }
+
+    uint DispatchX(uint count)
+    {
+        return uint(ceil(float(count) / float(numthreads.x)));
+    }
+
+    uint DispatchY(uint count)
+    {
+        return uint(ceil(float(count) / float(numthreads.y)));
+    }
+
+    uint DispatchZ(uint count)
+    {
+        return uint(ceil(float(count) / float(numthreads.z)));
     }
 };
 
@@ -209,7 +226,7 @@ public:
     void CreateTexture(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
     void CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
     void CreateDepthTarget(uint2 resolution, String name = "Texture");
-    void CreateBuffer(uint size, uint stride, bool upload = false, String name = "Buffer");
+    void CreateBuffer(uint size, uint stride, bool upload = false, String name = "Buffer", D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON);
     template <typename T>
     void CreateBuffer(uint count, String name = "Buffer");
     template <typename T>
@@ -856,7 +873,7 @@ void Resource::CreateDepthTarget(uint2 resolution, String name)
     }
 }
 
-void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
+void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D3D12_RESOURCE_STATES initialState)
 {
     //ZoneScoped;
 
@@ -887,7 +904,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name)
     HRESULT hr = GPU::instance->allocator->CreateResource(
         &allocationDesc,
         &resourceDesc,
-        D3D12_RESOURCE_STATE_COMMON,
+        initialState,
         NULL,
         &allocation,
         IID_NULL, NULL);
@@ -1310,11 +1327,11 @@ class StructuredBuffer
 public:
     Resource gpuData;
 
-    void CreateBuffer(uint elementCount)
+    void CreateBuffer(uint elementCount, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON)
     {
         gpuData.Release(true);
         elementCount = max(uint1(1), uint1(elementCount));
-        gpuData.CreateBuffer(sizeof(T) * elementCount, sizeof(T), false, typeid(T).name());
+        gpuData.CreateBuffer(sizeof(T) * elementCount, sizeof(T), false, typeid(T).name(), initialState);
     }
 
     void Release()
@@ -1348,7 +1365,7 @@ public:
         return gpuData.GetResource();
     }
 
-    D3D12_GPU_VIRTUAL_ADDRESS GetGPUVirtualAddress(uint index)
+    D3D12_GPU_VIRTUAL_ADDRESS GetGPUVirtualAddress(uint index = 0)
     {
         if (gpuData.GetResource() == 0)
             return 0;

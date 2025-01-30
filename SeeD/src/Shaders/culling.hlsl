@@ -8,10 +8,13 @@
 
 
 [RootSignature(GlobalRootSignature)]
-[numthreads(1, 1, 1)]
+[numthreads(64, 1, 1)]
 void Culling(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
 {
     uint instanceIndex = dtid;
+    
+    if (instanceIndex >= commonResourcesIndices.instanceCount)
+        return;
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
@@ -50,9 +53,12 @@ void Culling(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint
             {
                 uint index = 0;
                 InterlockedAdd(counters[0], 1, index);
-                HLSL::MeshletDrawCall mdc;
+                HLSL::MeshletDrawCall mdc = (HLSL::MeshletDrawCall)0;
                 mdc.meshletIndex = mesh.meshletOffset + i;
                 mdc.instanceIndex = instanceIndex;
+                mdc.ThreadGroupCountX = 1;
+                mdc.ThreadGroupCountY = 1;
+                mdc.ThreadGroupCountZ = 1;
                 meshletsInView[index] = mdc;
             }
         }

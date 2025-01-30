@@ -69,10 +69,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
 [outputtopology("triangle")]
 [numthreads(124, 1, 1)]
 void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[64], out indices uint3 outIndices[124])
-{
-    uint instanceIndex = payload.instanceIndex[groupId];
-    uint meshletIndex = payload.meshletIndices[groupId];
-    
+{   
     if (instanceIndex == HLSL::invalidUINT)
         return;
     
