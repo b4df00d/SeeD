@@ -8,7 +8,7 @@
 
 
 [RootSignature(GlobalRootSignature)]
-[numthreads(64, 1, 1)]
+[numthreads(8, 1, 1)]
 void Culling(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
 {
     uint instanceIndex = dtid;
@@ -21,14 +21,12 @@ void Culling(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint
     
     StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
-    uint meshletCount = min(256, mesh.meshletCount);
-    
-    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
     
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[cullingContext.culledInstanceCounterIndex];
     RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsInView = ResourceDescriptorHeap[cullingContext.culledInstanceIndex];
     
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
     
     float3 center = mul(instance.worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
     float radius = length(instance.worldMatrix[0].xyz) * mesh.boundingSphere.w; // assume uniform scaling
@@ -38,7 +36,7 @@ void Culling(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint
     
     if (!culled)
     {
-        for (uint i = 0; i < meshletCount; i++)
+        for (uint i = 0; i < mesh.meshletCount; i++)
         {
             StructuredBuffer<HLSL:: Meshlet > meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
             HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset + i];

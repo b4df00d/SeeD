@@ -333,11 +333,6 @@ public:
 
         size_t meshlet_count = meshopt_buildMeshlets(meshopt_meshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(), originalMesh.indices.data(), originalMesh.indices.size(), &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex), max_vertices, max_triangles, cone_weight);
 
-        const meshopt_Meshlet& last = meshopt_meshlets[meshlet_count - 1];
-
-        meshlet_vertices.resize(last.vertex_offset + last.vertex_count);
-        meshlet_triangles.resize(last.triangle_offset + ((last.triangle_count * 3 + 3) & ~3));
-        meshopt_meshlets.resize(meshlet_count);
 
         std::vector<Meshlet> meshlets(meshopt_meshlets.size());
         meshlets.resize(meshopt_meshlets.size());
@@ -353,6 +348,11 @@ public:
             meshlets[i].vertexOffset = m.vertex_offset;
             meshlets[i].boundingSphere = float4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
         }
+
+        const meshopt_Meshlet& last = meshopt_meshlets[meshlet_count - 1];
+        meshlet_vertices.resize(last.vertex_offset + last.vertex_count);
+        meshlet_triangles.resize(last.triangle_offset + ((last.triangle_count * 3 + 3) & ~3));
+        //meshopt_meshlets.resize(meshlet_count);
 
         MeshData optimizedMesh;
         optimizedMesh.meshlets = meshlets;
@@ -455,11 +455,11 @@ public:
         CreateMeshes(_scene);
         CreateMaterials(_scene);
 
-        for (uint i = 0; i < 100; i++)
+        //for (uint i = 0; i < 100; i++)
         {
-            _scene->mRootNode->mTransformation.a4 = Rand01() * 3.0f;
-            _scene->mRootNode->mTransformation.b4 = Rand01() * 10.0f;
-            _scene->mRootNode->mTransformation.c4 = Rand01() * 3.0f;
+            //_scene->mRootNode->mTransformation.a4 = Rand01() * 5.0f;
+            //_scene->mRootNode->mTransformation.b4 = Rand01() * 5.0f;
+            //_scene->mRootNode->mTransformation.c4 = Rand01() * 5.0f;
 
             CreateEntities(_scene, _scene->mRootNode);
         }

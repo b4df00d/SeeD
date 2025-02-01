@@ -1712,7 +1712,7 @@ struct MeshData
 {
     std::vector<Meshlet> meshlets;
     std::vector<unsigned int> meshlet_vertices;
-    std::vector<unsigned int> meshlet_triangles;
+    std::vector<unsigned char> meshlet_triangles;
     std::vector<Vertex> vertices;
     float4 boundingSphere;
 };
@@ -1780,7 +1780,7 @@ struct MeshStorage
         nextMeshOffset += 1;
         nextMeshletOffset += meshData.meshlets.size();
         nextMeshletVertexOffset += meshData.meshlet_vertices.size();
-        nextMeshletTriangleOffset += meshData.meshlet_triangles.size();
+        nextMeshletTriangleOffset += meshData.meshlet_triangles.size(); // triangles are packed in 1 uint (a, b, c, mop)
         nextVertexOffset += meshData.vertices.size();
         lock.unlock();
 

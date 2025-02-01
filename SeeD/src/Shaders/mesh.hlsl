@@ -69,14 +69,11 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
 [outputtopology("triangle")]
 [numthreads(124, 1, 1)]
 void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[64], out indices uint3 outIndices[124])
-{   
-    if (instanceIndex == HLSL::invalidUINT)
-        return;
-    
-    StructuredBuffer<HLSL:: Instance > instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+{
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
     
-    StructuredBuffer<HLSL:: Meshlet > meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
+    StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
     HLSL::Meshlet meshlet = meshlets[meshletIndex];
     SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
     
@@ -94,15 +91,26 @@ void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThre
         outVerts[groupThreadId].pos = mul(camera.viewProj, worldPos);
         outVerts[groupThreadId].color = RandUINT(meshletIndex);
     }
-    StructuredBuffer<uint> trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
+    ByteAddressBuffer trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
     if (groupThreadId < meshlet.triangleCount)
     {
         uint offset = meshlet.triangleOffset + groupThreadId * 3;
-        uint a = trianglesData[offset];
-        uint b = trianglesData[offset + 1];
-        uint c = trianglesData[offset + 2];
-        uint3 abc = uint3(a, b, c);
-        outIndices[groupThreadId] = abc;
+        uint alignedOffset = offset & ~3;
+        uint diff = (offset - alignedOffset);
+        uint2 packedData = trianglesData.Load2(alignedOffset);
+        
+        uint tri[8];
+        tri[0] = (packedData.x) & 0x000000ff;
+        tri[1] = (packedData.x >> 8) & 0x000000ff;
+        tri[2] = (packedData.x >> 16) & 0x000000ff;
+        tri[3] = (packedData.x >> 24) & 0x000000ff;
+        
+        tri[4] = (packedData.y) & 0x000000ff;
+        tri[5] = (packedData.y >> 8) & 0x000000ff;
+        tri[6] = (packedData.y >> 16) & 0x000000ff;
+        tri[7] = (packedData.y >> 24) & 0x000000ff;
+        
+        outIndices[groupThreadId] = uint3(tri[diff], tri[diff + 1], tri[diff + 2]);
     }
 }
 

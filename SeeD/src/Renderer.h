@@ -435,7 +435,7 @@ public:
         commandBuffer->cmd->Dispatch(1, 1, 1);
 
         Shader& culling = *AssetLibrary::instance->Get<Shader>(cullingShader.Get().id, true);
-        culling.numthreads = uint3(64, 1, 1);
+        culling.numthreads = uint3(8, 1, 1);
         commandBuffer->SetCompute(culling);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));

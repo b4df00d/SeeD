@@ -117,8 +117,6 @@ namespace HLSL
         uint ThreadGroupCountX;
         uint ThreadGroupCountY;
         uint ThreadGroupCountZ;
-        
-        uint pad[3];
     };
     
     struct Camera
