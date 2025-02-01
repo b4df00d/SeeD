@@ -136,7 +136,7 @@ struct ViewWorld
     StructuredUploadBuffer<HLSL::Light> lights;
     Map<World::Entity, Material, HLSL::Material> materials;
     StructuredUploadBuffer<HLSL::Instance> instances;
-    StructuredUploadBuffer<HLSL::Instance> instancesGPU; // only for instances created on GPU
+    StructuredBuffer<HLSL::Instance> instancesGPU; // only for instances created on GPU
     TLAS tlas;
 
     void Release()
@@ -245,7 +245,7 @@ public:
     // debug only ?
     String name;
 
-    virtual void On(View* view, bool asyncCompute, String _name)
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name)
     {
         ZoneScoped;
         name = _name;
@@ -253,7 +253,7 @@ public:
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            commandBuffer.Get(i).On(asyncCompute, name);
+            commandBuffer.Get(i).On(queue, name);
         }
     }
 
@@ -405,9 +405,9 @@ class Culling : public Pass
     Components::Handle<Components::Shader> cullingShader;
     Components::Handle<Components::Shader> cullingResetShader;
 public:
-    virtual void On(View* view, bool asyncCompute, String _name) override
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name) override
     {
-        Pass::On(view, asyncCompute, _name);
+        Pass::On(view, queue, _name);
         ZoneScoped;
         cullingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\culling.hlsl");
         cullingResetShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingReset.hlsl");
@@ -435,7 +435,6 @@ public:
         commandBuffer->cmd->Dispatch(1, 1, 1);
 
         Shader& culling = *AssetLibrary::instance->Get<Shader>(cullingShader.Get().id, true);
-        culling.numthreads = uint3(8, 1, 1);
         commandBuffer->SetCompute(culling);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
@@ -499,9 +498,9 @@ class Forward : public Pass
 {
     Components::Handle<Components::Shader> meshShader;
 public:
-    virtual void On(View* view, bool asyncCompute, String _name) override
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name) override
     {
-        Pass::On(view, asyncCompute, _name);
+        Pass::On(view, queue, _name);
         ZoneScoped;
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
     }
@@ -592,18 +591,18 @@ public:
 
         depthBuffer.CreateDepthTarget(resolution, "Depth");
 
-        skinning.On(this, false, "skinning");
-        particles.On(this, false, "particles");
-        spawning.On(this, false, "spawning");
-        culling.On(this, false, "culling");
-        zPrepass.On(this, false, "zPrepass");
-        gBuffers.On(this, false, "gBuffers");
-        lighting.On(this, false, "lighting");
-        forward.On(this, false, "forward");
+        skinning.On(this, GPU::instance->graphicQueue, "skinning");
+        particles.On(this, GPU::instance->graphicQueue, "particles");
+        spawning.On(this, GPU::instance->graphicQueue, "spawning");
+        culling.On(this, GPU::instance->graphicQueue, "culling");
+        zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass");
+        gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers");
+        lighting.On(this, GPU::instance->graphicQueue, "lighting");
+        forward.On(this, GPU::instance->graphicQueue, "forward");
         forward.renderTargets[0] = GPU::instance->backBuffer.Get();
         forward.depthBuffer = depthBuffer;
-        postProcess.On(this, false, "postProcess");
-        present.On(this, false, "present");
+        postProcess.On(this, GPU::instance->graphicQueue, "postProcess");
+        present.On(this, GPU::instance->graphicQueue, "present");
 
         //AssetLibrary::instance->LoadMandatory();
     }
@@ -972,7 +971,7 @@ public:
     {
         resolution = window.windowResolution;
 
-        editor.On(this, false, "editor");
+        editor.On(this, GPU::instance->graphicQueue, "editor");
     }
 
     void Off() override

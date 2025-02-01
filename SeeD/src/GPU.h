@@ -209,7 +209,7 @@ struct CommandBuffer
 
     void SetCompute(Shader& shader);
     void SetGraphic(Shader& shader);
-    void On(bool asyncCompute, String name);
+    void On(ID3D12CommandQueue* queue, String name);
     void Off();
 };
 
@@ -436,6 +436,7 @@ public:
 
     ID3D12CommandQueue* graphicQueue{};
     ID3D12CommandQueue* computeQueue{};
+    ID3D12CommandQueue* copyQueue{};
 
     IDXGISwapChain3* swapChain{};
 
@@ -468,6 +469,7 @@ public:
         descriptorHeap.Off();
         graphicQueue->Release();
         computeQueue->Release();
+        copyQueue->Release();
 
         Resource::ReleaseResources(true);
         Resource::CleanUploadResources(true);
@@ -537,6 +539,7 @@ public:
         D3D12_COMMAND_QUEUE_DESC commandQueueDesc;
         commandQueueDesc = {};
         commandQueueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+        commandQueueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
         commandQueueDesc.Type = D3D12_COMMAND_LIST_TYPE::D3D12_COMMAND_LIST_TYPE_DIRECT;
         hr = device->CreateCommandQueue(&commandQueueDesc, IID_PPV_ARGS(&graphicQueue));
         if (FAILED(hr))
@@ -544,8 +547,17 @@ public:
             GPU::PrintDeviceRemovedReason(hr);
             return;
         }
+        commandQueueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
         commandQueueDesc.Type = D3D12_COMMAND_LIST_TYPE::D3D12_COMMAND_LIST_TYPE_COMPUTE;
         hr = device->CreateCommandQueue(&commandQueueDesc, IID_PPV_ARGS(&computeQueue));
+        if (FAILED(hr))
+        {
+            GPU::PrintDeviceRemovedReason(hr);
+            return;
+        }
+        commandQueueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        commandQueueDesc.Type = D3D12_COMMAND_LIST_TYPE::D3D12_COMMAND_LIST_TYPE_COPY;
+        hr = device->CreateCommandQueue(&commandQueueDesc, IID_PPV_ARGS(&copyQueue));
         if (FAILED(hr))
         {
             GPU::PrintDeviceRemovedReason(hr);
@@ -897,7 +909,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D
 
     if (upload)
     {
-        allocationDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+        allocationDesc.HeapType = D3D12_HEAP_TYPE_GPU_UPLOAD;
         resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
     }
 
@@ -1271,10 +1283,12 @@ void CommandBuffer::SetGraphic(Shader& shader)
     cmd->SetPipelineState(shader.pso);
     //cmd->SetGraphicsRootDescriptorTable();
 }
-void CommandBuffer::On(bool asyncCompute, String name)
+void CommandBuffer::On(ID3D12CommandQueue* _queue, String name)
 {
-    D3D12_COMMAND_LIST_TYPE type = asyncCompute ? D3D12_COMMAND_LIST_TYPE_COMPUTE : D3D12_COMMAND_LIST_TYPE_DIRECT;
-    queue = asyncCompute ? GPU::instance->computeQueue : GPU::instance->graphicQueue;
+    queue = _queue;
+    D3D12_COMMAND_LIST_TYPE type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    if (queue == GPU::instance->computeQueue) type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    if (queue == GPU::instance->copyQueue) type = D3D12_COMMAND_LIST_TYPE_COPY;
     HRESULT hr = GPU::instance->device->CreateCommandAllocator(type, IID_PPV_ARGS(&cmdAlloc));
     if (FAILED(hr))
     {
@@ -1554,33 +1568,36 @@ struct Profiler
     {
         ZoneScoped;
         UINT64 profileIdx = UINT64(-1);
-        for (UINT64 i = 0; i < numProfiles; ++i)
+        if (cb.queue != GPU::instance->copyQueue)
         {
-            if (profiles[i].name == name)
+            for (UINT64 i = 0; i < numProfiles; ++i)
             {
-                profileIdx = i;
-                break;
+                if (profiles[i].name == name)
+                {
+                    profileIdx = i;
+                    break;
+                }
             }
+
+            if (profileIdx == UINT64(-1))
+            {
+                profileIdx = numProfiles++;
+                profiles[profileIdx].name = name;
+            }
+
+            seedAssert(profileIdx != UINT64(-1));
+            seedAssert(profileIdx < maxProfiles);
+
+            ProfileData& profileData = profiles[profileIdx];
+            profileData.Active = true;
+
+            // Insert the start timestamp
+            const uint startQueryIdx = uint(profileIdx * 2);
+            cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, startQueryIdx);
+
+            profileData.QueryStarted = true;
+
         }
-
-        if (profileIdx == UINT64(-1))
-        {
-            profileIdx = numProfiles++;
-            profiles[profileIdx].name = name;
-        }
-
-        seedAssert(profileIdx != UINT64(-1));
-        seedAssert(profileIdx < maxProfiles);
-
-        ProfileData& profileData = profiles[profileIdx];
-        profileData.Active = true;
-
-        // Insert the start timestamp
-        const uint startQueryIdx = uint(profileIdx * 2);
-        cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, startQueryIdx);
-
-        profileData.QueryStarted = true;
-
         cb.profileIdx = (uint)profileIdx;
         return profileIdx;
     }
@@ -1588,16 +1605,19 @@ struct Profiler
     void EndProfile(CommandBuffer& cb)
     {
         ZoneScoped;
-        ProfileData& profileData = profiles[cb.profileIdx];
+        if (cb.profileIdx != UINT(-1))
+        {
+            ProfileData& profileData = profiles[cb.profileIdx];
 
-        // Insert the end timestamp
-        const uint startQueryIdx = uint(cb.profileIdx * QUEUECOUNT);
-        const uint endQueryIdx = startQueryIdx + 1;
-        cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, endQueryIdx);
+            // Insert the end timestamp
+            const uint startQueryIdx = uint(cb.profileIdx * QUEUECOUNT);
+            const uint endQueryIdx = startQueryIdx + 1;
+            cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, endQueryIdx);
 
-        // Resolve the data
-        const UINT64 dstOffset = ((GPU::instance->frameIndex * maxProfiles * QUEUECOUNT) + startQueryIdx) * sizeof(UINT64);
-        cb.cmd->ResolveQueryData(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, startQueryIdx, 2, buffer.GetResource(), dstOffset);
+            // Resolve the data
+            const UINT64 dstOffset = ((GPU::instance->frameIndex * maxProfiles * QUEUECOUNT) + startQueryIdx) * sizeof(UINT64);
+            cb.cmd->ResolveQueryData(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, startQueryIdx, 2, buffer.GetResource(), dstOffset);
+        }
     }
 
     void UpdateProfile(ProfileData& profile, UINT64 profileIdx, UINT64 gpuFrequency, const UINT64* frameQueryData)

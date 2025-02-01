@@ -40,7 +40,7 @@ public:
         instance = this;
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            commandBuffer.Get(i).On(false, name);
+            commandBuffer.Get(i).On(GPU::instance->copyQueue, name);
         }
         namespace fs = std::filesystem;
         fs::create_directories("..\\Assets");
@@ -99,7 +99,7 @@ public:
     {
         if (commandBuffer->open)
             IOs::Log("{} OPEN !!", name);
-        ID3D12CommandQueue* commandQueue = GPU::instance->graphicQueue;
+        ID3D12CommandQueue* commandQueue = commandBuffer->queue;
         commandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
         commandQueue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
@@ -767,7 +767,7 @@ public :
         instance = nullptr;
 	}
 
-    D3D12_SHADER_BYTECODE Compile(String file, String entry, String type, ID3D12RootSignature** rootSignature = nullptr, ID3D12CommandSignature** commandSignature = nullptr)
+    D3D12_SHADER_BYTECODE Compile(String file, String entry, String type, Shader* shader = nullptr)
     {
 		ZoneScoped;
         bool compiled = false;
@@ -866,7 +866,7 @@ public :
         shaderBytecode.BytecodeLength = pShader->GetBufferSize();
         shaderBytecode.pShaderBytecode = pShader->GetBufferPointer();
 
-        if (rootSignature != nullptr)
+        if (shader != nullptr)
         {
             IDxcBlob* sig = nullptr;
             pResults->GetOutput(DXC_OUT_ROOT_SIGNATURE, IID_PPV_ARGS(&sig), &pShaderName);
@@ -875,14 +875,12 @@ public :
                 return D3D12_SHADER_BYTECODE{};
             }
 
-            hr = GPU::instance->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(rootSignature));
+            hr = GPU::instance->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&shader->rootSignature));
             if (!SUCCEEDED(hr))
             {
                 return D3D12_SHADER_BYTECODE{};
             }
-        }
-        if (commandSignature != nullptr)
-        {
+        
             // Create the command signature used for indirect drawing.
             // Each command consists of a CBV update and a DrawInstanced call.
             D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
@@ -901,7 +899,7 @@ public :
             commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
             commandSignatureDesc.ByteStride = sizeof(HLSL::MeshletDrawCall);
 
-            auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, *rootSignature, IID_PPV_ARGS(commandSignature));
+            auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, shader->rootSignature, IID_PPV_ARGS(&shader->commandSignature));
             if (FAILED(hr))
             {
                 GPU::PrintDeviceRemovedReason(hr);
@@ -921,6 +919,8 @@ public :
             fclose(fp);
         }
 #endif
+
+        ShaderReflection(pResults, shader, nullptr, nullptr);
 
         return shaderBytecode;
     }
@@ -943,6 +943,175 @@ public :
         }
 
         return pso;
+    }
+
+    void ShaderReflection(IDxcResult* pResults, Shader* shader = NULL, std::vector<D3D12_INPUT_ELEMENT_DESC>* inputLayoutElements = NULL, std::vector<DXGI_FORMAT>* outputLayoutElements = NULL)
+    {
+        // Reflection to get custom cbuffer layout
+        IDxcBlob* pReflectionData;
+        pResults->GetOutput(DXC_OUT_REFLECTION, IID_PPV_ARGS(&pReflectionData), nullptr);
+        DxcBuffer reflectionBuffer;
+        reflectionBuffer.Ptr = pReflectionData->GetBufferPointer();
+        reflectionBuffer.Size = pReflectionData->GetBufferSize();
+        reflectionBuffer.Encoding = 0;
+        ID3D12ShaderReflection* pShaderReflection;
+        DxcUtils->CreateReflection(&reflectionBuffer, IID_PPV_ARGS(&pShaderReflection));
+
+        D3D12_SHADER_DESC refDesc;
+        pShaderReflection->GetDesc(&refDesc);
+
+        std::cout << "InstructionCounts (float | int | texture | total): " << refDesc.FloatInstructionCount << " | " << refDesc.IntInstructionCount << " | " << refDesc.TextureLoadInstructions << " | " << refDesc.InstructionCount << " -- TempRegisterCount : " << refDesc.TempRegisterCount << std::endl;
+        /*
+        if (shader != NULL)
+        {
+            for (uint j = 0; j < refDesc.ConstantBuffers; j++)
+            {
+                ID3D12ShaderReflectionConstantBuffer* resource = pShaderReflection->GetConstantBufferByIndex(j);
+                D3D12_SHADER_BUFFER_DESC bufDesc;
+                resource->GetDesc(&bufDesc);
+                if (strcmp(bufDesc.Name, "materials[0]") == 0)
+                {
+                    for (uint k = 0; k < bufDesc.Variables; k++)
+                    {
+                        ID3D12ShaderReflectionVariable* matVar = resource->GetVariableByIndex(k);
+                        D3D12_SHADER_VARIABLE_DESC matDesc = {};
+                        matVar->GetDesc(&matDesc);
+                        D3D12_SHADER_TYPE_DESC matTypeDesc;
+                        ID3D12ShaderReflectionType* matType = matVar->GetType();
+                        matType->GetDesc(&matTypeDesc);
+
+
+
+                        //std::cout << "\n struct Material \n {";
+                        for (uint l = 0; l < matTypeDesc.Members; l++)
+                        {
+                            LPCSTR memberName = matType->GetMemberTypeName(l);
+                            ID3D12ShaderReflectionType* memberType = matType->GetMemberTypeByIndex(l);
+                            D3D12_SHADER_TYPE_DESC memberTypeDesc;
+                            memberType->GetDesc(&memberTypeDesc);
+
+                            shader->propertiesMemoryPointers[memberName] = memberTypeDesc;
+
+                            //std::cout << "\n     " << memberName << " " << memberTypeDesc.Type;
+                        }
+                        //std::cout << "\n }";
+
+                    }
+                }
+            }
+
+            // Create imput Layout
+            if (inputLayoutElements != NULL)
+            {
+                // Read input layout description from shader info
+                for (uint i = 0; i < refDesc.InputParameters; i++)
+                {
+                    D3D12_SIGNATURE_PARAMETER_DESC paramDesc;
+                    pShaderReflection->GetInputParameterDesc(i, &paramDesc);
+
+                    if (strncmp("SV_", paramDesc.SemanticName, 3) == 0)
+                    {
+                        continue;
+                    }
+
+                    // fill out input element desc
+                    D3D12_INPUT_ELEMENT_DESC elementDesc;
+                    elementDesc.SemanticName = paramDesc.SemanticName;
+                    elementDesc.SemanticIndex = paramDesc.SemanticIndex;
+                    elementDesc.InputSlot = i < VERTICE_BUFFERS_COUNT ? i : VERTICE_BUFFERS_COUNT - 1;
+                    elementDesc.AlignedByteOffset = D3D12_APPEND_ALIGNED_ELEMENT;
+                    elementDesc.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+                    elementDesc.InstanceDataStepRate = 0;
+
+                    // determine DXGI format
+                    if (paramDesc.Mask == 1)
+                    {
+                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) elementDesc.Format = DXGI_FORMAT_R32_UINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) elementDesc.Format = DXGI_FORMAT_R32_SINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) elementDesc.Format = DXGI_FORMAT_R32_FLOAT;
+                    }
+                    else if (paramDesc.Mask <= 3)
+                    {
+                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) elementDesc.Format = DXGI_FORMAT_R32G32_UINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) elementDesc.Format = DXGI_FORMAT_R32G32_SINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) elementDesc.Format = DXGI_FORMAT_R32G32_FLOAT;
+                    }
+                    else if (paramDesc.Mask <= 7)
+                    {
+                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) elementDesc.Format = DXGI_FORMAT_R32G32B32_UINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) elementDesc.Format = DXGI_FORMAT_R32G32B32_SINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) elementDesc.Format = DXGI_FORMAT_R32G32B32_FLOAT;
+                    }
+                    else if (paramDesc.Mask <= 15)
+                    {
+                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) elementDesc.Format = DXGI_FORMAT_R32G32B32A32_UINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) elementDesc.Format = DXGI_FORMAT_R32G32B32A32_SINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) elementDesc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+                    }
+
+                    //save element desc
+                    inputLayoutElements->push_back(elementDesc);
+                }
+            }
+
+            // Create imput Layout
+            if (outputLayoutElements != NULL)
+            {
+                // Read input layout description from shader info
+                for (uint i = 0; i < refDesc.OutputParameters; i++)
+                {
+                    D3D12_SIGNATURE_PARAMETER_DESC paramDesc;
+                    pShaderReflection->GetOutputParameterDesc(i, &paramDesc);
+
+                    // Create the SO Declaration
+                    D3D12_SO_DECLARATION_ENTRY entry;
+                    entry.SemanticIndex = paramDesc.SemanticIndex;
+                    entry.SemanticName = paramDesc.SemanticName;
+                    entry.Stream = paramDesc.Stream;
+                    entry.StartComponent = 0; // Assume starting at 0
+                    entry.OutputSlot = 0; // Assume the first output slot
+
+                    DXGI_FORMAT format;
+                    // determine DXGI format
+                    if (paramDesc.Mask == 1)
+                    {
+                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32_UINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32_SINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32_FLOAT;
+                    }
+                    else if (paramDesc.Mask <= 3)
+                    {
+                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32G32_UINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32G32_SINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32G32_FLOAT;
+                    }
+                    else if (paramDesc.Mask <= 7)
+                    {
+                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32G32B32_UINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32G32B32_SINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32G32B32_FLOAT;
+                    }
+                    else if (paramDesc.Mask <= 15)
+                    {
+                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32G32B32A32_UINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32G32B32A32_SINT;
+                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+                    }
+
+                    outputLayoutElements->push_back(format);
+                }
+            }
+        }
+        */
+
+        if (shader != NULL)
+        {
+            uint x;
+            uint y;
+            uint z;
+            pShaderReflection->GetThreadGroupSize(&x, &y, &z);
+            shader->numthreads = uint3(x, y, z);
+        }
     }
 
     bool Parse(Shader& shader, String file)
@@ -989,7 +1158,7 @@ public :
 					*/
 					if (tokens[1] == "gBuffer")
 					{
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature, &shader.commandSignature);
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader);
                         D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[3], "ps_6_6");
                         PipelineStateStream stream{};
                         stream.MS = meshShaderBytecode;
@@ -999,7 +1168,7 @@ public :
 					}
 					else if (tokens[1] == "zPrepass")
 					{
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader.rootSignature, &shader.commandSignature);
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader);
                         PipelineStateStream stream{};
                         stream.MS = meshShaderBytecode;
                         shader.pso = CreatePSO(stream);
@@ -1007,8 +1176,8 @@ public :
 					}
                     else if (tokens[1] == "forward")
                     {
-                        //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader.rootSignature);
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader.rootSignature, &shader.commandSignature);
+                        //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader);
                         D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6");
                         PipelineStateStream stream;
                         //stream.AS = amplificationShaderBytecode;
@@ -1021,7 +1190,7 @@ public :
                     }
                     else if (tokens[1] == "compute")
                     {
-                        D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, tokens[2], "cs_6_6", &shader.rootSignature);
+                        D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, tokens[2], "cs_6_6", &shader);
                         PipelineStateStream stream;
                         stream.CS = computeShaderBytecode;
                         stream.pRootSignature = shader.rootSignature;
