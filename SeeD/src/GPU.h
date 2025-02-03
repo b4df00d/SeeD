@@ -241,6 +241,7 @@ public:
     void Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset = 0);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter, ID3D12Resource* resource);
+    void Barrier(CommandBuffer& cb);
     uint AlignForUavCounter(uint bufferSize)
     {
         const uint alignment = D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT;
@@ -1215,6 +1216,12 @@ void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, 
     cb.cmd->ResourceBarrier(1, &trans);
 }
 
+void Resource::Barrier(CommandBuffer& cb)
+{
+    D3D12_RESOURCE_BARRIER trans{ D3D12_RESOURCE_BARRIER_TYPE_UAV , D3D12_RESOURCE_BARRIER_FLAG_NONE , {GetResource(), 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON} };
+    cb.cmd->ResourceBarrier(1, &trans);
+}
+
 void Resource::CleanUploadResources(bool everything)
 {
     //ZoneScoped;
@@ -1536,6 +1543,10 @@ struct Profiler
     Resource buffer;
     ReadBackBuffer readbackBuffer;
     std::vector<ProfileData> profiles;
+
+    uint instancesCount;
+    uint meshletsCount;
+    uint verticesCount;
 
     void On()
     {

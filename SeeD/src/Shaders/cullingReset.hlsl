@@ -12,6 +12,9 @@ void Reset(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint g
 {
     uint instanceIndex = dtid;
     
-    RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[cullingContext.culledInstanceCounterIndex];
-    counters[0] = 0;
+    RWStructuredBuffer<uint> isntancesCounters = ResourceDescriptorHeap[cullingContext.instancesCounterIndex];
+    isntancesCounters[0] = 0;
+    
+    RWStructuredBuffer<uint> meshletsCounters = ResourceDescriptorHeap[cullingContext.meshletsCounterIndex];
+    meshletsCounters[0] = 0;
 }

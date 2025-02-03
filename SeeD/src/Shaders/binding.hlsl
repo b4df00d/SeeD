@@ -99,14 +99,14 @@ cbuffer Nop2 : register(b3)
     uint notUsedYet2;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer MeshletIndex : register(b4)
+cbuffer InstanceIndex : register(b4)
 {
-    uint meshletIndex;
+    uint instanceIndexIndirect;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer InstanceIndex : register(b5)
+cbuffer MeshletIndex : register(b5)
 {
-    uint instanceIndex;
+    uint meshletIndexIndirect;
 };
 
 #define BINDINGS_HLSL

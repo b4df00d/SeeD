@@ -122,6 +122,8 @@ public:
         }
         ImGui::Text("average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
 
+        ImGui::Text("instances %u | meshlets %u)", Profiler::instance->instancesCount, Profiler::instance->meshletsCount);
+
         ImGui::Separator();
 
         for (int i = 0; i < Profiler::instance->profiles.size(); i++)

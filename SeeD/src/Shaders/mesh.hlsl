@@ -71,10 +71,10 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
 void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[64], out indices uint3 outIndices[124])
 {
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[instanceIndex];
+    HLSL::Instance instance = instances[instanceIndexIndirect];
     
     StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
-    HLSL::Meshlet meshlet = meshlets[meshletIndex];
+    HLSL::Meshlet meshlet = meshlets[meshletIndexIndirect];
     SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
@@ -89,7 +89,7 @@ void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThre
         float4 pos = float4(verticesData[index].pos, 1);
         float4 worldPos = mul(instance.worldMatrix, pos);
         outVerts[groupThreadId].pos = mul(camera.viewProj, worldPos);
-        outVerts[groupThreadId].color = RandUINT(meshletIndex);
+        outVerts[groupThreadId].color = RandUINT(meshletIndexIndirect);
     }
     ByteAddressBuffer trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
     if (groupThreadId < meshlet.triangleCount)
@@ -125,7 +125,7 @@ PS_OUTPUT_FORWARD PixelForward(HLSL::MSVert inVerts)
     PS_OUTPUT_FORWARD o;
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[instanceIndex];
+    HLSL::Instance instance = instances[instanceIndexIndirect];
     o.albedo = float4(inVerts.color, 1);
     //o.entityID = 1;
     return o;

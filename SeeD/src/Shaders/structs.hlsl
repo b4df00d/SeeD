@@ -49,7 +49,9 @@ namespace HLSL
         uint cameraIndex;
         uint lightsIndex;
         uint culledInstanceIndex;
-        uint culledInstanceCounterIndex;
+        uint culledMeshletsIndex;
+        uint instancesCounterIndex;
+        uint meshletsCounterIndex;
     };
     
     struct Shader
@@ -108,10 +110,21 @@ namespace HLSL
         uint pad[2];
     };
     
+    struct InstanceCullingDispatch
+    {
+        uint instanceIndex;
+        uint meshletIndex;
+        
+        // for D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH
+        uint ThreadGroupCountX;
+        uint ThreadGroupCountY;
+        uint ThreadGroupCountZ;
+    };
+    
     struct MeshletDrawCall
     {
-        uint meshletIndex;
         uint instanceIndex;
+        uint meshletIndex;
         
         // for D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH
         uint ThreadGroupCountX;

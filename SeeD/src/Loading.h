@@ -455,11 +455,11 @@ public:
         CreateMeshes(_scene);
         CreateMaterials(_scene);
 
-        //for (uint i = 0; i < 100; i++)
+        for (uint i = 0; i < 100; i++)
         {
-            //_scene->mRootNode->mTransformation.a4 = Rand01() * 5.0f;
-            //_scene->mRootNode->mTransformation.b4 = Rand01() * 5.0f;
-            //_scene->mRootNode->mTransformation.c4 = Rand01() * 5.0f;
+            _scene->mRootNode->mTransformation.a4 = Rand01() * 5.0f;
+            _scene->mRootNode->mTransformation.b4 = Rand01() * 5.0f;
+            _scene->mRootNode->mTransformation.c4 = Rand01() * 5.0f;
 
             CreateEntities(_scene, _scene->mRootNode);
         }
@@ -802,7 +802,7 @@ public :
         vArgs.push_back(entryName.c_str());
         vArgs.push_back(L"-T");
         vArgs.push_back(typeName.c_str());
-        vArgs.push_back(DXC_ARG_ALL_RESOURCES_BOUND);
+        //vArgs.push_back(DXC_ARG_ALL_RESOURCES_BOUND);
         //vArgs.push_back(L"-no-warnings");
 #ifdef _DEBUG
         vArgs.push_back(L"-Zi");
@@ -892,7 +892,11 @@ public :
             argumentDescs[1].Constant.RootParameterIndex = 5;
             argumentDescs[1].Constant.Num32BitValuesToSet = 1;
             argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
-            argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+            if(type == "ms_6_6")
+                argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+            if (type == "cs_6_6")
+                argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+
 
             D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
             commandSignatureDesc.pArgumentDescs = argumentDescs;

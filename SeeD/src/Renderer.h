@@ -138,6 +138,7 @@ struct ViewWorld
     StructuredUploadBuffer<HLSL::Instance> instances;
     StructuredBuffer<HLSL::Instance> instancesGPU; // only for instances created on GPU
     TLAS tlas;
+    std::atomic<uint> meshletsCount;
 
     void Release()
     {
@@ -157,8 +158,18 @@ struct CullingContext
 
     StructuredBuffer<HLSL::Camera> camera;
     StructuredBuffer<HLSL::Light> lights;
+    StructuredBuffer<HLSL::InstanceCullingDispatch> instancesInView;
     StructuredBuffer<HLSL::MeshletDrawCall> meshletsInView;
-    StructuredBuffer<uint> meshletsInViewCounter;
+    StructuredBuffer<uint> instancesCounter;
+    StructuredBuffer<uint> meshletsCounter;
+
+    void On()
+    {
+        instancesInView.CreateBuffer(0, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        meshletsInView.CreateBuffer(0, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        instancesCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+    }
 
     void Release()
     {
@@ -168,8 +179,10 @@ struct CullingContext
         }
         camera.Release();
         lights.Release();
+        instancesInView.Release();
         meshletsInView.Release();
-        meshletsInViewCounter.Release();
+        instancesCounter.Release();
+        meshletsCounter.Release();
     }
 };
 
@@ -180,7 +193,10 @@ public:
     CullingContext cullingContext;
     uint2 resolution;
 
-    virtual void On(IOs::WindowInformation& window) = 0;
+    virtual void On(IOs::WindowInformation& window)
+    {
+        cullingContext.On();
+    }
     virtual void Off()
     {
         for (uint i = 0; i < FRAMEBUFFERING; i++)
@@ -226,8 +242,10 @@ public:
 
         cullingContextParams.cameraIndex = 0;
         cullingContextParams.lightsIndex = 0;
-        cullingContextParams.culledInstanceIndex = cullingContext.meshletsInView.GetResource().uav.offset;
-        cullingContextParams.culledInstanceCounterIndex = cullingContext.meshletsInViewCounter.GetResource().uav.offset;
+        cullingContextParams.culledInstanceIndex = cullingContext.instancesInView.GetResource().uav.offset;
+        cullingContextParams.culledMeshletsIndex = cullingContext.meshletsInView.GetResource().uav.offset;
+        cullingContextParams.instancesCounterIndex = cullingContext.instancesCounter.GetResource().uav.offset;
+        cullingContextParams.meshletsCounterIndex = cullingContext.meshletsCounter.GetResource().uav.offset;
 
         cullingContext.cullingContext->Clear();
         cullingContext.cullingContext->Add(cullingContextParams);
@@ -402,17 +420,17 @@ public:
 
 class Culling : public Pass
 {
-    Components::Handle<Components::Shader> cullingShader;
     Components::Handle<Components::Shader> cullingResetShader;
+    Components::Handle<Components::Shader> cullingInstancesShader;
+    Components::Handle<Components::Shader> cullingMeshletsShader;
 public:
     virtual void On(View* view, ID3D12CommandQueue* queue, String _name) override
     {
         Pass::On(view, queue, _name);
         ZoneScoped;
-        cullingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\culling.hlsl");
         cullingResetShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingReset.hlsl");
-        view->cullingContext.meshletsInView.CreateBuffer(0, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        view->cullingContext.meshletsInViewCounter.CreateBuffer(0, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        cullingInstancesShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingInstances.hlsl");
+        cullingMeshletsShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingMeshlets.hlsl");
     }
     void Setup(View* view) override
     {
@@ -423,8 +441,10 @@ public:
         ZoneScoped;
         Open();
 
+        view->cullingContext.instancesInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
         view->cullingContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
-        view->cullingContext.meshletsInViewCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+        view->cullingContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+        view->cullingContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
 
         auto& instances = view->viewWorld->instances;
 
@@ -434,14 +454,23 @@ public:
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
         commandBuffer->cmd->Dispatch(1, 1, 1);
 
-        Shader& culling = *AssetLibrary::instance->Get<Shader>(cullingShader.Get().id, true);
-        commandBuffer->SetCompute(culling);
+        Shader& cullingInstances = *AssetLibrary::instance->Get<Shader>(cullingInstancesShader.Get().id, true);
+        commandBuffer->SetCompute(cullingInstances);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
-        commandBuffer->cmd->Dispatch(culling.DispatchX(instances.Size()), 1, 1);
+        commandBuffer->cmd->Dispatch(cullingInstances.DispatchX(instances.Size()), 1, 1);
+
+        view->cullingContext.instancesInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        view->cullingContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
+        Shader& cullingMeshlets = *AssetLibrary::instance->Get<Shader>(cullingMeshletsShader.Get().id, true);
+        commandBuffer->SetCompute(cullingMeshlets);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
+        commandBuffer->cmd->ExecuteIndirect(cullingMeshlets.commandSignature, instances.Size(), view->cullingContext.instancesInView.GetResourcePtr(), 0, view->cullingContext.instancesCounter.GetResourcePtr(), 0);
 
         view->cullingContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        view->cullingContext.meshletsInViewCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        view->cullingContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
         Close();
     }
@@ -498,7 +527,7 @@ class Forward : public Pass
 {
     Components::Handle<Components::Shader> meshShader;
 public:
-    virtual void On(View* view, ID3D12CommandQueue* queue, String _name) override
+    void On(View* view, ID3D12CommandQueue* queue, String _name) override
     {
         Pass::On(view, queue, _name);
         ZoneScoped;
@@ -525,7 +554,7 @@ public:
         commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
 
         uint maxDraw = view->cullingContext.meshletsInView.Size();
-        commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->cullingContext.meshletsInView.GetResourcePtr(), 0, view->cullingContext.meshletsInViewCounter.GetResourcePtr(), 0);
+        commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->cullingContext.meshletsInView.GetResourcePtr(), 0, view->cullingContext.meshletsCounter.GetResourcePtr(), 0);
 
         Close();
     }
@@ -587,6 +616,8 @@ public:
 
     void On(IOs::WindowInformation& window) override
     {
+        View::On(window);
+
         resolution = window.windowResolution;
 
         depthBuffer.CreateDepthTarget(resolution, "Depth");
@@ -678,6 +709,7 @@ public:
     {
         ZoneScoped;
         viewWorld->instances.Clear();
+        viewWorld->meshletsCount = 0;
 
 
 #define UpdateInstancesStepSize 128
@@ -696,6 +728,7 @@ public:
                 ZoneScopedN("UpdateInstance");
 
                 std::array<HLSL::Instance, UpdateInstancesStepSize> localInstances;
+                uint localMeshletCount = 0;
                 uint instanceCount = 0;
                 for (uint subQuery = 0; subQuery < UpdateInstancesStepSize; subQuery++)
                 {
@@ -738,10 +771,13 @@ public:
                     // count instances with shader
 
                     instanceCount++;
+
+                    Mesh* mesh = AssetLibrary::instance->Get<Mesh>(meshCmp.id);
+                    localMeshletCount += mesh->meshletCount;
                 }
 
                 frameWorld.instances.AddRange(localInstances.data(), instanceCount);
-
+                frameWorld.meshletsCount += localMeshletCount;
             }
         );
 
@@ -931,7 +967,8 @@ public:
             {
                 ZoneScoped;
                 this->viewWorld->instances.Upload();
-                this->cullingContext.meshletsInView.Resize(GlobalResources::instance->meshStorage.nextMeshletVertexOffset);
+                this->cullingContext.instancesInView.Resize(this->viewWorld->instances.Size());
+                this->cullingContext.meshletsInView.Resize(this->viewWorld->meshletsCount);
             }
         ).name("upload instances buffer");
 
@@ -1020,6 +1057,11 @@ public:
     void Schedule(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
+
+
+        Profiler::instance->instancesCount = mainView.viewWorld->instances.Size();
+        Profiler::instance->meshletsCount = mainView.viewWorld->meshletsCount;
+        Profiler::instance->verticesCount = 0;
 
         auto mainViewEndTask = mainView.Schedule(world, subflow);
         auto editorViewEndTask = editorView.Schedule(world, subflow);
