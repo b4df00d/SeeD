@@ -42,7 +42,7 @@ void CullingInstance(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThread
         HLSL::InstanceCullingDispatch mdc = (HLSL::InstanceCullingDispatch) 0;
         mdc.instanceIndex = instanceIndex;
         mdc.meshletIndex = mesh.meshletOffset;
-        mdc.ThreadGroupCountX = mesh.meshletCount;
+        mdc.ThreadGroupCountX = ceil(mesh.meshletCount / (HLSL::cullMeshletThreadCount * 1.0f));
         mdc.ThreadGroupCountY = 1;
         mdc.ThreadGroupCountZ = 1;
         instancesInView[index] = mdc;

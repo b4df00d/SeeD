@@ -1429,8 +1429,6 @@ public:
         {
             cpuData.push_back(data[i]);
         }
-        //std::atomic_thread_fence(std::memory_order_acquire);
-        //MemoryBarrier;
         lock.unlock();
     }
     uint Size()

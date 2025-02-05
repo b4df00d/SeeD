@@ -7,23 +7,25 @@
 #pragma compute CullingMeshlet
 
 [RootSignature(GlobalRootSignature)]
-[numthreads(1, 1, 1)]
+[numthreads(HLSL::cullMeshletThreadCount, 1, 1)]
 void CullingMeshlet(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
 {
-    uint localMeshletIndex = dtid;
-    uint meshletIndex = meshletIndexIndirect + localMeshletIndex;
-    
-    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
-    
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
+    
+    StructuredBuffer<HLSL:: Mesh > meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
+    HLSL::Mesh mesh = meshes[instance.meshIndex];
+    
+    uint localMeshletIndex = dtid;
+    if (localMeshletIndex >= mesh.meshletCount)
+        return;
+    uint meshletIndex = mesh.meshletOffset + localMeshletIndex;
     
     StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
     HLSL::Meshlet meshlet = meshlets[meshletIndex];
     
-    RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[cullingContext.meshletsCounterIndex];
-    RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsInView = ResourceDescriptorHeap[cullingContext.culledMeshletsIndex];
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
     
     float3 center = mul(instance.worldMatrix, float4(meshlet.boundingSphere.xyz, 1)).xyz;
     float radius = length(instance.worldMatrix[0].xyz) * meshlet.boundingSphere.w; // assume uniform scaling
@@ -33,6 +35,8 @@ void CullingMeshlet(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadI
     
     if (!culled)
     {
+        RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[cullingContext.meshletsCounterIndex];
+        RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsInView = ResourceDescriptorHeap[cullingContext.culledMeshletsIndex];
         uint index = 0;
         InterlockedAdd(counter[0], 1, index);
         HLSL::MeshletDrawCall mdc = (HLSL::MeshletDrawCall) 0;
