@@ -1133,13 +1133,13 @@ void Resource::Release(bool deferred)
             GPU::instance->descriptorHeap.FreeRTVSlot(rtv);
             GPU::instance->descriptorHeap.FreeDSVSlot(dsv);
         }
-        allocation = { 0 };
-        stride = { 0 };
-        srv = { UINT32_MAX };
-        uav = { UINT32_MAX };
-        rtv = { UINT32_MAX, 0, 0 };
-        dsv = { UINT32_MAX, 0 };
     }
+    allocation = { 0 };
+    stride = { 0 };
+    srv = { UINT32_MAX };
+    uav = { UINT32_MAX };
+    rtv = { UINT32_MAX, 0, 0 };
+    dsv = { UINT32_MAX, 0 };
 }
 
 ID3D12Resource* Resource::GetResource()
@@ -1773,8 +1773,8 @@ struct MeshStorage
 
     std::recursive_mutex lock;
 
-    uint meshesMaxCount = 100000;
-    uint meshletMaxCount = 100000;
+    uint meshesMaxCount = 10000;
+    uint meshletMaxCount = 1000000;
     uint meshletVertexMaxCount = meshletMaxCount * 64;
     uint meshletTrianglesMaxCount = meshletMaxCount * 124;
     uint vertexMaxCount = meshletVertexMaxCount;
@@ -1784,7 +1784,7 @@ struct MeshStorage
         meshes.CreateBuffer<Mesh>(meshesMaxCount, "meshes");
         meshlets.CreateBuffer<Meshlet>(meshletMaxCount, "meshlets");
         meshletVertices.CreateBuffer<unsigned int>(meshletVertexMaxCount, "meshlet vertices");
-        meshletTriangles.CreateBuffer<unsigned int>(meshletTrianglesMaxCount, "meshlet triangles");
+        meshletTriangles.CreateBuffer<unsigned char>(meshletTrianglesMaxCount, "meshlet triangles");
         vertices.CreateBuffer<Vertex>(vertexMaxCount, "vertices");
     }
 

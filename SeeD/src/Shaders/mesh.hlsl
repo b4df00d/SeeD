@@ -67,18 +67,21 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
 
 [RootSignature(GlobalRootSignature)]
 [outputtopology("triangle")]
-[numthreads(124, 1, 1)]
-void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[64], out indices uint3 outIndices[124])
+[numthreads(HLSL::max_triangles, 1, 1)]
+void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])
 {
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
+    
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
     
     StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
     HLSL::Meshlet meshlet = meshlets[meshletIndexIndirect];
-    SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
+    meshlet.vertexCount = min(HLSL::max_vertices, meshlet.vertexCount);
+    meshlet.triangleCount = min(HLSL::max_triangles, meshlet.triangleCount);
     
-    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
+    SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
     
     StructuredBuffer<uint> meshletVertices = ResourceDescriptorHeap[commonResourcesIndices.meshletVerticesHeapIndex];
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];

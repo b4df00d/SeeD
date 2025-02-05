@@ -21,9 +21,9 @@ public:
     String assetsPath = "..\\Assets\\";
     String file = "..\\assetLibrary.txt";
     std::unordered_map<assetID, uint> loadingRequest;
-    int meshLoadingLimit = 3;
-    int shaderLoadingLimit = 3;
-    int textureLoadingLimit = 3;
+    int meshLoadingLimit = 5;
+    int shaderLoadingLimit = 5;
+    int textureLoadingLimit = 5;
     int meshLoaded;
     int shaderLoaded;
     int textureLoaded;
@@ -102,6 +102,23 @@ public:
         ID3D12CommandQueue* commandQueue = commandBuffer->queue;
         commandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
         commandQueue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
+    }
+
+    void CheckReload()
+    {
+        for (auto& item : map)
+        {
+            if (item.second.type == AssetLibrary::AssetType::shader)
+            {
+                if (map[item.first].indexInVector != ~0)
+                {
+                    if (Get<Shader>(item.first)->NeedReload())
+                    {
+                        LoadAsset(item.first, false);
+                    }
+                }
+            }
+        }
     }
 
     AssetLibrary::AssetType GetType(assetID id)
@@ -322,20 +339,18 @@ public:
     MeshData Process(MeshOriginal& originalMesh)
     {
 		ZoneScoped;
-        const size_t max_vertices = 64;
-        const size_t max_triangles = 124;
         const float cone_weight = 0.5f;
 
-        size_t max_meshlets = meshopt_buildMeshletsBound(originalMesh.indices.size(), max_vertices, max_triangles);
+        size_t max_meshlets = meshopt_buildMeshletsBound(originalMesh.indices.size(), HLSL::max_vertices, HLSL::max_triangles);
         std::vector<meshopt_Meshlet> meshopt_meshlets(max_meshlets);
-        std::vector<unsigned int> meshlet_vertices(max_meshlets * max_vertices);
-        std::vector<unsigned char> meshlet_triangles(max_meshlets * max_triangles * 3);
+        std::vector<unsigned int> meshlet_vertices(max_meshlets * HLSL::max_vertices);
+        std::vector<unsigned char> meshlet_triangles(max_meshlets * HLSL::max_triangles * 3);
 
-        size_t meshlet_count = meshopt_buildMeshlets(meshopt_meshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(), originalMesh.indices.data(), originalMesh.indices.size(), &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex), max_vertices, max_triangles, cone_weight);
+        size_t meshlet_count = meshopt_buildMeshlets(meshopt_meshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(), originalMesh.indices.data(), originalMesh.indices.size(), &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex), HLSL::max_vertices, HLSL::max_triangles, cone_weight);
 
 
-        std::vector<Meshlet> meshlets(meshopt_meshlets.size());
-        meshlets.resize(meshopt_meshlets.size());
+        std::vector<Meshlet> meshlets(meshlet_count);
+        meshlets.resize(meshlet_count);
         for (uint i = 0; i < meshlet_count; i++)
         {
             auto& m = meshopt_meshlets[i];
@@ -357,13 +372,20 @@ public:
         MeshData optimizedMesh;
         optimizedMesh.meshlets = meshlets;
         optimizedMesh.meshlet_vertices = meshlet_vertices;
-        optimizedMesh.meshlet_triangles.resize(meshlet_triangles.size());
-        for (uint i = 0; i < meshlet_triangles.size(); i++)
-        {
-            optimizedMesh.meshlet_triangles[i] = meshlet_triangles[i];
-        }
+        optimizedMesh.meshlet_triangles = meshlet_triangles;
         optimizedMesh.vertices = originalMesh.vertices;
         optimizedMesh.boundingSphere = originalMesh.boundingSphere;
+        
+        for (uint i = 0; i < optimizedMesh.meshlets.size(); i++)
+        {
+            seedAssert(optimizedMesh.meshlets[i].vertexCount > 0);
+            seedAssert(optimizedMesh.meshlets[i].triangleCount > 0);
+            seedAssert(optimizedMesh.meshlets[i].vertexCount <= HLSL::max_vertices);
+            seedAssert(optimizedMesh.meshlets[i].triangleCount <= HLSL::max_triangles);
+            seedAssert(optimizedMesh.meshlets[i].vertexOffset < optimizedMesh.meshlet_vertices.size());
+            seedAssert(optimizedMesh.meshlets[i].triangleOffset < optimizedMesh.meshlet_triangles.size());
+            //IOs::Log("V {} | T {}", optimizedMesh.meshlets[i].vertexCount, optimizedMesh.meshlets[i].triangleCount);
+        }
 
         return optimizedMesh;
 
@@ -455,11 +477,11 @@ public:
         CreateMeshes(_scene);
         CreateMaterials(_scene);
 
-        for (uint i = 0; i < 100; i++)
+        //for (uint i = 0; i < 100; i++)
         {
-            _scene->mRootNode->mTransformation.a4 = Rand01() * 5.0f;
-            _scene->mRootNode->mTransformation.b4 = Rand01() * 5.0f;
-            _scene->mRootNode->mTransformation.c4 = Rand01() * 5.0f;
+            //_scene->mRootNode->mTransformation.a4 = Rand01() * 5.0f;
+            //_scene->mRootNode->mTransformation.b4 = Rand01() * 5.0f;
+            //_scene->mRootNode->mTransformation.c4 = Rand01() * 5.0f;
 
             CreateEntities(_scene, _scene->mRootNode);
         }
@@ -564,7 +586,7 @@ public:
         for (unsigned int i = 0; i < _scene->mNumMeshes; i++)
         {
             auto m = _scene->mMeshes[i];
-            IOs::Log("    {}", m->mName.C_Str());
+            //IOs::Log("    {} {}", m->mName.C_Str(), i);
             {
                 MeshLoader::MeshOriginal originalMesh;
                 float3 minBB = float3(FLT_MAX);
@@ -624,7 +646,7 @@ public:
                 originalMesh.boundingSphere = float4(center, radius);
 
                 MeshData mesh = MeshLoader::instance->Process(originalMesh);
-                assetID id = MeshLoader::instance->Write(mesh, m->mName.C_Str());
+                assetID id = MeshLoader::instance->Write(mesh, std::format("{}{}", m->mName.C_Str(), i));
 
                 World::Entity ent;
                 ent.Make(Components::Mesh::mask);
@@ -1222,9 +1244,9 @@ ShaderLoader* ShaderLoader::instance = nullptr;
 inline void AssetLibrary::LoadAssets()
 {
     //ZoneScoped;
-    meshLoaded = meshLoadingLimit;
-    shaderLoaded = shaderLoadingLimit;
-    textureLoaded = textureLoadingLimit;
+    meshLoaded = 0;
+    shaderLoaded = 0;
+    textureLoaded = 0;
 
     for (auto& item : loadingRequest)
     {
@@ -1232,10 +1254,11 @@ inline void AssetLibrary::LoadAssets()
         
         LoadAsset(id, false);
 
-        if (meshLoaded <= 0 && shaderLoaded <= 0 && textureLoaded <= 0)
+        if (meshLoaded > meshLoadingLimit && shaderLoaded > shaderLoadingLimit && textureLoaded > textureLoadingLimit)
             break;
     }
     loadingRequest.clear();
+    CheckReload();
 }
 inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
 {
@@ -1243,7 +1266,7 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
     {
     case AssetLibrary::AssetType::mesh:
     {
-        if (ignoreBudget || meshLoaded >= 0)
+        if (ignoreBudget || meshLoaded < meshLoadingLimit)
         {
             MeshData meshData = MeshLoader::instance->Read(map[id].path);
             if (meshData.meshlets.size() > 0)
@@ -1252,7 +1275,7 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
                 lock.lock();
                 meshes.push_back(mesh);
                 map[id].indexInVector = meshes.size() - 1;
-                meshLoaded--;
+                meshLoaded++;
                 lock.unlock();
             }
         }
@@ -1260,16 +1283,24 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
     break;
     case AssetLibrary::AssetType::shader:
     {
-        if (ignoreBudget || shaderLoaded >= 0)
+        if (ignoreBudget || shaderLoaded < shaderLoadingLimit)
         {
             Shader shader;
             bool compiled = ShaderLoader::instance->Load(shader, map[id].path);
             if (compiled)
             {
                 lock.lock();
-                shaders.push_back(shader);
-                map[id].indexInVector = shaders.size() - 1;
-                shaderLoaded--;
+                uint index = map[id].indexInVector;
+                if (index != ~0)
+                {
+                    shaders[index] = shader;
+                }
+                else
+                {
+                    shaders.push_back(shader);
+                    map[id].indexInVector = shaders.size() - 1;
+                }
+                shaderLoaded++;
                 lock.unlock();
             }
         }
@@ -1277,7 +1308,7 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
     break;
     case AssetLibrary::AssetType::texture:
     {
-        if (ignoreBudget || textureLoaded >= 0)
+        if (ignoreBudget || textureLoaded < textureLoadingLimit)
         {
             Resource texture;
             bool loaded = TextureLoader::instance->Load(texture, map[id].path);
@@ -1286,7 +1317,7 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
                 lock.lock();
                 textures.push_back(texture);
                 map[id].indexInVector = textures.size() - 1;
-                textureLoaded--;
+                textureLoaded++;
                 lock.unlock();
             }
         }

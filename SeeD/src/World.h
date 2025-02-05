@@ -533,7 +533,7 @@ namespace Systems
             cam.nearClip = 0.1;
             cam.farClip = 1000.0f;
             auto& trans = camera.Get<Components::Transform>();
-            trans.position = 0;
+            trans.position = float3(0, 1, -2);
             trans.rotation = quaternion::identity();
             trans.scale = 1;
 

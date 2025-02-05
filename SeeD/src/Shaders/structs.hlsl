@@ -152,6 +152,8 @@ namespace HLSL
         uint2 resolution;
     };
     
+    static const uint max_vertices = 64;
+    static const uint max_triangles = 124;
 #ifndef __cplusplus
     struct MSVert
     {

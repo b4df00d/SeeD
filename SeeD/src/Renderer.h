@@ -165,8 +165,8 @@ struct CullingContext
 
     void On()
     {
-        instancesInView.CreateBuffer(0, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        meshletsInView.CreateBuffer(0, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        instancesInView.CreateBuffer(100, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        meshletsInView.CreateBuffer(1000, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         instancesCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     }
@@ -659,15 +659,13 @@ public:
     tf::Task Schedule(World& world, tf::Subflow& subflow) override
     {
         ZoneScoped;
-        SetupViewParams(); // je devrais pas essayer de mettre ca dans le execute ? mais a ce moment comment je connais le GPUVirtualAdress dans les pass ?!
-        SetupCullingContextParams(); // je devrais pas essayer de mettre ca dans le execute ? mais a ce moment comment je connais le GPUVirtualAdress dans les pass ?!
 
         tf::Task updateInstances = UpdateInstances(world, subflow);
         tf::Task updateMaterials = UpdateMaterials(world, subflow);
         tf::Task updateLights = UpdateLights(world, subflow);
         tf::Task updateCameras = UpdateCameras(world, subflow);
 
-        tf::Task updloadInstancesBuffers = UploadInstancesBuffers(world, subflow);
+        tf::Task uploadAndSetup = UploadAndSetup(world, subflow);
 
         SUBTASKVIEWPASS(skinning);
         SUBTASKVIEWPASS(particles);
@@ -680,10 +678,10 @@ public:
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
-        updateInstances.precede(updateMaterials, updloadInstancesBuffers);
-        updloadInstancesBuffers.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+        updateInstances.precede(updateMaterials, uploadAndSetup);
+        uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
-        presentTask.succeed(updateInstances, updateMaterials, updloadInstancesBuffers);
+        presentTask.succeed(updateInstances, updateMaterials, uploadAndSetup);
         presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
@@ -959,7 +957,7 @@ public:
         return task;
     }
 
-    tf::Task UploadInstancesBuffers(World& world, tf::Subflow& subflow)
+    tf::Task UploadAndSetup(World& world, tf::Subflow& subflow)
     {
 
         tf::Task task = subflow.emplace(
@@ -969,6 +967,8 @@ public:
                 this->viewWorld->instances.Upload();
                 this->cullingContext.instancesInView.Resize(this->viewWorld->instances.Size());
                 this->cullingContext.meshletsInView.Resize(this->viewWorld->meshletsCount);
+                SetupViewParams();
+                SetupCullingContextParams();
             }
         ).name("upload instances buffer");
 

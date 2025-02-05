@@ -122,7 +122,7 @@ public:
         }
         ImGui::Text("average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
 
-        ImGui::Text("instances %u | meshlets %u)", Profiler::instance->instancesCount, Profiler::instance->meshletsCount);
+        ImGui::Text("instances %u | meshlets %u", Profiler::instance->instancesCount, Profiler::instance->meshletsCount);
 
         ImGui::Separator();
 
@@ -185,6 +185,29 @@ public:
     }
 };
 AssetLibraryWindow assetLibraryWindowWindow;
+
+class GPUResourcesWindow : public EditorWindow
+{
+public:
+    GPUResourcesWindow() : EditorWindow("GPUResources") {}
+    void Update() override final
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("GPUResources", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+
+        for (uint i = 0; i < Resource::allResources.size(); i++)
+        {
+            ImGui::Text("%s \t %u", Resource::allResourcesNames[i].c_str(), Resource::allResources[i]->GetResource()->GetDesc().Width);
+        }
+
+        ImGui::End();
+    }
+};
+GPUResourcesWindow gpuResourcesWindow;
 
 #include "Shaders/structs.hlsl"
 class OptionWindow : public EditorWindow
