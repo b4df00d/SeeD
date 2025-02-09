@@ -1,73 +1,5 @@
 #pragma once
 
-#include "imgui.h"
-#include "imgui_impl_win32.h"
-#include "imgui_impl_dx12.h"
-
-class UI
-{
-	ID3D12DescriptorHeap* pd3dSrvDescHeap = NULL;
-	D3D12_CPU_DESCRIPTOR_HANDLE  hFontSrvCpuDescHandle = {};
-	D3D12_GPU_DESCRIPTOR_HANDLE  hFontSrvGpuDescHandle = {};
-	ID3D12GraphicsCommandList* cmdList = nullptr;
-	ID3D12CommandAllocator* cmdAlloc = nullptr;
-
-public:
-	static UI* instance;
-    void On(IOs::WindowInformation* window, ID3D12Device9* device, IDXGISwapChain3* swapchain)
-    {
-        ZoneScoped;
-		instance = this;
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGui_ImplWin32_Init(window->windowHandle);
-        ImGuiIO& io = ImGui::GetIO();
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // IF using Docking Branch
-
-        DXGI_SWAP_CHAIN_DESC sc;
-        swapchain->GetDesc(&sc);
-
-        D3D12_DESCRIPTOR_HEAP_DESC desc = {};
-        desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        desc.NumDescriptors = 100;
-        desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        if (device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&pd3dSrvDescHeap)) != S_OK)
-            return;
-
-        hFontSrvCpuDescHandle = pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart();
-        hFontSrvGpuDescHandle = pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart();
-
-        ImGui_ImplDX12_Init(device, sc.BufferCount, sc.BufferDesc.Format, pd3dSrvDescHeap, hFontSrvCpuDescHandle, hFontSrvGpuDescHandle);
-    }
-
-    void Off()
-    {
-        ZoneScoped;
-        ImGui_ImplDX12_Shutdown();
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
-    }
-
-    void FrameStart()
-    {
-        ZoneScoped;
-        ImGui_ImplDX12_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-    }
-
-    void FrameRender(ID3D12GraphicsCommandList4* cmdList)
-    {
-        ZoneScoped;
-        ImGui::Render();
-		cmdList->SetDescriptorHeaps(1, &pd3dSrvDescHeap);
-        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList);
-    }
-
-};
-UI* UI::instance;
 
 
 
@@ -188,21 +120,97 @@ AssetLibraryWindow assetLibraryWindowWindow;
 
 class GPUResourcesWindow : public EditorWindow
 {
+    bool openDemo;
 public:
     GPUResourcesWindow() : EditorWindow("GPUResources") {}
     void Update() override final
     {
         ZoneScoped;
+
+        ImGui::ShowDemoWindow(&openDemo);
+
         if (!ImGui::Begin("GPUResources", &isOpen, ImGuiWindowFlags_None))
         {
             ImGui::End();
             return;
         }
 
-        for (uint i = 0; i < Resource::allResources.size(); i++)
+        const std::lock_guard<std::mutex> lock(Resource::lock);
+
+        const char* names[] = { "Resources", "Content" };
+        static Resource* selectedResource = nullptr;
+        bool selected;
+
+        ImGuiStyle& style = ImGui::GetStyle();
+        ImGui::BeginGroup();
+        const ImGuiWindowFlags child_flags = ImGuiWindowFlags_MenuBar;
+        ImGuiID child_id = ImGui::GetID((void*)(intptr_t)0);
+        const bool child_is_visible = ImGui::BeginChild(child_id, ImVec2(200, ImGui::GetContentRegionAvail().y), ImGuiChildFlags_Borders, child_flags);
+        for (int i = 0; i < Resource::allResources.size(); i++)
         {
-            ImGui::Text("%s \t %u", Resource::allResourcesNames[i].c_str(), Resource::allResources[i]->GetResource()->GetDesc().Width);
+
+            ImGui::PushID(i);
+            selected = selectedResource == Resource::allResources[i];
+            if (selected)
+            {
+                ImGui::TextColored(ImVec4(1, 1, 0, 1), Resource::allResourcesNames[i].c_str());
+            }
+            else
+            {
+                ImGui::Selectable(Resource::allResourcesNames[i].c_str(), &selected);
+                if (selected)
+                    selectedResource = Resource::allResources[i];
+            }
+            ImGui::SameLine();
+            ImGui::Text("%u", Resource::allResources[i]->GetResource()->GetDesc().Width);
+            ImGui::PopID();
         }
+        ImGui::EndChild();
+        ImGui::EndGroup();
+
+        ImGui::SameLine();
+
+        ImGui::BeginGroup();
+        child_id = ImGui::GetID((void*)(intptr_t)1);
+        ImGui::BeginChild(child_id, ImGui::GetContentRegionAvail(), ImGuiChildFlags_Borders, child_flags);
+        if (selectedResource)
+        {
+            ImGuiIO& io = ImGui::GetIO();
+            ImTextureID my_tex_id = selectedResource->srv.handle.ptr;
+            ImVec2 img_sz = ImGui::GetContentRegionAvail();
+            float my_tex_w = img_sz.x;
+            float my_tex_h = img_sz.y;
+            {
+                ImGui::Text("%.0fx%.0f", my_tex_w, my_tex_h);
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+                ImVec2 uv_min = ImVec2(0.0f, 0.0f);                 // Top-left
+                ImVec2 uv_max = ImVec2(1.0f, 1.0f);                 // Lower-right
+                ImVec4 tint_col = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);   // No tint
+                ImVec4 border_col = ImGui::GetStyleColorVec4(ImGuiCol_Border);
+                ImGui::Image(my_tex_id, img_sz, uv_min, uv_max, tint_col, border_col);
+                if (ImGui::BeginItemTooltip())
+                {
+                    ImVec2 imgPos = ImVec2(img_sz.x / my_tex_w * pos.x, img_sz.y / my_tex_h * pos.y);
+
+                    float region_sz = 16.0f;
+                    float region_x = io.MousePos.x - pos.x - region_sz * 0.5f;
+                    float region_y = io.MousePos.y - pos.y - region_sz * 0.5f;
+                    float zoom = 16.0f;
+                    if (region_x < 0.0f) { region_x = 0.0f; }
+                    else if (region_x > my_tex_w - region_sz) { region_x = my_tex_w - region_sz; }
+                    if (region_y < 0.0f) { region_y = 0.0f; }
+                    else if (region_y > my_tex_h - region_sz) { region_y = my_tex_h - region_sz; }
+                    ImGui::Text("Min: (%.2f, %.2f)", region_x, region_y);
+                    ImGui::Text("Max: (%.2f, %.2f)", region_x + region_sz, region_y + region_sz);
+                    ImVec2 uv0 = ImVec2((region_x) / my_tex_w, (region_y) / my_tex_h);
+                    ImVec2 uv1 = ImVec2((region_x + region_sz) / my_tex_w, (region_y + region_sz) / my_tex_h);
+                    ImGui::Image(my_tex_id, ImVec2(region_sz * zoom, region_sz * zoom), uv0, uv1, tint_col, border_col);
+                    ImGui::EndTooltip();
+                }
+            }
+        }
+        ImGui::EndChild();
+        ImGui::EndGroup();
 
         ImGui::End();
     }

@@ -3,6 +3,82 @@
 #include <map>
 #include "Shaders/structs.hlsl"
 
+#include "ffx_api/ffx_api.hpp"
+#include "ffx_api/dx12/ffx_api_dx12.hpp"
+#include "FidelityFX/host/backends/dx12/ffx_dx12.h"
+#include "FidelityFX/host/ffx_spd.h"
+
+
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx12.h"
+
+class UI
+{
+    ID3D12DescriptorHeap* pd3dSrvDescHeap = NULL;
+    D3D12_CPU_DESCRIPTOR_HANDLE  hFontSrvCpuDescHandle = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE  hFontSrvGpuDescHandle = {};
+    ID3D12GraphicsCommandList* cmdList = nullptr;
+    ID3D12CommandAllocator* cmdAlloc = nullptr;
+
+public:
+    static UI* instance;
+    void On(IOs::WindowInformation* window, ID3D12Device9* device, IDXGISwapChain3* swapchain)
+    {
+        ZoneScoped;
+        instance = this;
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGui_ImplWin32_Init(window->windowHandle);
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // IF using Docking Branch
+
+        DXGI_SWAP_CHAIN_DESC sc;
+        swapchain->GetDesc(&sc);
+
+        D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+        desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        desc.NumDescriptors = 100;
+        desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&pd3dSrvDescHeap)) != S_OK)
+            return;
+
+        hFontSrvCpuDescHandle = pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart();
+        hFontSrvGpuDescHandle = pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart();
+
+        ImGui_ImplDX12_Init(device, sc.BufferCount, sc.BufferDesc.Format, pd3dSrvDescHeap, hFontSrvCpuDescHandle, hFontSrvGpuDescHandle);
+    }
+
+    void Off()
+    {
+        ZoneScoped;
+        ImGui_ImplDX12_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+    }
+
+    void FrameStart()
+    {
+        ZoneScoped;
+        ImGui_ImplDX12_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+    }
+
+    void FrameRender(ID3D12GraphicsCommandList4* cmdList)
+    {
+        ZoneScoped;
+        ImGui::Render();
+        cmdList->SetDescriptorHeaps(1, &pd3dSrvDescHeap);
+        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList);
+    }
+
+};
+UI* UI::instance;
+
+
 static constexpr uint invalidMapIndex = UINT_MAX;
 // is this is thread safe only because we allocate the max number of stuff we will find before the MT part
 // with the reserve in the lock this should now be ok ?
@@ -189,9 +265,10 @@ struct CullingContext
 class View
 {
 public:
+    uint2 resolution;
     PerFrame<ViewWorld> viewWorld;
     CullingContext cullingContext;
-    uint2 resolution;
+    std::map<UINT64, Resource> resources;
 
     virtual void On(IOs::WindowInformation& window)
     {
@@ -204,6 +281,11 @@ public:
             viewWorld.Get(i).Release();
         }
         cullingContext.Release();
+
+        for (auto& item : resources)
+        {
+            item.second.Release();
+        }
     }
     virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
     virtual void Execute() = 0;
@@ -211,16 +293,16 @@ public:
     {
         HLSL::CommonResourcesIndices commonResourcesIndices;
 
-        commonResourcesIndices.meshesHeapIndex = GlobalResources::instance->meshStorage.meshes.srv.offset;
-        commonResourcesIndices.meshCount = GlobalResources::instance->meshStorage.nextMeshOffset;
-        commonResourcesIndices.meshletsHeapIndex = GlobalResources::instance->meshStorage.meshlets.srv.offset;
-        commonResourcesIndices.meshletCount = GlobalResources::instance->meshStorage.nextMeshletOffset;
-        commonResourcesIndices.meshletVerticesHeapIndex = GlobalResources::instance->meshStorage.meshletVertices.srv.offset;
-        commonResourcesIndices.meshletVertexCount = GlobalResources::instance->meshStorage.nextMeshletVertexOffset;
-        commonResourcesIndices.meshletTrianglesHeapIndex = GlobalResources::instance->meshStorage.meshletTriangles.srv.offset;
-        commonResourcesIndices.meshletTriangleCount = GlobalResources::instance->meshStorage.nextMeshletTriangleOffset;
-        commonResourcesIndices.verticesHeapIndex = GlobalResources::instance->meshStorage.vertices.srv.offset;
-        commonResourcesIndices.vertexCount = GlobalResources::instance->meshStorage.nextVertexOffset;
+        commonResourcesIndices.meshesHeapIndex = MeshStorage::instance->meshes.srv.offset;
+        commonResourcesIndices.meshCount = MeshStorage::instance->nextMeshOffset;
+        commonResourcesIndices.meshletsHeapIndex = MeshStorage::instance->meshlets.srv.offset;
+        commonResourcesIndices.meshletCount = MeshStorage::instance->nextMeshletOffset;
+        commonResourcesIndices.meshletVerticesHeapIndex = MeshStorage::instance->meshletVertices.srv.offset;
+        commonResourcesIndices.meshletVertexCount = MeshStorage::instance->nextMeshletVertexOffset;
+        commonResourcesIndices.meshletTrianglesHeapIndex = MeshStorage::instance->meshletTriangles.srv.offset;
+        commonResourcesIndices.meshletTriangleCount = MeshStorage::instance->nextMeshletTriangleOffset;
+        commonResourcesIndices.verticesHeapIndex = MeshStorage::instance->vertices.srv.offset;
+        commonResourcesIndices.vertexCount = MeshStorage::instance->nextVertexOffset;
         commonResourcesIndices.camerasHeapIndex = viewWorld->cameras.gpuData.srv.offset;
         commonResourcesIndices.cameraCount = viewWorld->cameras.Size();
         commonResourcesIndices.lightsHeapIndex = viewWorld->lights.gpuData.srv.offset;
@@ -253,19 +335,44 @@ public:
     }
 };
 
+class ViewResource
+{
+    static std::mutex lock;
+    View* view;
+    UINT64 hash;
+public:
+    void Register(std::string _name, View* _view)
+    {
+        view = _view;
+        hash = std::hash<std::string>{}(_name);
+        lock.lock();
+        if(!view->resources.contains(hash))
+            view->resources[hash] = Resource();
+        lock.unlock();
+    };
+    Resource& Get()
+    {
+        lock.lock();
+        Resource& res = view->resources[hash];
+        lock.unlock();
+        return res;
+    }
+};
+std::mutex ViewResource::lock;
+
 class Pass
 {
+    View* view;
 public:
     PerFrame<CommandBuffer> commandBuffer;
-    Resource renderTargets[8];
-    Resource depthBuffer;
 
     // debug only ?
     String name;
 
-    virtual void On(View* view, ID3D12CommandQueue* queue, String _name)
+    virtual void On(View* _view, ID3D12CommandQueue* queue, String _name)
     {
         ZoneScoped;
+        view = _view;
         name = _name;
         //name = CharToWString(typeid(this).name()); // name = "class Pass * __ptr64"
 
@@ -275,7 +382,7 @@ public:
         }
     }
 
-    void Off()
+    virtual void Off()
     {
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -330,7 +437,7 @@ public:
         commandQueue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
-    void SetupView(View* view, bool clearRT, bool clearDepth)
+    void SetupView(View* view, Resource* RT, uint RTCount, bool clearRT, Resource* depth, bool clearDepth)
     {
 
         UINT64 w = view->resolution.x;
@@ -355,14 +462,19 @@ public:
         commandBuffer->cmd->RSSetScissorRects(1, &rect);
 
         // USE : commandBuffer->cmd->BeginRenderPass(); ?
-        commandBuffer->cmd->OMSetRenderTargets(1, &renderTargets[0].rtv.handle, false, &depthBuffer.dsv.handle);
+        D3D12_CPU_DESCRIPTOR_HANDLE RTs[8] = {};
+        for (uint i = 0; i < RTCount; i++)
+        {
+            RTs[i] = RT[i].rtv.handle;
+        }
+        commandBuffer->cmd->OMSetRenderTargets(RTCount, RTs, false, &depth->dsv.handle);
 
         float4 clearColor(0.4f, 0.1f, 0.2f, 0.0f);
-        commandBuffer->cmd->ClearRenderTargetView(renderTargets[0].rtv.handle, clearColor.f32, 1, &rect);
+        commandBuffer->cmd->ClearRenderTargetView(GPU::instance->backBuffer.Get().rtv.handle, clearColor.f32, 1, &rect);
 
         float clearDepthValue(1.0f);
         UINT8 clearStencilValue(0);
-        commandBuffer->cmd->ClearDepthStencilView(depthBuffer.dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepthValue, clearStencilValue, 1, &rect);
+        commandBuffer->cmd->ClearDepthStencilView(depth->dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepthValue, clearStencilValue, 1, &rect);
     }
 
     virtual void Setup(View* view) = 0;
@@ -418,8 +530,82 @@ public:
     }
 };
 
+class HZB : public Pass
+{
+    ViewResource depth;
+    ViewResource depthDownSample;
+    FfxSpdContextDescription m_InitializationParameters = { 0 };
+    FfxSpdContext            m_Context;
+public:
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name) override
+    {
+        Pass::On(view, queue, _name);
+        ZoneScoped;
+
+        depth.Register("Depth", view);
+        depthDownSample.Register("DepthDownSample", view);
+        depthDownSample.Get().CreateTexture(view->resolution, DXGI_FORMAT_R32_FLOAT, true, "DepthDownSample");
+
+        // create backend interface (DX12)
+        size_t scratchBufferSize = ffxGetScratchMemorySizeDX12(1);
+        void* scratchBuffer = malloc(scratchBufferSize);
+        memset(scratchBuffer, 0, scratchBufferSize);
+        ffxGetInterfaceDX12(&m_InitializationParameters.backendInterface, ffxGetDeviceDX12(GPU::instance->device), scratchBuffer, scratchBufferSize, 1);
+
+        // Setup all the parameters for this SPD run
+        m_InitializationParameters.downsampleFilter = FFX_SPD_DOWNSAMPLE_FILTER_MAX;
+        m_InitializationParameters.flags = 0;   // Reset
+        m_InitializationParameters.flags |= FFX_SPD_SAMPLER_LOAD;
+        m_InitializationParameters.flags |= FFX_SPD_WAVE_INTEROP_LDS;
+        m_InitializationParameters.flags |= FFX_SPD_MATH_PACKED;
+        ffxSpdContextCreate(&m_Context, &m_InitializationParameters);
+
+    }
+    virtual void Off() override
+    {
+        Pass::Off();
+        ZoneScoped;
+        ffxSpdContextDestroy(&m_Context);
+    }
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        depthDownSample.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION cpyLocSrc;
+        cpyLocSrc.SubresourceIndex = 0;
+        cpyLocSrc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        cpyLocSrc.pResource = depth.Get().GetResource();
+        D3D12_TEXTURE_COPY_LOCATION cpyLocDst;
+        cpyLocDst.SubresourceIndex = 0;
+        cpyLocDst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        cpyLocDst.pResource = depthDownSample.Get().GetResource();
+        commandBuffer->cmd->CopyTextureRegion(&cpyLocDst, 0,0,0, &cpyLocSrc, nullptr);
+        depthDownSample.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+
+        FfxResource zbuff = {};
+        zbuff.description = ffxGetResourceDescriptionDX12(depthDownSample.Get().GetResource());
+        zbuff.state = FFX_RESOURCE_STATE_PIXEL_COMPUTE_READ;
+        zbuff.resource = depthDownSample.Get().GetResource();
+        FfxSpdDispatchDescription dispatchParameters = {};
+        dispatchParameters.commandList = commandBuffer->cmd;
+        dispatchParameters.resource = zbuff;
+
+        FfxErrorCode errorCode = ffxSpdContextDispatch(&m_Context, &dispatchParameters);
+        Close();
+    }
+};
+
 class Culling : public Pass
 {
+    ViewResource depth;
     Components::Handle<Components::Shader> cullingResetShader;
     Components::Handle<Components::Shader> cullingInstancesShader;
     Components::Handle<Components::Shader> cullingMeshletsShader;
@@ -428,6 +614,7 @@ public:
     {
         Pass::On(view, queue, _name);
         ZoneScoped;
+        depth.Register("Depth", view);
         cullingResetShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingReset.hlsl");
         cullingInstancesShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingInstances.hlsl");
         cullingMeshletsShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingMeshlets.hlsl");
@@ -478,7 +665,15 @@ public:
 
 class ZPrepass : public Pass
 {
+    ViewResource depth;
 public:
+    void On(View* view, ID3D12CommandQueue* queue, String _name) override
+    {
+        Pass::On(view, queue, _name);
+        ZoneScoped;
+        depth.Register("Depth", view);
+        depth.Get().CreateDepthTarget(view->resolution, "Depth");
+    }
     void Setup(View* view) override
     {
         ZoneScoped;
@@ -525,12 +720,14 @@ public:
 
 class Forward : public Pass
 {
+    ViewResource depth;
     Components::Handle<Components::Shader> meshShader;
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name) override
     {
         Pass::On(view, queue, _name);
         ZoneScoped;
+        depth.Register("Depth", view);
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
@@ -542,10 +739,9 @@ public:
         ZoneScoped;
         Open();
 
-        renderTargets[0] = GPU::instance->backBuffer.Get();
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        SetupView(view, true, true);
+        SetupView(view, &GPU::instance->backBuffer.Get(), 1, true, &depth.Get(), true);
 
         Shader& shader = *AssetLibrary::instance->Get<Shader>(meshShader.Get().id, true);
         commandBuffer->SetGraphic(shader);
@@ -601,6 +797,7 @@ public:
 class MainView : public View
 {
 public:
+    HZB hzb;
     Skinning skinning;
     Particles particles;
     Spawning spawning;
@@ -622,6 +819,7 @@ public:
 
         depthBuffer.CreateDepthTarget(resolution, "Depth");
 
+        hzb.On(this, GPU::instance->graphicQueue, "hzb");
         skinning.On(this, GPU::instance->graphicQueue, "skinning");
         particles.On(this, GPU::instance->graphicQueue, "particles");
         spawning.On(this, GPU::instance->graphicQueue, "spawning");
@@ -630,8 +828,6 @@ public:
         gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers");
         lighting.On(this, GPU::instance->graphicQueue, "lighting");
         forward.On(this, GPU::instance->graphicQueue, "forward");
-        forward.renderTargets[0] = GPU::instance->backBuffer.Get();
-        forward.depthBuffer = depthBuffer;
         postProcess.On(this, GPU::instance->graphicQueue, "postProcess");
         present.On(this, GPU::instance->graphicQueue, "present");
 
@@ -640,6 +836,7 @@ public:
 
     void Off() override
     {
+        hzb.Off();
         skinning.Off();
         particles.Off();
         spawning.Off();
@@ -667,6 +864,7 @@ public:
 
         tf::Task uploadAndSetup = UploadAndSetup(world, subflow);
 
+        SUBTASKVIEWPASS(hzb);
         SUBTASKVIEWPASS(skinning);
         SUBTASKVIEWPASS(particles);
         SUBTASKVIEWPASS(spawning);
@@ -682,7 +880,7 @@ public:
         uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         presentTask.succeed(updateInstances, updateMaterials, uploadAndSetup);
-        presentTask.succeed(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+        presentTask.succeed(hzbTask, skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
     }
@@ -690,6 +888,7 @@ public:
     void Execute() override
     {
         ZoneScoped;
+        hzb.Execute();
         skinning.Execute();
         particles.Execute();
         spawning.Execute();
@@ -1034,14 +1233,14 @@ class Renderer
 {
 public:
     static Renderer* instance;
-    GlobalResources globalResources;
+    MeshStorage meshStorage;
     MainView mainView;
     EditorView editorView;
 
     void On(IOs::WindowInformation& window)
     {
         instance = this;
-        globalResources.On();
+        meshStorage.On();
         mainView.On(window);
         editorView.On(window);
     }
@@ -1050,14 +1249,13 @@ public:
     {
         editorView.Off();
         mainView.Off();
-        globalResources.Off();
+        meshStorage.Off();
         instance = nullptr;
     }
 
     void Schedule(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
-
 
         Profiler::instance->instancesCount = mainView.viewWorld->instances.Size();
         Profiler::instance->meshletsCount = mainView.viewWorld->meshletsCount;
@@ -1070,86 +1268,9 @@ public:
         SUBTASKRENDERER(WaitFrame);
         SUBTASKRENDERER(PresentFrame);
 
-        UploadMeshesBuffers(subflow).precede(ExecuteFrame);
-        UploadShadersBuffers(subflow).precede(ExecuteFrame);
-        UploadTexturesBuffers(subflow).precede(ExecuteFrame);
-
         ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
         ExecuteFrame.precede(WaitFrame);
         WaitFrame.precede(PresentFrame);
-    }
-
-    tf::Task UploadMeshesBuffers(tf::Subflow& subflow)
-    {
-        ZoneScoped;
-
-        tf::Task task = subflow.emplace(
-            []()
-            {
-                auto& meshesAssetLibrary = AssetLibrary::instance->meshes;
-                auto& meshesHLSL = GlobalResources::instance->meshes;
-                meshesHLSL.Resize(meshesAssetLibrary.size());
-
-                for (uint i = 0; i < meshesAssetLibrary.size(); i++)
-                {
-                    auto& cpu = meshesAssetLibrary[i];
-                    auto& gpu = meshesHLSL[i];
-                    gpu.meshletOffset = cpu.meshletOffset;
-                    gpu.meshletCount = cpu.meshletCount;
-                }
-                meshesHLSL.Upload(); // WRONG !! on peut pas se permettre d upload des nouvelles data (surtout si ca demande un resize) pendant qu on a encore une frame en vole
-            }
-        ).name("upload meshes buffer");
-
-        return task;
-    }
-
-    tf::Task UploadShadersBuffers(tf::Subflow& subflow)
-    {
-        ZoneScoped;
-
-        tf::Task task = subflow.emplace(
-            []()
-            {
-                auto& shadersAssetLibrary = AssetLibrary::instance->shaders;
-                auto& shadersHLSL = GlobalResources::instance->shaders;
-                shadersHLSL.Resize(shadersAssetLibrary.size());
-
-                for (uint i = 0; i < shadersAssetLibrary.size(); i++)
-                {
-                    auto& cpu = shadersAssetLibrary[i];
-                    auto& gpu = shadersHLSL[i];
-                    gpu.id = i;//cpu.something;
-                }
-                shadersHLSL.Upload();
-            }
-        ).name("upload shaders buffer");
-
-        return task;
-    }
-
-    tf::Task UploadTexturesBuffers(tf::Subflow& subflow)
-    {
-        ZoneScoped;
-
-        tf::Task task = subflow.emplace(
-            []()
-            {
-                auto& texturesAssetLibrary = AssetLibrary::instance->textures;
-                auto& texturesHLSL = GlobalResources::instance->textures;
-                texturesHLSL.Resize(texturesAssetLibrary.size());
-
-                for (uint i = 0; i < texturesAssetLibrary.size(); i++)
-                {
-                    auto& cpu = texturesAssetLibrary[i];
-                    auto& gpu = texturesHLSL[i];
-                    gpu.index = cpu.srv.offset;
-                }
-                texturesHLSL.Upload();
-            }
-        ).name("upload textures buffer");
-
-        return task;
     }
 
     void ExecuteFrame()

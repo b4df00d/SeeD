@@ -32,6 +32,8 @@ void CullingMeshlet(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadI
     float4 boundingSphere = float4(center, radius);
     
     bool culled = FrustumCulling(camera.planes, boundingSphere);
+    if (!culled)
+        culled = OcclusionCulling(boundingSphere);
     
     if (!culled)
     {

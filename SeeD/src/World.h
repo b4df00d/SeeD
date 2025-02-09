@@ -6,9 +6,7 @@
 
 #define SUBTASKWORLD(system) tf::Task system##Task = subflow.emplace([this, &system](){system->Update(this);}).name(#system)
 
-//typedef uint64_t assetID;
 class World;
-//struct World::Entity;
 
 struct assetID
 {

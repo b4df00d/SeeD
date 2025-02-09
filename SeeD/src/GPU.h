@@ -29,6 +29,7 @@ extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"
 struct SRV
 {
     uint offset;
+    D3D12_GPU_DESCRIPTOR_HANDLE handle;
 };
 
 struct UAV
@@ -223,7 +224,7 @@ public:
     RTV rtv{ UINT32_MAX, 0, 0 };
     DSV dsv{ UINT32_MAX, 0 };
 
-    void CreateTexture(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
+    void CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, String name = "Texture");
     void CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
     void CreateDepthTarget(uint2 resolution, String name = "Texture");
     void CreateBuffer(uint size, uint stride, bool upload = false, String name = "Buffer", D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON);
@@ -251,10 +252,10 @@ public:
     static void ReleaseResources(bool everything = false);
 
     static std::mutex lock;
-    static std::vector<std::tuple<uint, D3D12MA::Allocation*>> uploadResources; // could we remove that and only use releaseResources ? 
-    static std::vector<D3D12MA::Allocation*> allResources;
+    static std::vector<std::pair<uint, Resource*>> uploadResources; // could we remove that and only use releaseResources ? 
+    static std::vector<Resource*> allResources;
     static std::vector<String> allResourcesNames;
-    static std::vector<std::tuple<uint, Resource>> releaseResources;
+    static std::vector<std::pair<uint, Resource>> releaseResources;
 };
 
 struct DescriptorHeap
@@ -669,7 +670,7 @@ public:
 GPU* GPU::instance;
 
 // definitions of Resource
-void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, String name)
+void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, String name)
 {
     //ZoneScoped;
     D3D12_RESOURCE_DESC resourceDesc = {};
@@ -678,12 +679,12 @@ void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, String name)
     resourceDesc.Width = resolution.x;
     resourceDesc.Height = resolution.y;
     resourceDesc.DepthOrArraySize = 1;
-    resourceDesc.MipLevels = 1;
+    resourceDesc.MipLevels = mips ? 0 : 1;
     resourceDesc.Format = format;
     resourceDesc.SampleDesc.Count = 1;
     resourceDesc.SampleDesc.Quality = 0;
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
     D3D12MA::ALLOCATION_DESC allocationDesc = {};
     allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -700,15 +701,16 @@ void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, String name)
     allocation->SetName(wname.c_str());
     allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(allocation);
+    allResources.push_back(this);
     allResourcesNames.push_back(name);
     lock.unlock();
 
     {
-        auto desc = GetResource()->GetDesc();
         D3D12_CPU_DESCRIPTOR_HANDLE handle;
+        auto desc = GetResource()->GetDesc();
         srv.offset = (uint)GPU::instance->descriptorHeap.globalDescriptorHeapSlots.Get();
         handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+        srv.handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
 
         D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
         SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -763,7 +765,7 @@ void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String n
     allocation->SetName(wname.c_str());
     allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(allocation);
+    allResources.push_back(this);
     allResourcesNames.push_back(name);
     lock.unlock();
 
@@ -772,6 +774,7 @@ void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String n
         D3D12_CPU_DESCRIPTOR_HANDLE handle;
         srv.offset = (uint)GPU::instance->descriptorHeap.globalDescriptorHeapSlots.Get();
         handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+        srv.handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
 
         D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
         SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -842,7 +845,7 @@ void Resource::CreateDepthTarget(uint2 resolution, String name)
     allocation->SetName(wname.c_str());
     allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(allocation);
+    allResources.push_back(this);
     allResourcesNames.push_back(name);
     lock.unlock();
 
@@ -851,6 +854,7 @@ void Resource::CreateDepthTarget(uint2 resolution, String name)
         D3D12_CPU_DESCRIPTOR_HANDLE handle;
         srv.offset = (uint)GPU::instance->descriptorHeap.globalDescriptorHeapSlots.Get();
         handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+        srv.handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
 
         D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
         SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -930,7 +934,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D
     allocation->SetName(wname.c_str());
     allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(allocation);
+    allResources.push_back(this);
     allResourcesNames.push_back(name.c_str());
     lock.unlock();
 
@@ -1036,7 +1040,7 @@ void Resource::CreateReadBackBuffer(uint size, String name)
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(allocation);
+    allResources.push_back(this);
     allResourcesNames.push_back(name);
     lock.unlock();
 
@@ -1070,6 +1074,7 @@ void Resource::BackBuffer(ID3D12Resource* backBuffer)
 
     {
         D3D12_CPU_DESCRIPTOR_HANDLE handle = GPU::instance->descriptorHeap.GetGlobalSlot(srv);
+        srv.handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
 
         auto desc = GetResource()->GetDesc();
         D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
@@ -1112,6 +1117,14 @@ void Resource::Release(bool deferred)
         if (deferred)
         {
             lock.lock();
+            for (int j = (int)allResources.size() - 1; j >= 0; j--)
+            {
+                if (allResources[j] == this)
+                {
+                    allResources.erase(allResources.begin() + j);
+                    allResourcesNames.erase(allResourcesNames.begin() + j);
+                }
+            }
             releaseResources.push_back({ GPU::instance->frameNumber , *this });
             lock.unlock();
         }
@@ -1120,7 +1133,7 @@ void Resource::Release(bool deferred)
             lock.lock();
             for (int j = (int)allResources.size() - 1; j >= 0; j--)
             {
-                if (allResources[j] == allocation)
+                if (allResources[j] == this)
                 {
                     allResources.erase(allResources.begin() + j);
                     allResourcesNames.erase(allResourcesNames.begin() + j);
@@ -1188,10 +1201,13 @@ void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset)
         &uploadAllocation,
         IID_NULL, NULL);
 
+    Resource* tmpUpRes = new Resource();
+    tmpUpRes->allocation = uploadAllocation;
+
     uploadAllocation->SetName(L"UploadBuffer");
     lock.lock();
-    uploadResources.push_back({ GPU::instance->frameNumber, uploadAllocation });
-    allResources.push_back(uploadAllocation);
+    uploadResources.push_back({ GPU::instance->frameNumber, tmpUpRes });
+    allResources.push_back(tmpUpRes);
     allResourcesNames.push_back("UploadBuffer");
     lock.unlock();
 
@@ -1230,19 +1246,19 @@ void Resource::CleanUploadResources(bool everything)
         frameNumberThreshold = UINT_MAX;
     for (int i = (int)uploadResources.size() - 1; i >= 0 ; i--)
     {
-        if (std::get<0>(uploadResources[i]) < frameNumberThreshold)
+        if (uploadResources[i].first < frameNumberThreshold)
         {
-            D3D12MA::Allocation* alloc = std::get<1>(uploadResources[i]);
+            Resource* res = uploadResources[i].second;
             for (int j = (int)allResources.size() - 1; j >= 0; j--)
             {
-                if (allResources[j] == alloc)
+                if (allResources[j] == res)
                 {
                     allResources.erase(allResources.begin() + j);
                     allResourcesNames.erase(allResourcesNames.begin() + j);
                 }
             }
             {
-                alloc->Release();
+                res->Release();
             }
             uploadResources.erase(uploadResources.begin() + i);
         }
@@ -1257,9 +1273,9 @@ void Resource::ReleaseResources(bool everything)
         frameNumberThreshold = UINT_MAX;
     for (int i = (int)releaseResources.size() - 1; i >= 0; i--)
     {
-        if (std::get<0>(releaseResources[i]) < frameNumberThreshold)
+        if (releaseResources[i].first < frameNumberThreshold)
         {
-            Resource& res = std::get<1>(releaseResources[i]);
+            Resource& res = releaseResources[i].second;
             res.Release();
             releaseResources.erase(releaseResources.begin() + i);
         }
@@ -1267,10 +1283,10 @@ void Resource::ReleaseResources(bool everything)
 }
 
 std::mutex Resource::lock;
-std::vector<std::tuple<uint, D3D12MA::Allocation*>> Resource::uploadResources;
-std::vector<D3D12MA::Allocation*> Resource::allResources;
+std::vector<std::pair<uint, Resource*>> Resource::uploadResources;
+std::vector<Resource*> Resource::allResources;
 std::vector<String> Resource::allResourcesNames;
-std::vector< std::tuple<uint, Resource>> Resource::releaseResources;
+std::vector< std::pair<uint, Resource>> Resource::releaseResources;
 // end of definitions of Resource
 
 // definitions of CommandBuffer      
@@ -1755,6 +1771,8 @@ struct Material
 
 struct MeshStorage
 {
+    static MeshStorage* instance;
+
     uint nextMeshOffset = 0;
     Resource meshes;
     uint nextMeshletOffset = 0;
@@ -1779,6 +1797,7 @@ struct MeshStorage
 
     void On()
     {
+        instance = this;
         meshes.CreateBuffer<Mesh>(meshesMaxCount, "meshes");
         meshlets.CreateBuffer<Meshlet>(meshletMaxCount, "meshlets");
         meshletVertices.CreateBuffer<unsigned int>(meshletVertexMaxCount, "meshlet vertices");
@@ -1793,6 +1812,7 @@ struct MeshStorage
         meshletVertices.Release();
         meshletTriangles.Release();
         vertices.Release();
+        instance = nullptr;
     }
 
     Mesh Load(MeshData& meshData, CommandBuffer& commandBuffer)
@@ -1851,37 +1871,4 @@ struct MeshStorage
         return newMesh;
     }
 };
-
-// life time : program
-struct GlobalResources
-{
-    static GlobalResources* instance;
-    
-    // various 'tables' of asset desc
-    StructuredUploadBuffer<HLSL::Shader> shaders;
-    StructuredUploadBuffer<HLSL::Mesh> meshes;
-    StructuredUploadBuffer<HLSL::Texture> textures;
-
-    MeshStorage meshStorage;
-
-    void On()
-    {
-        instance = this;
-        meshStorage.On();
-    }
-
-    void Off()
-    {
-        meshStorage.Off();
-        Release();
-        instance = nullptr;
-    }
-
-    void Release()
-    {
-        shaders.Release();
-        meshes.Release();
-        textures.Release();
-    }
-};
-GlobalResources* GlobalResources::instance = nullptr;
+MeshStorage* MeshStorage::instance;

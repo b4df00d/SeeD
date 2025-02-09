@@ -97,6 +97,9 @@
     <ClCompile Include="..\Third\imgui-docking\backends\imgui_impl_win32.cpp">
       <Filter>Third Files\imgui</Filter>
     </ClCompile>
+    <ClCompile Include="..\Third\imgui-docking\imgui_demo.cpp">
+      <Filter>Third Files\imgui</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

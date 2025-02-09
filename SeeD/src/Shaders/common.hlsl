@@ -515,6 +515,12 @@ bool FrustumCulling(in float4 planes[6], float4 boundingSphere)
     return culled;
 }
 
+bool OcclusionCulling(float4 boundingSphere)
+{
+    // test against HZB
+    return false;
+}
+
 /*
 LightComp GetLightComp(in uint globalLightIndex, float3 normal, float3 position, float clipZ, float3 viewDir, bool shadows = true)
 {

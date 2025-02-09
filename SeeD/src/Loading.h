@@ -1271,7 +1271,7 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             MeshData meshData = MeshLoader::instance->Read(map[id].path);
             if (meshData.meshlets.size() > 0)
             {
-                Mesh mesh = GlobalResources::instance->meshStorage.Load(meshData, commandBuffer.Get());
+                Mesh mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get());
                 lock.lock();
                 meshes.push_back(mesh);
                 map[id].indexInVector = meshes.size() - 1;
