@@ -170,6 +170,15 @@ public:
 		if (ImGui_ImplWin32_WndProcHandler(hwnd, umessage, wparam, lparam))
 			return 1;
 
+		bool WantCaptureKeyboard = false;
+		bool WantCaptureMouse = false;
+		if (ImGui::GetCurrentContext())
+		{
+			ImGuiIO& io = ImGui::GetIO();
+			WantCaptureKeyboard = !io.WantCaptureKeyboard;
+			WantCaptureMouse = !io.WantCaptureMouse;
+		}
+
 		IOs* pThis;
 		if (umessage == WM_NCCREATE)
 		{
@@ -261,66 +270,94 @@ public:
 		// unlike WM_LBUTTONDOWN, WM_KEYDOWN is called as long as a key is pressed
 		case WM_KEYDOWN:
 		{
-			// If a key is pressed send it to the input object so it can record that state.
-			_keys.pressed[((unsigned int)wparam)] = !_keys.pressed[((unsigned int)wparam)];
-			_keys.down[((unsigned int)wparam)] = true;
+			if (WantCaptureKeyboard)
+			{
+				// If a key is pressed send it to the input object so it can record that state.
+				_keys.pressed[((unsigned int)wparam)] = !_keys.pressed[((unsigned int)wparam)];
+				_keys.down[((unsigned int)wparam)] = true;
+			}
 			break;
 		}
 
 		// Check if a key has been released on the keyboard.
 		case WM_KEYUP:
 		{
-			// If a key is released then send it to the input object so it can unset the state for that key.
-			_keys.down[((unsigned int)wparam)] = false;
+			if (WantCaptureKeyboard)
+			{
+				// If a key is released then send it to the input object so it can unset the state for that key.
+				_keys.down[((unsigned int)wparam)] = false;
+			}
 			break;
 		}
 
 		// unlike WM_KEYDOWN mouse WM_LBUTTONDOWN only happen once
 		case WM_LBUTTONDOWN:
 		{
-			_mouse.mouseButtonLeft = true;
-			_mouse.mouseButtonLeftDown = true;
+			if (WantCaptureMouse)
+			{
+				_mouse.mouseButtonLeft = true;
+				_mouse.mouseButtonLeftDown = true;
+			}
 			break;
 		}
 
 		case WM_MBUTTONDOWN:
 		{
-			_mouse.mouseButtonMiddle = true;
-			_mouse.mouseButtonMiddleDown = true;
+			if (WantCaptureMouse)
+			{
+				_mouse.mouseButtonMiddle = true;
+				_mouse.mouseButtonMiddleDown = true;
+			}
 			break;
 		}
 
 		case WM_RBUTTONDOWN:
 		{
-			_mouse.mouseButtonRight = true;
-			_mouse.mouseButtonRightDown = true;
+			if (WantCaptureMouse)
+			{
+				_mouse.mouseButtonRight = true;
+				_mouse.mouseButtonRightDown = true;
+			}
 			break;
 		}
 
 		case WM_LBUTTONUP:
 		{
-			_mouse.mouseButtonLeft = false;
-			_mouse.mouseButtonLeftUp = true;
+			if (WantCaptureMouse)
+			{
+				_mouse.mouseButtonLeft = false;
+				_mouse.mouseButtonLeftUp = true;
+			}
 			break;
 		}
 
 		case WM_MBUTTONUP:
 		{
-			_mouse.mouseButtonMiddle = false;
-			_mouse.mouseButtonMiddleUp = true;
+			if (WantCaptureMouse)
+			{
+				_mouse.mouseButtonMiddle = false;
+				_mouse.mouseButtonMiddleUp = true;
+			}
 			break;
 		}
 
 		case WM_RBUTTONUP:
 		{
-			_mouse.mouseButtonRight = false;
-			_mouse.mouseButtonRightUp = true;
+			if (WantCaptureMouse)
+			{
+				_mouse.mouseButtonRight = false;
+				_mouse.mouseButtonRightUp = true;
+			}
 			break;
 		}
 
 		case WM_MOUSEWHEEL:
 		{
-			_mouse.mouseWheel = GET_WHEEL_DELTA_WPARAM(wparam);
+			if (WantCaptureMouse)
+			{
+				_mouse.mouseWheel = GET_WHEEL_DELTA_WPARAM(wparam);
+			}
+			break;
 		}
 
 		// Any other messages send to the default message handler as our application won't make use of them.

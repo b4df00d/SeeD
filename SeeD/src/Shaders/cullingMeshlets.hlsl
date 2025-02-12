@@ -31,9 +31,9 @@ void CullingMeshlet(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadI
     float radius = length(instance.worldMatrix[0].xyz) * meshlet.boundingSphere.w; // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
     
-    bool culled = FrustumCulling(camera.planes, boundingSphere);
+    bool culled = FrustumCulling(camera, boundingSphere);
     if (!culled)
-        culled = OcclusionCulling(boundingSphere);
+        culled = OcclusionCulling(camera, boundingSphere);
     
     if (!culled)
     {

@@ -8,11 +8,6 @@
 #include "FidelityFX/host/backends/dx12/ffx_dx12.h"
 #include "FidelityFX/host/ffx_spd.h"
 
-
-#include "imgui.h"
-#include "imgui_impl_win32.h"
-#include "imgui_impl_dx12.h"
-
 class UI
 {
     ID3D12DescriptorHeap* pd3dSrvDescHeap = NULL;
@@ -22,6 +17,9 @@ class UI
     ID3D12CommandAllocator* cmdAlloc = nullptr;
 
 public:
+
+    D3D12_CPU_DESCRIPTOR_HANDLE  imgCPUHandle = {};
+    D3D12_GPU_DESCRIPTOR_HANDLE  imgGPUHandle = {};
     static UI* instance;
     void On(IOs::WindowInformation* window, ID3D12Device9* device, IDXGISwapChain3* swapchain)
     {
@@ -47,6 +45,9 @@ public:
 
         hFontSrvCpuDescHandle = pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart();
         hFontSrvGpuDescHandle = pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart();
+
+        imgCPUHandle.ptr = static_cast<SIZE_T>(pd3dSrvDescHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(1) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+        imgGPUHandle.ptr = static_cast<SIZE_T>(pd3dSrvDescHeap->GetGPUDescriptorHandleForHeapStart().ptr + INT64(1) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
 
         ImGui_ImplDX12_Init(device, sc.BufferCount, sc.BufferDesc.Format, pd3dSrvDescHeap, hFontSrvCpuDescHandle, hFontSrvGpuDescHandle);
     }
@@ -289,6 +290,12 @@ public:
     }
     virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
     virtual void Execute() = 0;
+    Resource& GetRegisteredResource(String name)
+    {
+        UINT64 hash = std::hash<std::string>{}(name);
+        Resource& res = resources[hash];
+        return res;
+    }
     void SetupViewParams()
     {
         HLSL::CommonResourcesIndices commonResourcesIndices;
@@ -322,12 +329,15 @@ public:
     {
         HLSL::CullingContext cullingContextParams;
 
-        cullingContextParams.cameraIndex = 0;
+        cullingContextParams.cameraIndex = options.stopFrustumUpdate ? 1 : 0;
         cullingContextParams.lightsIndex = 0;
         cullingContextParams.culledInstanceIndex = cullingContext.instancesInView.GetResource().uav.offset;
         cullingContextParams.culledMeshletsIndex = cullingContext.meshletsInView.GetResource().uav.offset;
         cullingContextParams.instancesCounterIndex = cullingContext.instancesCounter.GetResource().uav.offset;
         cullingContextParams.meshletsCounterIndex = cullingContext.meshletsCounter.GetResource().uav.offset;
+        cullingContextParams.HZB = GetRegisteredResource("DepthDownSample").srv.offset;
+        cullingContextParams.resolution = resolution;
+        cullingContextParams.HZBMipCount = GetRegisteredResource("DepthDownSample").GetResource()->GetDesc().MipLevels;
 
         cullingContext.cullingContext->Clear();
         cullingContext.cullingContext->Add(cullingContextParams);
@@ -534,8 +544,8 @@ class HZB : public Pass
 {
     ViewResource depth;
     ViewResource depthDownSample;
-    FfxSpdContextDescription m_InitializationParameters = { 0 };
-    FfxSpdContext            m_Context;
+    FfxSpdContextDescription initializationParameters = { 0 };
+    FfxSpdContext            context;
 public:
     virtual void On(View* view, ID3D12CommandQueue* queue, String _name) override
     {
@@ -550,22 +560,22 @@ public:
         size_t scratchBufferSize = ffxGetScratchMemorySizeDX12(1);
         void* scratchBuffer = malloc(scratchBufferSize);
         memset(scratchBuffer, 0, scratchBufferSize);
-        ffxGetInterfaceDX12(&m_InitializationParameters.backendInterface, ffxGetDeviceDX12(GPU::instance->device), scratchBuffer, scratchBufferSize, 1);
+        ffxGetInterfaceDX12(&initializationParameters.backendInterface, ffxGetDeviceDX12(GPU::instance->device), scratchBuffer, scratchBufferSize, 1);
 
         // Setup all the parameters for this SPD run
-        m_InitializationParameters.downsampleFilter = FFX_SPD_DOWNSAMPLE_FILTER_MAX;
-        m_InitializationParameters.flags = 0;   // Reset
-        m_InitializationParameters.flags |= FFX_SPD_SAMPLER_LOAD;
-        m_InitializationParameters.flags |= FFX_SPD_WAVE_INTEROP_LDS;
-        m_InitializationParameters.flags |= FFX_SPD_MATH_PACKED;
-        ffxSpdContextCreate(&m_Context, &m_InitializationParameters);
+        initializationParameters.flags = 0;   // Reset
+        initializationParameters.flags |= FFX_SPD_SAMPLER_LOAD;
+        initializationParameters.flags |= FFX_SPD_WAVE_INTEROP_LDS;
+        initializationParameters.flags |= FFX_SPD_MATH_PACKED;
+        initializationParameters.downsampleFilter = FFX_SPD_DOWNSAMPLE_FILTER_MAX;
+        ffxSpdContextCreate(&context, &initializationParameters);
 
     }
     virtual void Off() override
     {
         Pass::Off();
         ZoneScoped;
-        ffxSpdContextDestroy(&m_Context);
+        ffxSpdContextDestroy(&context);
     }
     void Setup(View* view) override
     {
@@ -575,6 +585,11 @@ public:
     {
         ZoneScoped;
         Open();
+        if (options.stopFrustumUpdate)
+        {
+            Close();
+            return;
+        }
 
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE);
         depthDownSample.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -598,7 +613,7 @@ public:
         dispatchParameters.commandList = commandBuffer->cmd;
         dispatchParameters.resource = zbuff;
 
-        FfxErrorCode errorCode = ffxSpdContextDispatch(&m_Context, &dispatchParameters);
+        FfxErrorCode errorCode = ffxSpdContextDispatch(&context, &dispatchParameters);
         Close();
     }
 };
@@ -1077,19 +1092,25 @@ public:
                 ViewWorld& frameWorld = viewWorld.Get();
                 auto& queryResult = world.frameQueries[queryIndex];
 
-                HLSL::Camera hlslcamPrevious = {};
-                if (this->viewWorld->cameras.Size() > 0)
+                static HLSL::Camera hlslcamPrevious = {};
+                if (!options.stopFrustumUpdate)
                 {
-                    hlslcamPrevious = this->viewWorld->cameras[0];
+                    if (this->viewWorld->cameras.Size() > 0)
+                    {
+                        hlslcamPrevious = this->viewWorld->cameras[0];
+                    }
                 }
 
                 this->viewWorld->cameras.Clear();
+
                 for (uint i = 0; i < entityCount; i++)
                 {
                     auto& cam = queryResult[i].Get<Components::Camera>();
                     auto& trans = queryResult[i].Get<Components::WorldMatrix>();
+
                     float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip);
                     float4x4 viewProj = mul(inverse(trans.matrix), proj);
+                    float4 worldPos = float4(trans.matrix[3].xyz, 1);
 
                     float4 planes[6];
                     float3 worldCorners[8];
@@ -1128,6 +1149,8 @@ public:
 
                     HLSL::Camera hlslcam;
 
+                    hlslcam.view = inverse(trans.matrix);
+                    hlslcam.proj = proj;
                     hlslcam.viewProj = viewProj;
                     hlslcam.planes[0] = planes[0];
                     hlslcam.planes[1] = planes[1];
@@ -1135,19 +1158,11 @@ public:
                     hlslcam.planes[3] = planes[3];
                     hlslcam.planes[4] = planes[4];
                     hlslcam.planes[5] = planes[5];
-
-                    if (options.stopFrustumUpdate)
-                    {
-                        hlslcam.planes[0] = hlslcamPrevious.planes[0];
-                        hlslcam.planes[1] = hlslcamPrevious.planes[1];
-                        hlslcam.planes[2] = hlslcamPrevious.planes[2];
-                        hlslcam.planes[3] = hlslcamPrevious.planes[3];
-                        hlslcam.planes[4] = hlslcamPrevious.planes[4];
-                        hlslcam.planes[5] = hlslcamPrevious.planes[5];
-                    }
+                    hlslcam.worldPos = worldPos;
 
                     this->viewWorld->cameras.Add(hlslcam);
                 }
+                this->viewWorld->cameras.Add(hlslcamPrevious);
 
                 this->viewWorld->cameras.Upload();
             }

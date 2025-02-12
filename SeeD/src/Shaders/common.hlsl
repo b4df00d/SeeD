@@ -503,22 +503,75 @@ float3 BoxCubeMapLookup(float3 rayOrigin, float3 unitRayDir, float3 boxCenter, f
 
 }
 
-bool FrustumCulling(in float4 planes[6], float4 boundingSphere)
+//https://gist.github.com/JarkkoPFC/1186bc8a861dae3c8339b0cda4e6cdb3
+float4 sphere_screen_extents(in const float3 pos_, in const float rad_, in const float4x4 v2p_)
+{
+  // calculate horizontal extents
+    //assert(v2p_.z.w == 1 && v2p_.w.w == 0);
+    float4 res;
+    float rad2 = rad_ * rad_, d = pos_.z * rad_;
+    float hv = sqrt(pos_.x * pos_.x + pos_.z * pos_.z - rad2);
+    float ha = pos_.x * hv, hb = pos_.x * rad_, hc = pos_.z * hv;
+    res.x = (ha - d) * v2p_[0][0] / (hc + hb); // left
+    res.z = (ha + d) * v2p_[0][0] / (hc - hb); // right
+
+  // calculate vertical extents
+    float vv = sqrt(pos_.y * pos_.y + pos_.z * pos_.z - rad2);
+    float va = pos_.y * vv, vb = pos_.y * rad_, vc = pos_.z * vv;
+    res.y = (va - d) * v2p_[1][1] / (vc + vb); // bottom
+    res.w = (va + d) * v2p_[1][1] / (vc - vb); // top
+    return res;
+}
+
+float4 ScreenSpaceBB(in HLSL::Camera camera, float4 boundingSphere)
+{
+    float4 viewSphere = mul(camera.view, float4(boundingSphere.xyz, 1));
+    viewSphere.w = boundingSphere.w;
+    return sphere_screen_extents(viewSphere.xyz, viewSphere.w, camera.proj);
+}
+
+bool FrustumCulling(in HLSL::Camera camera, float4 boundingSphere)
 {
     bool culled = false;
     [unroll]
     for (uint i = 0; i < 6; ++i)
     {
-        float distance = dot(planes[i].xyz, boundingSphere.xyz) + planes[i].w;
+        float distance = dot(camera.planes[i].xyz, boundingSphere.xyz) + camera.planes[i].w;
         culled |= distance < -boundingSphere.w;
     }
     return culled;
 }
 
-bool OcclusionCulling(float4 boundingSphere)
+//https://youtu.be/EtX7WnFhxtQ?si=eUxHtsi2rsHYCWWC&t=1491  Erik Jansson - GPU driven Rendering with Mesh Shaders in Alan Wake 2
+// il y a 4 sample plutot que 1 sample du mip du dessus car les 4 corners peuvent etre a cheval entre 2 pixel du sample du dessus
+bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
 {
-    // test against HZB
-    return false;
+    float4 viewSphere = float4(mul(camera.view, float4(boundingSphere.xyz, 1)).xyz, boundingSphere.w);
+    float3 sphereClosestPointToCamera = viewSphere.xyz - normalize(viewSphere.xyz) * boundingSphere.w;
+    float4 clipSphere = mul(camera.proj, float4(sphereClosestPointToCamera.xyz, 1));
+    float fBoundSphereDepth = clipSphere.z / clipSphere.w;
+    
+    float3 vHZB = float3(cullingContext.resolution.x, cullingContext.resolution.y, cullingContext.HZBMipCount);
+    Texture2D<float> tHZB = ResourceDescriptorHeap[cullingContext.HZB];
+    float4 vLBRT = ScreenSpaceBB(camera, boundingSphere);
+    
+    float4 vToUV = float4(0.5f, -0.5f, 0.5f, -0.5f);
+    float4 vUV = saturate(vLBRT.xwzy * vToUV + 0.5f);
+    float4 vAABB = vUV * vHZB.xyxy;
+    float2 vExtents = vAABB.zw - vAABB.xy;
+    
+    float fMipLevel = ceil(log2(max(vExtents.x, vExtents.y)));
+    fMipLevel = clamp(fMipLevel, 0.0f, vHZB.z - 1.0f);
+    
+    float4 vOcclusionDepth = float4(tHZB.SampleLevel(samplerPointClamp, vUV.xy, fMipLevel),
+                                    tHZB.SampleLevel(samplerPointClamp, vUV.zy, fMipLevel),
+                                    tHZB.SampleLevel(samplerPointClamp, vUV.zw, fMipLevel),
+                                    tHZB.SampleLevel(samplerPointClamp, vUV.xw, fMipLevel));
+    
+    float fMaxOcclusionDepth = max(max(max(vOcclusionDepth.x, vOcclusionDepth.y), vOcclusionDepth.z), vOcclusionDepth.w);
+    bool bCulled = fMaxOcclusionDepth < fBoundSphereDepth;
+    
+    return bCulled;
 }
 
 /*

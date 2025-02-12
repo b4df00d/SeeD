@@ -52,6 +52,9 @@ namespace HLSL
         uint culledMeshletsIndex;
         uint instancesCounterIndex;
         uint meshletsCounterIndex;
+        uint HZB;
+        uint HZBMipCount;
+        uint2 resolution;
     };
     
     struct Shader
@@ -135,8 +138,11 @@ namespace HLSL
     
     struct Camera
     {
+        float4x4 view;
+        float4x4 proj;
         float4x4 viewProj;
         float4 planes[6];
+        float4 worldPos;
     };
 
     struct Light

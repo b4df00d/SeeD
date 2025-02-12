@@ -34,7 +34,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     float4 boundingSphere = mul(instance.worldMatrix, float4(mesh.boundingSphere.xyz, 1));
     boundingSphere.w = mesh.boundingSphere.w;
     
-    bool culled = FrustumCulling(camera.planes, boundingSphere);
+    bool culled = FrustumCulling(camera, boundingSphere);
     
     if (culled)  meshletCount = 0;
     
@@ -50,7 +50,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
         boundingSphere = mul(instance.worldMatrix, float4(meshlet.boundingSphere.xyz, 1));
         boundingSphere.w = mesh.boundingSphere.w;
     
-        culled = FrustumCulling(camera.planes, boundingSphere);
+        culled = FrustumCulling(camera, boundingSphere);
     
         if (!culled)
         {
@@ -70,8 +70,8 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
 [numthreads(HLSL::max_triangles, 1, 1)]
 void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])
 {
-    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
+    StructuredBuffer<HLSL:: Camera > cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    HLSL::Camera camera = cameras[0]; //cullingContext.cameraIndex];
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];

@@ -109,5 +109,11 @@ cbuffer MeshletIndex : register(b5)
     uint meshletIndexIndirect;
 };
 
+SamplerState samplerLinear : register(s0);
+SamplerComparisonState samplerShadows : register(s1);
+SamplerComparisonState samplerShadowsReverseZ : register(s2);
+SamplerState samplerPoint : register(s3);
+SamplerState samplerPointClamp : register(s4);
+
 #define BINDINGS_HLSL
 #endif
