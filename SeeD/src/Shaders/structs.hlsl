@@ -9,6 +9,7 @@
 // CAREFULL OF ALIGNEMENT !
 // AVX 1 or 2 is not 16bytes aligned with hlsl++
 // sse2 is. and thus can have a similar memory layout as hlsl compilation
+// but prefere float4 or uint4 instead of float2 float3 because hlsl++ will still reserve a full float4 even for a float2
 
 struct Options
 {
@@ -54,7 +55,7 @@ namespace HLSL
         uint meshletsCounterIndex;
         uint HZB;
         uint HZBMipCount;
-        uint2 resolution;
+        uint4 resolution;
     };
     
     struct Shader

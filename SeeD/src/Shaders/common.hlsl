@@ -525,8 +525,7 @@ float4 sphere_screen_extents(in const float3 pos_, in const float rad_, in const
 
 float4 ScreenSpaceBB(in HLSL::Camera camera, float4 boundingSphere)
 {
-    float4 viewSphere = mul(camera.view, float4(boundingSphere.xyz, 1));
-    viewSphere.w = boundingSphere.w;
+    float4 viewSphere = float4(mul(camera.view, float4(boundingSphere.xyz, 1)).xyz, boundingSphere.w);
     return sphere_screen_extents(viewSphere.xyz, viewSphere.w, camera.proj);
 }
 
@@ -546,8 +545,11 @@ bool FrustumCulling(in HLSL::Camera camera, float4 boundingSphere)
 // il y a 4 sample plutot que 1 sample du mip du dessus car les 4 corners peuvent etre a cheval entre 2 pixel du sample du dessus
 bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
 {
+    if (length(boundingSphere.xyz - camera.worldPos.xyz) < boundingSphere.w)
+        return false;
+    
     float4 viewSphere = float4(mul(camera.view, float4(boundingSphere.xyz, 1)).xyz, boundingSphere.w);
-    float3 sphereClosestPointToCamera = viewSphere.xyz - normalize(viewSphere.xyz) * boundingSphere.w;
+    float3 sphereClosestPointToCamera = viewSphere.xyz + normalize(viewSphere.xyz) * boundingSphere.w;
     float4 clipSphere = mul(camera.proj, float4(sphereClosestPointToCamera.xyz, 1));
     float fBoundSphereDepth = clipSphere.z / clipSphere.w;
     

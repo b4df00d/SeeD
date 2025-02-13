@@ -336,7 +336,7 @@ public:
         cullingContextParams.instancesCounterIndex = cullingContext.instancesCounter.GetResource().uav.offset;
         cullingContextParams.meshletsCounterIndex = cullingContext.meshletsCounter.GetResource().uav.offset;
         cullingContextParams.HZB = GetRegisteredResource("DepthDownSample").srv.offset;
-        cullingContextParams.resolution = resolution;
+        cullingContextParams.resolution = uint4(resolution, 0, 0);
         cullingContextParams.HZBMipCount = GetRegisteredResource("DepthDownSample").GetResource()->GetDesc().MipLevels;
 
         cullingContext.cullingContext->Clear();
