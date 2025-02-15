@@ -235,11 +235,13 @@ public:
     template <typename T>
     void CreateAppendBuffer(uint count, String name = "AppendBuffer");
     void CreateReadBackBuffer(uint size, String name = "ReadBackBuffer");
+    void CreateAccelerationStructure(uint size, String name = "AccelerationStructure");
     void BackBuffer(ID3D12Resource* backBuffer);
     void Release(bool deferred = false);
     ID3D12Resource* GetResource();
     uint BufferSize();
-    void Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset = 0);
+    void Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb);
+    void UploadElements(void* data, uint count, uint index, CommandBuffer& cb);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter, ID3D12Resource* resource);
     void Barrier(CommandBuffer& cb);
@@ -1068,6 +1070,64 @@ void Resource::CreateReadBackBuffer(uint size, String name)
     */
 }
 
+void Resource::CreateAccelerationStructure(uint size, String name)
+{
+    //ZoneScoped;
+    D3D12_RESOURCE_DESC resourceDesc = {};
+    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resourceDesc.Alignment = 0;
+    resourceDesc.Width = size;
+    resourceDesc.Height = 1;
+    resourceDesc.DepthOrArraySize = 1;
+    resourceDesc.MipLevels = 1;
+    resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+    resourceDesc.SampleDesc.Count = 1;
+    resourceDesc.SampleDesc.Quality = 0;
+    resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE;
+
+    D3D12MA::ALLOCATION_DESC allocationDesc = {};
+    allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+
+    HRESULT hr = GPU::instance->allocator->CreateResource(
+        &allocationDesc,
+        &resourceDesc,
+        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+        NULL,
+        &allocation,
+        IID_NULL, NULL);
+
+    std::wstring wname = name.ToWString();
+    allocation->SetName(wname.c_str());
+    lock.lock();
+    allResources.push_back(this);
+    allResourcesNames.push_back(name);
+    lock.unlock();
+
+    /*
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = GPU::instance->descriptorHeap.GetGlobalSlot(srv);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
+        SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        SRVDesc.Format = resourceDesc.Format;
+        SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        SRVDesc.Texture2D.MipLevels = resourceDesc.MipLevels;
+        GPU::instance->device->CreateShaderResourceView(allocation->GetResource(), &SRVDesc, handle);
+    }
+
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle = GPU::instance->descriptorHeap.GetGlobalSlot(uav);
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC UAVDesc = {};
+        UAVDesc.Format = resourceDesc.Format;
+        UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        UAVDesc.Texture2D.MipSlice = 0;
+        GPU::instance->device->CreateUnorderedAccessView(allocation->GetResource(), nullptr, &UAVDesc, handle);
+    }
+    */
+}
+
 void Resource::BackBuffer(ID3D12Resource* backBuffer)
 {
     rtv.raw = backBuffer;
@@ -1169,12 +1229,16 @@ uint Resource::BufferSize()
     return GetResource()->GetDesc().Width;
 }
 
-void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset)
+void Resource::Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb)
 {
     //ZoneScoped;
     if (options.stopBufferUpload)
         return;
     //ZoneScopedN("Resource::Upload");
+
+    if (dataSize + offset > GetResource()->GetDesc().Width)
+        IOs::Log("Resource {} full", WCharToString(allocation->GetName()));
+
     D3D12MA::Allocation* uploadAllocation;
 
     D3D12_RESOURCE_DESC resourceDesc = {};
@@ -1219,6 +1283,11 @@ void Resource::Upload(void* data, uint dataSize, CommandBuffer& cb, uint offset)
     lock.lock();
     cb.cmd->CopyBufferRegion(allocation->GetResource(), offset, uploadAllocation->GetResource(), 0, dataSize);
     lock.unlock();
+}
+
+void Resource::UploadElements(void* data, uint count, uint index, CommandBuffer& cb)
+{
+    Upload(data, count * stride, index * stride, cb);
 }
 
 void Resource::Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter)
@@ -1731,26 +1800,10 @@ struct Vertex
 
 struct Meshlet : HLSL::Meshlet
 {
-    /*
-    // offsets within meshlet_vertices and meshlet_triangles arrays with meshlet data
-    uint vertexOffset;
-    uint triangleOffset;
-
-    // number of vertices and triangles used in the meshlet; data is stored in consecutive range defined by offset and count
-    uint vertexCount;
-    uint triangleCount;
-
-    float4 boundingSphere;
-    */
 };
 
 struct Mesh : HLSL::Mesh
 {
-    /*
-    float4 boundingSphere;
-    uint meshletOffset;
-    uint meshletCount;
-    */
 };
 
 struct MeshData
@@ -1758,6 +1811,7 @@ struct MeshData
     std::vector<Meshlet> meshlets;
     std::vector<unsigned int> meshlet_vertices;
     std::vector<unsigned char> meshlet_triangles;
+    std::vector<unsigned int> indices;
     std::vector<Vertex> vertices;
     float4 boundingSphere;
 };
@@ -1767,6 +1821,15 @@ struct Material
     uint shaderIndex;
     float parameters[15];
     SRV texturesSRV[16];
+};
+
+struct ResourcePool
+{
+    uint poolSize;
+    uint nextOffset;
+    uint stride;
+    std::vector<Resource> resource;
+
 };
 
 struct MeshStorage
@@ -1783,17 +1846,21 @@ struct MeshStorage
     Resource meshletTriangles;
     uint nextVertexOffset = 0;
     Resource vertices;
+    uint nextIndexOffset = 0;
+    Resource indices;
 
-    Resource blasVertices;
-    Resource blasIndicies;
+    std::vector<Resource> blas;
+    Resource scratchBLAS;
+    uint maxScratchSizeInBytes = 100000;
 
     std::recursive_mutex lock;
 
     uint meshesMaxCount = 10000;
     uint meshletMaxCount = 1000000;
-    uint meshletVertexMaxCount = meshletMaxCount * 64;
-    uint meshletTrianglesMaxCount = meshletMaxCount * 124;
+    uint meshletVertexMaxCount = meshletMaxCount * HLSL::max_vertices;
+    uint meshletTrianglesMaxCount = meshletMaxCount * HLSL::max_triangles;
     uint vertexMaxCount = meshletVertexMaxCount;
+    uint indexMaxCount = meshletTrianglesMaxCount;
 
     void On()
     {
@@ -1803,6 +1870,9 @@ struct MeshStorage
         meshletVertices.CreateBuffer<unsigned int>(meshletVertexMaxCount, "meshlet vertices");
         meshletTriangles.CreateBuffer<unsigned char>(meshletTrianglesMaxCount, "meshlet triangles");
         vertices.CreateBuffer<Vertex>(vertexMaxCount, "vertices");
+        indices.CreateBuffer<unsigned int>(indexMaxCount, "indices");
+
+        scratchBLAS.CreateBuffer(maxScratchSizeInBytes, 1, false, "RayTracingScratch", D3D12_RESOURCE_STATE_COMMON);
     }
 
     void Off()
@@ -1812,6 +1882,12 @@ struct MeshStorage
         meshletVertices.Release();
         meshletTriangles.Release();
         vertices.Release();
+        indices.Release();
+        for (uint i = 0; i < blas.size(); i++)
+        {
+            blas[i].Release();
+        }
+        scratchBLAS.Release();
         instance = nullptr;
     }
 
@@ -1825,18 +1901,24 @@ struct MeshStorage
         uint _nextMeshletVertexOffset = nextMeshletVertexOffset;
         uint _nextMeshletTriangleOffset = nextMeshletTriangleOffset;
         uint _nextVertexOffset = nextVertexOffset;
+        uint _nextIndexOffset = nextIndexOffset;
 
         nextMeshOffset += 1;
         nextMeshletOffset += meshData.meshlets.size();
         nextMeshletVertexOffset += meshData.meshlet_vertices.size();
-        nextMeshletTriangleOffset += meshData.meshlet_triangles.size(); // triangles are packed in 1 uint (a, b, c, mop)
+        nextMeshletTriangleOffset += meshData.meshlet_triangles.size();
         nextVertexOffset += meshData.vertices.size();
+        nextIndexOffset += meshData.indices.size();
         lock.unlock();
 
         Mesh newMesh;
         newMesh.boundingSphere = meshData.boundingSphere;
         newMesh.meshletCount = meshData.meshlets.size();
         newMesh.meshletOffset = _nextMeshletOffset;
+        newMesh.indexCount = meshData.indices.size();
+        newMesh.indexOffset = _nextIndexOffset;
+        newMesh.vertexCount = meshData.vertices.size();
+        newMesh.vertexOffset = _nextVertexOffset;
         for (uint i = 0; i < meshData.meshlets.size(); i++)
         {
             meshData.meshlets[i].triangleOffset += _nextMeshletTriangleOffset;
@@ -1847,28 +1929,85 @@ struct MeshStorage
         {
             meshData.meshlet_vertices[j] += _nextVertexOffset;
         }
+        for (uint j = 0; j < meshData.indices.size(); j++)
+        {
+            meshData.indices[j] += _nextIndexOffset;
+        }
 
-        if (nextMeshOffset > meshesMaxCount)
-            IOs::Log("Too much meshes");
-        meshes.Upload(&newMesh, sizeof(newMesh), commandBuffer, _nextMeshOffset * sizeof(newMesh));
-
-        if (nextMeshletOffset > meshletMaxCount)
-            IOs::Log("Too much meshlets");
-        meshlets.Upload(meshData.meshlets.data(), meshData.meshlets.size() * sizeof(meshData.meshlets[0]), commandBuffer, _nextMeshletOffset * sizeof(meshData.meshlets[0]));
-
-        if (nextMeshletVertexOffset > meshletVertexMaxCount)
-            IOs::Log("Too much meshlets vertices");
-        meshletVertices.Upload(meshData.meshlet_vertices.data(), meshData.meshlet_vertices.size() * sizeof(meshData.meshlet_vertices[0]), commandBuffer, _nextMeshletVertexOffset * sizeof(meshData.meshlet_vertices[0]));
-
-        if (nextMeshletTriangleOffset > meshletTrianglesMaxCount)
-            IOs::Log("Too much meshlets triangles");
-        meshletTriangles.Upload(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size() * sizeof(meshData.meshlet_triangles[0]), commandBuffer, _nextMeshletTriangleOffset * sizeof(meshData.meshlet_triangles[0]));
-
-        if (nextVertexOffset > vertexMaxCount)
-            IOs::Log("Too much vertices");
-        vertices.Upload(meshData.vertices.data(), meshData.vertices.size() * sizeof(meshData.vertices[0]), commandBuffer, _nextVertexOffset * sizeof(meshData.vertices[0]));
+        meshes.UploadElements(&newMesh, 1, _nextMeshOffset, commandBuffer);
+        meshlets.UploadElements(meshData.meshlets.data(), meshData.meshlets.size(), _nextMeshletOffset, commandBuffer);
+        meshletVertices.UploadElements(meshData.meshlet_vertices.data(), meshData.meshlet_vertices.size(), _nextMeshletVertexOffset, commandBuffer);
+        meshletTriangles.UploadElements(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size(), _nextMeshletTriangleOffset, commandBuffer);
+        vertices.UploadElements(meshData.vertices.data(), meshData.vertices.size(), _nextVertexOffset, commandBuffer);
+        indices.UploadElements(meshData.indices.data(), meshData.indices.size(), _nextIndexOffset, commandBuffer);
 
         return newMesh;
+    }
+
+    void LoadBLAS(Mesh& mesh, CommandBuffer& commandBuffer)
+    {
+        bool isOpaque = true;
+        D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};
+        descriptor.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        descriptor.Triangles.VertexBuffer.StartAddress = vertices.GetResource()->GetGPUVirtualAddress() + mesh.vertexOffset * vertices.stride;
+        descriptor.Triangles.VertexBuffer.StrideInBytes = vertices.stride;
+        descriptor.Triangles.VertexCount = mesh.vertexCount;
+        descriptor.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+        descriptor.Triangles.IndexBuffer = indices.GetResource()->GetGPUVirtualAddress() + mesh.indexOffset * indices.stride;
+        descriptor.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+        descriptor.Triangles.IndexCount = mesh.indexCount;
+        descriptor.Triangles.Transform3x4 = 0;//matrix->GetGPUVirtualAddress() + offset;
+        descriptor.Flags = isOpaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS prebuildDesc;
+        prebuildDesc.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        prebuildDesc.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        prebuildDesc.NumDescs = 1;
+        prebuildDesc.pGeometryDescs = &descriptor;
+        prebuildDesc.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
+        GPU::instance->device->GetRaytracingAccelerationStructurePrebuildInfo(&prebuildDesc, &info);
+
+        if (info.ScratchDataSizeInBytes <= 0 || info.ResultDataMaxSizeInBytes <= 0)// || info.UpdateScratchDataSizeInBytes <= 0)
+        {
+            IOs::Log("Raytracing BLAS Creation Error");
+        }
+        seedAssert(info.ScratchDataSizeInBytes < maxScratchSizeInBytes);
+
+        // Helper to compute aligned buffer sizes
+#ifndef ROUND_UP
+#define ROUND_UP(v, powerOf2Alignment)                                         \
+  (((v) + (powerOf2Alignment)-1) & ~((powerOf2Alignment)-1))
+#endif
+        // Buffer sizes need to be 256-byte-aligned
+        UINT64 scratchSizeInBytes = ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        UINT64 resultSizeInBytes = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+
+        if (scratchSizeInBytes > maxScratchSizeInBytes)
+            maxScratchSizeInBytes = scratchSizeInBytes;
+
+        blas.resize(blas.size() + 1);
+        auto& newblas = blas.back();
+        newblas.CreateAccelerationStructure(resultSizeInBytes, "BLAS");
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc;
+        buildDesc.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        buildDesc.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        buildDesc.Inputs.NumDescs = 1;
+        buildDesc.Inputs.pGeometryDescs = &descriptor;
+        buildDesc.DestAccelerationStructureData = newblas.GetResource()->GetGPUVirtualAddress();
+        buildDesc.ScratchAccelerationStructureData = scratchBLAS.GetResource()->GetGPUVirtualAddress();
+        buildDesc.SourceAccelerationStructureData = 0;
+        buildDesc.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+
+        commandBuffer.cmd->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+
+        D3D12_RESOURCE_BARRIER uavBarrier;
+        uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarrier.UAV.pResource = newblas.GetResource();
+        uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        commandBuffer.cmd->ResourceBarrier(1, &uavBarrier);
     }
 };
 MeshStorage* MeshStorage::instance;

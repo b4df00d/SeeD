@@ -91,6 +91,10 @@ namespace HLSL
         float4 boundingSphere;
         uint meshletOffset;
         uint meshletCount;
+        uint vertexOffset;
+        uint vertexCount;
+        uint indexOffset;
+        uint indexCount;
         uint pad[2];
     };
     

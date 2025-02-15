@@ -304,6 +304,7 @@ public:
             READ_VECTOR(mesh.meshlet_triangles);
             READ_VECTOR(mesh.meshlet_vertices);
             READ_VECTOR(mesh.vertices);
+            READ_VECTOR(mesh.indices);
             fin.read((char*)&mesh.boundingSphere, sizeof(mesh.boundingSphere));
             fin.close();
         }
@@ -328,6 +329,7 @@ public:
             WRITE_VECTOR(mesh.meshlet_triangles);
             WRITE_VECTOR(mesh.meshlet_vertices);
             WRITE_VECTOR(mesh.vertices);
+            WRITE_VECTOR(mesh.indices);
             fout.write((char*)&mesh.boundingSphere, sizeof(mesh.boundingSphere));
             fout.close();
         }
@@ -374,6 +376,7 @@ public:
         optimizedMesh.meshlet_vertices = meshlet_vertices;
         optimizedMesh.meshlet_triangles = meshlet_triangles;
         optimizedMesh.vertices = originalMesh.vertices;
+        optimizedMesh.indices = originalMesh.indices;
         optimizedMesh.boundingSphere = originalMesh.boundingSphere;
         
         for (uint i = 0; i < optimizedMesh.meshlets.size(); i++)

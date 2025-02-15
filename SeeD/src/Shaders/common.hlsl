@@ -545,6 +545,7 @@ bool FrustumCulling(in HLSL::Camera camera, float4 boundingSphere)
 // il y a 4 sample plutot que 1 sample du mip du dessus car les 4 corners peuvent etre a cheval entre 2 pixel du sample du dessus
 bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
 {
+    //boundingSphere.w *= 0.3; // test pour le 'presque back face culling a cause du zdepth'
     if (length(boundingSphere.xyz - camera.worldPos.xyz) < boundingSphere.w)
         return false;
     
