@@ -26,6 +26,12 @@ extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"
 
 #define FRAMEBUFFERING 2
 
+        // Helper to compute aligned buffer sizes
+#ifndef ROUND_UP
+#define ROUND_UP(v, powerOf2Alignment)                                         \
+  (((v) + (powerOf2Alignment)-1) & ~((powerOf2Alignment)-1))
+#endif
+
 struct SRV
 {
     uint offset;
@@ -204,7 +210,6 @@ struct CommandBuffer
     ID3D12CommandAllocator* cmdAlloc = NULL;
     ID3D12CommandQueue* queue = NULL;
     Fence passEnd;
-    Fence waitFor;
     uint profileIdx;
     bool open;
 
@@ -1418,7 +1423,7 @@ void CommandBuffer::On(ID3D12CommandQueue* _queue, String name)
     {
         GPU::PrintDeviceRemovedReason(hr);
     }
-    passEnd.fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    passEnd.fenceEvent = CreateEvent(nullptr, FALSE, FALSE, wname.c_str());
     if (passEnd.fenceEvent == nullptr)
     {
         GPU::PrintDeviceRemovedReason(hr);
@@ -1519,6 +1524,17 @@ public:
         cpuData.reserve(cpuData.size() + count);
         for (uint i = 0; i < count; i++)
         {
+            cpuData.push_back(data[i]);
+        }
+        lock.unlock();
+    }
+    void AddRangeWithTransform(T* data, uint count, void (*f)(int, T&))
+    {
+        lock.lock();
+        cpuData.reserve(cpuData.size() + count);
+        for (uint i = 0; i < count; i++)
+        {
+            f(cpuData.size(), data[i]);
             cpuData.push_back(data[i]);
         }
         lock.unlock();
@@ -1785,20 +1801,7 @@ struct Profiler
 };
 Profiler* Profiler::instance;
 
-struct BLAS
-{
-
-};
-
-struct TLAS
-{
-    ~TLAS()
-    {
-
-    }
-};
-
-struct Vertex
+struct Vertex // et pas HLSL::Vertex car a cause de hlsl++ il sera pas aligne pareil mais il doivent rester les memes !
 {
     float px, py, pz;
     float nx, ny, nz;
@@ -1811,6 +1814,7 @@ struct Meshlet : HLSL::Meshlet
 
 struct Mesh : HLSL::Mesh
 {
+    Resource BLAS;
 };
 
 struct MeshData
@@ -1827,9 +1831,10 @@ struct Material
 {
     uint shaderIndex;
     float parameters[15];
-    SRV texturesSRV[16];
+    SRV texturesSRV[16]; // <- pas bon ! c´est pas aligné comme HLSL::Material
 };
 
+/*
 struct ResourcePool
 {
     uint poolSize;
@@ -1838,6 +1843,7 @@ struct ResourcePool
     std::vector<Resource> resource;
 
 };
+*/
 
 struct MeshStorage
 {
@@ -1856,7 +1862,9 @@ struct MeshStorage
     uint nextIndexOffset = 0;
     Resource indices;
 
-    std::vector<Resource> blas;
+    // just to keep the BLAS so it can be released
+    // could we just store BLASes in big bulk resources like above ?
+    std::vector<Mesh> allMeshes;
     Resource scratchBLAS;
     uint maxScratchSizeInBytes = 1000000;
 
@@ -1872,8 +1880,8 @@ struct MeshStorage
     void On()
     {
         instance = this;
-        meshes.CreateBuffer<Mesh>(meshesMaxCount, "meshes");
-        meshlets.CreateBuffer<Meshlet>(meshletMaxCount, "meshlets");
+        meshes.CreateBuffer<HLSL::Mesh>(meshesMaxCount, "meshes");
+        meshlets.CreateBuffer<HLSL::Meshlet>(meshletMaxCount, "meshlets");
         meshletVertices.CreateBuffer<unsigned int>(meshletVertexMaxCount, "meshlet vertices");
         meshletTriangles.CreateBuffer<unsigned char>(meshletTrianglesMaxCount, "meshlet triangles");
         vertices.CreateBuffer<Vertex>(vertexMaxCount, "vertices");
@@ -1890,10 +1898,6 @@ struct MeshStorage
         meshletTriangles.Release();
         vertices.Release();
         indices.Release();
-        for (uint i = 0; i < blas.size(); i++)
-        {
-            blas[i].Release();
-        }
         scratchBLAS.Release();
         instance = nullptr;
     }
@@ -1948,7 +1952,7 @@ struct MeshStorage
         vertices.UploadElements(meshData.vertices.data(), meshData.vertices.size(), _nextVertexOffset, commandBuffer);
         indices.UploadElements(meshData.indices.data(), meshData.indices.size(), _nextIndexOffset, commandBuffer);
 
-        //LoadBLAS(newMesh, commandBuffer);
+        LoadBLAS(newMesh, commandBuffer);
 
         return newMesh;
     }
@@ -1984,11 +1988,6 @@ struct MeshStorage
         }
         seedAssert(info.ScratchDataSizeInBytes < maxScratchSizeInBytes);
 
-        // Helper to compute aligned buffer sizes
-#ifndef ROUND_UP
-#define ROUND_UP(v, powerOf2Alignment)                                         \
-  (((v) + (powerOf2Alignment)-1) & ~((powerOf2Alignment)-1))
-#endif
         // Buffer sizes need to be 256-byte-aligned
         UINT64 scratchSizeInBytes = ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
         UINT64 resultSizeInBytes = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
@@ -1996,16 +1995,14 @@ struct MeshStorage
         if (scratchSizeInBytes > maxScratchSizeInBytes)
             maxScratchSizeInBytes = scratchSizeInBytes;
 
-        blas.resize(blas.size() + 1);
-        auto& newblas = blas.back();
-        newblas.CreateAccelerationStructure(resultSizeInBytes, "BLAS");
+        mesh.BLAS.CreateAccelerationStructure(resultSizeInBytes, "BLAS");
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc;
         buildDesc.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
         buildDesc.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
         buildDesc.Inputs.NumDescs = 1;
         buildDesc.Inputs.pGeometryDescs = &descriptor;
-        buildDesc.DestAccelerationStructureData = newblas.GetResource()->GetGPUVirtualAddress();
+        buildDesc.DestAccelerationStructureData = mesh.BLAS.GetResource()->GetGPUVirtualAddress();
         buildDesc.ScratchAccelerationStructureData = scratchBLAS.GetResource()->GetGPUVirtualAddress();
         buildDesc.SourceAccelerationStructureData = 0;
         buildDesc.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
@@ -2014,9 +2011,11 @@ struct MeshStorage
 
         D3D12_RESOURCE_BARRIER uavBarrier;
         uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        uavBarrier.UAV.pResource = newblas.GetResource();
+        uavBarrier.UAV.pResource = mesh.BLAS.GetResource();
         uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
         commandBuffer.cmd->ResourceBarrier(1, &uavBarrier);
+
+        
     }
 };
 MeshStorage* MeshStorage::instance;

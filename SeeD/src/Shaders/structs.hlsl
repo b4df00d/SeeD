@@ -20,6 +20,16 @@ struct Options
 
 namespace HLSL
 {
+    static const uint max_vertices = 64;
+    static const uint max_triangles = 124;
+#ifndef __cplusplus
+    struct MSVert
+    {
+        float4 pos : SV_Position;
+        float3 color : COLOR0;
+    };
+#endif
+    
     static const uint invalidUINT = 4294967295;
     struct CommonResourcesIndices
     {
@@ -163,14 +173,4 @@ namespace HLSL
     {
         uint2 resolution;
     };
-    
-    static const uint max_vertices = 64;
-    static const uint max_triangles = 124;
-#ifndef __cplusplus
-    struct MSVert
-    {
-        float4 pos : SV_Position;
-        float3 color : COLOR0;
-    };
-#endif
 }

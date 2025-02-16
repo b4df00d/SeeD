@@ -214,7 +214,7 @@ struct ViewWorld
     Map<World::Entity, Material, HLSL::Material> materials;
     StructuredUploadBuffer<HLSL::Instance> instances;
     StructuredBuffer<HLSL::Instance> instancesGPU; // only for instances created on GPU
-    TLAS tlas;
+
     std::atomic<uint> meshletsCount;
 
     void Release()
@@ -248,7 +248,7 @@ struct CullingContext
         meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
     }
 
-    void Release()
+    void Off()
     {
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -263,16 +263,41 @@ struct CullingContext
     }
 };
 
+struct RayTracingContext
+{
+    PerFrame<StructuredUploadBuffer<D3D12_RAYTRACING_INSTANCE_DESC>> instancesRayTracing;
+    Resource TLAS;
+    Resource scratchBuffer;
+
+    void On()
+    {
+        TLAS.CreateAccelerationStructure(1000000, "TLAS");
+        scratchBuffer.CreateBuffer(1000000, 1, false, "scratchBuffer");
+    }
+
+    void Off()
+    {
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            instancesRayTracing.Get(i).Release();
+        }
+        TLAS.Release();
+        scratchBuffer.Release();
+    }
+};
+
 class View
 {
 public:
     uint2 resolution;
     PerFrame<ViewWorld> viewWorld;
+    RayTracingContext raytracingContext;
     CullingContext cullingContext;
     std::map<UINT64, Resource> resources;
 
     virtual void On(IOs::WindowInformation& window)
     {
+        raytracingContext.On();
         cullingContext.On();
     }
     virtual void Off()
@@ -281,7 +306,8 @@ public:
         {
             viewWorld.Get(i).Release();
         }
-        cullingContext.Release();
+        raytracingContext.Off();
+        cullingContext.Off();
 
         for (auto& item : resources)
         {
@@ -375,12 +401,12 @@ class Pass
     View* view;
 public:
     PerFrame<CommandBuffer> commandBuffer;
-    Pass* dependency;
+    PerFrame<CommandBuffer>* dependency = nullptr;
 
     // debug only ?
     String name;
 
-    virtual void On(View* _view, ID3D12CommandQueue* queue, String _name, Pass* _dependency)
+    virtual void On(View* _view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency)
     {
         ZoneScoped;
         view = _view;
@@ -447,7 +473,8 @@ public:
 
         if (dependency != nullptr)
         {
-            commandBuffer->queue->Wait(dependency->commandBuffer->passEnd.fence, dependency->commandBuffer->passEnd.fenceValue);
+            //IOs::Log("{} waiting on {}", name.c_str(), "something");
+            commandBuffer->queue->Wait(dependency->Get().passEnd.fence, dependency->Get().passEnd.fenceValue);
         }
         commandBuffer->queue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
         commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
@@ -558,8 +585,9 @@ public:
         ZoneScoped;
         Open();
 
-        /*
-        bool allowUpdate;
+        bool allowUpdate = true;
+
+        //CPU stuff ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
         // The generated AS can support iterative updates. This may change the final
         // size of the AS as well as the temporary memory requirements, and hence has
@@ -587,12 +615,50 @@ public:
         GPU::instance->device->GetRaytracingAccelerationStructurePrebuildInfo(&prebuildDesc, &info);
 
         // Buffer sizes need to be 256-byte-aligned
-        *scratchSizeInBytes = ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
-        *resultSizeInBytes = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        uint scratchSizeInBytes = ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        uint resultSizeInBytes = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
         // The instance descriptors are stored as-is in GPU memory, so we can deduce
         // the required size from the instance count
-        *descriptorsSizeInBytes = ROUND_UP(sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * static_cast<UINT64>(m_instances.size()), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
-        */
+        uint descriptorsSizeInBytes = ROUND_UP(sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * static_cast<UINT64>(view->viewWorld->instances.Size()), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+
+
+        //GPU stuff ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+        bool updateOnly = false;
+        // If this in an update operation we need to provide the source buffer
+        D3D12_GPU_VIRTUAL_ADDRESS pSourceAS = updateOnly ? view->raytracingContext.TLAS.GetResource()->GetGPUVirtualAddress() : 0;
+
+        // The stored flags represent whether the AS has been built for updates or
+        // not. If yes and an update is requested, the builder is told to only update
+        // the AS instead of fully rebuilding it
+        if (flags == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE && updateOnly)
+        {
+            flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+        }
+
+        // Create a descriptor of the requested builder work, to generate a top-level
+        // AS from the input parameters
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc = {};
+        buildDesc.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        buildDesc.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        buildDesc.Inputs.InstanceDescs = view->raytracingContext.instancesRayTracing->GetGPUVirtualAddress();
+        buildDesc.Inputs.NumDescs = view->raytracingContext.instancesRayTracing->Size();
+        buildDesc.DestAccelerationStructureData = view->raytracingContext.TLAS.GetResource()->GetGPUVirtualAddress();
+        buildDesc.ScratchAccelerationStructureData = view->raytracingContext.scratchBuffer.GetResource()->GetGPUVirtualAddress();
+        buildDesc.SourceAccelerationStructureData = pSourceAS;
+        buildDesc.Inputs.Flags = flags;
+
+        // Build the top-level AS
+        commandBuffer->cmd->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+
+        // Wait for the builder to complete by setting a barrier on the resulting
+        // buffer. This can be important in case the rendering is triggered
+        // immediately afterwards, without executing the command list
+        D3D12_RESOURCE_BARRIER uavBarrier;
+        uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        uavBarrier.UAV.pResource = view->raytracingContext.TLAS.GetResource();
+        uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        commandBuffer->cmd->ResourceBarrier(1, &uavBarrier);
 
         Close();
     }
@@ -605,7 +671,7 @@ class HZB : public Pass
     FfxSpdContextDescription initializationParameters = { 0 };
     FfxSpdContext            context;
 public:
-    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, Pass* _dependency) override
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
     {
         Pass::On(view, queue, _name, _dependency);
         ZoneScoped;
@@ -683,7 +749,7 @@ class Culling : public Pass
     Components::Handle<Components::Shader> cullingInstancesShader;
     Components::Handle<Components::Shader> cullingMeshletsShader;
 public:
-    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, Pass* _dependency) override
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
     {
         Pass::On(view, queue, _name, _dependency);
         ZoneScoped;
@@ -740,7 +806,7 @@ class ZPrepass : public Pass
 {
     ViewResource depth;
 public:
-    void On(View* view, ID3D12CommandQueue* queue, String _name, Pass* _dependency) override
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
     {
         Pass::On(view, queue, _name, _dependency);
         ZoneScoped;
@@ -798,7 +864,7 @@ class Forward : public Pass
     ViewResource depth;
     Components::Handle<Components::Shader> meshShader;
 public:
-    void On(View* view, ID3D12CommandQueue* queue, String _name, Pass* _dependency) override
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
     {
         Pass::On(view, queue, _name, _dependency);
         ZoneScoped;
@@ -893,17 +959,17 @@ public:
         resolution = window.windowResolution;
 
         hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr);
-        skinning.On(this, GPU::instance->computeQueue, "skinning", nullptr);
-        particles.On(this, GPU::instance->computeQueue, "particles", nullptr);
-        spawning.On(this, GPU::instance->computeQueue, "spawning", nullptr);
-        accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", nullptr);
-        culling.On(this, GPU::instance->computeQueue, "culling", &hzb);
-        zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling);
-        gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass);
-        lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers);
-        forward.On(this, GPU::instance->graphicQueue, "forward", &lighting);
-        postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &forward);
-        present.On(this, GPU::instance->graphicQueue, "present", &postProcess);
+        skinning.On(this, GPU::instance->computeQueue, "skinning", &AssetLibrary::instance->commandBuffer);
+        particles.On(this, GPU::instance->computeQueue, "particles", &AssetLibrary::instance->commandBuffer);
+        spawning.On(this, GPU::instance->computeQueue, "spawning", &AssetLibrary::instance->commandBuffer);
+        accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &AssetLibrary::instance->commandBuffer);
+        culling.On(this, GPU::instance->graphicQueue, "culling", &hzb.commandBuffer);
+        zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer);
+        gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer);
+        lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers.commandBuffer);
+        forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer);
+        postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &forward.commandBuffer);
+        present.On(this, GPU::instance->graphicQueue, "present", &postProcess.commandBuffer);
     }
 
     void Off() override
@@ -980,6 +1046,7 @@ public:
         ZoneScoped;
         viewWorld->instances.Clear();
         viewWorld->meshletsCount = 0;
+        raytracingContext.instancesRayTracing->Clear();
 
 
 #define UpdateInstancesStepSize 128
@@ -993,13 +1060,15 @@ public:
         frameWorld.materials.Reserve(materialsCount);
         
         tf::Task task = subflow.for_each_index(0, entityCount, UpdateInstancesStepSize,
-            [&world, &frameWorld, instanceQueryIndex](int i)
+            [this, &world, instanceQueryIndex](int i)
             {
                 ZoneScopedN("UpdateInstance");
 
                 std::array<HLSL::Instance, UpdateInstancesStepSize> localInstances;
+                std::array<D3D12_RAYTRACING_INSTANCE_DESC, UpdateInstancesStepSize> localInstancesRayTracing;
                 uint localMeshletCount = 0;
                 uint instanceCount = 0;
+                uint instanceRayTracingCount = 0;
                 for (uint subQuery = 0; subQuery < UpdateInstancesStepSize; subQuery++)
                 {
                     auto& queryResult = world.frameQueries[instanceQueryIndex];
@@ -1024,8 +1093,8 @@ public:
                         continue;
 
                     uint materialIndex;
-                    bool materialAdded = frameWorld.materials.Add(World::Entity(instanceCmp.material.index), materialIndex);
-                    if (!frameWorld.materials.GetLoaded(materialIndex))
+                    bool materialAdded = viewWorld->materials.Add(World::Entity(instanceCmp.material.index), materialIndex);
+                    if (!viewWorld->materials.GetLoaded(materialIndex))
                         continue;
 
                     // everything should be loaded to be able to draw the instance
@@ -1035,19 +1104,35 @@ public:
                     instance.meshIndex = meshIndex;
                     instance.materialIndex = materialIndex;
                     instance.worldMatrix = worldMatrix;
-
-                    // if in range (depending on distance and BC size)
-                        // Add to TLAS
                     // count instances with shader
-
                     instanceCount++;
 
                     Mesh* mesh = AssetLibrary::instance->Get<Mesh>(meshCmp.id);
                     localMeshletCount += mesh->meshletCount;
+
+
+                    // if in range (depending on distance and BC size)
+                        // Add to TLAS
+                    D3D12_RAYTRACING_INSTANCE_DESC& instanceDesc = localInstancesRayTracing[instanceRayTracingCount];
+                    // Instance ID visible in the shader in InstanceID()
+                    instanceDesc.InstanceID = instanceRayTracingCount;
+                    // Index of the hit group invoked upon intersection
+                    instanceDesc.InstanceContributionToHitGroupIndex = 0;
+                    // Instance flags, including backface culling, winding, etc - TODO: should be accessible from outside
+                    instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+                    // Instance transform matrix
+                    memcpy(instanceDesc.Transform, &worldMatrix, sizeof(instanceDesc.Transform));
+                    // Get access to the bottom level
+                    instanceDesc.AccelerationStructure = mesh->BLAS.GetResource()->GetGPUVirtualAddress();
+                    // Visibility mask, always visible here - TODO: should be accessible from outside
+                    instanceDesc.InstanceMask = 0xFF;
+
+                    instanceRayTracingCount++;
                 }
 
-                frameWorld.instances.AddRange(localInstances.data(), instanceCount);
-                frameWorld.meshletsCount += localMeshletCount;
+                viewWorld->instances.AddRange(localInstances.data(), instanceCount);
+                viewWorld->meshletsCount += localMeshletCount;
+                raytracingContext.instancesRayTracing->AddRangeWithTransform(localInstancesRayTracing.data(), instanceRayTracingCount, [](int index, D3D12_RAYTRACING_INSTANCE_DESC& data) { data.InstanceID = index; });
             }
         );
 
@@ -1237,6 +1322,7 @@ public:
             {
                 ZoneScoped;
                 this->viewWorld->instances.Upload();
+                this->raytracingContext.instancesRayTracing->Upload();
                 this->cullingContext.instancesInView.Resize(this->viewWorld->instances.Size());
                 this->cullingContext.meshletsInView.Resize(this->viewWorld->meshletsCount);
                 SetupViewParams();
@@ -1341,9 +1427,15 @@ public:
         SUBTASKRENDERER(WaitFrame);
         SUBTASKRENDERER(PresentFrame);
 
+#if INTERLEAVEFRAMES
         ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
         ExecuteFrame.precede(WaitFrame);
         WaitFrame.precede(PresentFrame);
+#else
+        ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
+        WaitFrame.precede(ExecuteFrame);
+        ExecuteFrame.precede(PresentFrame);
+#endif
     }
 
     void ExecuteFrame()

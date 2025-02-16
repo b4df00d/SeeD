@@ -54,6 +54,10 @@ public:
         {
             commandBuffer.Get(i).Off();
         }
+        for (uint i = 0; i < meshes.size(); i++)
+        {
+            meshes[i].BLAS.Release();
+        }
         instance = nullptr;
     }
 
@@ -99,9 +103,9 @@ public:
     {
         if (commandBuffer->open)
             IOs::Log("{} OPEN !!", name);
-        ID3D12CommandQueue* commandQueue = commandBuffer->queue;
-        commandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
-        commandQueue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
+
+        commandBuffer->queue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
+        commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
     void CheckReload()
