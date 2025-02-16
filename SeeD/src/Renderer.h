@@ -375,14 +375,16 @@ class Pass
     View* view;
 public:
     PerFrame<CommandBuffer> commandBuffer;
+    Pass* dependency;
 
     // debug only ?
     String name;
 
-    virtual void On(View* _view, ID3D12CommandQueue* queue, String _name)
+    virtual void On(View* _view, ID3D12CommandQueue* queue, String _name, Pass* _dependency)
     {
         ZoneScoped;
         view = _view;
+        dependency = _dependency;
         name = _name;
         //name = CharToWString(typeid(this).name()); // name = "class Pass * __ptr64"
 
@@ -442,9 +444,13 @@ public:
     {
         if (commandBuffer->open)
             IOs::Log("{} OPEN !!", name.c_str());
-        ID3D12CommandQueue* commandQueue = GPU::instance->graphicQueue;
-        commandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
-        commandQueue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
+
+        if (dependency != nullptr)
+        {
+            commandBuffer->queue->Wait(dependency->commandBuffer->passEnd.fence, dependency->commandBuffer->passEnd.fenceValue);
+        }
+        commandBuffer->queue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
+        commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
     void SetupView(View* view, Resource* RT, uint RTCount, bool clearRT, Resource* depth, bool clearDepth)
@@ -540,6 +546,58 @@ public:
     }
 };
 
+class AccelerationStructure : public Pass
+{
+public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        /*
+        bool allowUpdate;
+
+        // The generated AS can support iterative updates. This may change the final
+        // size of the AS as well as the temporary memory requirements, and hence has
+        // to be set before the actual build
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS flags = allowUpdate ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE
+            : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+
+        // Describe the work being requested, in this case the construction of a
+        // (possibly dynamic) top-level hierarchy, with the given instance descriptors
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS
+            prebuildDesc = {};
+        prebuildDesc.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        prebuildDesc.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        prebuildDesc.NumDescs = static_cast<UINT>(view->viewWorld->instances.Size());
+        prebuildDesc.Flags = flags;
+
+        // This structure is used to hold the sizes of the required scratch memory and
+        // resulting AS
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
+
+        // Building the acceleration structure (AS) requires some scratch space, as
+        // well as space to store the resulting structure This function computes a
+        // conservative estimate of the memory requirements for both, based on the
+        // number of bottom-level instances.
+        GPU::instance->device->GetRaytracingAccelerationStructurePrebuildInfo(&prebuildDesc, &info);
+
+        // Buffer sizes need to be 256-byte-aligned
+        *scratchSizeInBytes = ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        *resultSizeInBytes = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        // The instance descriptors are stored as-is in GPU memory, so we can deduce
+        // the required size from the instance count
+        *descriptorsSizeInBytes = ROUND_UP(sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * static_cast<UINT64>(m_instances.size()), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        */
+
+        Close();
+    }
+};
+
 class HZB : public Pass
 {
     ViewResource depth;
@@ -547,9 +605,9 @@ class HZB : public Pass
     FfxSpdContextDescription initializationParameters = { 0 };
     FfxSpdContext            context;
 public:
-    virtual void On(View* view, ID3D12CommandQueue* queue, String _name) override
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, Pass* _dependency) override
     {
-        Pass::On(view, queue, _name);
+        Pass::On(view, queue, _name, _dependency);
         ZoneScoped;
 
         depth.Register("Depth", view);
@@ -625,9 +683,9 @@ class Culling : public Pass
     Components::Handle<Components::Shader> cullingInstancesShader;
     Components::Handle<Components::Shader> cullingMeshletsShader;
 public:
-    virtual void On(View* view, ID3D12CommandQueue* queue, String _name) override
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, Pass* _dependency) override
     {
-        Pass::On(view, queue, _name);
+        Pass::On(view, queue, _name, _dependency);
         ZoneScoped;
         depth.Register("Depth", view);
         cullingResetShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingReset.hlsl");
@@ -682,9 +740,9 @@ class ZPrepass : public Pass
 {
     ViewResource depth;
 public:
-    void On(View* view, ID3D12CommandQueue* queue, String _name) override
+    void On(View* view, ID3D12CommandQueue* queue, String _name, Pass* _dependency) override
     {
-        Pass::On(view, queue, _name);
+        Pass::On(view, queue, _name, _dependency);
         ZoneScoped;
         depth.Register("Depth", view);
         depth.Get().CreateDepthTarget(view->resolution, "Depth");
@@ -731,7 +789,6 @@ public:
         Open();
 
 
-
         Close();
     }
 };
@@ -741,9 +798,9 @@ class Forward : public Pass
     ViewResource depth;
     Components::Handle<Components::Shader> meshShader;
 public:
-    void On(View* view, ID3D12CommandQueue* queue, String _name) override
+    void On(View* view, ID3D12CommandQueue* queue, String _name, Pass* _dependency) override
     {
-        Pass::On(view, queue, _name);
+        Pass::On(view, queue, _name, _dependency);
         ZoneScoped;
         depth.Register("Depth", view);
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
@@ -819,6 +876,7 @@ public:
     Skinning skinning;
     Particles particles;
     Spawning spawning;
+    AccelerationStructure accelerationStructure;
     Culling culling;
     ZPrepass zPrepass;
     GBuffers gBuffers;
@@ -827,7 +885,6 @@ public:
     PostProcess postProcess;
     Present present;
 
-    Resource depthBuffer;
 
     void On(IOs::WindowInformation& window) override
     {
@@ -835,21 +892,18 @@ public:
 
         resolution = window.windowResolution;
 
-        depthBuffer.CreateDepthTarget(resolution, "Depth");
-
-        hzb.On(this, GPU::instance->graphicQueue, "hzb");
-        skinning.On(this, GPU::instance->graphicQueue, "skinning");
-        particles.On(this, GPU::instance->graphicQueue, "particles");
-        spawning.On(this, GPU::instance->graphicQueue, "spawning");
-        culling.On(this, GPU::instance->graphicQueue, "culling");
-        zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass");
-        gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers");
-        lighting.On(this, GPU::instance->graphicQueue, "lighting");
-        forward.On(this, GPU::instance->graphicQueue, "forward");
-        postProcess.On(this, GPU::instance->graphicQueue, "postProcess");
-        present.On(this, GPU::instance->graphicQueue, "present");
-
-        //AssetLibrary::instance->LoadMandatory();
+        hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr);
+        skinning.On(this, GPU::instance->computeQueue, "skinning", nullptr);
+        particles.On(this, GPU::instance->computeQueue, "particles", nullptr);
+        spawning.On(this, GPU::instance->computeQueue, "spawning", nullptr);
+        accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", nullptr);
+        culling.On(this, GPU::instance->computeQueue, "culling", &hzb);
+        zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling);
+        gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass);
+        lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers);
+        forward.On(this, GPU::instance->graphicQueue, "forward", &lighting);
+        postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &forward);
+        present.On(this, GPU::instance->graphicQueue, "present", &postProcess);
     }
 
     void Off() override
@@ -858,6 +912,7 @@ public:
         skinning.Off();
         particles.Off();
         spawning.Off();
+        accelerationStructure.Off();
         culling.Off();
         zPrepass.Off();
         gBuffers.Off();
@@ -865,8 +920,6 @@ public:
         forward.Off();
         postProcess.Off();
         present.Off();
-
-        depthBuffer.Release();
 
         View::Off();
     }
@@ -886,6 +939,7 @@ public:
         SUBTASKVIEWPASS(skinning);
         SUBTASKVIEWPASS(particles);
         SUBTASKVIEWPASS(spawning);
+        SUBTASKVIEWPASS(accelerationStructure);
         SUBTASKVIEWPASS(culling);
         SUBTASKVIEWPASS(zPrepass);
         SUBTASKVIEWPASS(gBuffers);
@@ -895,10 +949,10 @@ public:
         SUBTASKVIEWPASS(present);
 
         updateInstances.precede(updateMaterials, uploadAndSetup);
-        uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+        uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         presentTask.succeed(updateInstances, updateMaterials, uploadAndSetup);
-        presentTask.succeed(hzbTask, skinningTask, particlesTask, spawningTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+        presentTask.succeed(hzbTask, skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
     }
@@ -910,6 +964,7 @@ public:
         skinning.Execute();
         particles.Execute();
         spawning.Execute();
+        accelerationStructure.Execute();
         culling.Execute();
         zPrepass.Execute();
         gBuffers.Execute();
@@ -1225,7 +1280,7 @@ public:
     {
         resolution = window.windowResolution;
 
-        editor.On(this, GPU::instance->graphicQueue, "editor");
+        editor.On(this, GPU::instance->graphicQueue, "editor", nullptr);
     }
 
     void Off() override

@@ -40,7 +40,7 @@ public:
         instance = this;
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            commandBuffer.Get(i).On(GPU::instance->copyQueue, name);
+            commandBuffer.Get(i).On(GPU::instance->computeQueue, name); //not copyQueue because creation of blas needs it :(
         }
         namespace fs = std::filesystem;
         fs::create_directories("..\\Assets");

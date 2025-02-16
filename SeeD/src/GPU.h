@@ -551,6 +551,8 @@ public:
             GPU::PrintDeviceRemovedReason(hr);
             return;
         }
+        graphicQueue->SetName(L"graphicQueue");
+
         commandQueueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
         commandQueueDesc.Type = D3D12_COMMAND_LIST_TYPE::D3D12_COMMAND_LIST_TYPE_COMPUTE;
         hr = device->CreateCommandQueue(&commandQueueDesc, IID_PPV_ARGS(&computeQueue));
@@ -559,6 +561,8 @@ public:
             GPU::PrintDeviceRemovedReason(hr);
             return;
         }
+        computeQueue->SetName(L"computeQueue");
+
         commandQueueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
         commandQueueDesc.Type = D3D12_COMMAND_LIST_TYPE::D3D12_COMMAND_LIST_TYPE_COPY;
         hr = device->CreateCommandQueue(&commandQueueDesc, IID_PPV_ARGS(&copyQueue));
@@ -567,6 +571,7 @@ public:
             GPU::PrintDeviceRemovedReason(hr);
             return;
         }
+        copyQueue->SetName(L"copyQueue");
     }
 
     void CreateSwapChain(IOs::WindowInformation* window)
@@ -1084,7 +1089,7 @@ void Resource::CreateAccelerationStructure(uint size, String name)
     resourceDesc.SampleDesc.Count = 1;
     resourceDesc.SampleDesc.Quality = 0;
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    resourceDesc.Flags = D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE;
 
     D3D12MA::ALLOCATION_DESC allocationDesc = {};
     allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -1497,6 +1502,7 @@ public:
     }
     uint AddUnique(const T& value)
     {
+        lock.lock();
         uint index = 0;
         for (; index < cpuData.size(); index++)
         {
@@ -1504,6 +1510,7 @@ public:
                 return index;
         }
         cpuData.push_back(value);
+        lock.unlock();
         return index;
     }
     void AddRange(T* data, uint count)
@@ -1851,7 +1858,7 @@ struct MeshStorage
 
     std::vector<Resource> blas;
     Resource scratchBLAS;
-    uint maxScratchSizeInBytes = 100000;
+    uint maxScratchSizeInBytes = 1000000;
 
     std::recursive_mutex lock;
 
@@ -1940,6 +1947,8 @@ struct MeshStorage
         meshletTriangles.UploadElements(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size(), _nextMeshletTriangleOffset, commandBuffer);
         vertices.UploadElements(meshData.vertices.data(), meshData.vertices.size(), _nextVertexOffset, commandBuffer);
         indices.UploadElements(meshData.indices.data(), meshData.indices.size(), _nextIndexOffset, commandBuffer);
+
+        //LoadBLAS(newMesh, commandBuffer);
 
         return newMesh;
     }
