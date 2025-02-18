@@ -1,12 +1,10 @@
-//#pragma once
-
 #include "structs.hlsl"
 #include "binding.hlsl"
 #include "common.hlsl"
 
 #pragma compute CullingInstance
 
-[RootSignature(GlobalRootSignature)]
+[RootSignature(SeeDRootSignature)]
 [numthreads(128, 1, 1)]
 void CullingInstance(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
 {

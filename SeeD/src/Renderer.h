@@ -473,8 +473,12 @@ public:
 
         if (dependency != nullptr)
         {
-            //IOs::Log("{} waiting on {}", name.c_str(), "something");
             commandBuffer->queue->Wait(dependency->Get().passEnd.fence, dependency->Get().passEnd.fenceValue);
+        }
+        else if(endOfLastFrame != nullptr)
+        {
+            uint lastFrameIndex = GPU::instance->frameIndex ? 0 : 1;
+            commandBuffer->queue->Wait(endOfLastFrame->Get(lastFrameIndex).passEnd.fence, endOfLastFrame->Get(lastFrameIndex).passEnd.fenceValue);
         }
         commandBuffer->queue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
         commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
@@ -844,7 +848,22 @@ public:
 
 class Lighting : public Pass
 {
+    StructuredUploadBuffer<byte> shaderBindingTable;
+    Components::Handle<Components::Shader> rayDispatchShader;
 public:
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
+    {
+        Pass::On(view, queue, _name, _dependency);
+        ZoneScoped;
+        rayDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracing.hlsl");
+
+        uint raygenEntrySize = 16;
+        uint missEntrySize = 16;
+        uint hitEntrySize = 16;
+        uint shaderBindingTableSize = raygenEntrySize + missEntrySize + hitEntrySize;
+        shaderBindingTable.Resize(shaderBindingTableSize);
+        shaderBindingTable.Data();
+    }
     void Setup(View* view) override
     {
         ZoneScoped;
@@ -854,6 +873,7 @@ public:
         ZoneScoped;
         Open();
 
+        Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
 
         Close();
     }
@@ -1402,6 +1422,8 @@ public:
         meshStorage.On();
         mainView.On(window);
         editorView.On(window);
+
+        endOfLastFrame = &editorView.editor.commandBuffer;
     }
     
     void Off()
@@ -1427,7 +1449,8 @@ public:
         SUBTASKRENDERER(WaitFrame);
         SUBTASKRENDERER(PresentFrame);
 
-#if INTERLEAVEFRAMES
+#define INTERLEAVEFRAMES
+#ifdef INTERLEAVEFRAMES
         ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
         ExecuteFrame.precede(WaitFrame);
         WaitFrame.precede(PresentFrame);
@@ -1457,7 +1480,7 @@ public:
         HRESULT hr;
         // if the current fence value is still less than "fenceValue", then we know the GPU has not finished executing
         // the command queue since it has not reached the "commandQueue->Signal(fence, fenceValue)" command
-        Fence& previousFrame = editorView.editor.commandBuffer.Get(GPU::instance->frameIndex ? 0 : 1).passEnd;
+        Fence& previousFrame = endOfLastFrame->Get(GPU::instance->frameIndex ? 0 : 1).passEnd;
         auto v = previousFrame.fence->GetCompletedValue();
         if (v < previousFrame.fenceValue)
         {

@@ -104,6 +104,11 @@ public:
         if (commandBuffer->open)
             IOs::Log("{} OPEN !!", name);
 
+        if (endOfLastFrame != nullptr)
+        {
+            uint lastFrameIndex = GPU::instance->frameIndex ? 0 : 1;
+            commandBuffer->queue->Wait(endOfLastFrame->Get(lastFrameIndex).passEnd.fence, endOfLastFrame->Get(lastFrameIndex).passEnd.fenceValue);
+        }
         commandBuffer->queue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
         commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
@@ -831,6 +836,8 @@ public :
         vArgs.push_back(entryName.c_str());
         vArgs.push_back(L"-T");
         vArgs.push_back(typeName.c_str());
+        vArgs.push_back(L"-rootsig-define");
+        vArgs.push_back(L"SeeDRootSignature");
         //vArgs.push_back(DXC_ARG_ALL_RESOURCES_BOUND);
         //vArgs.push_back(L"-no-warnings");
 #ifdef _DEBUG
@@ -895,20 +902,30 @@ public :
         shaderBytecode.BytecodeLength = pShader->GetBufferSize();
         shaderBytecode.pShaderBytecode = pShader->GetBufferPointer();
 
+
+
         if (shader != nullptr)
         {
-            IDxcBlob* sig = nullptr;
-            pResults->GetOutput(DXC_OUT_ROOT_SIGNATURE, IID_PPV_ARGS(&sig), &pShaderName);
-            if (sig == nullptr)
+            IDxcBlob* pSig = nullptr;
+            IDxcBlobUtf16* pSigName = nullptr;
+            pResults->GetOutput(DXC_OUT_ROOT_SIGNATURE, IID_PPV_ARGS(&pSig), &pSigName);
+            if (pSig != nullptr)
             {
-                return D3D12_SHADER_BYTECODE{};
+                hr = GPU::instance->device->CreateRootSignature(0, pSig->GetBufferPointer(), pSig->GetBufferSize(), IID_PPV_ARGS(&shader->rootSignature));
+                if (!SUCCEEDED(hr))
+                {
+                    return D3D12_SHADER_BYTECODE{};
+                }
+            }
+            else
+            {
+                hr = GPU::instance->device->CreateRootSignature(1, pShader->GetBufferPointer(), pShader->GetBufferSize(), IID_PPV_ARGS(&shader->rootSignature));
+                if (!SUCCEEDED(hr))
+                {
+                    return D3D12_SHADER_BYTECODE{};
+                }
             }
 
-            hr = GPU::instance->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&shader->rootSignature));
-            if (!SUCCEEDED(hr))
-            {
-                return D3D12_SHADER_BYTECODE{};
-            }
         
             // Create the command signature used for indirect drawing.
             // Each command consists of a CBV update and a DrawInstanced call.
@@ -923,14 +940,21 @@ public :
             argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
             if(type == "ms_6_6")
                 argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
-            if (type == "cs_6_6")
+            else if (type == "cs_6_6")
                 argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+            else if (type == "lib_6_3")
+                argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS;
 
 
             D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
             commandSignatureDesc.pArgumentDescs = argumentDescs;
             commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
-            commandSignatureDesc.ByteStride = sizeof(HLSL::MeshletDrawCall);
+            if (type == "ms_6_6")
+                commandSignatureDesc.ByteStride = sizeof(HLSL::MeshletDrawCall);
+            else if (type == "cs_6_6")
+                commandSignatureDesc.ByteStride = sizeof(HLSL::InstanceCullingDispatch);
+            else if (type == "lib_6_6")
+                commandSignatureDesc.ByteStride = sizeof(HLSL::RayDispatch);
 
             auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, shader->rootSignature, IID_PPV_ARGS(&shader->commandSignature));
             if (FAILED(hr))
@@ -938,6 +962,12 @@ public :
                 GPU::PrintDeviceRemovedReason(hr);
                 return D3D12_SHADER_BYTECODE{};
             }
+
+            IDxcBlob* rtLibrary;
+
+            pResults->GetResult(&rtLibrary);
+            ID3D12StateObject* rtStateObject;
+            ID3D12StateObjectProperties* rtStateObjectProps;
         }
 
 #if 0
@@ -988,7 +1018,12 @@ public :
         reflectionBuffer.Size = pReflectionData->GetBufferSize();
         reflectionBuffer.Encoding = 0;
         ID3D12ShaderReflection* pShaderReflection;
-        DxcUtils->CreateReflection(&reflectionBuffer, IID_PPV_ARGS(&pShaderReflection));
+        HRESULT hr = DxcUtils->CreateReflection(&reflectionBuffer, IID_PPV_ARGS(&pShaderReflection));
+        if (FAILED(hr))
+        {
+            GPU::PrintDeviceRemovedReason(hr);
+            return;
+        }
 
         D3D12_SHADER_DESC refDesc;
         pShaderReflection->GetDesc(&refDesc);
@@ -1180,7 +1215,7 @@ public :
 					auto tokens = line.Split(" ");
 
 					// add empty strings for shaders passes names to avoid checking if a token is there
-					for (uint i = (uint)tokens.size(); i < 4; i++)
+					for (uint i = (uint)tokens.size(); i < 5; i++)
 					{
 						tokens.push_back(" ");
 					}
@@ -1230,6 +1265,17 @@ public :
                         shader.pso = nullptr;
                         shader.pso = CreatePSO(stream);
                         compiled = shader.pso != nullptr;
+                    }
+                    else if (tokens[1] == "raytracing")
+                    {
+                        D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, "", "lib_6_6", &shader);
+                        PipelineStateStream stream;
+                        stream.CS = computeShaderBytecode;
+                        stream.pRootSignature = shader.rootSignature;
+                        shader.pso = nullptr;
+                        //shader.pso = CreatePSO(stream);
+                        //compiled = shader.pso != nullptr;
+                        compiled = true;
                     }
 				}
 			}

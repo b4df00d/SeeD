@@ -1,12 +1,10 @@
-//#pragma once
-
 #include "structs.hlsl"
 #include "binding.hlsl"
 #include "common.hlsl"
 
 #pragma compute CullingMeshlet
 
-[RootSignature(GlobalRootSignature)]
+[RootSignature(SeeDRootSignature)]
 [numthreads(HLSL::cullMeshletThreadCount, 1, 1)]
 void CullingMeshlet(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
 {

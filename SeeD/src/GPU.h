@@ -158,6 +158,10 @@ struct Shader
     ID3D12RootSignature* rootSignature;
     ID3D12PipelineState* pso;
 
+    //for raytracing
+    ID3D12StateObject* rtStateObject;
+    ID3D12StateObjectProperties* rtStateObjectProps;
+
     uint3 numthreads; // read that from shader reflection
 
     std::map<String, __time64_t> creationTime;
@@ -425,6 +429,8 @@ public:
         return &Get();
     }
 };
+
+static PerFrame<CommandBuffer>* endOfLastFrame = nullptr;
 
 class GPU
 {
@@ -1554,6 +1560,10 @@ public:
     T& operator [] (uint index)
     {
         return cpuData[index];
+    }
+    T* Data()
+    {
+        return cpuData.data();
     }
     void Upload()
     {

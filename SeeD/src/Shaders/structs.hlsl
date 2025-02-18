@@ -151,6 +151,40 @@ namespace HLSL
         uint ThreadGroupCountZ;
     };
     
+#ifndef __cplusplus
+    typedef uint64_t D3D12_GPU_VIRTUAL_ADDRESS;
+    struct D3D12_GPU_VIRTUAL_ADDRESS_RANGE
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS StartAddress;
+        uint64_t SizeInBytes;
+    };
+    struct D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS StartAddress;
+        uint64_t SizeInBytes;
+        uint64_t StrideInBytes;
+    };
+    struct D3D12_DISPATCH_RAYS_DESC
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE RayGenerationShaderRecord;
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE MissShaderTable;
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE HitGroupTable;
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE CallableShaderTable;
+        uint Width;
+        uint Height;
+        uint Depth;
+    };
+#endif
+    
+    struct RayDispatch
+    {
+        uint instanceIndex;
+        uint meshletIndex;
+        
+        // for D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH
+        D3D12_DISPATCH_RAYS_DESC rayDesc;
+    };
+    
     struct Camera
     {
         float4x4 view;
@@ -172,5 +206,26 @@ namespace HLSL
     struct Globals
     {
         uint2 resolution;
+    };
+    
+    // Hit information, aka ray payload
+    // Note that the payload should be kept as small as possible,
+    // and that its size must be declared in the corresponding
+    // D3D12_RAYTRACING_SHADER_CONFIG pipeline subobjet.
+    struct HitInfo
+    {
+        float3 color;
+        float rayDepth;
+        float3 currentPosition;
+        uint rndseed;
+        float3 normal;
+        float tCurrent;
+    };
+    
+    // Attributes output by the raytracing when hitting a surface,
+    // here the barycentric coordinates
+    struct Attributes
+    {
+        float2 bary;
     };
 }

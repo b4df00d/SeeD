@@ -14,7 +14,7 @@ struct Payload
 groupshared Payload sPayload;
 groupshared uint payloadIndex;
 
-[RootSignature(GlobalRootSignature)]
+[RootSignature(SeeDRootSignature)]
 [numthreads(1, 1, 1)]
 void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
 {
@@ -65,7 +65,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     DispatchMesh(min(256, payloadIndex), 1, 1, sPayload);
 }
 
-[RootSignature(GlobalRootSignature)]
+[RootSignature(SeeDRootSignature)]
 [outputtopology("triangle")]
 [numthreads(HLSL::max_triangles, 1, 1)]
 void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])

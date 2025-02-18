@@ -126,5 +126,8 @@
     <FxCompile Include="src\Shaders\cullingMeshlets.hlsl">
       <Filter>Source Files\Shaders</Filter>
     </FxCompile>
+    <FxCompile Include="src\Shaders\raytracing.hlsl">
+      <Filter>Source Files\Shaders</Filter>
+    </FxCompile>
   </ItemGroup>
 </Project>

@@ -6,7 +6,7 @@
 
 #pragma compute Reset
 
-[RootSignature(GlobalRootSignature)]
+[RootSignature(SeeDRootSignature)]
 [numthreads(1, 1, 1)]
 void Reset(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
 {

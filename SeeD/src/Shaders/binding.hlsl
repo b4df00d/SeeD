@@ -1,11 +1,11 @@
-#pragma once
+//#pragma once
 #ifndef BINDINGS_HLSL
 //#include "structs.hlsl"
 
 //https://learn.microsoft.com/en-us/windows/win32/direct3d12/dynamic-indexing-using-hlsl-5-1
 //https://devblogs.microsoft.com/directx/in-the-works-hlsl-shader-model-6-6/
 
-#define GlobalRootSignature "RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED), " \
+#define SeeDRootSignature  "RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED),"\
             "CBV(b0, space = 0), "\
             "CBV(b1, space = 0), "\
             "CBV(b2, space = 0), "\

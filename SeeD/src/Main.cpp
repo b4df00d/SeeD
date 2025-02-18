@@ -252,6 +252,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\_Environment.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\BOURDON-V01.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Objects\\primitives.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\caldera-main\\map_source\\prefabs\\br\\wz_vg\\mp_wz_island\\commercial\\hotel_01.usd");
     engine.Loop();
     engine.Off();
 
