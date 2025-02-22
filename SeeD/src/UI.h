@@ -54,32 +54,43 @@ public:
         }
         ImGui::Text("average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
 
-        ImGui::Text("instances %u | meshlets %u", Profiler::instance->instancesCount, Profiler::instance->meshletsCount);
+        ImGui::Text("instances %u | meshlets %u", Profiler::instance->frameData.instancesCount, Profiler::instance->frameData.meshletsCount);
 
         ImGui::Separator();
 
-        for (int i = 0; i < Profiler::instance->profiles.size(); i++)
+        for (uint j = 0; j < ARRAYSIZE(Profiler::instance->queueProfile); j++)
         {
-            Profiler::ProfileData& profile = Profiler::instance->profiles[i];
-            if (profile.name == nullptr)
-                continue;
+            if (j == 0)
+                ImGui::Text("Graphic");
+            if (j == 1)
+                ImGui::Text("Compute");
+            if (j == 2)
+                ImGui::Text("Copy");
 
-            double maxTime = 0.0;
-            double avgTime = 0.0;
-            UINT64 avgTimeSamples = 0;
-            for (UINT i = 0; i < Profiler::ProfileData::FilterSize; ++i)
+            auto& prof = Profiler::instance->queueProfile[j];
+            for (int i = 0; i < prof.entries.size(); i++)
             {
-                if (profile.TimeSamples[i] <= 0.0)
+                Profiler::ProfileData& profile = prof.entries[i];
+                if (profile.name == nullptr)
                     continue;
-                maxTime = profile.TimeSamples[i] > maxTime ? profile.TimeSamples[i] : maxTime;
-                avgTime += profile.TimeSamples[i];
-                ++avgTimeSamples;
+
+                double maxTime = 0.0;
+                double avgTime = 0.0;
+                UINT64 avgTimeSamples = 0;
+                for (UINT i = 0; i < Profiler::ProfileData::FilterSize; ++i)
+                {
+                    if (profile.TimeSamples[i] <= 0.0)
+                        continue;
+                    maxTime = profile.TimeSamples[i] > maxTime ? profile.TimeSamples[i] : maxTime;
+                    avgTime += profile.TimeSamples[i];
+                    ++avgTimeSamples;
+                }
+
+                if (avgTimeSamples > 0)
+                    avgTime /= double(avgTimeSamples);
+
+                ImGui::Text("\t %s: %.2fms (%.2fms max)", profile.name, avgTime, maxTime);
             }
-
-            if (avgTimeSamples > 0)
-                avgTime /= double(avgTimeSamples);
-
-            ImGui::Text("%s: %.2fms (%.2fms max)", profile.name, avgTime, maxTime);
         }
 
         ImGui::End();
@@ -151,7 +162,7 @@ public:
         {
 
             ImGui::PushID(i);
-            selected = selectedResource == Resource::allResources[i];
+            selected = selectedResource != nullptr && selectedResource->allocation == Resource::allResources[i].allocation;
             if (selected)
             {
                 ImGui::TextColored(ImVec4(1, 1, 0, 1), Resource::allResourcesNames[i].c_str());
@@ -160,10 +171,11 @@ public:
             {
                 ImGui::Selectable(Resource::allResourcesNames[i].c_str(), &selected);
                 if (selected)
-                    selectedResource = Resource::allResources[i];
+                    selectedResource = &Resource::allResources[i];
             }
             ImGui::SameLine();
-            ImGui::Text("%u", Resource::allResources[i]->GetResource()->GetDesc().Width);
+            if(Resource::allResources[i].GetResource())
+                ImGui::Text("%u", Resource::allResources[i].GetResource()->GetDesc().Width);
             ImGui::PopID();
         }
         ImGui::EndChild();

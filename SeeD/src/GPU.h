@@ -56,6 +56,53 @@ struct DSV
     D3D12_CPU_DESCRIPTOR_HANDLE handle;
 };
 
+class CommandBuffer;
+class Resource
+{
+public:
+    D3D12MA::Allocation* allocation{ 0 };
+    uint stride{ 0 };
+    SRV srv{ UINT32_MAX };
+    UAV uav{ UINT32_MAX };
+    RTV rtv{ UINT32_MAX, 0, 0 };
+    DSV dsv{ UINT32_MAX, 0 };
+
+    void CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, String name = "Texture");
+    void CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
+    void CreateDepthTarget(uint2 resolution, String name = "Texture");
+    void CreateBuffer(uint size, uint stride, bool upload = false, String name = "Buffer", D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON);
+    template <typename T>
+    void CreateBuffer(uint count, String name = "Buffer");
+    template <typename T>
+    void CreateUploadBuffer(uint count, String name = "UploadBuffer");
+    template <typename T>
+    void CreateAppendBuffer(uint count, String name = "AppendBuffer");
+    void CreateReadBackBuffer(uint size, String name = "ReadBackBuffer");
+    void CreateAccelerationStructure(uint size, String name = "AccelerationStructure");
+    void BackBuffer(ID3D12Resource* backBuffer);
+    void Release(bool deferred = false);
+    ID3D12Resource* GetResource();
+    uint BufferSize();
+    void Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb);
+    void UploadElements(void* data, uint count, uint index, CommandBuffer& cb);
+    void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
+    void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter, ID3D12Resource* resource);
+    void Barrier(CommandBuffer& cb);
+    uint AlignForUavCounter(uint bufferSize)
+    {
+        const uint alignment = D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT;
+        return (bufferSize + (alignment - 1)) & ~(alignment - 1);
+    }
+    //static void CleanUploadResources(bool everything = false);
+    static void ReleaseResources(bool everything = false);
+
+    static std::mutex lock;
+    //static std::vector<std::pair<uint, Resource*>> uploadResources; // could we remove that and only use releaseResources ? 
+    static std::vector<Resource> allResources;
+    static std::vector<String> allResourcesNames;
+    static std::vector<std::pair<uint, Resource>> releaseResources;
+};
+
 template<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE SubObjectType, typename T>
 struct alignas(void*) StreamSubObject
 {
@@ -154,15 +201,31 @@ struct PipelineStateStream
 
 struct Shader
 {
+    enum class Type
+    {
+        Graphic,
+        Compute,
+        Raytracing
+    } type;
+
     ID3D12CommandSignature* commandSignature;
     ID3D12RootSignature* rootSignature;
     ID3D12PipelineState* pso;
 
-    //for raytracing
+    uint3 numthreads; // read that from shader reflection
+
+    // for raytracing
     ID3D12StateObject* rtStateObject;
     ID3D12StateObjectProperties* rtStateObjectProps;
-
-    uint3 numthreads; // read that from shader reflection
+    //StructuredUploadBuffer<byte> shaderBindingTable;
+    Resource shaderBindingTable;
+    //std::vector<std::pair<String, std::vector<void*>>> entries;
+     // no parameters, just have one global root sig ?
+    std::vector<String> rayGen;
+    std::vector<String> miss;
+    std::vector<String> hit;
+    std::vector<String> hitGroup;
+    static constexpr uint progIdSize = D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT;
 
     std::map<String, __time64_t> creationTime;
     bool NeedReload()
@@ -198,6 +261,78 @@ struct Shader
     {
         return uint(ceil(float(count) / float(numthreads.z)));
     }
+
+    D3D12_DISPATCH_RAYS_DESC GetRTDesc()
+    {
+        uint rayGenSize = ROUND_UP(progIdSize, D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
+        uint missSize = ROUND_UP(progIdSize * miss.size(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
+        uint hitSize = ROUND_UP(progIdSize * hit.size(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
+
+        uint bufferSize = rayGenSize + missSize + hitSize;
+        bufferSize *= 100;
+        if (shaderBindingTable.GetResource() == nullptr || shaderBindingTable.GetResource()->GetDesc().Width < bufferSize)
+        {
+            shaderBindingTable.Release();
+            shaderBindingTable.CreateBuffer(bufferSize, 1, true, "ShaderBindingTable", D3D12_RESOURCE_STATE_COMMON);
+        }
+
+        D3D12_DISPATCH_RAYS_DESC drd = {};
+
+        drd.Depth = 1;
+
+        drd.RayGenerationShaderRecord.StartAddress = shaderBindingTable.GetResource()->GetGPUVirtualAddress();
+        drd.RayGenerationShaderRecord.SizeInBytes = rayGenSize;
+
+        drd.MissShaderTable.StartAddress = drd.RayGenerationShaderRecord.StartAddress + drd.RayGenerationShaderRecord.SizeInBytes;
+        drd.MissShaderTable.SizeInBytes = missSize;
+        drd.MissShaderTable.StrideInBytes = progIdSize;
+
+        drd.HitGroupTable.StartAddress = drd.MissShaderTable.StartAddress + drd.MissShaderTable.SizeInBytes;
+        drd.HitGroupTable.SizeInBytes = hitSize;
+        drd.HitGroupTable.StrideInBytes = progIdSize;
+
+        uint shaderBindingTableSize = drd.RayGenerationShaderRecord.SizeInBytes + drd.MissShaderTable.SizeInBytes + drd.HitGroupTable.SizeInBytes;
+        //seedAssert(bufferSize == shaderBindingTableSize);
+
+        uint8_t* sbt;
+        shaderBindingTable.GetResource()->Map(0, nullptr, (void**)&sbt);
+
+        CopyRTShaderData(sbt, rayGen);
+        sbt += drd.RayGenerationShaderRecord.SizeInBytes;
+        
+        CopyRTShaderData(sbt, miss);
+        sbt += drd.MissShaderTable.SizeInBytes;
+
+        CopyRTShaderData(sbt, hitGroup);
+
+        shaderBindingTable.GetResource()->Unmap(0, nullptr);
+
+        return drd;
+    }
+    uint CopyRTShaderData(uint8_t* outputData, const std::vector<String>& shaders)
+    {
+        uint8_t* pData = outputData;
+        for (const auto& shader : shaders)
+        {
+            // Get the shader identifier, and check whether that identifier is known
+            void* id = rtStateObjectProps->GetShaderIdentifier(shader.ToWString().c_str());
+            if (!id)
+            {
+                IOs::Log("Unknown shader identifier used in the SBT: {}", shader.c_str());
+                seedAssert(!id);
+            }
+            // Copy the shader identifier
+            memcpy(pData, id, progIdSize);
+            /*
+            // Copy all its resources pointers or values in bulk
+            memcpy(pData + progIdSize, shader.m_inputData.data(), shader.m_inputData.size() * 8);
+            */
+
+            pData += progIdSize;
+        }
+        // Return the number of bytes actually written to the output buffer
+        return 0;
+    }
 };
 
 struct Fence
@@ -221,52 +356,6 @@ struct CommandBuffer
     void SetGraphic(Shader& shader);
     void On(ID3D12CommandQueue* queue, String name);
     void Off();
-};
-
-class Resource
-{
-public:
-    D3D12MA::Allocation* allocation{ 0 };
-    uint stride{ 0 };
-    SRV srv{ UINT32_MAX };
-    UAV uav{ UINT32_MAX };
-    RTV rtv{ UINT32_MAX, 0, 0 };
-    DSV dsv{ UINT32_MAX, 0 };
-
-    void CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, String name = "Texture");
-    void CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
-    void CreateDepthTarget(uint2 resolution, String name = "Texture");
-    void CreateBuffer(uint size, uint stride, bool upload = false, String name = "Buffer", D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON);
-    template <typename T>
-    void CreateBuffer(uint count, String name = "Buffer");
-    template <typename T>
-    void CreateUploadBuffer(uint count, String name = "UploadBuffer");
-    template <typename T>
-    void CreateAppendBuffer(uint count, String name = "AppendBuffer");
-    void CreateReadBackBuffer(uint size, String name = "ReadBackBuffer");
-    void CreateAccelerationStructure(uint size, String name = "AccelerationStructure");
-    void BackBuffer(ID3D12Resource* backBuffer);
-    void Release(bool deferred = false);
-    ID3D12Resource* GetResource();
-    uint BufferSize();
-    void Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb);
-    void UploadElements(void* data, uint count, uint index, CommandBuffer& cb);
-    void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
-    void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter, ID3D12Resource* resource);
-    void Barrier(CommandBuffer& cb);
-    uint AlignForUavCounter(uint bufferSize)
-    {
-        const uint alignment = D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT;
-        return (bufferSize + (alignment - 1)) & ~(alignment - 1);
-    }
-    static void CleanUploadResources(bool everything = false);
-    static void ReleaseResources(bool everything = false);
-
-    static std::mutex lock;
-    static std::vector<std::pair<uint, Resource*>> uploadResources; // could we remove that and only use releaseResources ? 
-    static std::vector<Resource*> allResources;
-    static std::vector<String> allResourcesNames;
-    static std::vector<std::pair<uint, Resource>> releaseResources;
 };
 
 struct DescriptorHeap
@@ -487,7 +576,7 @@ public:
         copyQueue->Release();
 
         Resource::ReleaseResources(true);
-        Resource::CleanUploadResources(true);
+        //Resource::CleanUploadResources(true);
         for (uint i = 0; i < Resource::allResourcesNames.size(); i++)
         {
             IOs::Log("{}", Resource::allResourcesNames[i].c_str());
@@ -719,7 +808,7 @@ void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, St
     allocation->SetName(wname.c_str());
     allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(this);
+    allResources.push_back(*this);
     allResourcesNames.push_back(name);
     lock.unlock();
 
@@ -783,7 +872,7 @@ void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String n
     allocation->SetName(wname.c_str());
     allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(this);
+    allResources.push_back(*this);
     allResourcesNames.push_back(name);
     lock.unlock();
 
@@ -863,7 +952,7 @@ void Resource::CreateDepthTarget(uint2 resolution, String name)
     allocation->SetName(wname.c_str());
     allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(this);
+    allResources.push_back(*this);
     allResourcesNames.push_back(name);
     lock.unlock();
 
@@ -952,7 +1041,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D
     allocation->SetName(wname.c_str());
     allocation->GetResource()->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(this);
+    allResources.push_back(*this);
     allResourcesNames.push_back(name.c_str());
     lock.unlock();
 
@@ -1058,7 +1147,7 @@ void Resource::CreateReadBackBuffer(uint size, String name)
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(this);
+    allResources.push_back(*this);
     allResourcesNames.push_back(name);
     lock.unlock();
 
@@ -1116,7 +1205,7 @@ void Resource::CreateAccelerationStructure(uint size, String name)
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
     lock.lock();
-    allResources.push_back(this);
+    allResources.push_back(*this);
     allResourcesNames.push_back(name);
     lock.unlock();
 
@@ -1195,7 +1284,7 @@ void Resource::Release(bool deferred)
             lock.lock();
             for (int j = (int)allResources.size() - 1; j >= 0; j--)
             {
-                if (allResources[j] == this)
+                if (allResources[j].allocation == this->allocation)
                 {
                     allResources.erase(allResources.begin() + j);
                     allResourcesNames.erase(allResourcesNames.begin() + j);
@@ -1209,7 +1298,7 @@ void Resource::Release(bool deferred)
             lock.lock();
             for (int j = (int)allResources.size() - 1; j >= 0; j--)
             {
-                if (allResources[j] == this)
+                if (allResources[j].allocation == this->allocation)
                 {
                     allResources.erase(allResources.begin() + j);
                     allResourcesNames.erase(allResourcesNames.begin() + j);
@@ -1286,9 +1375,10 @@ void Resource::Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb)
 
     uploadAllocation->SetName(L"UploadBuffer");
     lock.lock();
-    uploadResources.push_back({ GPU::instance->frameNumber, tmpUpRes });
-    allResources.push_back(tmpUpRes);
-    allResourcesNames.push_back("UploadBuffer");
+    //uploadResources.push_back({ GPU::instance->frameNumber, tmpUpRes });
+    //allResources.push_back(tmpUpRes);
+    //allResourcesNames.push_back("UploadBuffer");
+    releaseResources.push_back({ GPU::instance->frameNumber, *tmpUpRes });
     lock.unlock();
 
     void* buf;
@@ -1323,6 +1413,7 @@ void Resource::Barrier(CommandBuffer& cb)
     cb.cmd->ResourceBarrier(1, &trans);
 }
 
+/*
 void Resource::CleanUploadResources(bool everything)
 {
     //ZoneScoped;
@@ -1349,6 +1440,7 @@ void Resource::CleanUploadResources(bool everything)
         }
     }
 }
+*/
 
 void Resource::ReleaseResources(bool everything)
 {
@@ -1368,8 +1460,8 @@ void Resource::ReleaseResources(bool everything)
 }
 
 std::mutex Resource::lock;
-std::vector<std::pair<uint, Resource*>> Resource::uploadResources;
-std::vector<Resource*> Resource::allResources;
+//std::vector<std::pair<uint, Resource*>> Resource::uploadResources;
+std::vector<Resource> Resource::allResources;
 std::vector<String> Resource::allResourcesNames;
 std::vector< std::pair<uint, Resource>> Resource::releaseResources;
 // end of definitions of Resource
@@ -1634,8 +1726,8 @@ public:
 // use https://github.com/Raikiri/LegitProfiler for display ?
 struct Profiler
 {
-#define QUEUECOUNT 2
     static Profiler* instance;
+ 
     struct ProfileData
     {
         LPCSTR name = nullptr;
@@ -1653,40 +1745,41 @@ struct Profiler
         UINT64 CurrSample = 0;
     };
 
-    UINT64 maxProfiles = 128;
-    UINT64 numProfiles = 0;
     ID3D12QueryHeap* queryHeap = NULL;
-    Resource buffer;
-    ReadBackBuffer readbackBuffer;
-    std::vector<ProfileData> profiles;
 
-    uint instancesCount;
-    uint meshletsCount;
-    uint verticesCount;
+    struct PerQueueData
+    {
+        static constexpr UINT64 queueCount = 3;
+        static constexpr UINT64 maxProfiles = 128;
+        Resource buffer;
+        ReadBackBuffer readbackBuffer;
+        std::vector<ProfileData> entries;
+    };
+    PerQueueData queueProfile[3];
+
+    struct FrameData
+    {
+        uint instancesCount;
+        uint meshletsCount;
+        uint verticesCount;
+    };
+    FrameData frameData;
 
     void On()
     {
         ZoneScoped;
         D3D12_QUERY_HEAP_DESC queryheapDesc = { };
-        queryheapDesc.Count = (UINT)(maxProfiles * QUEUECOUNT);
+        queryheapDesc.Count = PerQueueData::maxProfiles;
         queryheapDesc.NodeMask = 0;
         queryheapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
         GPU::instance->device->CreateQueryHeap(&queryheapDesc, IID_PPV_ARGS(&queryHeap));
 
-        profiles.resize(maxProfiles);
-
-        /*
-        for (int i = 0; i < FRAMEBUFFERING; i++)
+        for (uint i = 0; i < PerQueueData::queueCount; i++)
         {
-            String name = std::format("profilerData_{}", i);
-            buffer[i].CreateBuffer<UINT64>((UINT)(maxProfiles * FRAMEBUFFERING * QUEUECOUNT));
-            //buffer.Get(i)->gpuData.From(device->memory.GetUAV(device->profiler.Buffer[i].value.stride, device->profiler.Buffer[i].value.capacity, n, D3D12_RESOURCE_STATE_COPY_DEST));
+            auto& prof = queueProfile[i];
+            prof.entries.reserve(PerQueueData::maxProfiles);
+            prof.buffer.CreateBuffer<UINT64>((UINT)(PerQueueData::maxProfiles), "Profile");
         }
-        */
-        //readbackBuffer.value.SetCapacity((UINT)(maxProfiles * FRAMEBUFFERING * QUEUECOUNT));
-        //readbackBuffer.resource.From(device->memory.GetReadBack(device->profiler.Buffer[0].value.stride, device->profiler.Buffer[0].value.capacity, "profilerDataReadBack"));
-
-        buffer.CreateBuffer<UINT64>((UINT)(maxProfiles * FRAMEBUFFERING * QUEUECOUNT), "Profile");
 
         instance = this;
     }
@@ -1694,56 +1787,73 @@ struct Profiler
     UINT64 StartProfile(CommandBuffer& cb, const LPCSTR name)
     {
         ZoneScoped;
+
+        uint queueIndex = 0;
+        if (cb.queue == GPU::instance->graphicQueue)
+            queueIndex = 0;
+        if (cb.queue == GPU::instance->computeQueue)
+            queueIndex = 1;
+        if (cb.queue == GPU::instance->copyQueue)
+            queueIndex = 2;
+
+        auto& prof = queueProfile[queueIndex];
+        
         UINT64 profileIdx = UINT64(-1);
-        if (cb.queue != GPU::instance->copyQueue)
+        for (UINT64 i = 0; i < prof.entries.size(); ++i)
         {
-            for (UINT64 i = 0; i < numProfiles; ++i)
+            if (prof.entries[i].name == name)
             {
-                if (profiles[i].name == name)
-                {
-                    profileIdx = i;
-                    break;
-                }
+                profileIdx = i;
+                break;
             }
-
-            if (profileIdx == UINT64(-1))
-            {
-                profileIdx = numProfiles++;
-                profiles[profileIdx].name = name;
-            }
-
-            seedAssert(profileIdx != UINT64(-1));
-            seedAssert(profileIdx < maxProfiles);
-
-            ProfileData& profileData = profiles[profileIdx];
-            profileData.Active = true;
-
-            // Insert the start timestamp
-            const uint startQueryIdx = uint(profileIdx * 2);
-            cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, startQueryIdx);
-
-            profileData.QueryStarted = true;
-
         }
+
+        if (profileIdx == UINT64(-1))
+        {
+            profileIdx = prof.entries.size();
+            ProfileData data = {};
+            data.name = name;
+            prof.entries.push_back(data);
+        }
+
+        seedAssert(profileIdx != UINT64(-1));
+        seedAssert(profileIdx < PerQueueData::maxProfiles);
+
+        ProfileData& profileData = prof.entries[profileIdx];
+        profileData.Active = true;
+        profileData.QueryStarted = true;
+
+        // Insert the start timestamp
+        cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, profileIdx * 2);
         cb.profileIdx = (uint)profileIdx;
+
         return profileIdx;
     }
 
     void EndProfile(CommandBuffer& cb)
     {
         ZoneScoped;
+
         if (cb.profileIdx != UINT(-1))
         {
-            ProfileData& profileData = profiles[cb.profileIdx];
+            uint queueIndex = 0;
+            if (cb.queue == GPU::instance->graphicQueue)
+                queueIndex = 0;
+            if (cb.queue == GPU::instance->computeQueue)
+                queueIndex = 1;
+            if (cb.queue == GPU::instance->copyQueue)
+                queueIndex = 2;
+
+            auto& prof = queueProfile[queueIndex];
+
+            ProfileData& profileData = prof.entries[cb.profileIdx];
 
             // Insert the end timestamp
-            const uint startQueryIdx = uint(cb.profileIdx * QUEUECOUNT);
-            const uint endQueryIdx = startQueryIdx + 1;
-            cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, endQueryIdx);
+            cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, cb.profileIdx * 2 + 1);
 
             // Resolve the data
-            const UINT64 dstOffset = ((GPU::instance->frameIndex * maxProfiles * QUEUECOUNT) + startQueryIdx) * sizeof(UINT64);
-            cb.cmd->ResolveQueryData(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, startQueryIdx, 2, buffer.GetResource(), dstOffset);
+            const UINT64 dstOffset = (cb.profileIdx * 2) * sizeof(UINT64);
+            cb.cmd->ResolveQueryData(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, cb.profileIdx * 2, 2, prof.buffer.GetResource(), dstOffset);
         }
     }
 
@@ -1784,28 +1894,36 @@ struct Profiler
     {
         ZoneScoped;
         UINT64 gpuFrequency = 0;
-        const UINT64* frameQueryData = nullptr;
 
         cb.queue->GetTimestampFrequency(&gpuFrequency);
 
-        readbackBuffer.ReadBack(buffer, cb);
+        for (uint i = 0; i < ARRAYSIZE(queueProfile); i++)
+        {
+            auto& prof = queueProfile[i];
+            prof.readbackBuffer.ReadBack(prof.buffer, cb);
 
-        UINT64* queryData = NULL;
-        ID3D12Resource* res = readbackBuffer.gpuData.GetResource();
-        res->Map(0, nullptr, (void**)&queryData);
-        frameQueryData = queryData + (GPU::instance->frameIndex * maxProfiles * 2);
-        res->Unmap(0, nullptr);
+            UINT64* queryData = NULL;
+            ID3D12Resource* res = prof.readbackBuffer.gpuData.GetResource();
+            res->Map(0, nullptr, (void**)&queryData);
 
-        // Iterate over all of the profiles
-        for (UINT64 profileIdx = 0; profileIdx < numProfiles; ++profileIdx)
-            UpdateProfile(profiles[profileIdx], profileIdx, gpuFrequency, frameQueryData);
+            // Iterate over all of the profiles
+            for (UINT64 profileIdx = 0; profileIdx < prof.entries.size(); ++profileIdx)
+                UpdateProfile(prof.entries[profileIdx], profileIdx, gpuFrequency, queryData);
+
+            res->Unmap(0, nullptr);
+        }
+
     }
 
     void Off()
     {
         ZoneScoped;
-        buffer.Release();
-        readbackBuffer.Release();
+        for (uint i = 0; i < ARRAYSIZE(queueProfile); i++)
+        {
+            auto& prof = queueProfile[i];
+            prof.buffer.Release();
+            prof.readbackBuffer.Release();
+        }
         queryHeap->Release();
     }
 };
@@ -1962,7 +2080,18 @@ struct MeshStorage
         vertices.UploadElements(meshData.vertices.data(), meshData.vertices.size(), _nextVertexOffset, commandBuffer);
         indices.UploadElements(meshData.indices.data(), meshData.indices.size(), _nextIndexOffset, commandBuffer);
 
+        meshes.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        meshlets.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        meshletVertices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        meshletTriangles.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+
+        vertices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        indices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
         LoadBLAS(newMesh, commandBuffer);
+
+        vertices.Transition(commandBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+        indices.Transition(commandBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
 
         return newMesh;
     }

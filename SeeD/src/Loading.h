@@ -58,6 +58,10 @@ public:
         {
             meshes[i].BLAS.Release();
         }
+        for (uint i = 0; i < shaders.size(); i++)
+        {
+            shaders[i].shaderBindingTable.Release();
+        }
         instance = nullptr;
     }
 
@@ -856,20 +860,10 @@ public :
         //vArgs.push_back(L"-remove-unused-functions");
         //vArgs.push_back(L"-remove-unused-globals");
 #endif
-#ifdef REVERSE_Z
-        vArgs.push_back(L"-D");
-        vArgs.push_back(L"REVERSE_Z");
-#endif
 
         // Compile it with specified arguments.
         IDxcResult* pResults;
-        DxcCompiler->Compile(
-            &Source,
-            vArgs.data(),
-            (UINT32)vArgs.size(),
-            pIncludeHandler,
-            IID_PPV_ARGS(&pResults)
-        );
+        DxcCompiler->Compile( &Source, vArgs.data(), (UINT32)vArgs.size(), pIncludeHandler, IID_PPV_ARGS(&pResults));
 
         // Print errors if present.
         IDxcBlobUtf8* pErrors = nullptr;
@@ -889,86 +883,16 @@ public :
             return D3D12_SHADER_BYTECODE{};
         }
 
-        // Save shader binary.
-        IDxcBlob* pShader = nullptr;
-        IDxcBlobUtf16* pShaderName = nullptr;
-        pResults->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&pShader), &pShaderName);
-        if (pShader == nullptr)
-        {
-            return D3D12_SHADER_BYTECODE{};
-        }
-        // fill out shader bytecode structure for pixel shader
-        shaderBytecode = {};
-        shaderBytecode.BytecodeLength = pShader->GetBufferSize();
-        shaderBytecode.pShaderBytecode = pShader->GetBufferPointer();
-
-
+        shaderBytecode = CreateShaderByteCode(shader, pResults);
 
         if (shader != nullptr)
         {
-            IDxcBlob* pSig = nullptr;
-            IDxcBlobUtf16* pSigName = nullptr;
-            pResults->GetOutput(DXC_OUT_ROOT_SIGNATURE, IID_PPV_ARGS(&pSig), &pSigName);
-            if (pSig != nullptr)
-            {
-                hr = GPU::instance->device->CreateRootSignature(0, pSig->GetBufferPointer(), pSig->GetBufferSize(), IID_PPV_ARGS(&shader->rootSignature));
-                if (!SUCCEEDED(hr))
-                {
-                    return D3D12_SHADER_BYTECODE{};
-                }
-            }
-            else
-            {
-                hr = GPU::instance->device->CreateRootSignature(1, pShader->GetBufferPointer(), pShader->GetBufferSize(), IID_PPV_ARGS(&shader->rootSignature));
-                if (!SUCCEEDED(hr))
-                {
-                    return D3D12_SHADER_BYTECODE{};
-                }
-            }
-
-        
-            // Create the command signature used for indirect drawing.
-            // Each command consists of a CBV update and a DrawInstanced call.
-            D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
-            argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[0].Constant.RootParameterIndex = 4;
-            argumentDescs[0].Constant.Num32BitValuesToSet = 1;
-            argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
-            argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[1].Constant.RootParameterIndex = 5;
-            argumentDescs[1].Constant.Num32BitValuesToSet = 1;
-            argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
-            if(type == "ms_6_6")
-                argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
-            else if (type == "cs_6_6")
-                argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
-            else if (type == "lib_6_3")
-                argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS;
-
-
-            D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
-            commandSignatureDesc.pArgumentDescs = argumentDescs;
-            commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
-            if (type == "ms_6_6")
-                commandSignatureDesc.ByteStride = sizeof(HLSL::MeshletDrawCall);
-            else if (type == "cs_6_6")
-                commandSignatureDesc.ByteStride = sizeof(HLSL::InstanceCullingDispatch);
-            else if (type == "lib_6_6")
-                commandSignatureDesc.ByteStride = sizeof(HLSL::RayDispatch);
-
-            auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, shader->rootSignature, IID_PPV_ARGS(&shader->commandSignature));
-            if (FAILED(hr))
-            {
-                GPU::PrintDeviceRemovedReason(hr);
-                return D3D12_SHADER_BYTECODE{};
-            }
-
-            IDxcBlob* rtLibrary;
-
-            pResults->GetResult(&rtLibrary);
-            ID3D12StateObject* rtStateObject;
-            ID3D12StateObjectProperties* rtStateObjectProps;
+            CreateRootSignature(shader, pResults);
+            CreateCommandSignature(shader);
+            CreateRTShaderLibrary(shader, pResults);
         }
+
+        ShaderReflection(pResults, shader, nullptr, nullptr);
 
 #if 0
         // Save pdb.
@@ -983,9 +907,255 @@ public :
         }
 #endif
 
-        ShaderReflection(pResults, shader, nullptr, nullptr);
+        return shaderBytecode;
+    }
+
+    D3D12_SHADER_BYTECODE CreateShaderByteCode(Shader* shader, IDxcResult* pResults)
+    {
+        // Save shader binary.
+        IDxcBlob* pShader = nullptr;
+        IDxcBlobUtf16* pShaderName = nullptr;
+        pResults->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&pShader), &pShaderName);
+        if (pShader == nullptr)
+        {
+            return D3D12_SHADER_BYTECODE{};
+        }
+        // fill out shader bytecode structure for pixel shader
+        D3D12_SHADER_BYTECODE shaderBytecode = {};
+        shaderBytecode.BytecodeLength = pShader->GetBufferSize();
+        shaderBytecode.pShaderBytecode = pShader->GetBufferPointer();
 
         return shaderBytecode;
+    }
+
+    void CreateRootSignature(Shader* shader, IDxcResult* pResults)
+    {
+        IDxcBlob* pSig = nullptr;
+        IDxcBlobUtf16* pSigName = nullptr;
+        pResults->GetOutput(DXC_OUT_ROOT_SIGNATURE, IID_PPV_ARGS(&pSig), &pSigName);
+        if (pSig != nullptr)
+        {
+            auto hr = GPU::instance->device->CreateRootSignature(0, pSig->GetBufferPointer(), pSig->GetBufferSize(), IID_PPV_ARGS(&shader->rootSignature));
+            if (!SUCCEEDED(hr))
+            {
+                seedAssert(false);
+            }
+        }
+        else
+        {
+            IDxcBlob* pShader = nullptr;
+            IDxcBlobUtf16* pShaderName = nullptr;
+            pResults->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&pShader), &pShaderName);
+            auto hr = GPU::instance->device->CreateRootSignature(1, pShader->GetBufferPointer(), pShader->GetBufferSize(), IID_PPV_ARGS(&shader->rootSignature));
+            if (!SUCCEEDED(hr))
+            {
+                seedAssert(false);
+            }
+        }
+    }
+
+    void CreateCommandSignature(Shader* shader)
+    {
+        // Create the command signature used for indirect drawing.
+        // Each command consists of a CBV update and a DrawInstanced call.
+        D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
+        argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        argumentDescs[0].Constant.RootParameterIndex = 4;
+        argumentDescs[0].Constant.Num32BitValuesToSet = 1;
+        argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
+        argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+        argumentDescs[1].Constant.RootParameterIndex = 5;
+        argumentDescs[1].Constant.Num32BitValuesToSet = 1;
+        argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
+        if (shader->type == Shader::Type::Graphic)
+            argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+        else if (shader->type == Shader::Type::Compute)
+            argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+        else if (shader->type == Shader::Type::Raytracing)
+            argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS;
+
+
+        D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
+        commandSignatureDesc.pArgumentDescs = argumentDescs;
+        commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+        if (shader->type == Shader::Type::Graphic)
+            commandSignatureDesc.ByteStride = sizeof(HLSL::MeshletDrawCall);
+        else if (shader->type == Shader::Type::Compute)
+            commandSignatureDesc.ByteStride = sizeof(HLSL::InstanceCullingDispatch);
+        else if (shader->type == Shader::Type::Raytracing)
+            commandSignatureDesc.ByteStride = sizeof(HLSL::RayDispatch);
+
+        auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, shader->rootSignature, IID_PPV_ARGS(&shader->commandSignature));
+        if (FAILED(hr))
+        {
+            GPU::PrintDeviceRemovedReason(hr);
+            seedAssert(false);
+        }
+    }
+
+    void CreateRTShaderLibrary(Shader* shader, IDxcResult* pResults)
+    {
+        if (shader->type != Shader::Type::Raytracing)
+            return;
+
+        // https://www.realtimerendering.com/raytracinggems/unofficial_RayTracingGems_v1.5.pdf
+
+        IDxcBlob* rtLibrary;
+        pResults->GetResult(&rtLibrary);
+
+        shader->rayGen.push_back("RayGen");
+        shader->miss.push_back("Miss");
+        shader->hit.push_back("ClosestHit");
+        shader->hit.push_back("AnyHit");
+        shader->hitGroup.push_back("HitGroup");
+
+        D3D12_EXPORT_DESC exports[] = { 
+            {L"RayGen", 0, D3D12_EXPORT_FLAG_NONE}, 
+            {L"Miss", 0, D3D12_EXPORT_FLAG_NONE},
+            {L"ClosestHit", 0, D3D12_EXPORT_FLAG_NONE},
+            {L"AnyHit", 0, D3D12_EXPORT_FLAG_NONE} };
+
+        D3D12_DXIL_LIBRARY_DESC libDesc;
+        libDesc.DXILLibrary.BytecodeLength = rtLibrary->GetBufferSize();
+        libDesc.DXILLibrary.pShaderBytecode = rtLibrary->GetBufferPointer();
+        libDesc.NumExports = ARRAYSIZE(exports);
+        libDesc.pExports = exports;
+
+        D3D12_HIT_GROUP_DESC hitGroups[] = { {L"HitGroup", D3D12_HIT_GROUP_TYPE_TRIANGLES, L"AnyHit", L"ClosestHit", nullptr /*intersection name*/}};
+
+        D3D12_RAYTRACING_SHADER_CONFIG shaderDesc = {};
+        shaderDesc.MaxPayloadSizeInBytes = sizeof(HLSL::HitInfo);
+        shaderDesc.MaxAttributeSizeInBytes = 8;
+
+        const WCHAR* exportSymboles[] = { L"RayGen", L"Miss", L"HitGroup", L"AnyHit", L"ClosestHit" }; // all synboles from lib + hit group name + hit shader name (must be unique, may be created from a std::set)
+
+
+        // The pipeline is made of a set of sub-objects, representing the DXIL libraries, hit group
+        // declarations, root signature associations, plus some configuration objects
+        UINT64 subobjectCount =
+            1 + //ARRAYSIZE(exports) +                     // DXIL libraries
+            ARRAYSIZE(hitGroups) +                                      // Hit group declarations
+            1 +                                      // Shader configuration
+            1 +                                      // Shader payload
+            //2 * m_rootSignatureAssociations.size() + // Root signature declaration + association
+            1 +                                      // Empty global root signatures <- real root sig !!
+            //1 +                                      // Empty local root signatures
+            1;                                       // Final pipeline subobject
+
+        // Initialize a vector with the target object count. It is necessary to make the allocation before
+        // adding subobjects as some subobjects reference other subobjects by pointer. Using push_back may
+        // reallocate the array and invalidate those pointers.
+        std::vector<D3D12_STATE_SUBOBJECT> subobjects(subobjectCount);
+
+        UINT currentIndex = 0;
+
+        // Add all the DXIL libraries
+        //for (uint i = 0; i < ARRAYSIZE(exports); i++)
+        {
+            D3D12_STATE_SUBOBJECT libSubobject = {};
+            libSubobject.Type = D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY;
+            libSubobject.pDesc = &libDesc;
+            subobjects[currentIndex++] = libSubobject;
+        }
+
+        // Add all the hit group declarations
+        for (uint i = 0; i < ARRAYSIZE(hitGroups); i++)
+        {
+            D3D12_STATE_SUBOBJECT hitGroup = {};
+            hitGroup.Type = D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP;
+            hitGroup.pDesc = &hitGroups[i];
+            subobjects[currentIndex++] = hitGroup;
+        }
+
+        // Add a subobject for the shader payload configuration
+        D3D12_STATE_SUBOBJECT shaderConfigObject = {};
+        shaderConfigObject.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG;
+        shaderConfigObject.pDesc = &shaderDesc;
+        subobjects[currentIndex++] = shaderConfigObject;
+
+        // Add a subobject for the association between shaders and the payload
+        // Associate the set of shaders with the payload defined in the previous subobject
+        D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION shaderPayloadAssociation = {};
+        shaderPayloadAssociation.NumExports = ARRAYSIZE(exportSymboles);
+        shaderPayloadAssociation.pExports = exportSymboles;
+        shaderPayloadAssociation.pSubobjectToAssociate = &subobjects[(currentIndex - 1)];
+
+        // Create and store the payload association object
+        D3D12_STATE_SUBOBJECT shaderPayloadAssociationObject = {};
+        shaderPayloadAssociationObject.Type = D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION;
+        shaderPayloadAssociationObject.pDesc = &shaderPayloadAssociation;
+        subobjects[currentIndex++] = shaderPayloadAssociationObject;
+
+#if 0 // no local sigroot
+        // The root signature association requires two objects for each: one to declare the root
+        // signature, and another to associate that root signature to a set of symbols
+        for (RootSignatureAssociation& assoc : m_rootSignatureAssociations)
+        {
+            // Add a subobject to declare the root signature
+            D3D12_STATE_SUBOBJECT rootSigObject = {};
+            rootSigObject.Type = D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE;
+            rootSigObject.pDesc = &assoc.m_rootSignature;
+
+            subobjects[currentIndex++] = rootSigObject;
+
+            // Add a subobject for the association between the exported shader symbols and the root
+            // signature
+            assoc.m_association.NumExports = static_cast<UINT>(assoc.m_symbolPointers.size());
+            assoc.m_association.pExports = assoc.m_symbolPointers.data();
+            assoc.m_association.pSubobjectToAssociate = &subobjects[(currentIndex - 1)];
+
+            D3D12_STATE_SUBOBJECT rootSigAssociationObject = {};
+            rootSigAssociationObject.Type = D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION;
+            rootSigAssociationObject.pDesc = &assoc.m_association;
+
+            subobjects[currentIndex++] = rootSigAssociationObject;
+        }
+#endif
+
+        // The pipeline construction always requires an empty global root signature <- NOT A DUMMY ! I have a real global rootsig
+        D3D12_STATE_SUBOBJECT globalRootSig;
+        globalRootSig.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
+        ID3D12RootSignature* dgSig = shader->rootSignature;
+        globalRootSig.pDesc = &dgSig;
+
+        subobjects[currentIndex++] = globalRootSig;
+
+        // huuum test ...
+        /*
+        // The pipeline construction always requires an empty local root signature
+        D3D12_STATE_SUBOBJECT dummyLocalRootSig;
+        dummyLocalRootSig.Type = D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE;
+        ID3D12RootSignature* dlSig = m_dummyLocalRootSignature;
+        dummyLocalRootSig.pDesc = &dlSig;
+        subobjects[currentIndex++] = dummyLocalRootSig;
+        */
+
+        // Add a subobject for the ray tracing pipeline configuration
+        D3D12_RAYTRACING_PIPELINE_CONFIG pipelineConfig = {};
+        pipelineConfig.MaxTraceRecursionDepth = 1;
+
+        D3D12_STATE_SUBOBJECT pipelineConfigObject = {};
+        pipelineConfigObject.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;
+        pipelineConfigObject.pDesc = &pipelineConfig;
+
+        subobjects[currentIndex++] = pipelineConfigObject;
+
+        // Describe the ray tracing pipeline state object
+        D3D12_STATE_OBJECT_DESC pipelineDesc = {};
+        pipelineDesc.Type = D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE;
+        pipelineDesc.NumSubobjects = currentIndex; // static_cast<UINT>(subobjects.size());
+        pipelineDesc.pSubobjects = subobjects.data();
+
+        // Create the state object
+        HRESULT hr = GPU::instance->device->CreateStateObject(&pipelineDesc, IID_PPV_ARGS(&shader->rtStateObject));
+        if (FAILED(hr))
+        {
+            //throw std::logic_error("Could not create the raytracing state object");
+            std::cout << " !! Could not create the raytracing state object !! \n";
+            assert(true);
+        }
+
+        shader->rtStateObject->QueryInterface(&shader->rtStateObjectProps);
     }
 
     ID3D12PipelineState* CreatePSO(PipelineStateStream& stream)
@@ -1226,6 +1396,7 @@ public :
 					*/
 					if (tokens[1] == "gBuffer")
 					{
+                        shader.type = Shader::Type::Graphic;
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader);
                         D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[3], "ps_6_6");
                         PipelineStateStream stream{};
@@ -1236,6 +1407,7 @@ public :
 					}
 					else if (tokens[1] == "zPrepass")
 					{
+                        shader.type = Shader::Type::Graphic;
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader);
                         PipelineStateStream stream{};
                         stream.MS = meshShaderBytecode;
@@ -1244,6 +1416,7 @@ public :
 					}
                     else if (tokens[1] == "forward")
                     {
+                        shader.type = Shader::Type::Graphic;
                         //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader);
                         D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6");
@@ -1258,6 +1431,7 @@ public :
                     }
                     else if (tokens[1] == "compute")
                     {
+                        shader.type = Shader::Type::Compute;
                         D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, tokens[2], "cs_6_6", &shader);
                         PipelineStateStream stream;
                         stream.CS = computeShaderBytecode;
@@ -1268,9 +1442,9 @@ public :
                     }
                     else if (tokens[1] == "raytracing")
                     {
+                        shader.type = Shader::Type::Raytracing;
                         D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, "", "lib_6_6", &shader);
-                        PipelineStateStream stream;
-                        stream.CS = computeShaderBytecode;
+                        PipelineStateStream stream = {};
                         stream.pRootSignature = shader.rootSignature;
                         shader.pso = nullptr;
                         //shader.pso = CreatePSO(stream);

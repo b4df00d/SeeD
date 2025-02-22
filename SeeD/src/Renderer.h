@@ -848,7 +848,6 @@ public:
 
 class Lighting : public Pass
 {
-    StructuredUploadBuffer<byte> shaderBindingTable;
     Components::Handle<Components::Shader> rayDispatchShader;
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
@@ -856,13 +855,6 @@ public:
         Pass::On(view, queue, _name, _dependency);
         ZoneScoped;
         rayDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracing.hlsl");
-
-        uint raygenEntrySize = 16;
-        uint missEntrySize = 16;
-        uint hitEntrySize = 16;
-        uint shaderBindingTableSize = raygenEntrySize + missEntrySize + hitEntrySize;
-        shaderBindingTable.Resize(shaderBindingTableSize);
-        shaderBindingTable.Data();
     }
     void Setup(View* view) override
     {
@@ -874,6 +866,13 @@ public:
         Open();
 
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
+
+        D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
+        drd.Width = view->resolution.x;
+        drd.Height = view->resolution.y;
+
+        commandBuffer->cmd->SetPipelineState1(rayDispatch.rtStateObject);
+        commandBuffer->cmd->DispatchRays(&drd);
 
         Close();
     }
@@ -1438,9 +1437,9 @@ public:
     {
         ZoneScoped;
 
-        Profiler::instance->instancesCount = mainView.viewWorld->instances.Size();
-        Profiler::instance->meshletsCount = mainView.viewWorld->meshletsCount;
-        Profiler::instance->verticesCount = 0;
+        Profiler::instance->frameData.instancesCount = mainView.viewWorld->instances.Size();
+        Profiler::instance->frameData.meshletsCount = mainView.viewWorld->meshletsCount;
+        Profiler::instance->frameData.verticesCount = 0;
 
         auto mainViewEndTask = mainView.Schedule(world, subflow);
         auto editorViewEndTask = editorView.Schedule(world, subflow);
@@ -1497,7 +1496,7 @@ public:
             WaitForSingleObject(previousFrame.fenceEvent, 10000);
         }
 
-        Resource::CleanUploadResources();
+        //Resource::CleanUploadResources();
         Resource::ReleaseResources();
     }
 

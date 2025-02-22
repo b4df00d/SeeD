@@ -51,7 +51,7 @@ public:
 		return result;
 	}
 
-	inline std::wstring ToWString()
+	inline const std::wstring ToWString() const
 	{
 		return std::wstring(begin(), end());
 	}
