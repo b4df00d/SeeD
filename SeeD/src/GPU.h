@@ -266,9 +266,9 @@ struct Shader
     {
         uint rayGenSize = ROUND_UP(progIdSize, D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
         uint missSize = ROUND_UP(progIdSize * miss.size(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
-        uint hitSize = ROUND_UP(progIdSize * hit.size(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
+        uint hitGroupSize = ROUND_UP(progIdSize * hitGroup.size(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
 
-        uint bufferSize = rayGenSize + missSize + hitSize;
+        uint bufferSize = rayGenSize + missSize + hitGroupSize;
         bufferSize *= 100;
         if (shaderBindingTable.GetResource() == nullptr || shaderBindingTable.GetResource()->GetDesc().Width < bufferSize)
         {
@@ -288,7 +288,7 @@ struct Shader
         drd.MissShaderTable.StrideInBytes = progIdSize;
 
         drd.HitGroupTable.StartAddress = drd.MissShaderTable.StartAddress + drd.MissShaderTable.SizeInBytes;
-        drd.HitGroupTable.SizeInBytes = hitSize;
+        drd.HitGroupTable.SizeInBytes = hitGroupSize;
         drd.HitGroupTable.StrideInBytes = progIdSize;
 
         uint shaderBindingTableSize = drd.RayGenerationShaderRecord.SizeInBytes + drd.MissShaderTable.SizeInBytes + drd.HitGroupTable.SizeInBytes;
@@ -353,6 +353,7 @@ struct CommandBuffer
     bool open;
 
     void SetCompute(Shader& shader);
+    void SetRaytracing(Shader& shader);
     void SetGraphic(Shader& shader);
     void On(ID3D12CommandQueue* queue, String name);
     void Off();
@@ -1209,18 +1210,18 @@ void Resource::CreateAccelerationStructure(uint size, String name)
     allResourcesNames.push_back(name);
     lock.unlock();
 
-    /*
     {
         D3D12_CPU_DESCRIPTOR_HANDLE handle = GPU::instance->descriptorHeap.GetGlobalSlot(srv);
 
         D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
         SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         SRVDesc.Format = resourceDesc.Format;
-        SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        SRVDesc.Texture2D.MipLevels = resourceDesc.MipLevels;
-        GPU::instance->device->CreateShaderResourceView(allocation->GetResource(), &SRVDesc, handle);
+        SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+        SRVDesc.RaytracingAccelerationStructure.Location = allocation->GetResource()->GetGPUVirtualAddress();
+        GPU::instance->device->CreateShaderResourceView(nullptr, &SRVDesc, handle);
     }
 
+    /*
     {
         D3D12_CPU_DESCRIPTOR_HANDLE handle = GPU::instance->descriptorHeap.GetGlobalSlot(uav);
 
@@ -1474,6 +1475,13 @@ void CommandBuffer::SetCompute(Shader& shader)
     cmd->SetComputeRootSignature(shader.rootSignature);
     cmd->SetPipelineState(shader.pso);
     //cmd->SetGraphicsRootDescriptorTable();
+}
+void CommandBuffer::SetRaytracing(Shader& shader)
+{
+    // SetDescriptorHeaps must be set before SetPipelineState because of dynamic indexing in descriptorHeap
+    cmd->SetDescriptorHeaps(1, &GPU::instance->descriptorHeap.globalDescriptorHeap);
+    cmd->SetComputeRootSignature(shader.rootSignature);
+    cmd->SetPipelineState1(shader.rtStateObject);
 }
 void CommandBuffer::SetGraphic(Shader& shader)
 {
@@ -1994,7 +2002,7 @@ struct MeshStorage
     // could we just store BLASes in big bulk resources like above ?
     std::vector<Mesh> allMeshes;
     Resource scratchBLAS;
-    uint maxScratchSizeInBytes = 1000000;
+    uint maxScratchSizeInBytes = 50000000;
 
     std::recursive_mutex lock;
 
@@ -2004,6 +2012,8 @@ struct MeshStorage
     uint meshletTrianglesMaxCount = meshletMaxCount * HLSL::max_triangles;
     uint vertexMaxCount = meshletVertexMaxCount;
     uint indexMaxCount = meshletTrianglesMaxCount;
+
+    StructuredUploadBuffer<float4x4> identityMatrix;
 
     void On()
     {
@@ -2016,6 +2026,10 @@ struct MeshStorage
         indices.CreateBuffer<unsigned int>(indexMaxCount, "indices");
 
         scratchBLAS.CreateBuffer(maxScratchSizeInBytes, 1, false, "RayTracingScratch", D3D12_RESOURCE_STATE_COMMON);
+
+        float4x4 iden = float4x4::identity();
+        identityMatrix.Add(iden);
+        identityMatrix.Upload();
     }
 
     void Off()
@@ -2027,6 +2041,7 @@ struct MeshStorage
         vertices.Release();
         indices.Release();
         scratchBLAS.Release();
+        identityMatrix.Release();
         instance = nullptr;
     }
 
@@ -2070,7 +2085,7 @@ struct MeshStorage
         }
         for (uint j = 0; j < meshData.indices.size(); j++)
         {
-            meshData.indices[j] += _nextIndexOffset;
+            meshData.indices[j] += _nextVertexOffset;
         }
 
         meshes.UploadElements(&newMesh, 1, _nextMeshOffset, commandBuffer);
@@ -2098,6 +2113,7 @@ struct MeshStorage
 
     void LoadBLAS(Mesh& mesh, CommandBuffer& commandBuffer)
     {
+        lock.lock();
         bool isOpaque = true;
         D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};
         descriptor.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
@@ -2108,7 +2124,7 @@ struct MeshStorage
         descriptor.Triangles.IndexBuffer = indices.GetResource()->GetGPUVirtualAddress() + mesh.indexOffset * indices.stride;
         descriptor.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
         descriptor.Triangles.IndexCount = mesh.indexCount;
-        descriptor.Triangles.Transform3x4 = 0;//matrix->GetGPUVirtualAddress() + offset;
+        descriptor.Triangles.Transform3x4 = identityMatrix.GetResourcePtr()->GetGPUVirtualAddress();
         descriptor.Flags = isOpaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS prebuildDesc;
@@ -2146,7 +2162,8 @@ struct MeshStorage
         buildDesc.SourceAccelerationStructureData = 0;
         buildDesc.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
 
-        commandBuffer.cmd->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo = {};
+        commandBuffer.cmd->BuildRaytracingAccelerationStructure(&buildDesc, 1, &postInfo);
 
         D3D12_RESOURCE_BARRIER uavBarrier;
         uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -2154,7 +2171,7 @@ struct MeshStorage
         uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
         commandBuffer.cmd->ResourceBarrier(1, &uavBarrier);
 
-        
+        lock.unlock();
     }
 };
 MeshStorage* MeshStorage::instance;

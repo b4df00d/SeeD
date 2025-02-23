@@ -24,9 +24,9 @@ public:
     int meshLoadingLimit = 5;
     int shaderLoadingLimit = 5;
     int textureLoadingLimit = 5;
-    int meshLoaded;
-    int shaderLoaded;
-    int textureLoaded;
+    int meshLoaded = 0;
+    int shaderLoaded = 0;
+    int textureLoaded = 0;
 
     std::vector<Mesh> meshes;
     std::vector<Shader> shaders;
@@ -355,6 +355,8 @@ public:
     {
 		ZoneScoped;
         const float cone_weight = 0.5f;
+
+        //meshopt_generateVertexRemap
 
         size_t max_meshlets = meshopt_buildMeshletsBound(originalMesh.indices.size(), HLSL::max_vertices, HLSL::max_triangles);
         std::vector<meshopt_Meshlet> meshopt_meshlets(max_meshlets);
@@ -1039,7 +1041,7 @@ public :
             1 +                                      // Shader payload
             //2 * m_rootSignatureAssociations.size() + // Root signature declaration + association
             1 +                                      // Empty global root signatures <- real root sig !!
-            //1 +                                      // Empty local root signatures
+            1 +                                      // Empty local root signatures
             1;                                       // Final pipeline subobject
 
         // Initialize a vector with the target object count. It is necessary to make the allocation before
@@ -1086,6 +1088,14 @@ public :
         shaderPayloadAssociationObject.pDesc = &shaderPayloadAssociation;
         subobjects[currentIndex++] = shaderPayloadAssociationObject;
 
+        // The pipeline construction always requires an empty global root signature <- NOT A DUMMY ! I have a real global rootsig
+        D3D12_STATE_SUBOBJECT globalRootSig;
+        globalRootSig.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
+        ID3D12RootSignature* dgSig = shader->rootSignature;
+        globalRootSig.pDesc = &dgSig;
+
+        subobjects[currentIndex++] = globalRootSig;
+
 #if 0 // no local sigroot
         // The root signature association requires two objects for each: one to declare the root
         // signature, and another to associate that root signature to a set of symbols
@@ -1110,25 +1120,14 @@ public :
 
             subobjects[currentIndex++] = rootSigAssociationObject;
         }
+
 #endif
-
-        // The pipeline construction always requires an empty global root signature <- NOT A DUMMY ! I have a real global rootsig
-        D3D12_STATE_SUBOBJECT globalRootSig;
-        globalRootSig.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
-        ID3D12RootSignature* dgSig = shader->rootSignature;
-        globalRootSig.pDesc = &dgSig;
-
-        subobjects[currentIndex++] = globalRootSig;
-
-        // huuum test ...
-        /*
         // The pipeline construction always requires an empty local root signature
         D3D12_STATE_SUBOBJECT dummyLocalRootSig;
         dummyLocalRootSig.Type = D3D12_STATE_SUBOBJECT_TYPE_LOCAL_ROOT_SIGNATURE;
-        ID3D12RootSignature* dlSig = m_dummyLocalRootSignature;
+        ID3D12RootSignature* dlSig = CreateDummyRootSignatures();
         dummyLocalRootSig.pDesc = &dlSig;
         subobjects[currentIndex++] = dummyLocalRootSig;
-        */
 
         // Add a subobject for the ray tracing pipeline configuration
         D3D12_RAYTRACING_PIPELINE_CONFIG pipelineConfig = {};
@@ -1156,6 +1155,37 @@ public :
         }
 
         shader->rtStateObject->QueryInterface(&shader->rtStateObjectProps);
+    }
+    ID3D12RootSignature* CreateDummyRootSignatures()
+    {
+        // Creation of the global root signature
+        D3D12_ROOT_SIGNATURE_DESC rootDesc = {};
+        rootDesc.NumParameters = 0;
+        rootDesc.pParameters = nullptr;
+        // A global root signature is the default, hence this flag
+        rootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_NONE;
+
+        HRESULT hr = 0;
+
+        ID3DBlob* serializedRootSignature;
+        ID3DBlob* error;
+        ID3D12RootSignature* m_dummyLocalRootSignature;
+
+        // Create the local root signature, reusing the same descriptor but altering the creation flag
+        rootDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE;
+        hr = D3D12SerializeRootSignature(&rootDesc, D3D_ROOT_SIGNATURE_VERSION_1, &serializedRootSignature, &error);
+        if (FAILED(hr))
+        {
+            //throw std::logic_error("Could not serialize the local root signature");
+        }
+        hr = GPU::instance->device->CreateRootSignature(0, serializedRootSignature->GetBufferPointer(), serializedRootSignature->GetBufferSize(), IID_PPV_ARGS(&m_dummyLocalRootSignature));
+
+        serializedRootSignature->Release();
+        if (FAILED(hr))
+        {
+            //throw std::logic_error("Could not create the local root signature");
+        }
+        return m_dummyLocalRootSignature;
     }
 
     ID3D12PipelineState* CreatePSO(PipelineStateStream& stream)

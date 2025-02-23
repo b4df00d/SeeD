@@ -265,14 +265,18 @@ struct CullingContext
 
 struct RayTracingContext
 {
+    PerFrame<StructuredUploadBuffer<HLSL::RTParameters>> rtParameters;
     PerFrame<StructuredUploadBuffer<D3D12_RAYTRACING_INSTANCE_DESC>> instancesRayTracing;
     Resource TLAS;
-    Resource scratchBuffer;
+    Resource GI;
+    Resource shadows;
 
-    void On()
+    void On(uint2 resolution)
     {
         TLAS.CreateAccelerationStructure(1000000, "TLAS");
-        scratchBuffer.CreateBuffer(1000000, 1, false, "scratchBuffer");
+        //scratchBuffer.CreateBuffer(1000000, 1, false, "scratchBuffer");
+        GI.CreateTexture(resolution, DXGI_FORMAT_R11G11B10_FLOAT, false, "GI");
+        shadows.CreateTexture(resolution, DXGI_FORMAT_R8_UNORM, false, "shadows");
     }
 
     void Off()
@@ -280,9 +284,12 @@ struct RayTracingContext
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
             instancesRayTracing.Get(i).Release();
+            rtParameters.Get(i).Release();
         }
         TLAS.Release();
-        scratchBuffer.Release();
+        //scratchBuffer.Release();
+        GI.Release();
+        shadows.Release();
     }
 };
 
@@ -297,7 +304,8 @@ public:
 
     virtual void On(IOs::WindowInformation& window)
     {
-        raytracingContext.On();
+        resolution = window.windowResolution;
+        raytracingContext.On(resolution);
         cullingContext.On();
     }
     virtual void Off()
@@ -402,15 +410,17 @@ class Pass
 public:
     PerFrame<CommandBuffer> commandBuffer;
     PerFrame<CommandBuffer>* dependency = nullptr;
+    PerFrame<CommandBuffer>* dependency2 = nullptr;
 
     // debug only ?
     String name;
 
-    virtual void On(View* _view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency)
+    virtual void On(View* _view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2)
     {
         ZoneScoped;
         view = _view;
         dependency = _dependency;
+        dependency2 = _dependency2;
         name = _name;
         //name = CharToWString(typeid(this).name()); // name = "class Pass * __ptr64"
 
@@ -474,6 +484,10 @@ public:
         if (dependency != nullptr)
         {
             commandBuffer->queue->Wait(dependency->Get().passEnd.fence, dependency->Get().passEnd.fenceValue);
+            if (dependency2 != nullptr)
+            {
+                commandBuffer->queue->Wait(dependency2->Get().passEnd.fence, dependency2->Get().passEnd.fenceValue);
+            }
         }
         else if(endOfLastFrame != nullptr)
         {
@@ -648,7 +662,7 @@ public:
         buildDesc.Inputs.InstanceDescs = view->raytracingContext.instancesRayTracing->GetGPUVirtualAddress();
         buildDesc.Inputs.NumDescs = view->raytracingContext.instancesRayTracing->Size();
         buildDesc.DestAccelerationStructureData = view->raytracingContext.TLAS.GetResource()->GetGPUVirtualAddress();
-        buildDesc.ScratchAccelerationStructureData = view->raytracingContext.scratchBuffer.GetResource()->GetGPUVirtualAddress();
+        buildDesc.ScratchAccelerationStructureData = MeshStorage::instance->scratchBLAS.GetResource()->GetGPUVirtualAddress();
         buildDesc.SourceAccelerationStructureData = pSourceAS;
         buildDesc.Inputs.Flags = flags;
 
@@ -675,9 +689,9 @@ class HZB : public Pass
     FfxSpdContextDescription initializationParameters = { 0 };
     FfxSpdContext            context;
 public:
-    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
-        Pass::On(view, queue, _name, _dependency);
+        Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
 
         depth.Register("Depth", view);
@@ -753,9 +767,9 @@ class Culling : public Pass
     Components::Handle<Components::Shader> cullingInstancesShader;
     Components::Handle<Components::Shader> cullingMeshletsShader;
 public:
-    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
-        Pass::On(view, queue, _name, _dependency);
+        Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         depth.Register("Depth", view);
         cullingResetShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingReset.hlsl");
@@ -810,9 +824,9 @@ class ZPrepass : public Pass
 {
     ViewResource depth;
 public:
-    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
-        Pass::On(view, queue, _name, _dependency);
+        Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         depth.Register("Depth", view);
         depth.Get().CreateDepthTarget(view->resolution, "Depth");
@@ -849,10 +863,11 @@ public:
 class Lighting : public Pass
 {
     Components::Handle<Components::Shader> rayDispatchShader;
+
 public:
-    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
-        Pass::On(view, queue, _name, _dependency);
+        Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         rayDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracing.hlsl");
     }
@@ -865,13 +880,26 @@ public:
         ZoneScoped;
         Open();
 
+        HLSL::RTParameters rtparams;
+        view->raytracingContext.rtParameters->Clear();
+        rtparams.BVH = view->raytracingContext.TLAS.srv.offset;
+        rtparams.giIndex = view->raytracingContext.GI.uav.offset;
+        rtparams.shadowsIndex = view->raytracingContext.shadows.uav.offset;
+        rtparams.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
+        view->raytracingContext.rtParameters->Add(rtparams);
+        view->raytracingContext.rtParameters->Upload();
+
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
+        commandBuffer->SetRaytracing(rayDispatch); 
+        // global root sig for ray tracing is the same as compute shaders
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress());
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, view->raytracingContext.rtParameters->GetGPUVirtualAddress());
 
         D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
         drd.Width = view->resolution.x;
         drd.Height = view->resolution.y;
 
-        commandBuffer->cmd->SetPipelineState1(rayDispatch.rtStateObject);
         commandBuffer->cmd->DispatchRays(&drd);
 
         Close();
@@ -883,9 +911,9 @@ class Forward : public Pass
     ViewResource depth;
     Components::Handle<Components::Shader> meshShader;
 public:
-    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency) override
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
-        Pass::On(view, queue, _name, _dependency);
+        Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         depth.Register("Depth", view);
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
@@ -975,20 +1003,18 @@ public:
     {
         View::On(window);
 
-        resolution = window.windowResolution;
-
-        hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr);
-        skinning.On(this, GPU::instance->computeQueue, "skinning", &AssetLibrary::instance->commandBuffer);
-        particles.On(this, GPU::instance->computeQueue, "particles", &AssetLibrary::instance->commandBuffer);
-        spawning.On(this, GPU::instance->computeQueue, "spawning", &AssetLibrary::instance->commandBuffer);
-        accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &AssetLibrary::instance->commandBuffer);
-        culling.On(this, GPU::instance->graphicQueue, "culling", &hzb.commandBuffer);
-        zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer);
-        gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer);
-        lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers.commandBuffer);
-        forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer);
-        postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &forward.commandBuffer);
-        present.On(this, GPU::instance->graphicQueue, "present", &postProcess.commandBuffer);
+        hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr, nullptr);
+        skinning.On(this, GPU::instance->computeQueue, "skinning", &AssetLibrary::instance->commandBuffer, nullptr);
+        particles.On(this, GPU::instance->computeQueue, "particles", &AssetLibrary::instance->commandBuffer, nullptr);
+        spawning.On(this, GPU::instance->computeQueue, "spawning", &AssetLibrary::instance->commandBuffer, nullptr);
+        accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &AssetLibrary::instance->commandBuffer, nullptr);
+        culling.On(this, GPU::instance->graphicQueue, "culling", &hzb.commandBuffer, nullptr);
+        zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer, nullptr);
+        gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
+        lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers.commandBuffer, &accelerationStructure.commandBuffer);
+        forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer, nullptr);
+        postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &forward.commandBuffer, nullptr);
+        present.On(this, GPU::instance->graphicQueue, "present", &postProcess.commandBuffer, nullptr);
     }
 
     void Off() override
@@ -1140,7 +1166,11 @@ public:
                     // Instance flags, including backface culling, winding, etc - TODO: should be accessible from outside
                     instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
                     // Instance transform matrix
-                    memcpy(instanceDesc.Transform, &worldMatrix, sizeof(instanceDesc.Transform));
+                    //float4x4 worldMatrixTrans = transpose(worldMatrix);
+                    //memcpy(instanceDesc.Transform, &worldMatrix, sizeof(instanceDesc.Transform));
+                    instanceDesc.Transform[0][0] = worldMatrix[0].x; instanceDesc.Transform[0][1] = worldMatrix[0].y; instanceDesc.Transform[0][2] = worldMatrix[0].z; instanceDesc.Transform[0][3] = worldMatrix[0].w;
+                    instanceDesc.Transform[1][0] = worldMatrix[1].x; instanceDesc.Transform[1][1] = worldMatrix[1].y; instanceDesc.Transform[1][2] = worldMatrix[1].z; instanceDesc.Transform[1][3] = worldMatrix[1].w;
+                    instanceDesc.Transform[2][0] = worldMatrix[2].x; instanceDesc.Transform[2][1] = worldMatrix[2].y; instanceDesc.Transform[2][2] = worldMatrix[2].z; instanceDesc.Transform[2][3] = worldMatrix[2].w;
                     // Get access to the bottom level
                     instanceDesc.AccelerationStructure = mesh->BLAS.GetResource()->GetGPUVirtualAddress();
                     // Visibility mask, always visible here - TODO: should be accessible from outside
@@ -1314,6 +1344,7 @@ public:
                     hlslcam.view = inverse(trans.matrix);
                     hlslcam.proj = proj;
                     hlslcam.viewProj = viewProj;
+                    hlslcam.viewProj_inv = inverse(hlslcam.viewProj);
                     hlslcam.planes[0] = planes[0];
                     hlslcam.planes[1] = planes[1];
                     hlslcam.planes[2] = planes[2];
@@ -1385,7 +1416,7 @@ public:
     {
         resolution = window.windowResolution;
 
-        editor.On(this, GPU::instance->graphicQueue, "editor", nullptr);
+        editor.On(this, GPU::instance->graphicQueue, "editor", nullptr, nullptr);
     }
 
     void Off() override

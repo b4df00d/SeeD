@@ -89,15 +89,19 @@ cbuffer CullingContext : register(b1)
     HLSL::CullingContext cullingContext;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer Nop1 : register(b2)
+#ifndef CUSTOM_ROOT_BUFFER_1 //defined by shaders to have 'personalized' data
+cbuffer Custom : register(b2)
 {
-    uint notUsedYet1;
+    uint custom;
 };
+#endif
 //---------------------------------------------------------------------------------------------
+#ifndef CUSTOM_ROOT_BUFFER_2
 cbuffer Nop2 : register(b3)
 {
     uint notUsedYet2;
 };
+#endif
 //---------------------------------------------------------------------------------------------
 cbuffer InstanceIndex : register(b4)
 {

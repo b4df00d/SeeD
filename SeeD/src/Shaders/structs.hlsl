@@ -190,6 +190,7 @@ namespace HLSL
         float4x4 view;
         float4x4 proj;
         float4x4 viewProj;
+        float4x4 viewProj_inv;
         float4 planes[6];
         float4 worldPos;
     };
@@ -205,7 +206,20 @@ namespace HLSL
     
     struct Globals
     {
-        uint2 resolution;
+        float4 resolution; //x, y, 1/x, 1/y
+        uint albedoIndex;
+        uint normalIndex;
+    };
+    
+    
+    // ----------------- RT stuff ------------------
+    struct RTParameters
+    {
+        float4 resolution; //x, y, 1/x, 1/y
+        uint BVH;
+        uint giIndex;
+        uint shadowsIndex;
+        uint restirIndex;
     };
     
     // Hit information, aka ray payload
@@ -228,4 +242,5 @@ namespace HLSL
     {
         float2 bary;
     };
+    // ----------------- End RT stuff ------------------
 }

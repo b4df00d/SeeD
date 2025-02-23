@@ -149,7 +149,7 @@ public:
         const std::lock_guard<std::mutex> lock(Resource::lock);
 
         const char* names[] = { "Resources", "Content" };
-        static Resource* selectedResource = nullptr;
+        static Resource selectedResource = {};
         static int mip = 0;
         bool selected;
 
@@ -162,7 +162,7 @@ public:
         {
 
             ImGui::PushID(i);
-            selected = selectedResource != nullptr && selectedResource->allocation == Resource::allResources[i].allocation;
+            selected = selectedResource.allocation != nullptr && selectedResource.allocation == Resource::allResources[i].allocation;
             if (selected)
             {
                 ImGui::TextColored(ImVec4(1, 1, 0, 1), Resource::allResourcesNames[i].c_str());
@@ -171,7 +171,7 @@ public:
             {
                 ImGui::Selectable(Resource::allResourcesNames[i].c_str(), &selected);
                 if (selected)
-                    selectedResource = &Resource::allResources[i];
+                    selectedResource = Resource::allResources[i];
             }
             ImGui::SameLine();
             if(Resource::allResources[i].GetResource())
@@ -186,10 +186,10 @@ public:
         ImGui::BeginGroup();
         child_id = ImGui::GetID((void*)(intptr_t)1);
         ImGui::BeginChild(child_id, ImGui::GetContentRegionAvail(), ImGuiChildFlags_Borders, child_flags);
-        if (selectedResource)
+        if (selectedResource.GetResource() != nullptr)
         {
             ImGuiIO& io = ImGui::GetIO();
-            auto desc = selectedResource->GetResource()->GetDesc();
+            auto desc = selectedResource.GetResource()->GetDesc();
             float textureW = desc.Width;
             float textureH = desc.Height;
             float ratio = textureW / textureH;
@@ -212,7 +212,7 @@ public:
                 srvDesc.Texture2D.PlaneSlice = 0;
                 srvDesc.Texture2D.ResourceMinLODClamp = 0;
                 srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                GPU::instance->device->CreateShaderResourceView(selectedResource->GetResource(), &srvDesc, UI::instance->imgCPUHandle);
+                GPU::instance->device->CreateShaderResourceView(selectedResource.GetResource(), &srvDesc, UI::instance->imgCPUHandle);
                 ImTextureID my_tex_id = UI::instance->imgGPUHandle.ptr;
 
                 ImVec2 pos = ImGui::GetCursorScreenPos();
