@@ -1145,6 +1145,8 @@ public:
                     // everything should be loaded to be able to draw the instance
                     float4x4 worldMatrix = ComputeWorldMatrix(ent);
 
+                    //worldMatrix[3][1] = sin(worldMatrix[3][2] + 1.0f * Time::instance->currentTicks * 0.0000001f);
+
                     HLSL::Instance& instance = localInstances[instanceCount];
                     instance.meshIndex = meshIndex;
                     instance.materialIndex = materialIndex;
@@ -1166,11 +1168,8 @@ public:
                     // Instance flags, including backface culling, winding, etc - TODO: should be accessible from outside
                     instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
                     // Instance transform matrix
-                    //float4x4 worldMatrixTrans = transpose(worldMatrix);
-                    //memcpy(instanceDesc.Transform, &worldMatrix, sizeof(instanceDesc.Transform));
-                    instanceDesc.Transform[0][0] = worldMatrix[0].x; instanceDesc.Transform[0][1] = worldMatrix[0].y; instanceDesc.Transform[0][2] = worldMatrix[0].z; instanceDesc.Transform[0][3] = worldMatrix[0].w;
-                    instanceDesc.Transform[1][0] = worldMatrix[1].x; instanceDesc.Transform[1][1] = worldMatrix[1].y; instanceDesc.Transform[1][2] = worldMatrix[1].z; instanceDesc.Transform[1][3] = worldMatrix[1].w;
-                    instanceDesc.Transform[2][0] = worldMatrix[2].x; instanceDesc.Transform[2][1] = worldMatrix[2].y; instanceDesc.Transform[2][2] = worldMatrix[2].z; instanceDesc.Transform[2][3] = worldMatrix[2].w;
+                    worldMatrix = transpose(worldMatrix);
+                    memcpy(instanceDesc.Transform, &worldMatrix, sizeof(instanceDesc.Transform));
                     // Get access to the bottom level
                     instanceDesc.AccelerationStructure = mesh->BLAS.GetResource()->GetGPUVirtualAddress();
                     // Visibility mask, always visible here - TODO: should be accessible from outside

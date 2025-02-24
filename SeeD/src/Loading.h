@@ -463,7 +463,7 @@ public:
             | aiProcess_GlobalScale
             //| aiProcess_GenBoundingBoxes
             //| aiProcess_RemoveRedundantMaterials
-            | aiProcess_OptimizeGraph
+            //| aiProcess_OptimizeGraph // <- ca fuck les mesh en bakant la matrice dans les vertex pos non ?
             //| aiProcess_OptimizeMeshes
 
             //| aiProcess_PopulateArmatureData

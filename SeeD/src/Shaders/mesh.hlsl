@@ -89,7 +89,7 @@ void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThre
     {
         uint tmpIndex = meshlet.vertexOffset + groupThreadId;
         uint index = meshletVertices[tmpIndex];
-        float4 pos = float4(verticesData[index].pos, 1);
+        float4 pos = float4(verticesData[index].pos.xyz, 1);
         float4 worldPos = mul(instance.worldMatrix, pos);
         outVerts[groupThreadId].pos = mul(camera.viewProj, worldPos);
         outVerts[groupThreadId].color = RandUINT(meshletIndexIndirect);

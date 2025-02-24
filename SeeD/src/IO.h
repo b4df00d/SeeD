@@ -101,8 +101,6 @@ public:
 	Mouse mouse{};
     WindowInformation window;
 
-	WNDPROC imgGUIProc = nullptr;
-
     void GetMouse()
     {
         ZoneScoped;
@@ -204,9 +202,6 @@ public:
 		window.windowPos.x = (int)plcmt.rcNormalPosition.left;
 		window.windowPos.y = (int)plcmt.rcNormalPosition.top;
 
-		if (pThis->imgGUIProc != nullptr && pThis->imgGUIProc(hwnd, umessage, wparam, lparam))
-			return 1;
-
 		switch (umessage)
 		{
 		case WM_CREATE:
@@ -270,6 +265,10 @@ public:
 		// unlike WM_LBUTTONDOWN, WM_KEYDOWN is called as long as a key is pressed
 		case WM_KEYDOWN:
 		{
+			if ((unsigned int)wparam == VK_ESCAPE)
+			{
+				ImGui::SetWindowFocus(NULL);
+			}
 			if (WantCaptureKeyboard)
 			{
 				// If a key is pressed send it to the input object so it can record that state.

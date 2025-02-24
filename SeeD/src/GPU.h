@@ -273,7 +273,7 @@ struct Shader
         if (shaderBindingTable.GetResource() == nullptr || shaderBindingTable.GetResource()->GetDesc().Width < bufferSize)
         {
             shaderBindingTable.Release();
-            shaderBindingTable.CreateBuffer(bufferSize, 1, true, "ShaderBindingTable", D3D12_RESOURCE_STATE_COMMON);
+            shaderBindingTable.CreateBuffer(bufferSize, 4, true, "ShaderBindingTable", D3D12_RESOURCE_STATE_COMMON);
         }
 
         D3D12_DISPATCH_RAYS_DESC drd = {};
@@ -2025,7 +2025,7 @@ struct MeshStorage
         vertices.CreateBuffer<Vertex>(vertexMaxCount, "vertices");
         indices.CreateBuffer<unsigned int>(indexMaxCount, "indices");
 
-        scratchBLAS.CreateBuffer(maxScratchSizeInBytes, 1, false, "RayTracingScratch", D3D12_RESOURCE_STATE_COMMON);
+        scratchBLAS.CreateBuffer(maxScratchSizeInBytes, 4, false, "RayTracingScratch", D3D12_RESOURCE_STATE_COMMON);
 
         float4x4 iden = float4x4::identity();
         identityMatrix.Add(iden);
@@ -2117,7 +2117,7 @@ struct MeshStorage
         bool isOpaque = true;
         D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};
         descriptor.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-        descriptor.Triangles.VertexBuffer.StartAddress = vertices.GetResource()->GetGPUVirtualAddress() + mesh.vertexOffset * vertices.stride;
+        descriptor.Triangles.VertexBuffer.StartAddress = vertices.GetResource()->GetGPUVirtualAddress();
         descriptor.Triangles.VertexBuffer.StrideInBytes = vertices.stride;
         descriptor.Triangles.VertexCount = mesh.vertexCount;
         descriptor.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
@@ -2132,7 +2132,7 @@ struct MeshStorage
         prebuildDesc.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
         prebuildDesc.NumDescs = 1;
         prebuildDesc.pGeometryDescs = &descriptor;
-        prebuildDesc.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+        prebuildDesc.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
 
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
         GPU::instance->device->GetRaytracingAccelerationStructurePrebuildInfo(&prebuildDesc, &info);
@@ -2148,7 +2148,11 @@ struct MeshStorage
         UINT64 resultSizeInBytes = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
 
         if (scratchSizeInBytes > maxScratchSizeInBytes)
+        {
             maxScratchSizeInBytes = scratchSizeInBytes;
+            //release deferred scratchBLAS
+            //reallocate scratchBLAS
+        }
 
         mesh.BLAS.CreateAccelerationStructure(resultSizeInBytes, "BLAS");
 
@@ -2160,10 +2164,9 @@ struct MeshStorage
         buildDesc.DestAccelerationStructureData = mesh.BLAS.GetResource()->GetGPUVirtualAddress();
         buildDesc.ScratchAccelerationStructureData = scratchBLAS.GetResource()->GetGPUVirtualAddress();
         buildDesc.SourceAccelerationStructureData = 0;
-        buildDesc.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+        buildDesc.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
 
-        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postInfo = {};
-        commandBuffer.cmd->BuildRaytracingAccelerationStructure(&buildDesc, 1, &postInfo);
+        commandBuffer.cmd->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
 
         D3D12_RESOURCE_BARRIER uavBarrier;
         uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
