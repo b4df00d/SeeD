@@ -1131,7 +1131,7 @@ public :
 
         // Add a subobject for the ray tracing pipeline configuration
         D3D12_RAYTRACING_PIPELINE_CONFIG pipelineConfig = {};
-        pipelineConfig.MaxTraceRecursionDepth = 1;
+        pipelineConfig.MaxTraceRecursionDepth = 3;
 
         D3D12_STATE_SUBOBJECT pipelineConfigObject = {};
         pipelineConfigObject.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;
