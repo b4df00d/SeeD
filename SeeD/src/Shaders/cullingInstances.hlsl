@@ -6,9 +6,9 @@
 
 [RootSignature(SeeDRootSignature)]
 [numthreads(128, 1, 1)]
-void CullingInstance(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
+void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
-    uint instanceIndex = dtid;
+    uint instanceIndex = dtid.x;
     if (instanceIndex >= commonResourcesIndices.instanceCount)
         return;
     

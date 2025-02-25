@@ -211,6 +211,16 @@ namespace HLSL
         uint normalIndex;
     };
     
+    struct PostProcessParameters
+    {
+        float4 resolution; //x, y, 1/x, 1/y
+        uint lightedIndex;
+        uint albedoIndex;
+        uint normalIndex;
+        uint depthIndex;
+        uint backBufferIndex;
+    };
+    
     
     // ----------------- RT stuff ------------------
     struct RTParameters
@@ -220,6 +230,10 @@ namespace HLSL
         uint giIndex;
         uint shadowsIndex;
         uint restirIndex;
+        uint lightedIndex;
+        uint albedoIndex;
+        uint normalIndex;
+        uint depthIndex;
     };
     
     // Hit information, aka ray payload

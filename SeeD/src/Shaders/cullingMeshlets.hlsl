@@ -6,7 +6,7 @@
 
 [RootSignature(SeeDRootSignature)]
 [numthreads(HLSL::cullMeshletThreadCount, 1, 1)]
-void CullingMeshlet(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
+void CullingMeshlet(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
@@ -14,7 +14,7 @@ void CullingMeshlet(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadI
     StructuredBuffer<HLSL:: Mesh > meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
     
-    uint localMeshletIndex = dtid;
+    uint localMeshletIndex = dtid.x;
     if (localMeshletIndex >= mesh.meshletCount)
         return;
     uint meshletIndex = mesh.meshletOffset + localMeshletIndex;

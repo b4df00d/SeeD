@@ -856,16 +856,23 @@ void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String n
     resourceDesc.SampleDesc.Count = 1;
     resourceDesc.SampleDesc.Quality = 0;
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
     D3D12MA::ALLOCATION_DESC allocationDesc = {};
     allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_CLEAR_VALUE clearValue = {};
+    clearValue.Format = resourceDesc.Format;
+    clearValue.Color[0] = 0;
+    clearValue.Color[1] = 0;
+    clearValue.Color[2] = 0;
+    clearValue.Color[3] = 0;
 
     HRESULT hr = GPU::instance->allocator->CreateResource(
         &allocationDesc,
         &resourceDesc,
         D3D12_RESOURCE_STATE_COMMON,
-        NULL,
+        &clearValue,
         &allocation,
         IID_NULL, NULL);
 
@@ -892,7 +899,6 @@ void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String n
         GPU::instance->device->CreateShaderResourceView(GetResource(), &SRVDesc, handle);
     }
 
-    /*
     {
         auto desc = GetResource()->GetDesc();
         D3D12_CPU_DESCRIPTOR_HANDLE handle;
@@ -905,7 +911,6 @@ void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String n
         UAVDesc.Texture2D.MipSlice = 0;
         GPU::instance->device->CreateUnorderedAccessView(GetResource(), nullptr, &UAVDesc, handle);
     }
-    */
 
     {
         rtv.handle = GPU::instance->descriptorHeap.GetRTVSlot(rtv);

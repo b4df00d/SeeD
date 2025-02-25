@@ -212,6 +212,7 @@ public:
                 srvDesc.Texture2D.PlaneSlice = 0;
                 srvDesc.Texture2D.ResourceMinLODClamp = 0;
                 srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                if (srvDesc.Format == DXGI_FORMAT_D32_FLOAT) srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
                 GPU::instance->device->CreateShaderResourceView(selectedResource.GetResource(), &srvDesc, UI::instance->imgCPUHandle);
                 ImTextureID my_tex_id = UI::instance->imgGPUHandle.ptr;
 

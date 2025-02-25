@@ -3,7 +3,7 @@
 #include "common.hlsl"
 
 //#pragma gBuffer MeshMain PixelgBuffer
-#pragma forward AmplificationMain MeshMain PixelForward
+#pragma forward AmplificationMain MeshMain PixelgBuffer
 
 struct Payload
 {
@@ -18,7 +18,7 @@ groupshared uint payloadIndex;
 [numthreads(1, 1, 1)]
 void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
 {
-    uint instanceIndex = dtid;
+    uint instanceIndex = dtid.x;
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
@@ -68,7 +68,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
 [RootSignature(SeeDRootSignature)]
 [outputtopology("triangle")]
 [numthreads(HLSL::max_triangles, 1, 1)]
-void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])
+void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])
 {
     StructuredBuffer<HLSL:: Camera > cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[0]; //cullingContext.cameraIndex];
@@ -85,19 +85,19 @@ void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThre
     
     StructuredBuffer<uint> meshletVertices = ResourceDescriptorHeap[commonResourcesIndices.meshletVerticesHeapIndex];
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
-    if (groupThreadId < meshlet.vertexCount)
+    if (groupThreadId.x < meshlet.vertexCount)
     {
-        uint tmpIndex = meshlet.vertexOffset + groupThreadId;
+        uint tmpIndex = meshlet.vertexOffset + groupThreadId.x;
         uint index = meshletVertices[tmpIndex];
         float4 pos = float4(verticesData[index].pos.xyz, 1);
         float4 worldPos = mul(instance.worldMatrix, pos);
-        outVerts[groupThreadId].pos = mul(camera.viewProj, worldPos);
-        outVerts[groupThreadId].color = RandUINT(meshletIndexIndirect);
+        outVerts[groupThreadId.x].pos = mul(camera.viewProj, worldPos);
+        outVerts[groupThreadId.x].color = RandUINT(meshletIndexIndirect);
     }
     ByteAddressBuffer trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
-    if (groupThreadId < meshlet.triangleCount)
+    if (groupThreadId.x < meshlet.triangleCount)
     {
-        uint offset = meshlet.triangleOffset + groupThreadId * 3;
+        uint offset = meshlet.triangleOffset + groupThreadId.x * 3;
         uint alignedOffset = offset & ~3;
         uint diff = (offset - alignedOffset);
         uint2 packedData = trianglesData.Load2(alignedOffset);
@@ -113,13 +113,14 @@ void MeshMain(in uint groupId : SV_GroupID, in uint groupThreadId : SV_GroupThre
         tri[6] = (packedData.y >> 16) & 0x000000ff;
         tri[7] = (packedData.y >> 24) & 0x000000ff;
         
-        outIndices[groupThreadId] = uint3(tri[diff], tri[diff + 1], tri[diff + 2]);
+        outIndices[groupThreadId.x] = uint3(tri[diff], tri[diff + 1], tri[diff + 2]);
     }
 }
 
 struct PS_OUTPUT_FORWARD
 {
     float4 albedo : SV_Target0;
+    float2 normal : SV_Target1;
     //uint entityID : SV_Target1;
 };
 
@@ -130,14 +131,19 @@ PS_OUTPUT_FORWARD PixelForward(HLSL::MSVert inVerts)
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
     o.albedo = float4(inVerts.color, 1);
+    o.normal = float2(0, 1);
     //o.entityID = 1;
     return o;
 }
 
-PS_OUTPUT_FORWARD PixelgBuffer()
+PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
 {
     PS_OUTPUT_FORWARD o;
-    o.albedo = 1;
+    
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+    HLSL::Instance instance = instances[instanceIndexIndirect];
+    o.albedo = float4(inVerts.color, 1);
+    o.normal = float2(0, 1);
     //o.entityID = 1;
     return o;
 }

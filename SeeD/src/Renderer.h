@@ -522,20 +522,23 @@ public:
         rect.bottom = (LONG)(vp.TopLeftY + vp.Height);
         commandBuffer->cmd->RSSetScissorRects(1, &rect);
 
+        float4 clearColor(0.0f, 0.0f, 0.0f, 0.0f);
         // USE : commandBuffer->cmd->BeginRenderPass(); ?
         D3D12_CPU_DESCRIPTOR_HANDLE RTs[8] = {};
         for (uint i = 0; i < RTCount; i++)
         {
             RTs[i] = RT[i].rtv.handle;
+            commandBuffer->cmd->ClearRenderTargetView(RTs[i], clearColor.f32, 1, &rect);
         }
-        commandBuffer->cmd->OMSetRenderTargets(RTCount, RTs, false, &depth->dsv.handle);
 
-        float4 clearColor(0.4f, 0.1f, 0.2f, 0.0f);
-        commandBuffer->cmd->ClearRenderTargetView(GPU::instance->backBuffer.Get().rtv.handle, clearColor.f32, 1, &rect);
+        commandBuffer->cmd->OMSetRenderTargets(RTCount, RTs, false, depth ? &depth->dsv.handle : nullptr);
 
-        float clearDepthValue(1.0f);
-        UINT8 clearStencilValue(0);
-        commandBuffer->cmd->ClearDepthStencilView(depth->dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepthValue, clearStencilValue, 1, &rect);
+        if (depth)
+        {
+            float clearDepthValue(1.0f);
+            UINT8 clearStencilValue(0);
+            commandBuffer->cmd->ClearDepthStencilView(depth->dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepthValue, clearStencilValue, 1, &rect);
+        }
     }
 
     virtual void Setup(View* view) = 0;
@@ -846,30 +849,71 @@ public:
 
 class GBuffers : public Pass
 {
+    ViewResource albedo;
+    ViewResource normal;
+    ViewResource depth;
+    Components::Handle<Components::Shader> meshShader;
 public:
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        albedo.Register("albedo", view);
+        albedo.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R8G8B8A8_UNORM, "albedo"); // must be same as backbuffer for a resource copy at end of frame 
+        normal.Register("normal", view);
+        normal.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R16G16_FLOAT, "normal");
+        depth.Register("Depth", view);
+        meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
+    }
     void Setup(View* view) override
     {
         ZoneScoped;
     }
-    // indirect draw calls from cullingResult
     void Render(View* view) override
     {
         ZoneScoped;
         Open();
+
+
+        albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+        Resource rts[] = { albedo.Get(), normal.Get() };
+        SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true);
+
+        Shader& shader = *AssetLibrary::instance->Get<Shader>(meshShader.Get().id, true);
+        commandBuffer->SetGraphic(shader);
+
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress());
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
+
+        uint maxDraw = view->cullingContext.meshletsInView.Size();
+        commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->cullingContext.meshletsInView.GetResourcePtr(), 0, view->cullingContext.meshletsCounter.GetResourcePtr(), 0);
+
+        albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+
         Close();
     }
 };
 
 class Lighting : public Pass
 {
+    ViewResource lighted;
+    ViewResource albedo;
     Components::Handle<Components::Shader> rayDispatchShader;
+    Components::Handle<Components::Shader> applyLightingShader;
 
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
+        lighted.Register("lighted", view);
+        lighted.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R10G10B10A2_UNORM, "lighted");
+        albedo.Register("albedo", view);
         rayDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracing.hlsl");
+        applyLightingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\lighting.hlsl");
     }
     void Setup(View* view) override
     {
@@ -886,6 +930,8 @@ public:
         rtparams.giIndex = view->raytracingContext.GI.uav.offset;
         rtparams.shadowsIndex = view->raytracingContext.shadows.uav.offset;
         rtparams.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
+        rtparams.albedoIndex = albedo.Get().uav.offset;
+        rtparams.lightedIndex = lighted.Get().uav.offset;
         view->raytracingContext.rtParameters->Add(rtparams);
         view->raytracingContext.rtParameters->Upload();
 
@@ -901,6 +947,17 @@ public:
         drd.Height = view->resolution.y;
 
         commandBuffer->cmd->DispatchRays(&drd);
+
+        view->raytracingContext.GI.Barrier(commandBuffer.Get());
+
+        Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
+        commandBuffer->SetCompute(applyLighting);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress());
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, view->raytracingContext.rtParameters->GetGPUVirtualAddress());
+        commandBuffer->cmd->Dispatch(applyLighting.DispatchX(view->resolution.x), applyLighting.DispatchY(view->resolution.y), 1);
+
+        lighted.Get().Barrier(commandBuffer.Get());
 
         Close();
     }
@@ -927,26 +984,38 @@ public:
         ZoneScoped;
         Open();
 
-        GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-
-        SetupView(view, &GPU::instance->backBuffer.Get(), 1, true, &depth.Get(), true);
-
-        Shader& shader = *AssetLibrary::instance->Get<Shader>(meshShader.Get().id, true);
-        commandBuffer->SetGraphic(shader);
-
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress());
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
-
-        uint maxDraw = view->cullingContext.meshletsInView.Size();
-        commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->cullingContext.meshletsInView.GetResourcePtr(), 0, view->cullingContext.meshletsCounter.GetResourcePtr(), 0);
-
         Close();
     }
 };
 
 class PostProcess : public Pass
 {
+    ViewResource lighted;
+    ViewResource albedo;
+    ViewResource normal;
+    ViewResource depth;
+    PerFrame<StructuredUploadBuffer<HLSL::PostProcessParameters>> ppParameters;
+    Components::Handle<Components::Shader> postProcessShader;
 public:
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        lighted.Register("lighted", view);
+        albedo.Register("albedo", view);
+        normal.Register("normal", view);
+        depth.Register("Depth", view);
+        postProcessShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\PostProcess.hlsl");
+    }
+    virtual void Off() override
+    {
+        Pass::Off();
+        ZoneScoped;
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            ppParameters.Get(i).Release();
+        }
+    }
     void Setup(View* view) override
     {
         ZoneScoped;
@@ -955,13 +1024,39 @@ public:
     {
         ZoneScoped;
         Open();
+
+        HLSL::PostProcessParameters ppparams;
+        ppParameters->Clear();
+        ppparams.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
+        ppparams.lightedIndex = lighted.Get().uav.offset;
+        ppparams.albedoIndex = albedo.Get().uav.offset;
+        ppparams.normalIndex = normal.Get().uav.offset;
+        ppparams.depthIndex = depth.Get().uav.offset;
+        ppparams.backBufferIndex = GPU::instance->backBuffer.Get().uav.offset;
+        ppParameters->Add(ppparams);
+        ppParameters->Upload();
+
+        Shader& postProcess = *AssetLibrary::instance->Get<Shader>(postProcessShader.Get().id, true);
+        commandBuffer->SetCompute(postProcess);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress());
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ppParameters->GetGPUVirtualAddress());
+        commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->resolution.x), postProcess.DispatchY(view->resolution.y), 1);
+
         Close();
     }
 };
 
 class Present : public Pass
 {
+    ViewResource albedo;
 public:
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        albedo.Register("albedo", view);
+    }
     void Setup(View* view) override
     {
         ZoneScoped;
@@ -970,6 +1065,9 @@ public:
     {
         ZoneScoped;
         Open();
+        GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+        commandBuffer->cmd->CopyResource(GPU::instance->backBuffer.Get().GetResource(), albedo.Get().GetResource());
+        GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET); // transition to present in the editor cmb
         Close();
     }
 };
