@@ -1429,7 +1429,18 @@ public :
                         shader.type = Shader::Type::Graphic;
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader);
                         D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[3], "ps_6_6");
-                        PipelineStateStream stream{};
+                        PipelineStateStream stream{}; 
+                        DXGI_FORMAT targetFormat[] = {DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16G16_FLOAT};
+                        D3D12_RT_FORMAT_ARRAY RTVFormats = {};
+                        for (uint i = 0; i < ARRAYSIZE(targetFormat); i++)
+                        {
+                            RTVFormats.RTFormats[i] = targetFormat[i];
+                        }
+                        for (uint i = ARRAYSIZE(targetFormat); i < 8; i++)
+                        {
+                            RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
+                        }
+                        stream.RTFormats = RTVFormats;
                         stream.MS = meshShaderBytecode;
                         stream.PS = bufferShaderBytecode;
                         shader.pso = CreatePSO(stream);

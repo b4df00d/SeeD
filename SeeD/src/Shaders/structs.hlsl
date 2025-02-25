@@ -26,6 +26,7 @@ namespace HLSL
     struct MSVert
     {
         float4 pos : SV_Position;
+        float3 normal : NORMAL;
         float3 color : COLOR0;
     };
 #endif

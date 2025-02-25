@@ -101,7 +101,6 @@ RaytracingPipelineConfig MyPipelineConfig =
     );
 */
 
-/*
 struct SurfaceData
 {
     float3 albedo;
@@ -109,6 +108,7 @@ struct SurfaceData
     float3 normal;
     float roughness;
 };
+/*
 SurfaceData GetSurfaceData(Attributes attrib)
 {
     DrawCall drawCallData = drawCall[InstanceID()];
@@ -173,31 +173,37 @@ void RayGen()
     
     RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
     
+    Texture2D<float> depth = ResourceDescriptorHeap[rtParameters.depthIndex];
+    Texture2D<float2> normalXY = ResourceDescriptorHeap[rtParameters.normalIndex];
+    float3 normal = float3(normalXY[launchIndex], 0);
+    normal.z = 1 - sqrt(normal.x * normal.x + normal.y * normal.y);
+    
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[0]; //cullingContext.cameraIndex];
     
-    float3 clipSpace = float3(launchIndex * rtParameters.resolution.zw * 2 - 1, 1);
+    // inverse y depth depth[uint2(launchIndex.x, rtParameters.resolution.y - launchIndex.y)]
+    float3 clipSpace = float3(launchIndex * rtParameters.resolution.zw * 2 - 1, depth[launchIndex]);
     float4 worldSpace = mul(camera.viewProj_inv, float4(clipSpace.x, -clipSpace.y, clipSpace.z, 1));
     worldSpace.xyz /= worldSpace.w;
     
     float3 rayDir = worldSpace.xyz - camera.worldPos.xyz;
     float rayLength = length(rayDir);
     rayDir /= rayLength;
-    
+    worldSpace.xyz = camera.worldPos.xyz + rayDir * rayLength + (normal * 0.1f);
     
     HLSL::HitInfo payload;
     payload.color = float3(0.0, 0.0, 0.0);
     payload.rayDepth = 0;
     payload.currentPosition = worldSpace.xyz;
-    payload.rndseed = initRand(launchIndex.x * abs(worldSpace.y), launchIndex.y * abs(worldSpace.z), 3);;
-    payload.normal = float3(0, 1, 0);
+    payload.rndseed = initRand(uint(launchIndex.x * abs(worldSpace.y + normal.z) * 61531) >> 1, uint(launchIndex.y * abs(worldSpace.z + normal.x) * 65721) >> 1, 3);
+    payload.normal = normal;
     payload.tCurrent = 0;
     
     
     // Define a ray, consisting of origin, direction, and the min-max distance values
     RayDesc ray;
-    ray.Origin = camera.worldPos.xyz;
-    ray.Direction = rayDir;
+    ray.Origin = worldSpace.xyz;
+    ray.Direction = getCosHemisphereSample(payload.rndseed, normal);
     ray.TMin = 0;
     ray.TMax = 100000;
 
@@ -206,39 +212,54 @@ void RayGen()
     
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     GI[launchIndex] = payload.color;
+    //GI[launchIndex] = worldSpace.xyz;
+
 }
 
 [shader("miss")]
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
-    payload.color = float3(0.2, 0.3, 0.8);
-
+    payload.color = float3(0.2, 0.3, 0.8) * 10.0f;
 }
 
 [shader("closesthit")]
 void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
     payload.rayDepth++;
+    
+    SurfaceData s;
+    s.albedo = 1;
+    
     if (payload.rayDepth <= 1)
     {
         float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() - 0.0001);
+        
+        HLSL::HitInfo nextRay;
+        nextRay.color = float3(0.0, 0.0, 0.0);
+        nextRay.rayDepth = payload.rayDepth;
+        nextRay.currentPosition = hitLocation;
+        nextRay.rndseed = payload.rndseed;
+        nextRay.normal = float3(0, 1, 0);
+        nextRay.tCurrent = 0;
     
         // Define a ray, consisting of origin, direction, and the min-max distance values
         RayDesc ray;
         ray.Origin = hitLocation;
-        ray.Direction = getCosHemisphereSample(payload.rndseed, float3(0, 1, 0));
+        ray.Direction = getCosHemisphereSample(nextRay.rndseed, float3(0, 1, 0));
         ray.TMin = 0;
         ray.TMax = 100000;
 
         // Trace the ray
         RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
-        TraceRay(BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+        TraceRay(BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, nextRay);
+        
+        
+        payload.color = s.albedo * nextRay.color; // do PBR shit here
     }
-    
-    if (payload.rayDepth == 1)
-        payload.color = float3(0, 1, 0);
-    if (payload.rayDepth == 2)
-        payload.color = float3(0, 0, 1);
+    else // last bounce
+    {
+        payload.color = float3(0, 0, 0);
+    }
 }
 
 [shader("anyhit")]

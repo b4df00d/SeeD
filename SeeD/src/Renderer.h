@@ -369,9 +369,9 @@ public:
         cullingContextParams.culledMeshletsIndex = cullingContext.meshletsInView.GetResource().uav.offset;
         cullingContextParams.instancesCounterIndex = cullingContext.instancesCounter.GetResource().uav.offset;
         cullingContextParams.meshletsCounterIndex = cullingContext.meshletsCounter.GetResource().uav.offset;
-        cullingContextParams.HZB = GetRegisteredResource("DepthDownSample").srv.offset;
+        cullingContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
         cullingContextParams.resolution = uint4(resolution, 0, 0);
-        cullingContextParams.HZBMipCount = GetRegisteredResource("DepthDownSample").GetResource()->GetDesc().MipLevels;
+        cullingContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
 
         cullingContext.cullingContext->Clear();
         cullingContext.cullingContext->Add(cullingContextParams);
@@ -697,9 +697,9 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
 
-        depth.Register("Depth", view);
-        depthDownSample.Register("DepthDownSample", view);
-        depthDownSample.Get().CreateTexture(view->resolution, DXGI_FORMAT_R32_FLOAT, true, "DepthDownSample");
+        depth.Register("depth", view);
+        depthDownSample.Register("depthDownSample", view);
+        depthDownSample.Get().CreateTexture(view->resolution, DXGI_FORMAT_R32_FLOAT, true, "depthDownSample");
 
         // create backend interface (DX12)
         size_t scratchBufferSize = ffxGetScratchMemorySizeDX12(1);
@@ -774,7 +774,7 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        depth.Register("Depth", view);
+        depth.Register("depth", view);
         cullingResetShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingReset.hlsl");
         cullingInstancesShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingInstances.hlsl");
         cullingMeshletsShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingMeshlets.hlsl");
@@ -831,8 +831,8 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        depth.Register("Depth", view);
-        depth.Get().CreateDepthTarget(view->resolution, "Depth");
+        depth.Register("depth", view);
+        depth.Get().CreateDepthTarget(view->resolution, "depth");
     }
     void Setup(View* view) override
     {
@@ -862,7 +862,7 @@ public:
         albedo.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R8G8B8A8_UNORM, "albedo"); // must be same as backbuffer for a resource copy at end of frame 
         normal.Register("normal", view);
         normal.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R16G16_FLOAT, "normal");
-        depth.Register("Depth", view);
+        depth.Register("depth", view);
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
@@ -901,6 +901,8 @@ class Lighting : public Pass
 {
     ViewResource lighted;
     ViewResource albedo;
+    ViewResource depth;
+    ViewResource normal;
     Components::Handle<Components::Shader> rayDispatchShader;
     Components::Handle<Components::Shader> applyLightingShader;
 
@@ -912,6 +914,8 @@ public:
         lighted.Register("lighted", view);
         lighted.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R10G10B10A2_UNORM, "lighted");
         albedo.Register("albedo", view);
+        depth.Register("depth", view);
+        normal.Register("normal", view);
         rayDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracing.hlsl");
         applyLightingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\lighting.hlsl");
     }
@@ -924,6 +928,9 @@ public:
         ZoneScoped;
         Open();
 
+
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
+
         HLSL::RTParameters rtparams;
         view->raytracingContext.rtParameters->Clear();
         rtparams.BVH = view->raytracingContext.TLAS.srv.offset;
@@ -932,6 +939,8 @@ public:
         rtparams.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
         rtparams.albedoIndex = albedo.Get().uav.offset;
         rtparams.lightedIndex = lighted.Get().uav.offset;
+        rtparams.normalIndex = normal.Get().srv.offset;
+        rtparams.depthIndex = depth.Get().srv.offset;
         view->raytracingContext.rtParameters->Add(rtparams);
         view->raytracingContext.rtParameters->Upload();
 
@@ -959,6 +968,9 @@ public:
 
         lighted.Get().Barrier(commandBuffer.Get());
 
+
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+
         Close();
     }
 };
@@ -972,7 +984,7 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        depth.Register("Depth", view);
+        depth.Register("depth", view);
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
@@ -1004,7 +1016,7 @@ public:
         lighted.Register("lighted", view);
         albedo.Register("albedo", view);
         normal.Register("normal", view);
-        depth.Register("Depth", view);
+        depth.Register("depth", view);
         postProcessShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\PostProcess.hlsl");
     }
     virtual void Off() override
@@ -1050,12 +1062,14 @@ public:
 class Present : public Pass
 {
     ViewResource albedo;
+    ViewResource depth;
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         albedo.Register("albedo", view);
+        depth.Register("depth", view);
     }
     void Setup(View* view) override
     {
