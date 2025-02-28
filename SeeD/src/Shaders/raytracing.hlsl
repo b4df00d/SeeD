@@ -108,38 +108,51 @@ struct SurfaceData
     float3 normal;
     float roughness;
 };
-/*
-SurfaceData GetSurfaceData(Attributes attrib)
+SurfaceData GetSurfaceData(HLSL::Attributes attrib)
 {
-    DrawCall drawCallData = drawCall[InstanceID()];
-    Material material = materials[globals.materialHeapIndex][drawCallData.materialIndex];
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+    HLSL::Instance instance = instances[InstanceID()];
+    
+    StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
+    HLSL::Material material = materials[instance.materialIndex];
+    
+    StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
+    HLSL::Mesh mesh = meshes[instance.meshIndex];
+    
+    StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
+    
+    StructuredBuffer<uint> indicesData = ResourceDescriptorHeap[commonResourcesIndices.indicesHeapIndex];
 
-    uint iBase = PrimitiveIndex() * 3 + uint(drawCallData.boundingSphere.x);
-    uint i1 = indices[drawCallData.meshIndex][iBase + 0] + uint(drawCallData.boundingSphere.y);
-    uint i2 = indices[drawCallData.meshIndex][iBase + 1] + uint(drawCallData.boundingSphere.y);
-    uint i3 = indices[drawCallData.meshIndex][iBase + 2] + uint(drawCallData.boundingSphere.y);
+    uint iBase = PrimitiveIndex() * 3 + mesh.indexOffset;
+    uint i1 = indicesData[iBase + 0];
+    uint i2 = indicesData[iBase + 1];
+    uint i3 = indicesData[iBase + 2];
 
-    float2 uv1 = meshesUV[drawCallData.entityID][i1].texCoord.xy;
-    float2 uv2 = meshesUV[drawCallData.entityID][i2].texCoord.xy;
-    float2 uv3 = meshesUV[drawCallData.entityID][i3].texCoord.xy;
+    float2 uv1 = verticesData[i1].uv;
+    float2 uv2 = verticesData[i2].uv;
+    float2 uv3 = verticesData[i3].uv;
 
     float2 uv = ((1 - attrib.bary.x - attrib.bary.y) * uv1 + attrib.bary.x * uv2 + attrib.bary.y * uv3);
 
     SurfaceData s;
-    s.albedo = srv2Dfloat4[material.albedo].SampleLevel(mapsSampler, uv, 0).xyz;
-    s.roughness = 1 - srv2Dfloat4[material.smoothness].SampleLevel(mapsSampler, uv, 0).xyz;
-    //s.albedo = float3(uv1.xy, 0);
+    Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
+    //s.albedo = albedo.SampleLevel(samplerLinear, uv, 0).xyz;
+    Texture2D<float4> roughness = ResourceDescriptorHeap[material.textures[2]];
+    //s.roughness = roughness.SampleLevel(samplerLinear, uv, 0).x;
+    s.albedo = 0.5;
+    s.roughness = 0.5;
 
-    float3 nrm1 = meshesOther[drawCallData.instanceCount][i1].normal.xyz;
-    float3 nrm2 = meshesOther[drawCallData.instanceCount][i2].normal.xyz;
-    float3 nrm3 = meshesOther[drawCallData.instanceCount][i3].normal.xyz;
+    float3 nrm1 = verticesData[i1].normal;
+    float3 nrm2 = verticesData[i2].normal;
+    float3 nrm3 = verticesData[i3].normal;
 
-    float3 nrm = ((1 - attrib.bary.x - attrib.bary.y) * nrm1 + attrib.bary.x * nrm2 + attrib.bary.y * nrm3);
-    s.normal = normalize(nrm);
-    s.normal = mul(s.normal, (float3x3) drawCallData.wMat);
+    float3 normal = ((1 - attrib.bary.x - attrib.bary.y) * nrm1 + attrib.bary.x * nrm2 + attrib.bary.y * nrm3);
+    normal = normalize(normal);
+    float3 worldNormal = mul((float3x3) instance.worldMatrix, normal);
+    s.normal = normal;
+    
     return s;
 }
-*/
 // Utility function to get a vector perpendicular to an input vector 
 //    (from "Efficient Construction of Perpendicular Vectors Without Branching")
 float3 getPerpendicularVector(float3 u)
@@ -174,9 +187,8 @@ void RayGen()
     RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
     
     Texture2D<float> depth = ResourceDescriptorHeap[rtParameters.depthIndex];
-    Texture2D<float2> normalXY = ResourceDescriptorHeap[rtParameters.normalIndex];
-    float3 normal = float3(normalXY[launchIndex], 0);
-    normal.z = 1 - sqrt(normal.x * normal.x + normal.y * normal.y);
+    Texture2D<float3> normalT = ResourceDescriptorHeap[rtParameters.normalIndex];
+    float3 normal = normalize(normalT[launchIndex]);
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[0]; //cullingContext.cameraIndex];
@@ -189,81 +201,130 @@ void RayGen()
     float3 rayDir = worldSpace.xyz - camera.worldPos.xyz;
     float rayLength = length(rayDir);
     rayDir /= rayLength;
-    worldSpace.xyz = camera.worldPos.xyz + rayDir * rayLength + (normal * 0.1f);
-    
-    HLSL::HitInfo payload;
-    payload.color = float3(0.0, 0.0, 0.0);
-    payload.rayDepth = 0;
-    payload.currentPosition = worldSpace.xyz;
-    payload.rndseed = initRand(uint(launchIndex.x * abs(worldSpace.y + normal.z) * 61531) >> 1, uint(launchIndex.y * abs(worldSpace.z + normal.x) * 65721) >> 1, 3);
-    payload.normal = normal;
-    payload.tCurrent = 0;
+    worldSpace.xyz = camera.worldPos.xyz + rayDir * rayLength + (normal * 0.01f);
     
     
-    // Define a ray, consisting of origin, direction, and the min-max distance values
-    RayDesc ray;
-    ray.Origin = worldSpace.xyz;
-    ray.Direction = getCosHemisphereSample(payload.rndseed, normal);
-    ray.TMin = 0;
-    ray.TMax = 100000;
+    float3 light = 0;
+    {
+        // AO
+        HLSL::HitInfo payload;
+        payload.color = float3(0.0, 0.0, 0.0);
+        payload.rayDepth = 0;
+        payload.currentPosition = worldSpace.xyz;
+        payload.rndseed = initRand(uint(launchIndex.x * abs(worldSpace.y + normal.z) * 582) >> 1, uint(launchIndex.y * abs(worldSpace.z + normal.x) * 672) >> 1, 3);
+        payload.normal = normal;
+        payload.tCurrent = 0;
+    
+        RayDesc ray;
+        ray.Origin = worldSpace.xyz;
+        ray.Direction = getCosHemisphereSample(payload.rndseed, normal);
+        ray.TMin = 0;
+        ray.TMax = 100000;
 
-    // Trace the ray
-    TraceRay( BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+        // Trace the ray
+        TraceRay( BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+        
+        light += payload.color;
+    }
+    
+    float shadow = 0;
+    {
+        // shadow
+        HLSL::HitInfo payload;
+        payload.color = float3(0.0, 0.0, 0.0);
+        payload.rayDepth = 1000000;
+        payload.currentPosition = worldSpace.xyz;
+        payload.rndseed = initRand(uint(launchIndex.x * abs(worldSpace.z + normal.x) * 382) >> 1, uint(launchIndex.y * abs(worldSpace.x + normal.y) * 472) >> 1, 3);
+        payload.normal = normal;
+        payload.tCurrent = 0;
+    
+        RayDesc ray;
+        ray.Origin = worldSpace.xyz;
+        ray.Direction = float3(1, 1, 1);
+        ray.TMin = 0;
+        ray.TMax = 100000;
+
+        // Trace the ray
+        TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, payload);
+        
+        shadow += saturate(payload.color.b);
+    }
     
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    GI[launchIndex] = payload.color;
-    //GI[launchIndex] = worldSpace.xyz;
+    GI[launchIndex] = light * 0.5f;
+    RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
+    shadows[launchIndex] = shadow;
 
 }
 
 [shader("miss")]
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
-    payload.color = float3(0.2, 0.3, 0.8) * 10.0f;
+    payload.color = float3(0.2, 0.3, 0.8) * 10.0f * pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.75 + 0.25, 2);
 }
 
 [shader("closesthit")]
 void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
     payload.rayDepth++;
+    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() - 0.0001);
+    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
     
-    SurfaceData s;
-    s.albedo = 1;
+    SurfaceData s = GetSurfaceData(attrib);
     
+    float shadow = 0;
+    {
+        // shadow
+        HLSL::HitInfo shadowload;
+        shadowload.color = float3(0.0, 0.0, 0.0);
+        shadowload.rayDepth = 1000000;
+        shadowload.currentPosition = hitLocation;
+        shadowload.rndseed = nextRand(payload.rndseed);
+        shadowload.normal = float3(0, 1, 0);
+        shadowload.tCurrent = 0;
+    
+        RayDesc ray;
+        ray.Origin = hitLocation;
+        ray.Direction = float3(1, 1, 1);
+        ray.TMin = 0;
+        ray.TMax = 100000;
+
+        // Trace the ray
+        TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, payload);
+        
+        shadow += saturate(shadowload.color.b);
+    }
+    
+    float3 light = 1;
     if (payload.rayDepth <= 1)
     {
-        float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() - 0.0001);
         
         HLSL::HitInfo nextRay;
         nextRay.color = float3(0.0, 0.0, 0.0);
         nextRay.rayDepth = payload.rayDepth;
         nextRay.currentPosition = hitLocation;
         nextRay.rndseed = payload.rndseed;
-        nextRay.normal = float3(0, 1, 0);
+        nextRay.normal = s.normal;
         nextRay.tCurrent = 0;
     
         // Define a ray, consisting of origin, direction, and the min-max distance values
         RayDesc ray;
         ray.Origin = hitLocation;
-        ray.Direction = getCosHemisphereSample(nextRay.rndseed, float3(0, 1, 0));
+        ray.Direction = getCosHemisphereSample(nextRay.rndseed, s.normal);
         ray.TMin = 0;
         ray.TMax = 100000;
 
         // Trace the ray
-        RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
         TraceRay(BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, nextRay);
         
-        
-        payload.color = s.albedo * nextRay.color; // do PBR shit here
+        light = nextRay.color;
     }
-    else // last bounce
-    {
-        payload.color = float3(0, 0, 0);
-    }
+    
+    payload.color += s.albedo * (shadow + light); // do PBR shit here
 }
 
 [shader("anyhit")]
 void AnyHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
-    payload.color = float3(1, 0, 0);
+    payload.color = float3(0, 0, 0);
 }

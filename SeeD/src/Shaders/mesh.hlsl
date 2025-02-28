@@ -2,8 +2,8 @@
 #include "binding.hlsl"
 #include "common.hlsl"
 
-//#pragma gBuffer MeshMain PixelgBuffer
-#pragma forward AmplificationMain MeshMain PixelgBuffer
+#pragma gBuffer AmplificationMain MeshMain PixelgBuffer
+//#pragma forward AmplificationMain MeshMain PixelgBuffer
 
 struct Payload
 {
@@ -123,7 +123,7 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
 struct PS_OUTPUT_FORWARD
 {
     float4 albedo : SV_Target0;
-    float2 normal : SV_Target1;
+    float3 normal : SV_Target1;
     //uint entityID : SV_Target1;
 };
 
@@ -134,7 +134,7 @@ PS_OUTPUT_FORWARD PixelForward(HLSL::MSVert inVerts)
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
     o.albedo = float4(inVerts.color, 1);
-    o.normal = inVerts.normal.xy;
+    o.normal = inVerts.normal.xyz;
     //o.entityID = 1;
     return o;
 }
@@ -145,8 +145,9 @@ PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
-    o.albedo = float4(inVerts.color, 1);
-    o.normal = inVerts.normal.xy;
+    //o.albedo = float4(inVerts.color, 1);
+    o.albedo = float4(0.5, 0.5, 0.5, 1);
+    o.normal = inVerts.normal.xyz;
     //o.entityID = 1;
     return o;
 }

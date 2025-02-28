@@ -44,6 +44,8 @@ namespace HLSL
         uint meshletTriangleCount;
         uint verticesHeapIndex;
         uint vertexCount;
+        uint indicesHeapIndex;
+        uint indexCount;
         uint camerasHeapIndex;
         uint cameraCount;
         uint lightsHeapIndex;
@@ -109,16 +111,11 @@ namespace HLSL
         uint pad[2];
     };
     
-    struct Texture
-    {
-        uint index;
-    };
-    
     struct Material
     {
-        uint shaderIndex;
+        uint textures[16];
         float parameters[15];
-        Texture textures[16];
+        uint shaderIndex;
     };
     
     struct Instance

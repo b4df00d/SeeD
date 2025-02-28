@@ -16,8 +16,15 @@ cbuffer CustomRT : register(b2)
 void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+    RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     RWTexture2D<float4> albedo = ResourceDescriptorHeap[rtParameters.albedoIndex];
     
-    lighted[dtid.xy] = float4(albedo[dtid.xy].xyz * GI[dtid.xy].xyz, 1);
+    float3 indirect = GI[dtid.xy].xyz;
+    float3 direct = shadows[dtid.xy];
+    
+    float3 result = albedo[dtid.xy].xyz * (direct + indirect);
+    result *= 0.5;
+    
+    lighted[dtid.xy] = float4(result, 1);
 }

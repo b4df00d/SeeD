@@ -344,6 +344,8 @@ public:
         commonResourcesIndices.meshletTriangleCount = MeshStorage::instance->nextMeshletTriangleOffset;
         commonResourcesIndices.verticesHeapIndex = MeshStorage::instance->vertices.srv.offset;
         commonResourcesIndices.vertexCount = MeshStorage::instance->nextVertexOffset;
+        commonResourcesIndices.indicesHeapIndex = MeshStorage::instance->indices.srv.offset;
+        commonResourcesIndices.indexCount = MeshStorage::instance->nextIndexOffset;
         commonResourcesIndices.camerasHeapIndex = viewWorld->cameras.gpuData.srv.offset;
         commonResourcesIndices.cameraCount = viewWorld->cameras.Size();
         commonResourcesIndices.lightsHeapIndex = viewWorld->lights.gpuData.srv.offset;
@@ -531,7 +533,7 @@ public:
             commandBuffer->cmd->ClearRenderTargetView(RTs[i], clearColor.f32, 1, &rect);
         }
 
-        commandBuffer->cmd->OMSetRenderTargets(RTCount, RTs, false, depth ? &depth->dsv.handle : nullptr);
+        commandBuffer->cmd->OMSetRenderTargets(RTCount, RTs, true, depth ? &depth->dsv.handle : nullptr);
 
         if (depth)
         {
@@ -861,7 +863,7 @@ public:
         albedo.Register("albedo", view);
         albedo.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R8G8B8A8_UNORM, "albedo"); // must be same as backbuffer for a resource copy at end of frame 
         normal.Register("normal", view);
-        normal.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R16G16_FLOAT, "normal");
+        normal.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R11G11B10_FLOAT, "normal");
         depth.Register("depth", view);
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
     }
@@ -1278,7 +1280,7 @@ public:
                     // Index of the hit group invoked upon intersection
                     instanceDesc.InstanceContributionToHitGroupIndex = 0;
                     // Instance flags, including backface culling, winding, etc - TODO: should be accessible from outside
-                    instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+                    instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE | D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
                     // Instance transform matrix
                     worldMatrix = transpose(worldMatrix);
                     memcpy(instanceDesc.Transform, &worldMatrix, sizeof(instanceDesc.Transform));
@@ -1293,6 +1295,7 @@ public:
                 viewWorld->instances.AddRange(localInstances.data(), instanceCount);
                 viewWorld->meshletsCount += localMeshletCount;
                 raytracingContext.instancesRayTracing->AddRangeWithTransform(localInstancesRayTracing.data(), instanceRayTracingCount, [](int index, D3D12_RAYTRACING_INSTANCE_DESC& data) { data.InstanceID = index; });
+                // THIS IS WRONG : data.InstanceID should be equal to the instance index in viewWorld.instances : this is not guarantied
             }
         );
 
