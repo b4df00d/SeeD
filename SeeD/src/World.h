@@ -10,12 +10,14 @@ class World;
 
 struct assetID
 {
+    static const assetID Invalid;
     UINT64 hash;
     bool operator==(const assetID& other) const
     {
         return hash == other.hash;
     }
 };
+const assetID assetID::Invalid = { ~0 };
 namespace std
 {
     template<>
@@ -453,6 +455,7 @@ namespace Components
         World::Entity entity;
         if (index == entityInvalid)
         {
+            IOs::Log("Should not be adding something if in multitrhead");
             entity.Make(T::mask);
             index = entity.id;
         }

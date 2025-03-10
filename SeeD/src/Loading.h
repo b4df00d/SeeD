@@ -167,6 +167,7 @@ public:
 
     uint GetIndex(assetID id)
     {
+        if (id == assetID::Invalid) return ~0;
         seedAssert(map.contains(id));
         auto& asset = map[id];
         if (asset.indexInVector == ~0)
@@ -663,8 +664,12 @@ public:
                 float radius = length(minBB - maxBB) * 0.5f;
                 originalMesh.boundingSphere = float4(center, radius);
 
-                MeshData mesh = MeshLoader::instance->Process(originalMesh);
-                assetID id = MeshLoader::instance->Write(mesh, std::format("{}{}", m->mName.C_Str(), i));
+                assetID id = assetID::Invalid;
+                if (originalMesh.indices.size() != 0)
+                {
+                    MeshData mesh = MeshLoader::instance->Process(originalMesh);
+                    id = MeshLoader::instance->Write(mesh, std::format("{}{}", m->mName.C_Str(), i));
+                }
 
                 World::Entity ent;
                 ent.Make(Components::Mesh::mask);

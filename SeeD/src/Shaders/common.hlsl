@@ -538,6 +538,7 @@ bool FrustumCulling(in HLSL::Camera camera, float4 boundingSphere)
         float distance = dot(camera.planes[i].xyz, boundingSphere.xyz) + camera.planes[i].w;
         culled |= distance < -boundingSphere.w;
     }
+    culled &= distance(camera.worldPos.xyz, boundingSphere.xyz) > boundingSphere.w;
     return culled;
 }
 
@@ -545,12 +546,11 @@ bool FrustumCulling(in HLSL::Camera camera, float4 boundingSphere)
 // il y a 4 sample plutot que 1 sample du mip du dessus car les 4 corners peuvent etre a cheval entre 2 pixel du sample du dessus
 bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
 {
-    //boundingSphere.w *= 0.3; // test pour le 'presque back face culling a cause du zdepth'
-    if (length(boundingSphere.xyz - camera.worldPos.xyz) < boundingSphere.w)
+    if (distance(boundingSphere.xyz, camera.worldPos.xyz) < boundingSphere.w)
         return false;
     
-    float4 viewSphere = float4(mul(camera.view, float4(boundingSphere.xyz, 1)).xyz, boundingSphere.w);
-    float3 sphereClosestPointToCamera = viewSphere.xyz + normalize(viewSphere.xyz) * boundingSphere.w;
+    float4 viewSphere = float4(mul(camera.view, float4(boundingSphere.xyz, 1)).xyz, boundingSphere.w); // assume view matrix is not scaled
+    float3 sphereClosestPointToCamera = viewSphere.xyz - normalize(viewSphere.xyz) * boundingSphere.w;
     float4 clipSphere = mul(camera.proj, float4(sphereClosestPointToCamera.xyz, 1));
     float fBoundSphereDepth = clipSphere.z / clipSphere.w;
     

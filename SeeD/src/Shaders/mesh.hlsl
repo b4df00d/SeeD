@@ -145,8 +145,8 @@ PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
-    //o.albedo = float4(inVerts.color, 1);
-    o.albedo = float4(0.5, 0.5, 0.5, 1);
+    o.albedo = float4(inVerts.color, 1);
+    //o.albedo = float4(0.5, 0.5, 0.5, 1);
     o.normal = inVerts.normal.xyz;
     //o.entityID = 1;
     return o;

@@ -1242,7 +1242,6 @@ public:
                     Components::Material& materialCmp = instanceCmp.material.Get();
                     Components::Shader& shaderCmp = materialCmp.shader.Get();
 
-
                     uint meshIndex = AssetLibrary::instance->GetIndex(meshCmp.id);
                     if (meshIndex == ~0)
                         continue;
@@ -1447,10 +1446,10 @@ public:
 
                     //4. generate and store the 6 planes that make up the frustum
                     planes[0] = PlaneFromPoints(worldCorners[0], worldCorners[1], worldCorners[2]); // Near
+                    planes[1] = PlaneFromPoints(worldCorners[6], worldCorners[7], worldCorners[5]); // Far
                     planes[2] = PlaneFromPoints(worldCorners[2], worldCorners[6], worldCorners[4]); // Left
                     planes[3] = PlaneFromPoints(worldCorners[7], worldCorners[3], worldCorners[5]); // Right
                     planes[5] = PlaneFromPoints(worldCorners[1], worldCorners[0], worldCorners[4]); // Bottom
-                    planes[1] = PlaneFromPoints(worldCorners[6], worldCorners[7], worldCorners[5]); // Far
                     planes[4] = PlaneFromPoints(worldCorners[2], worldCorners[3], worldCorners[6]); // Top
 
                     HLSL::Camera hlslcam;
