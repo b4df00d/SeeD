@@ -126,6 +126,7 @@ namespace HLSL
         uint pad[2];
     };
     
+    static const uint cullInstanceThreadCount = 128;
     static const uint cullMeshletThreadCount = 128;
     struct InstanceCullingDispatch
     {
