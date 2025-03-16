@@ -24,14 +24,13 @@ void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[cullingContext.instancesCounterIndex];
     RWStructuredBuffer<HLSL::InstanceCullingDispatch> instancesInView = ResourceDescriptorHeap[cullingContext.culledInstanceIndex];
     
-    
-    float3 center = mul(instance.worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
-    float radius = abs(max(max(length(instance.worldMatrix[0].xyz), length(instance.worldMatrix[1].xyz)), length(instance.worldMatrix[2].xyz)) * mesh.boundingSphere.w); // assume uniform scaling
+    float4x4 worldMatrix = instance.unpack();
+    float3 center = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
+    float radius = abs(max(max(length(instance.matA.xyz), length(instance.matA.xyz)), length(instance.matC.xyz)) * mesh.boundingSphere.w); // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
     
     bool culled = FrustumCulling(camera, boundingSphere);
-    if(!culled)
-        culled = OcclusionCulling(camera, boundingSphere);
+    if(!culled) culled = OcclusionCulling(camera, boundingSphere);
     
     if (!culled)
     {

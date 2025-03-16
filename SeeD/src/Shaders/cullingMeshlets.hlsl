@@ -4,34 +4,44 @@
 
 #pragma compute CullingMeshlet
 
+groupshared HLSL::Instance instance;
+groupshared HLSL::Mesh mesh;
+groupshared HLSL::Camera camera;
+
 [RootSignature(SeeDRootSignature)]
 [numthreads(HLSL::cullMeshletThreadCount, 1, 1)]
 void CullingMeshlet(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
-    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[instanceIndexIndirect];
-    
-    StructuredBuffer<HLSL:: Mesh > meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
-    HLSL::Mesh mesh = meshes[instance.meshIndex];
+    if(gtid.x == 0)
+    {
+        StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+        instance = instances[instanceIndexIndirect];
+        
+        StructuredBuffer<HLSL:: Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
+        mesh = meshes[instance.meshIndex];
+        
+        StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+        camera = cameras[cullingContext.cameraIndex];
+    }
+    GroupMemoryBarrierWithGroupSync();
     
     uint localMeshletIndex = dtid.x;
     if (localMeshletIndex >= mesh.meshletCount)
         return;
+    
     uint meshletIndex = mesh.meshletOffset + localMeshletIndex;
     
     StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
     HLSL::Meshlet meshlet = meshlets[meshletIndex];
     
-    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
     
-    float3 center = mul(instance.worldMatrix, float4(meshlet.boundingSphere.xyz, 1)).xyz;
-    float radius = abs(max(max(length(instance.worldMatrix[0].xyz), length(instance.worldMatrix[1].xyz)), length(instance.worldMatrix[2].xyz)) * meshlet.boundingSphere.w); // assume uniform scaling
+    float4x4 worldMatrix = instance.unpack();
+    float3 center = mul(worldMatrix, float4(meshlet.boundingSphere.xyz, 1)).xyz;
+    float radius = abs(max(max(length(instance.matA.xyz), length(instance.matA.xyz)), length(instance.matC.xyz)) * meshlet.boundingSphere.w); // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
     
     bool culled = FrustumCulling(camera, boundingSphere);
-    if (!culled)
-        culled = OcclusionCulling(camera, boundingSphere);
+    if (!culled)  culled = OcclusionCulling(camera, boundingSphere);
     
     if (!culled)
     {

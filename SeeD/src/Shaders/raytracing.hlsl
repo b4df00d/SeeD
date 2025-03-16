@@ -148,7 +148,8 @@ SurfaceData GetSurfaceData(HLSL::Attributes attrib)
 
     float3 normal = ((1 - attrib.bary.x - attrib.bary.y) * nrm1 + attrib.bary.x * nrm2 + attrib.bary.y * nrm3);
     normal = normalize(normal);
-    float3 worldNormal = mul((float3x3) instance.worldMatrix, normal);
+    float4x4 worldMatrix = instance.unpack();
+    float3 worldNormal = mul((float3x3) worldMatrix, normal);
     s.normal = normal;
     
     return s;
@@ -201,15 +202,41 @@ void RayGen()
     float3 rayDir = worldSpace.xyz - camera.worldPos.xyz;
     float rayLength = length(rayDir);
     rayDir /= rayLength;
-    worldSpace.xyz = camera.worldPos.xyz + rayDir * rayLength + (normal * 0.01f);
+    worldSpace.xyz = camera.worldPos.xyz + rayDir * (rayLength * 0.999f) + (normal * 0.01f);
     
+    
+    float shadow = 0;
+    {
+        // shadow
+        HLSL::HitInfo shadowload;
+        shadowload.color = float3(0.0, 0.0, 0.0);
+        shadowload.rayDepth = 1000000;
+        shadowload.currentPosition = worldSpace.xyz;
+        shadowload.rndseed = initRand(uint(launchIndex.x * abs(worldSpace.z + normal.x) * 382) >> 1, uint(launchIndex.y * abs(worldSpace.x + normal.y) * 472) >> 1, 3);
+        shadowload.normal = normal;
+        shadowload.tCurrent = 0;
+    
+        RayDesc ray;
+        ray.Origin = worldSpace.xyz;
+        ray.Direction = float3(1, 1, 1);
+        ray.TMin = 0;
+        ray.TMax = 100000;
+
+        if (dot(shadowload.normal, ray.Direction) > 0)
+        {
+            // Trace the ray
+            TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, shadowload);
+        }
+        
+        shadow += shadowload.color.b > 0.0 ? 1 : 0;
+    }
     
     float3 light = 0;
     {
         // AO
         HLSL::HitInfo payload;
         payload.color = float3(0.0, 0.0, 0.0);
-        payload.rayDepth = 0;
+        payload.rayDepth = 1;
         payload.currentPosition = worldSpace.xyz;
         payload.rndseed = initRand(uint(launchIndex.x * abs(worldSpace.y + normal.z) * 582) >> 1, uint(launchIndex.y * abs(worldSpace.z + normal.x) * 672) >> 1, 3);
         payload.normal = normal;
@@ -227,31 +254,8 @@ void RayGen()
         light += payload.color;
     }
     
-    float shadow = 0;
-    {
-        // shadow
-        HLSL::HitInfo payload;
-        payload.color = float3(0.0, 0.0, 0.0);
-        payload.rayDepth = 1000000;
-        payload.currentPosition = worldSpace.xyz;
-        payload.rndseed = initRand(uint(launchIndex.x * abs(worldSpace.z + normal.x) * 382) >> 1, uint(launchIndex.y * abs(worldSpace.x + normal.y) * 472) >> 1, 3);
-        payload.normal = normal;
-        payload.tCurrent = 0;
-    
-        RayDesc ray;
-        ray.Origin = worldSpace.xyz;
-        ray.Direction = float3(1, 1, 1);
-        ray.TMin = 0;
-        ray.TMax = 100000;
-
-        // Trace the ray
-        TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, payload);
-        
-        shadow += saturate(payload.color.b);
-    }
-    
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    GI[launchIndex] = light * 0.5f;
+    GI[launchIndex] = light;
     RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     shadows[launchIndex] = shadow;
 
@@ -260,19 +264,20 @@ void RayGen()
 [shader("miss")]
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
-    payload.color = float3(0.2, 0.3, 0.8) * 10.0f * pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.75 + 0.25, 2);
+    payload.color = float3(0.4, 0.5, 0.8) * pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.75 + 0.25, 4);
 }
 
 [shader("closesthit")]
 void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
-    payload.rayDepth++;
-    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() - 0.0001);
+    //payload.rayDepth++;
     RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
     
     SurfaceData s = GetSurfaceData(attrib);
+    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() - 0.000001);
     
-    float shadow = 0;
+    float3 sun = 0;
+    if (payload.rayDepth < HLSL::maxRTDepth)
     {
         // shadow
         HLSL::HitInfo shadowload;
@@ -288,20 +293,23 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
         ray.Direction = float3(1, 1, 1);
         ray.TMin = 0;
         ray.TMax = 100000;
-
-        // Trace the ray
-        TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, payload);
         
-        shadow += saturate(shadowload.color.b);
+        if (dot(payload.normal, ray.Direction) > 0)
+        {
+            // Trace the ray
+            TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, shadowload);
+        }
+        
+        sun += shadowload.color.b > 0.0 ? float3(1, 0.75, 0.65) * 3 : 0;
     }
     
-    float3 light = 1;
-    if (payload.rayDepth <= 1)
+    float3 light = 0;
+    if (payload.rayDepth < HLSL::maxRTDepth)
     {
         
         HLSL::HitInfo nextRay;
         nextRay.color = float3(0.0, 0.0, 0.0);
-        nextRay.rayDepth = payload.rayDepth;
+        nextRay.rayDepth = payload.rayDepth + 1;
         nextRay.currentPosition = hitLocation;
         nextRay.rndseed = payload.rndseed;
         nextRay.normal = s.normal;
@@ -320,7 +328,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
         light = nextRay.color;
     }
     
-    payload.color += s.albedo * (shadow + light); // do PBR shit here
+    payload.color += s.albedo * (sun + light); // do PBR shit here
 }
 
 [shader("anyhit")]

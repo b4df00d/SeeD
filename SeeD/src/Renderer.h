@@ -1263,7 +1263,8 @@ public:
                     HLSL::Instance& instance = localInstances[instanceCount];
                     instance.meshIndex = meshIndex;
                     instance.materialIndex = materialIndex;
-                    instance.worldMatrix = worldMatrix;
+                    //instance.worldMatrix = worldMatrix;
+                    instance.pack(worldMatrix);
                     // count instances with shader
                     instanceCount++;
 

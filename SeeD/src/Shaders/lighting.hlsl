@@ -21,7 +21,10 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     RWTexture2D<float4> albedo = ResourceDescriptorHeap[rtParameters.albedoIndex];
     
     float3 indirect = GI[dtid.xy].xyz;
-    float3 direct = shadows[dtid.xy];
+    float3 direct = shadows[dtid.xy] * float3(1, 0.75, 0.65) * 3;
+    
+    //indirect = 1;
+    //direct = 1;
     
     float3 result = albedo[dtid.xy].xyz * (direct + indirect);
     result *= 0.5;

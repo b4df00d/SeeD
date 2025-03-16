@@ -31,7 +31,8 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     
     uint meshletCount = min(256, mesh.meshletCount);
     
-    float4 boundingSphere = mul(instance.worldMatrix, float4(mesh.boundingSphere.xyz, 1));
+    float4x4 worldMatrix = instance.unpack();
+    float4 boundingSphere = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1));
     boundingSphere.w = mesh.boundingSphere.w;
     
     bool culled = FrustumCulling(camera, boundingSphere);
@@ -47,7 +48,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
         StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
         HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset + i];
         
-        boundingSphere = mul(instance.worldMatrix, float4(meshlet.boundingSphere.xyz, 1));
+        boundingSphere = mul(worldMatrix, float4(meshlet.boundingSphere.xyz, 1));
         boundingSphere.w = mesh.boundingSphere.w;
     
         culled = FrustumCulling(camera, boundingSphere);
@@ -87,12 +88,13 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
     if (groupThreadId.x < meshlet.vertexCount)
     {
+        float4x4 worldMatrix = instance.unpack();
         uint tmpIndex = meshlet.vertexOffset + groupThreadId.x;
         uint index = meshletVertices[tmpIndex];
         float4 pos = float4(verticesData[index].pos.xyz, 1);
-        float4 worldPos = mul(instance.worldMatrix, pos);
+        float4 worldPos = mul(worldMatrix, pos);
         float3 normal = verticesData[index].normal.xyz;
-        float3 worldNormal = mul((float3x3)instance.worldMatrix, normal);
+        float3 worldNormal = mul((float3x3)worldMatrix, normal);
         outVerts[groupThreadId.x].pos = mul(camera.viewProj, worldPos);
         outVerts[groupThreadId.x].color = RandUINT(meshletIndexIndirect);
         outVerts[groupThreadId.x].normal = worldNormal;
@@ -145,8 +147,8 @@ PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
-    o.albedo = float4(inVerts.color, 1);
-    //o.albedo = float4(0.5, 0.5, 0.5, 1);
+    o.albedo = float4(0.5, 0.5, 0.5, 1);
+    //o.albedo = float4(inVerts.color, 1);
     o.normal = inVerts.normal.xyz;
     //o.entityID = 1;
     return o;

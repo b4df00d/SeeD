@@ -120,13 +120,36 @@ namespace HLSL
     
     struct Instance
     {
-        float4x4 worldMatrix;
+        //float4x4 worldMatrix;
+        float4 matA;
+        float4 matB;
+        float4 matC;
         uint meshIndex;
         uint materialIndex;
         uint pad[2];
+        
+        float4x4 unpack()
+        {
+            return float4x4(matA.x, matB.x, matC.x, matA.w,
+                            matA.y, matB.y, matC.y, matB.w,
+                            matA.z, matB.z, matC.z, matC.w,
+                            0, 0, 0, 1);
+        }
+        
+        void pack(float4x4 mat)
+        {
+            matA.xyz = mat[0].xyz;
+            matA.w = mat[3].x;
+            
+            matB.xyz = mat[1].xyz;
+            matB.w = mat[3].y;
+            
+            matC.xyz = mat[2].xyz;
+            matC.w = mat[3].z;
+        }
     };
     
-    static const uint cullMeshletThreadCount = 128;
+    static const uint cullMeshletThreadCount = 32;
     struct InstanceCullingDispatch
     {
         uint instanceIndex;
@@ -221,6 +244,7 @@ namespace HLSL
     
     
     // ----------------- RT stuff ------------------
+    static const uint maxRTDepth = 3;
     struct RTParameters
     {
         float4 resolution; //x, y, 1/x, 1/y

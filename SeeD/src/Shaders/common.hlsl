@@ -525,8 +525,8 @@ float4 sphere_screen_extents(in const float3 pos_, in const float rad_, in const
 
 float4 ScreenSpaceBB(in HLSL::Camera camera, float4 boundingSphere)
 {
-    float4 viewSphere = float4(mul(camera.view, float4(boundingSphere.xyz, 1)).xyz, boundingSphere.w);
-    return sphere_screen_extents(viewSphere.xyz, viewSphere.w, camera.proj);
+    //boundingSphere = float4(mul(camera.view, float4(boundingSphere.xyz, 1)).xyz, boundingSphere.w);
+    return sphere_screen_extents(boundingSphere.xyz, boundingSphere.w, camera.proj);
 }
 
 bool FrustumCulling(in HLSL::Camera camera, float4 boundingSphere)
@@ -546,17 +546,19 @@ bool FrustumCulling(in HLSL::Camera camera, float4 boundingSphere)
 // il y a 4 sample plutot que 1 sample du mip du dessus car les 4 corners peuvent etre a cheval entre 2 pixel du sample du dessus
 bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
 {
-    if (distance(boundingSphere.xyz, camera.worldPos.xyz) < boundingSphere.w)
-        return false;
+    if (distance(boundingSphere.xyz, camera.worldPos.xyz) < boundingSphere.w) return false; // BS intersecting the camera pos
     
     float4 viewSphere = float4(mul(camera.view, float4(boundingSphere.xyz, 1)).xyz, boundingSphere.w); // assume view matrix is not scaled
+    
+    if (boundingSphere.w / saturate(viewSphere.z) < 0.0025f) return true; // BS too small
+    
     float3 sphereClosestPointToCamera = viewSphere.xyz - normalize(viewSphere.xyz) * boundingSphere.w;
     float4 clipSphere = mul(camera.proj, float4(sphereClosestPointToCamera.xyz, 1));
-    float fBoundSphereDepth = clipSphere.z / clipSphere.w;
+    float fBoundSphereDepth = saturate(clipSphere.z / clipSphere.w - 0.001);
     
     float3 vHZB = float3(cullingContext.resolution.x, cullingContext.resolution.y, cullingContext.HZBMipCount);
     Texture2D<float> tHZB = ResourceDescriptorHeap[cullingContext.HZB];
-    float4 vLBRT = ScreenSpaceBB(camera, boundingSphere);
+    float4 vLBRT = ScreenSpaceBB(camera, viewSphere);
     
     float4 vToUV = float4(0.5f, -0.5f, 0.5f, -0.5f);
     float4 vUV = saturate(vLBRT.xwzy * vToUV + 0.5f);

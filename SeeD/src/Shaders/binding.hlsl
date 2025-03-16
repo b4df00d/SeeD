@@ -72,7 +72,7 @@
                             "mipLodBias     = 0.0f, "\
                             "maxAnisotropy  = 0, "\
                             "comparisonFunc = COMPARISON_NEVER, "\
-                            "borderColor    = STATIC_BORDER_COLOR_TRANSPARENT_BLACK, "\
+                            "borderColor    = STATIC_BORDER_COLOR_OPAQUE_WHITE, "\
                             "minLOD         = 0.0f, "\
                             "maxLOD         = 3.402823466e+38f, "\
                             "space          = 0, "\
