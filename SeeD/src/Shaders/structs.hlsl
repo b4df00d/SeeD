@@ -1,9 +1,9 @@
 #pragma once
 
 #ifdef __cplusplus // bah c´est surtout pour par avoir ca dans le HLSL
-#define align __declspec(align(16))
+#define SeeDalign __declspec(align(16))
 #else
-#define align
+#define SeeDalign
 #endif
 
 // CAREFULL OF ALIGNEMENT !
@@ -28,6 +28,7 @@ namespace HLSL
         float4 pos : SV_Position;
         float3 normal : NORMAL;
         float3 color : COLOR0;
+        float2 uv : TEXCOORD0;
     };
 #endif
     

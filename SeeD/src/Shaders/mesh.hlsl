@@ -96,8 +96,9 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         float3 normal = verticesData[index].normal.xyz;
         float3 worldNormal = mul((float3x3)worldMatrix, normal);
         outVerts[groupThreadId.x].pos = mul(camera.viewProj, worldPos);
-        outVerts[groupThreadId.x].color = RandUINT(meshletIndexIndirect);
         outVerts[groupThreadId.x].normal = worldNormal;
+        outVerts[groupThreadId.x].color = RandUINT(meshletIndexIndirect);
+        outVerts[groupThreadId.x].uv = verticesData[index].uv;
     }
     ByteAddressBuffer trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
     if (groupThreadId.x < meshlet.triangleCount)
@@ -147,6 +148,12 @@ PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
+    
+    StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
+    HLSL::Material material = materials[instance.materialIndex];
+    
+    Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
+    
     o.albedo = float4(0.5, 0.5, 0.5, 1);
     //o.albedo = float4(inVerts.color, 1);
     o.normal = inVerts.normal.xyz;

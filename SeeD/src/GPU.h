@@ -56,7 +56,7 @@ struct DSV
     D3D12_CPU_DESCRIPTOR_HANDLE handle;
 };
 
-class CommandBuffer;
+struct CommandBuffer;
 class Resource
 {
 public:
@@ -67,6 +67,7 @@ public:
     RTV rtv{ UINT32_MAX, 0, 0 };
     DSV dsv{ UINT32_MAX, 0 };
 
+    void Create(D3D12_RESOURCE_DESC desc, String name = "Texture");
     void CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, String name = "Texture");
     void CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
     void CreateDepthTarget(uint2 resolution, String name = "Texture");
@@ -83,6 +84,7 @@ public:
     void Release(bool deferred = false);
     ID3D12Resource* GetResource();
     uint BufferSize();
+    void UploadTexture(std::vector<D3D12_SUBRESOURCE_DATA> subresources, CommandBuffer& cb);
     void Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb);
     void UploadElements(void* data, uint count, uint index, CommandBuffer& cb);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
@@ -291,7 +293,7 @@ struct Shader
         drd.HitGroupTable.SizeInBytes = hitGroupSize;
         drd.HitGroupTable.StrideInBytes = progIdSize;
 
-        uint shaderBindingTableSize = drd.RayGenerationShaderRecord.SizeInBytes + drd.MissShaderTable.SizeInBytes + drd.HitGroupTable.SizeInBytes;
+        UINT64 shaderBindingTableSize = drd.RayGenerationShaderRecord.SizeInBytes + drd.MissShaderTable.SizeInBytes + drd.HitGroupTable.SizeInBytes;
         //seedAssert(bufferSize == shaderBindingTableSize);
 
         uint8_t* sbt;
@@ -776,6 +778,60 @@ public:
     }
 };
 GPU* GPU::instance;
+
+
+void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name)
+{
+    D3D12MA::ALLOCATION_DESC allocationDesc = {};
+    allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+
+    HRESULT hr = GPU::instance->allocator->CreateResource(
+        &allocationDesc,
+        &resourceDesc,
+        D3D12_RESOURCE_STATE_COMMON,
+        NULL,
+        &allocation,
+        IID_NULL, NULL);
+
+    std::wstring wname = name.ToWString();
+    allocation->SetName(wname.c_str());
+    allocation->GetResource()->SetName(wname.c_str());
+    lock.lock();
+    allResources.push_back(*this);
+    allResourcesNames.push_back(name);
+    lock.unlock();
+
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+        auto desc = GetResource()->GetDesc();
+        srv.offset = (uint)GPU::instance->descriptorHeap.globalDescriptorHeapSlots.Get();
+        handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+        srv.handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
+        SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        SRVDesc.Format = desc.Format;
+        SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        SRVDesc.Texture2D.MipLevels = desc.MipLevels;
+        GPU::instance->device->CreateShaderResourceView(GetResource(), &SRVDesc, handle);
+    }
+
+    //exclude BC format for UAV
+    if(!((resourceDesc.Format >= DXGI_FORMAT_BC1_TYPELESS && resourceDesc.Format <= DXGI_FORMAT_BC5_SNORM)
+        || (resourceDesc.Format >= DXGI_FORMAT_BC6H_TYPELESS && resourceDesc.Format <= DXGI_FORMAT_BC7_UNORM_SRGB)))
+    {
+        auto desc = GetResource()->GetDesc();
+        D3D12_CPU_DESCRIPTOR_HANDLE handle;
+        uav.offset = (uint)GPU::instance->descriptorHeap.globalDescriptorHeapSlots.Get();
+        handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(uav.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC UAVDesc = {};
+        UAVDesc.Format = desc.Format;
+        UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        UAVDesc.Texture2D.MipSlice = 0;
+        GPU::instance->device->CreateUnorderedAccessView(GetResource(), nullptr, &UAVDesc, handle);
+    }
+}
 
 // definitions of Resource
 void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, String name)
@@ -1337,7 +1393,63 @@ ID3D12Resource* Resource::GetResource()
 
 uint Resource::BufferSize()
 {
-    return GetResource()->GetDesc().Width;
+    return (uint)GetResource()->GetDesc().Width;
+}
+
+void Resource::UploadTexture(std::vector<D3D12_SUBRESOURCE_DATA> subresources, CommandBuffer& cb)
+{
+
+    //UINT64 uploadBufferSize = GPU::instance->device->GetCopyableFootprints(&GetResource()->GetDesc(), 0, subresources.size(), 0, nullptr, nullptr, nullptr, &uploadBufferSize);
+
+    D3D12MA::Allocation* uploadAllocation;
+
+    D3D12MA::ALLOCATION_DESC allocationDesc = {};
+    allocationDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+
+    D3D12_RESOURCE_DESC desc = GetResource()->GetDesc();
+
+    HRESULT hr = GPU::instance->allocator->CreateResource(
+        &allocationDesc,
+        &desc,
+        D3D12_RESOURCE_STATE_COPY_SOURCE,
+        NULL,
+        &uploadAllocation,
+        IID_NULL, NULL);
+
+    Resource* tmpUpRes = new Resource();
+    tmpUpRes->allocation = uploadAllocation;
+
+    /*
+    uploadAllocation->SetName(L"UploadTexture");
+    lock.lock();
+    releaseResources.push_back({ GPU::instance->frameNumber, *tmpUpRes });
+    lock.unlock();
+
+    void* buf;
+    uploadAllocation->GetResource()->Map(0, nullptr, &buf);
+    memcpy(buf, data, dataSize);
+    uploadAllocation->GetResource()->Unmap(0, nullptr);
+
+    BYTE* pData;
+    HRESULT hr = tmpUpRes->GetResource()->Map(0, nullptr, reinterpret_cast<void**>(&pData));
+    if (FAILED(hr))
+    {
+        return;
+    }
+    for (UINT i = 0; i < NumSubresources; ++i)
+    {
+        if (pRowSizesInBytes[i] > SIZE_T(-1)) return 0;
+        D3D12_MEMCPY_DEST DestData = { pData + pLayouts[i].Offset, pLayouts[i].Footprint.RowPitch, SIZE_T(pLayouts[i].Footprint.RowPitch) * SIZE_T(pNumRows[i]) };
+        MemcpySubresource(&DestData, &pSrcData[i], static_cast<SIZE_T>(pRowSizesInBytes[i]), pNumRows[i], pLayouts[i].Footprint.Depth);
+    }
+    pIntermediate->Unmap(0, nullptr);
+
+    lock.lock();
+    Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+    cb.cmd->CopyTextureRegion(GetResource(), offset, uploadAllocation->GetResource(), 0, dataSize);
+    Transition(cb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    lock.unlock();
+    */
 }
 
 void Resource::Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb)
@@ -1645,7 +1757,7 @@ public:
         cpuData.reserve(cpuData.size() + count);
         for (uint i = 0; i < count; i++)
         {
-            f(cpuData.size(), data[i]);
+            f((int)cpuData.size(), data[i]);
             cpuData.push_back(data[i]);
         }
         lock.unlock();
@@ -1837,7 +1949,7 @@ struct Profiler
         profileData.QueryStarted = true;
 
         // Insert the start timestamp
-        cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, profileIdx * 2);
+        cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, (uint)profileIdx * 2);
         cb.profileIdx = (uint)profileIdx;
 
         return profileIdx;
@@ -2063,20 +2175,20 @@ struct MeshStorage
         uint _nextIndexOffset = nextIndexOffset;
 
         nextMeshOffset += 1;
-        nextMeshletOffset += meshData.meshlets.size();
-        nextMeshletVertexOffset += meshData.meshlet_vertices.size();
-        nextMeshletTriangleOffset += meshData.meshlet_triangles.size();
-        nextVertexOffset += meshData.vertices.size();
-        nextIndexOffset += meshData.indices.size();
+        nextMeshletOffset += (uint)meshData.meshlets.size();
+        nextMeshletVertexOffset += (uint)meshData.meshlet_vertices.size();
+        nextMeshletTriangleOffset += (uint)meshData.meshlet_triangles.size();
+        nextVertexOffset += (uint)meshData.vertices.size();
+        nextIndexOffset += (uint)meshData.indices.size();
         lock.unlock();
 
         Mesh newMesh;
         newMesh.boundingSphere = meshData.boundingSphere;
-        newMesh.meshletCount = meshData.meshlets.size();
+        newMesh.meshletCount = (uint)meshData.meshlets.size();
         newMesh.meshletOffset = _nextMeshletOffset;
-        newMesh.indexCount = meshData.indices.size();
+        newMesh.indexCount = (uint)meshData.indices.size();
         newMesh.indexOffset = _nextIndexOffset;
-        newMesh.vertexCount = meshData.vertices.size();
+        newMesh.vertexCount = (uint)meshData.vertices.size();
         newMesh.vertexOffset = _nextVertexOffset;
         for (uint i = 0; i < meshData.meshlets.size(); i++)
         {
@@ -2094,11 +2206,11 @@ struct MeshStorage
         }
 
         meshes.UploadElements(&newMesh, 1, _nextMeshOffset, commandBuffer);
-        meshlets.UploadElements(meshData.meshlets.data(), meshData.meshlets.size(), _nextMeshletOffset, commandBuffer);
-        meshletVertices.UploadElements(meshData.meshlet_vertices.data(), meshData.meshlet_vertices.size(), _nextMeshletVertexOffset, commandBuffer);
-        meshletTriangles.UploadElements(meshData.meshlet_triangles.data(), meshData.meshlet_triangles.size(), _nextMeshletTriangleOffset, commandBuffer);
-        vertices.UploadElements(meshData.vertices.data(), meshData.vertices.size(), _nextVertexOffset, commandBuffer);
-        indices.UploadElements(meshData.indices.data(), meshData.indices.size(), _nextIndexOffset, commandBuffer);
+        meshlets.UploadElements(meshData.meshlets.data(), (uint)meshData.meshlets.size(), _nextMeshletOffset, commandBuffer);
+        meshletVertices.UploadElements(meshData.meshlet_vertices.data(), (uint)meshData.meshlet_vertices.size(), _nextMeshletVertexOffset, commandBuffer);
+        meshletTriangles.UploadElements(meshData.meshlet_triangles.data(), (uint)meshData.meshlet_triangles.size(), _nextMeshletTriangleOffset, commandBuffer);
+        vertices.UploadElements(meshData.vertices.data(), (uint)meshData.vertices.size(), _nextVertexOffset, commandBuffer);
+        indices.UploadElements(meshData.indices.data(), (uint)meshData.indices.size(), _nextIndexOffset, commandBuffer);
 
         meshes.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         meshlets.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
@@ -2154,12 +2266,12 @@ struct MeshStorage
 
         if (scratchSizeInBytes > maxScratchSizeInBytes)
         {
-            maxScratchSizeInBytes = scratchSizeInBytes;
+            maxScratchSizeInBytes = (uint)scratchSizeInBytes;
             //release deferred scratchBLAS
             //reallocate scratchBLAS
         }
 
-        mesh.BLAS.CreateAccelerationStructure(resultSizeInBytes, "BLAS");
+        mesh.BLAS.CreateAccelerationStructure((uint)resultSizeInBytes, "BLAS");
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc;
         buildDesc.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;

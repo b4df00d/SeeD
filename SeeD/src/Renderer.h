@@ -193,7 +193,7 @@ public:
     }
     uint Size()
     {
-        return data.size();
+        return (uint)data.size();
     }
     void Upload()
     {
@@ -457,7 +457,7 @@ public:
         }
 
 #ifdef USE_PIX
-        PIXBeginEvent(commandBuffer->cmd, PIX_COLOR_INDEX((BYTE)name.c_str()), name.c_str());
+        PIXBeginEvent(commandBuffer->cmd, PIX_COLOR_INDEX((BYTE)(UINT64)name.c_str()), name.c_str());
 #endif
         Profiler::instance->StartProfile(commandBuffer.Get(), name.c_str());
     }
@@ -1420,7 +1420,7 @@ public:
 
                     float4 planes[6];
                     float3 worldCorners[8];
-                    float sizeCulling;
+                    //float sizeCulling;
 
                     // compute planes
                     float4x4 mat = mul(inverse(proj), trans.matrix);
@@ -1608,7 +1608,7 @@ public:
     void ExecuteFrame()
     {
         ZoneScoped;
-        HRESULT hr;
+        //HRESULT hr;
 
         AssetLibrary::instance->Close();
         AssetLibrary::instance->Execute();

@@ -42,7 +42,11 @@ public:
 
 		for (size_t found = find(i_delim); found != String::npos; found = find(i_delim, startIndex))
 		{
-			result.emplace_back(std::string(begin() + startIndex, begin() + found));
+			String token = std::string(begin() + startIndex, begin() + found);
+			if(!token.empty() && token != i_delim)
+			{
+				result.emplace_back(token);
+			}
 			startIndex = found + i_delim.size();
 		}
 		if (startIndex != size())

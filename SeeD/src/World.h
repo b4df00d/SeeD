@@ -17,7 +17,7 @@ struct assetID
         return hash == other.hash;
     }
 };
-const assetID assetID::Invalid = { ~0 };
+const assetID assetID::Invalid = { (UINT64)~0 };
 namespace std
 {
     template<>
@@ -71,6 +71,7 @@ namespace Components
     {
         uint index = entityInvalid;
         T& Get();
+        bool IsValid() { return index != entityInvalid; }
         //explicit operator World::Entity() const;
     };
 

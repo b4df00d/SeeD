@@ -252,8 +252,8 @@ public:
 				{
 					if (window.windowResolution.x != r.right || window.windowResolution.y != r.bottom)
 					{
-						window.windowResolution.x = (float)r.right;
-						window.windowResolution.y = (float)r.bottom;
+						window.windowResolution.x = r.right;
+						window.windowResolution.y = r.bottom;
 						window.windowResized = true;
 					}
 				}
@@ -457,8 +457,8 @@ public:
 		else
 		{
 			
-			int px = ((float)screenSize.x - (float)window.windowResolution.x) * 0.5f;
-			int py = ((float)screenSize.y - (float)window.windowResolution.y) * 0.5f;
+			int px = (screenSize.x - window.windowResolution.x) * 0.5f;
+			int py = (screenSize.y - window.windowResolution.y) * 0.5f;
 			windowPosition = int2(px, py);
 			int sx = (int)window.windowResolution.x;
 			int sy = (int)window.windowResolution.y;

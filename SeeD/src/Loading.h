@@ -18,6 +18,7 @@ public:
     };
     static AssetLibrary* instance;
     std::unordered_map<assetID, Asset> map;
+    String importPath = "..\\Assets\\";
     String assetsPath = "..\\Assets\\";
     String file = "..\\assetLibrary.txt";
     std::unordered_map<assetID, uint> loadingRequest;
@@ -82,7 +83,7 @@ public:
         }
 
 #ifdef USE_PIX
-        PIXBeginEvent(commandBuffer->cmd, PIX_COLOR_INDEX((BYTE)name), name);
+        PIXBeginEvent(commandBuffer->cmd, PIX_COLOR_INDEX((BYTE)(UINT64)name), name);
 #endif
         Profiler::instance->StartProfile(commandBuffer.Get(), name);
     }
@@ -137,12 +138,12 @@ public:
     AssetLibrary::AssetType GetType(assetID id)
     {
         String path = GetPath(id);
-        int extentionStart = path.find_last_of('.') + 1;
+        int extentionStart = (uint)path.find_last_of('.') + 1;
         String extenstion = path.substr(extentionStart);
         AssetLibrary::AssetType type;
         if (extenstion == "mesh") type = AssetLibrary::AssetType::mesh;
         else if (extenstion == "hlsl") type = AssetLibrary::AssetType::shader;
-        else if (extenstion == "dds") type = AssetLibrary::AssetType::texture;
+        else if (extenstion == "tex") type = AssetLibrary::AssetType::texture;
 
         return type;
     }
@@ -182,6 +183,9 @@ public:
     template<typename T>
     T* Get(assetID id, bool immediate = false)
     {
+        if (id == assetID::Invalid)
+            return nullptr;
+
         seedAssert(map.contains(id));
         auto& asset = map[id];
         if (asset.indexInVector == ~0)
@@ -222,6 +226,7 @@ public:
         std::ofstream myfile(file);
         if (myfile.is_open())
         {
+            myfile << importPath << std::endl;
             for (auto& item : map)
             {
                 myfile << item.first.hash << " " << item.second.path << std::endl;
@@ -236,6 +241,7 @@ public:
         std::ifstream myfile(file);
         if (myfile.is_open())
         {
+            myfile >> importPath;
             assetID id;
             String path;
             while (myfile >> id.hash >> path)
@@ -245,17 +251,49 @@ public:
             }
         }
     }
+
+    String FindInImportPath(String name)
+    {
+        size_t last = name.find_last_of("\\");
+        if (last != -1)
+            name = name.substr(last + 1);
+        for (const auto& p : std::filesystem::recursive_directory_iterator((std::string)importPath))
+        {
+            if (!std::filesystem::is_directory(p))
+            {
+                String pName = p.path().filename().string();
+                if (p.path().filename().string() == name)
+                    return p.path().string();
+            }
+        }
+        return "";
+    }
 };
 AssetLibrary* AssetLibrary::instance = nullptr;
 
 #include <wincodec.h>
-#include "../../Third/DirectXTex-main/WICTextureLoader/WICTextureLoader12.h"
-#include "../../Third/DirectXTex-main/DDSTextureLoader/DDSTextureLoader12.h"
+//#include "../../Third/DirectXTex-main/WICTextureLoader/WICTextureLoader12.h"
+//#include "../../Third/DirectXTex-main/DDSTextureLoader/DDSTextureLoader12.h"
+#include "../../Third/DirectXTex-main/DirectXTex/DirectXTex.h"
+#include <dstorage.h>
 class TextureLoader
 {
 public:
     static TextureLoader* instance;
     IWICImagingFactory* wicFactory = NULL;
+    IDStorageFactory* factory;
+    IDStorageCompressionCodec* compression;
+    IDStorageQueue* queue;
+    struct DirectStorageSampleTextureMetadataHeader
+    {
+        D3D12_RESOURCE_DESC resourceDesc;
+        DSTORAGE_COMPRESSION_FORMAT compressionFormat;
+        uint64_t resourceSizeCompressed;
+        uint64_t resourceSizeUncompressed;
+        int64_t resourceOffset;
+        wchar_t resourceName[MAX_PATH]; // This is the name of the resource this header describes. It's just the file name.
+    };
+
     void On()
     {
 		ZoneScoped;
@@ -263,6 +301,21 @@ public:
         HRESULT hr;
         CoInitialize(NULL);// Initialize the COM library
         hr = CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wicFactory));// create the WIC factory
+
+        hr = DStorageGetFactory(IID_PPV_ARGS(&factory));
+
+        constexpr uint32_t DEFAULT_THREAD_COUNT = 0;
+        hr = DStorageCreateCompressionCodec(DSTORAGE_COMPRESSION_FORMAT_GDEFLATE, DEFAULT_THREAD_COUNT, IID_PPV_ARGS(&compression));
+
+        // Create a DirectStorage queue which will be used to load data into a
+        // buffer on the GPU.
+        DSTORAGE_QUEUE_DESC queueDesc{};
+        queueDesc.Capacity = DSTORAGE_MAX_QUEUE_CAPACITY;
+        queueDesc.Priority = DSTORAGE_PRIORITY_NORMAL;
+        queueDesc.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
+        queueDesc.Device = GPU::instance->device;
+
+        hr = factory->CreateQueue(&queueDesc, IID_PPV_ARGS(&queue));
     }
 
     void Off()
@@ -272,9 +325,461 @@ public:
         instance = nullptr;
     }
 
-    bool Load(Resource& resource, String path)
+    Resource Read(String path)
     {
-        return false;
+        Resource resource = {};
+
+        String metaPath = path.substr(0, path.length() - 4) + ".meta";
+        DirectStorageSampleTextureMetadataHeader metadata;
+        std::ifstream fin(metaPath, std::ios::binary);
+        if (fin.is_open())
+        {
+            fin.read((char*)&metadata, sizeof(metadata));
+            fin.close();
+        }
+
+        resource.Create(metadata.resourceDesc, path);
+
+        IDStorageFile* fileHandle = nullptr;
+        factory->OpenFile(path.ToWString().c_str(), IID_PPV_ARGS(&fileHandle));
+
+        DSTORAGE_REQUEST req = {};
+        req.Options.CompressionFormat = metadata.compressionFormat;
+        req.Options.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
+        req.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_MULTIPLE_SUBRESOURCES;
+        req.Source.File.Source = fileHandle;
+        req.Source.File.Offset = metadata.resourceOffset;
+        req.Source.File.Size = metadata.resourceSizeCompressed;
+        req.Destination.MultipleSubresources.Resource = resource.GetResource();
+        req.Destination.MultipleSubresources.FirstSubresource = 0;
+        req.UncompressedSize = metadata.resourceSizeUncompressed;
+
+        req.CancellationTag = 1;
+        req.Name = (char*)path.c_str();
+
+        queue->EnqueueRequest(&req);
+        queue->Submit();
+
+        return resource;
+
+        /*
+        IDStorageFile* file;
+        HRESULT hr = factory->OpenFile(path.ToWString().c_str(), IID_PPV_ARGS(&file));
+        if (FAILED(hr))
+        {
+            IOs::Log("could not load {}", path.c_str());
+            return resource;
+        }
+
+        BY_HANDLE_FILE_INFORMATION info{};
+        hr = file->GetFileInformation(&info);
+        uint32_t fileSize = info.nFileSizeLow;
+
+        // Create the ID3D12Resource buffer which will be populated with the file's contents
+        D3D12_HEAP_PROPERTIES bufferHeapProps = {};
+        bufferHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+        bufferDesc.SampleDesc.Count = 1;
+
+
+        // Enqueue a request to read the file contents into a destination D3D12 buffer resource.
+        // Note: The example request below is performing a single read of the entire file contents.
+        DSTORAGE_REQUEST request = {};
+        request.Options.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
+        request.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_BUFFER;
+        request.Source.File.Source = file;
+        request.Source.File.Offset = 0;
+        request.Source.File.Size = fileSize;
+        request.UncompressedSize = fileSize;
+        request.Destination.Buffer.Resource = resource.GetResource();
+        request.Destination.Buffer.Offset = 0;
+        request.Destination.Buffer.Size = request.Source.File.Size;
+
+        queue->EnqueueRequest(&request);
+        //queue->Submit();
+
+        return resource;
+
+
+        //-------------------------------------------------------------------
+        Resource resourceUpload = {};
+
+        DirectX::TexMetadata metadata;
+        DirectX::ScratchImage* image = new DirectX::ScratchImage();
+        HRESULT hr = DirectX::LoadFromDDSFile(path.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, *image);
+        if (FAILED(hr))
+        {
+            IOs::Log("Fail to load cache file {}", path.c_str());
+        }
+
+        D3D12_RESOURCE_DESC rdesc = {};
+        rdesc.Width = static_cast<UINT>(metadata.width);
+        rdesc.Height = static_cast<UINT>(metadata.height);
+        rdesc.MipLevels = static_cast<UINT16>(metadata.mipLevels);
+        rdesc.DepthOrArraySize = (metadata.dimension == DirectX::TEX_DIMENSION_TEXTURE3D)
+            ? static_cast<UINT16>(metadata.depth)
+            : static_cast<UINT16>(metadata.arraySize);
+        rdesc.Format = metadata.format;
+        rdesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+        rdesc.SampleDesc.Count = 1;
+        rdesc.Dimension = static_cast<D3D12_RESOURCE_DIMENSION>(metadata.dimension);
+
+        std::vector<D3D12_SUBRESOURCE_DATA> subresources;
+        hr = DirectX::PrepareUpload(GPU::instance->device, image->GetImages(), image->GetImageCount(), image->GetMetadata(), subresources);
+        if (FAILED(hr))
+        {
+            IOs::Log("Fail to load cache file {}", path.c_str());
+            return resource;
+        }
+
+        UINT64 uploadBufferSize = 0;
+        GPU::instance->device->GetCopyableFootprints(&rdesc, 0, subresources.size(), 0, nullptr, nullptr, nullptr, &uploadBufferSize);
+
+        resource.Create(rdesc, path);
+
+        UploadResource up = device->memory.GetTempUploadResource(*(D3D12_RESOURCE_DESC1*)&CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize));
+
+        cmd->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(res->gpuResource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST));
+        UpdateSubresources(cmd, res->gpuResource, up.uploadResource, 0, 0, static_cast<unsigned int>(subresources.size()), subresources.data());
+        cmd->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(res->gpuResource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
+
+        auto uploadResourcesFinished = resourceUpload.End(device->commandQueue[0].commandQueue);
+        uploadResourcesFinished.wait();
+        decodedData.release();
+        decodedData.reset(NULL);
+        subresources.clear();
+        */
+    }
+
+    // Find best compressino for the given asset.
+    int64_t CompressExhaustive(std::vector<uint8_t>& compressedDst, const std::vector<uint8_t>& uncompressedSrc, DSTORAGE_COMPRESSION_FORMAT* formatOut)
+    {
+        // @todo this much be updated as formats and levels are added.
+        DSTORAGE_COMPRESSION_FORMAT supportedFormatMax = DSTORAGE_COMPRESSION_FORMAT_GDEFLATE;
+        DSTORAGE_COMPRESSION_FORMAT supportedFormatMin = DSTORAGE_COMPRESSION_FORMAT_NONE;
+        DSTORAGE_COMPRESSION supportedFormatLevelMax = DSTORAGE_COMPRESSION_BEST_RATIO;
+        DSTORAGE_COMPRESSION supportedFormatLevelMin = DSTORAGE_COMPRESSION_FASTEST;
+
+        int64_t smallestSize = INT64_MAX;
+
+        std::vector<uint8_t> tempCompressedBuffer;
+
+        for (std::underlying_type<DSTORAGE_COMPRESSION_FORMAT>::type format = supportedFormatMin; format <= supportedFormatMax; format++)
+        {
+            for (std::underlying_type<DSTORAGE_COMPRESSION>::type level = supportedFormatLevelMin; level <= supportedFormatLevelMax; level++)
+            {
+                int64_t compressedSize = Compress(static_cast<DSTORAGE_COMPRESSION_FORMAT>(format), static_cast<DSTORAGE_COMPRESSION>(level), tempCompressedBuffer, uncompressedSrc);
+                if (compressedSize < smallestSize)
+                {
+                    smallestSize = compressedSize;
+                    compressedDst = std::move(tempCompressedBuffer);
+                    *formatOut = static_cast<DSTORAGE_COMPRESSION_FORMAT>(format);
+                }
+            }
+        }
+        return smallestSize;
+    }
+
+    int64_t Compress(DSTORAGE_COMPRESSION_FORMAT format, DSTORAGE_COMPRESSION compressionLevel, std::vector<uint8_t>& compressedDst, const std::vector<uint8_t>& uncompressedSrc)
+    {
+        if (format != DSTORAGE_COMPRESSION_FORMAT_NONE)
+        {
+            IDStorageCompressionCodec* codec;
+            if (FAILED(DStorageCreateCompressionCodec(format, std::thread::hardware_concurrency(), IID_PPV_ARGS(&codec))))
+            {
+                std::wcerr << L"Unable to create compression codec. Check compression format or library version.";
+                return -1;
+            }
+
+            auto compressedBytesMax = codec->CompressBufferBound(uncompressedSrc.size());
+            compressedDst.resize(compressedBytesMax);
+
+            // Note: For now we assume that compression is a benefit, but it might not be. It's best to check the actual compressed size and make a decision.
+            size_t compressedBytesActual = 0;
+            if (FAILED(codec->CompressBuffer(uncompressedSrc.data(), uncompressedSrc.size(), compressionLevel, compressedDst.data(), compressedDst.size(), &compressedBytesActual)))
+            {
+                std::wcerr << L"Compression failure.";
+                return -1;
+            }
+
+            return compressedBytesActual;
+        }
+        else
+        {
+            if (compressedDst.size() < uncompressedSrc.size())
+            {
+                compressedDst.resize(uncompressedSrc.size());
+            }
+            memcpy(compressedDst.data(), uncompressedSrc.data(), uncompressedSrc.size());
+            return uncompressedSrc.size();
+        }
+    }
+    
+    bool CreateFileOnDisk(const wchar_t* const path, HANDLE* handleInOut)
+    {
+        assert(handleInOut != nullptr);
+
+        // Create files if necessary.
+        if (*handleInOut == INVALID_HANDLE_VALUE)
+        {
+            *handleInOut = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (GetLastError() == ERROR_ALREADY_EXISTS)
+            {
+                SetLastError(ERROR_SUCCESS); // ignore if already exist.
+            }
+            else if (GetLastError() != ERROR_SUCCESS)
+            {
+                std::wcerr << L"Failure to open file: " << path << std::endl;
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    int64_t WriteDataToDisk(const HANDLE fileHandle, const void* const data, const size_t byteCount)
+    {
+        LARGE_INTEGER filePointerOrStatus{ 0 };
+        filePointerOrStatus.LowPart = SetFilePointer(fileHandle, 0, &filePointerOrStatus.HighPart, FILE_CURRENT);
+
+        size_t totalBytesWritten = 0;
+        const char* dataPtr = (char*)data;
+        size_t bytesRemaining = byteCount;
+
+        while (bytesRemaining > 0)
+        {
+            DWORD bytesToWrite = static_cast<DWORD>(std::min((uint)bytesRemaining, MAXDWORD));
+            DWORD bytesWrittenThisCall = 0;
+            if (WriteFile(fileHandle, dataPtr + totalBytesWritten, bytesToWrite, &bytesWrittenThisCall, NULL))
+            {
+                bytesRemaining -= bytesWrittenThisCall;
+                dataPtr += bytesWrittenThisCall;
+            }
+            else
+            {
+                return -1;
+            }
+        }
+
+        // Return prior offset in current file so we know where the data is located.
+        return filePointerOrStatus.QuadPart;
+    }
+
+    assetID IsCached(String name)
+    {
+        String path;
+        assetID id;
+        id.hash = std::hash<std::string>{}(name);
+        path = std::format("{}{}.tex", AssetLibrary::instance->assetsPath.c_str(), id.hash);
+        id.hash = std::hash<std::string>{}(name);
+
+        std::ifstream fin(path, std::ios::binary);
+        if (fin.is_open())
+        {
+            fin.close();
+            return AssetLibrary::instance->Add(path);
+            //return id;
+        }
+        return assetID::Invalid;
+    }
+
+    // mix of directXTex and
+    //https://github.com/GPUOpen-LibrariesAndSDKs/DirectStorageSample/blob/main/src/TextureConverter/TextureConverter.cpp#L273
+    assetID Write(String name)
+    {
+        bool compressionExhaustive = true;
+        DSTORAGE_COMPRESSION_FORMAT compressionFormat = DSTORAGE_COMPRESSION_FORMAT_GDEFLATE;
+        DSTORAGE_COMPRESSION compressionLevel = DSTORAGE_COMPRESSION_BEST_RATIO;
+
+        String path;
+        assetID id;
+        id.hash = std::hash<std::string>{}(name);
+        path = std::format("{}{}.dds", AssetLibrary::instance->assetsPath.c_str(), id.hash);
+
+        String originalPath = AssetLibrary::instance->FindInImportPath(name);
+
+        HRESULT hr;
+        DirectX::TexMetadata metadata;
+        DirectX::ScratchImage* image = new DirectX::ScratchImage();
+        bool needCompression = false;
+
+        if (name.find(".dds") != -1)
+        {
+            hr = DirectX::LoadFromDDSFile(originalPath.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, *image);
+            needCompression = false;
+        }
+        else if (name.find(".tga") != -1)
+        {
+            hr = DirectX::LoadFromTGAFile(originalPath.ToWString().c_str(), DirectX::TGA_FLAGS_NONE, &metadata, *image);
+            needCompression = true;
+        }
+        else
+        {
+            hr = DirectX::LoadFromWICFile(originalPath.ToWString().c_str(), DirectX::WIC_FLAGS_NONE, &metadata, *image);
+            needCompression = true;
+        }
+        if (FAILED(hr))
+        {
+            IOs::Log("Fail to load {}", name.c_str());
+            return assetID::Invalid;
+        }
+
+        if (!metadata.mipLevels || !metadata.arraySize)
+            hr = E_INVALIDARG;
+
+        if ((metadata.width > UINT32_MAX) || (metadata.height > UINT32_MAX)
+            || (metadata.mipLevels > UINT16_MAX) || (metadata.arraySize > UINT16_MAX))
+            hr = E_INVALIDARG;
+
+        DirectX::ScratchImage mipChain;
+        DirectX::GenerateMipMaps(image->GetImages(), image->GetImageCount(), metadata, DirectX::TEX_FILTER_DEFAULT, 0, mipChain);
+
+        DirectX::ScratchImage imageBC;
+        hr = DirectX::Compress(mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(), DXGI_FORMAT_BC7_UNORM, DirectX::TEX_COMPRESS_BC7_QUICK | DirectX::TEX_COMPRESS_PARALLEL, DirectX::TEX_THRESHOLD_DEFAULT, imageBC);
+        if (FAILED(hr))
+        {
+            IOs::Log("Fail to compress {}", name.c_str());
+            return assetID::Invalid;
+        }
+        /*
+        if (needCompression)
+        {
+            DirectX::SaveToDDSFile(imageBC.GetImages(), imageBC.GetImageCount(), imageBC.GetMetadata(), DirectX::DDS_FLAGS_NONE, path.ToWString().c_str());
+        }
+        */
+
+        metadata = imageBC.GetMetadata();
+
+        // Create resource desc.
+        UINT subresourceCount = std::max(metadata.arraySize, metadata.depth) * metadata.mipLevels;
+        D3D12_RESOURCE_DESC resourceDesc{};
+        resourceDesc.Dimension = metadata.depth > 1 ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        resourceDesc.Alignment = 0;
+        resourceDesc.Width = metadata.width;
+        resourceDesc.Height = metadata.height;
+        resourceDesc.DepthOrArraySize = std::max(metadata.arraySize, metadata.depth);
+        resourceDesc.MipLevels = metadata.mipLevels;
+        resourceDesc.Format = metadata.format;
+        resourceDesc.SampleDesc = { 1, 0 };
+        resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> subresourceFootprints(subresourceCount);
+        std::vector<UINT> subresourceRowsCount(subresourceCount);
+        std::vector<UINT64> subresourceRowByteCount(subresourceCount);
+        UINT64 subresourceTotalByteCount = 0;
+
+        // Determine layout for disk.
+        GPU::instance->device->GetCopyableFootprints(&resourceDesc
+            , 0, subresourceCount
+            , 0, &subresourceFootprints[0]
+            , &subresourceRowsCount[0]
+            , &subresourceRowByteCount[0]
+            , &subresourceTotalByteCount);
+
+        // Allocate memory to copy into.
+        std::vector<uint8_t> textureData(subresourceTotalByteCount, 0);
+
+        // copy texture data...
+        for (UINT subResourceIdx = 0; subResourceIdx < subresourceCount; subResourceIdx++)
+        {
+            // Src setup
+            size_t srcRowPitchBytes = ((DirectX::BitsPerPixel(metadata.format) * metadata.width) + 7) / 8; // rounded to nearest byte.
+            size_t srcSlicePitchBytes = srcRowPitchBytes * metadata.height; // assuming tightly packed image.
+
+            // Dst setup
+            const auto& resourceFootprint = subresourceFootprints[subResourceIdx];
+            auto resourcePtr = textureData.data() + resourceFootprint.Offset;
+            const auto& footprint = resourceFootprint.Footprint;
+            size_t dstRowPitchBytes = resourceFootprint.Footprint.RowPitch; // padded row pitch.
+            size_t dstRowPitchPackedBytes = subresourceRowByteCount[subResourceIdx];
+            size_t dstSlicePitchBytes = subresourceRowsCount[subResourceIdx] * dstRowPitchBytes;
+
+            size_t resolvedHeight = std::min(subresourceRowsCount[subResourceIdx], (uint)metadata.height);
+            size_t resolvedPackedRowPitch = std::min(std::min(dstRowPitchBytes, srcRowPitchBytes), dstRowPitchPackedBytes);
+
+            for (uint32_t y = 0; y < resolvedHeight; y++)
+            {
+                memcpy((char*)resourcePtr + y * dstRowPitchBytes, imageBC.GetImages()[subResourceIdx].pixels + y * resolvedPackedRowPitch, resolvedPackedRowPitch);
+            }
+        }
+
+        HANDLE metadataFileHandle = INVALID_HANDLE_VALUE;
+        path = std::format("{}{}.meta", AssetLibrary::instance->assetsPath.c_str(), id.hash);
+        if (!CreateFileOnDisk(path.ToWString().c_str(), &metadataFileHandle))
+        {
+            return assetID::Invalid;
+        }
+
+        HANDLE texturedataFileHandle = INVALID_HANDLE_VALUE;
+        path = std::format("{}{}.tex", AssetLibrary::instance->assetsPath.c_str(), id.hash);
+        if (!CreateFileOnDisk(path.ToWString().c_str(), &texturedataFileHandle))
+        {
+            return assetID::Invalid;
+        }
+
+        std::vector<uint8_t> gpuData;
+        int64_t gpuDataSize = -1;
+        if (compressionExhaustive)
+        {
+            gpuDataSize = CompressExhaustive(gpuData, textureData, &compressionFormat);
+        }
+        else if (compressionFormat != DSTORAGE_COMPRESSION_FORMAT_NONE)
+        {
+            // compression enabled.
+            gpuData.resize(textureData.size());
+            gpuDataSize = Compress(compressionFormat, compressionLevel, gpuData, textureData);
+            if (gpuDataSize == -1)
+            {
+                IOs::Log("Failed to compress image: {}", path.c_str());
+                return assetID::Invalid;
+            }
+
+            if (textureData.size() <= gpuDataSize)
+            {
+                // Turns out compression didn't help us at all. TODO: Determine threshold at which compression should be disabled.
+                IOs::Log("Compression ineffective for {}", path.c_str());
+            }
+        }
+        else
+        {
+            // no compression... avoiding allocation.
+            gpuData = std::move(textureData);
+            gpuDataSize = gpuData.size();
+            if (gpuDataSize == 0)
+            {
+                return assetID::Invalid;
+            }
+        }
+
+        // Write GPU Data and obtain offset to data.
+        int64_t textureDataOffsetOnDisk = WriteDataToDisk(texturedataFileHandle, gpuData.data(), gpuDataSize);
+
+        // Assemble metadata.
+        DirectStorageSampleTextureMetadataHeader metadataDS;
+        metadataDS.resourceDesc = resourceDesc;
+        metadataDS.resourceSizeCompressed = gpuDataSize; // will be same as uncompressed size without compression.
+        metadataDS.resourceSizeUncompressed = subresourceTotalByteCount;
+        metadataDS.compressionFormat = compressionFormat;
+        wcsncpy(metadataDS.resourceName, name.ToWString().c_str(), std::extent_v<decltype(metadataDS.resourceName)> -1);
+        metadataDS.resourceName[std::extent_v<decltype(metadataDS.resourceName)> -1] = '\0'; // ensure truncation.
+        metadataDS.resourceOffset = textureDataOffsetOnDisk;
+        assert((textureDataOffsetOnDisk % 4096) == 0);
+
+        // Write CPU Data.
+        WriteDataToDisk(metadataFileHandle, &metadataDS, sizeof(metadataDS));
+
+        // Align next write for Texture data.
+
+        // now align the data..
+        int64_t unalignedOffset = WriteDataToDisk(texturedataFileHandle, nullptr, 0);
+        char zeroData[4096];
+        int64_t dataAlignmentBytes = ((unalignedOffset + 4095) & (~4096 + 1)) - unalignedOffset;
+        (void)WriteDataToDisk(texturedataFileHandle, zeroData, dataAlignmentBytes);
+
+        CloseHandle(metadataFileHandle);
+        CloseHandle(texturedataFileHandle);
+
+        return AssetLibrary::instance->Add(path);
     }
 };
 TextureLoader* TextureLoader::instance = nullptr;
@@ -291,7 +796,6 @@ public:
         std::vector<Vertex> vertices;
         float4 boundingSphere;
     };
-
 
 	void On()
 	{
@@ -325,7 +829,6 @@ public:
 
         return mesh;
     }
-
 
     assetID Write(MeshData& mesh, String name)
     {
@@ -417,12 +920,14 @@ MeshLoader* MeshLoader::instance = nullptr;
 #include "../../Third/assimp-master/include/assimp/Exporter.hpp"
 #include "../../Third/assimp-master/include/assimp/scene.h"
 #include "../../Third/assimp-master/include/assimp/postprocess.h"
+#include <cstdarg>
 class SceneLoader
 {
     std::vector<World::Entity> meshIndexToEntity;
     std::vector<World::Entity> matIndexToEntity;
     std::vector<World::Entity> animationIndexToEntity;
     std::vector<World::Entity> skeletonIndexToEntity;
+    std::vector<World::Entity> textureToEntity;
 
 public:
     static SceneLoader* instance;
@@ -451,7 +956,7 @@ public:
             | aiProcess_MakeLeftHanded
             | aiProcess_FlipWindingOrder
             | aiProcess_FlipUVs
-            
+
             //| aiProcess_CalcTangentSpace
             //| aiProcess_FixInfacingNormals
             //| aiProcess_GenSmoothNormals
@@ -509,6 +1014,7 @@ public:
         matIndexToEntity.clear();
         animationIndexToEntity.clear();
         skeletonIndexToEntity.clear();
+        textureToEntity.clear();
     }
 
     World::Entity CreateEntities(const aiScene* _scene, aiNode* node, World::Entity parentEntity = entityInvalid)
@@ -680,6 +1186,64 @@ public:
         }
     }
 
+    Components::Handle<Components::Texture> CreateOrLoadTexture(aiMaterial* m, int channelCount, aiTextureType channels...)
+    {
+        va_list args;
+        va_start(args, channels);
+
+        int tests = 0;
+        aiString texName("");
+        while (texName.length == 0 && tests < channelCount)
+        {
+            aiTextureType t = static_cast<aiTextureType>(va_arg(args, int));
+            m->GetTexture(t, 0, &texName);
+            tests++;
+        }
+
+        assetID id;
+        /*
+        String path;
+        id.hash = std::hash<std::string>{}(texName.C_Str());
+        path = std::format("{}{}.tex", AssetLibrary::instance->assetsPath.c_str(), id.hash);
+        id.hash = std::hash<std::string>{}(path);
+
+        if (AssetLibrary::instance->map.contains(id))
+        {
+            for (uint i = 0; i < textureToEntity.size(); i++)
+            {
+                if (textureToEntity[i].Get<Components::Texture>().id == id)
+                    return Components::Handle<Components::Texture> {textureToEntity[i].id};
+            }
+        }
+        */
+
+        World::Entity ent{ entityInvalid };
+        if (texName.length > 0)
+        {
+            // if the texture is found id should stay the same
+            // if not it will be assetID::invalid
+            id = TextureLoader::instance->IsCached(texName.C_Str());
+            if(id == assetID::Invalid)
+                id = TextureLoader::instance->Write(texName.C_Str());
+
+            if (id != assetID::Invalid)
+            {
+                ent.Make(Components::Texture::mask);
+                ent.Get<Components::Texture>().id = id;
+            }
+        }
+        else
+        {
+            id = assetID::Invalid;
+        }
+        
+        textureToEntity.push_back(ent);
+
+        return Components::Handle<Components::Texture> {ent.id};
+
+        va_end(args);
+    }
+
     void CreateMaterials(const aiScene* _scene)
     {
         ZoneScoped;
@@ -700,9 +1264,10 @@ public:
             strcpy_s(name.name, 256, m->GetName().C_Str());
 
             auto& newMat = ent.Get<Components::Material>();
+            newMat.shader = { shader.id };
 
             aiString texName;
-
+            /*
             for (unsigned int j = 0; j < 17; j++)
             {
                 for (unsigned int k = 0; k < m->GetTextureCount((aiTextureType)j); k++)
@@ -712,66 +1277,19 @@ public:
                     std::cout << texName.C_Str() << "\n";
                 }
             }
-
-            newMat.shader = { shader.id };
+            */
 
             for (uint j = 0; j < newMat.maxTextures; j++)
             {
                 newMat.textures[j] = { entityInvalid };
             }
 
-            /*
-            texName = "";
-            m->GetTexture(aiTextureType_DIFFUSE, 0, &texName);
-            if (texName.length == 0) m->GetTexture(aiTextureType_BASE_COLOR, 0, &texName);
-            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Albedo" + ".jpg";
-            auto res = GetOrCreateResource(world, texName.C_Str());
-            //newMat.textures[0] = res;
-            AssignTexture(gpuShader, newMat.textures, "albedo", res);
-
-            texName = "";
-            m->GetTexture(aiTextureType_NORMALS, 0, &texName);
-            if (texName.length == 0) m->GetTexture(aiTextureType_HEIGHT, 0, &texName);
-            if (texName.length == 0) m->GetTexture(aiTextureType_NORMAL_CAMERA, 0, &texName);
-            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Normal_LOD0" + ".jpg";
-            res = GetOrCreateResource(world, texName.C_Str());
-            //newMat.textures[1] = res;
-            AssignTexture(gpuShader, newMat.textures, "normal", res);
-
-            texName = "";
-            m->GetTexture(aiTextureType_METALNESS, 0, &texName);
-            if (texName.length == 0) m->GetTexture(aiTextureType_SPECULAR, 0, &texName);
-            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Albedo" + ".jpg";
-            res = GetOrCreateResource(world, texName.C_Str());
-            //newMat.textures[2] = res;
-            AssignTexture(gpuShader, newMat.textures, "metalness", res);
-
-            texName = "";
-            m->GetTexture(aiTextureType_SHININESS, 0, &texName);
-            if (texName.length == 0) m->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texName);
-            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Roughness" + ".jpg";
-            res = GetOrCreateResource(world, texName.C_Str());
-            //newMat.textures[3] = res;
-            AssignTexture(gpuShader, newMat.textures, "smoothness", res);
-
-            texName = "";
-            m->GetTexture(aiTextureType_AMBIENT, 0, &texName);
-            if (texName.length == 0) m->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texName);
-            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Cavity" + ".jpg";
-            res = GetOrCreateResource(world, texName.C_Str());
-            //newMat.textures[4] = res;
-            AssignTexture(gpuShader, newMat.textures, "occlusion", res);
-
-            texName = "";
-            m->GetTexture(aiTextureType_EMISSIVE, 0, &texName);
-            if (texName.length == 0) m->GetTexture(aiTextureType_EMISSION_COLOR, 0, &texName);
-            //if (texName.length == 0) texName = file.substr(0, file.length() - 8) + "4k_" + "Cavity" + ".jpg";
-            res = GetOrCreateResource(world, texName.C_Str());
-            //newMat.textures[5] = res;
-            AssignTexture(gpuShader, newMat.textures, "emission", res);
-
-            AssignVector(gpuShader, newMat, "color", float4(1, 1, 1, 0));
-            */
+            newMat.textures[0] = CreateOrLoadTexture(m, 2, aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE);
+            newMat.textures[1] = CreateOrLoadTexture(m, 3, aiTextureType_NORMAL_CAMERA, aiTextureType_NORMALS, aiTextureType_HEIGHT);
+            newMat.textures[2] = CreateOrLoadTexture(m, 2, aiTextureType_METALNESS, aiTextureType_SPECULAR);
+            newMat.textures[3] = CreateOrLoadTexture(m, 2, aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_SHININESS);
+            newMat.textures[4] = CreateOrLoadTexture(m, 2, aiTextureType_AMBIENT_OCCLUSION, aiTextureType_AMBIENT);
+            newMat.textures[5] = CreateOrLoadTexture(m, 2, aiTextureType_EMISSION_COLOR, aiTextureType_EMISSIVE);
 
             matIndexToEntity.push_back(ent);
         }
@@ -822,7 +1340,7 @@ public :
         auto entryName = std::wstring(entry.ToWString());
         auto typeName = std::wstring(type.ToWString());
 
-        HRESULT hr;
+        //HRESULT hr;
         ID3DBlob* errorBuff = NULL; // a buffer holding the error data if any
         ID3DBlob* signature = NULL;
 
@@ -1550,7 +2068,7 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
                 Mesh mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get());
                 lock.lock();
                 meshes.push_back(mesh);
-                map[id].indexInVector = meshes.size() - 1;
+                map[id].indexInVector = (uint)meshes.size() - 1;
                 meshLoaded++;
                 lock.unlock();
             }
@@ -1574,7 +2092,7 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
                 else
                 {
                     shaders.push_back(shader);
-                    map[id].indexInVector = shaders.size() - 1;
+                    map[id].indexInVector = (uint)shaders.size() - 1;
                 }
                 shaderLoaded++;
                 lock.unlock();
@@ -1586,13 +2104,12 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
     {
         if (ignoreBudget || textureLoaded < textureLoadingLimit)
         {
-            Resource texture;
-            bool loaded = TextureLoader::instance->Load(texture, map[id].path);
-            if (loaded)
+            Resource texture = TextureLoader::instance->Read(map[id].path);
+            if (texture.allocation != nullptr)
             {
                 lock.lock();
                 textures.push_back(texture);
-                map[id].indexInVector = textures.size() - 1;
+                map[id].indexInVector = (uint)textures.size() - 1;
                 textureLoaded++;
                 lock.unlock();
             }

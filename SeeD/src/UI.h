@@ -1,8 +1,5 @@
 #pragma once
 
-
-
-
 class EditorWindow
 {
 public:
@@ -115,6 +112,13 @@ public:
         {
             AssetLibrary::instance->map.clear();
         }
+
+        char path[256];
+        strcpy(path, AssetLibrary::instance->importPath.c_str());
+        if (ImGui::InputText("Import path", path, 256))
+        {
+            AssetLibrary::instance->importPath = path;
+        }
         ImGui::Separator();
 
         for (auto& item : AssetLibrary::instance->map)
@@ -128,6 +132,209 @@ public:
     }
 };
 AssetLibraryWindow assetLibraryWindowWindow;
+
+class HierarchyWindow : public EditorWindow
+{
+    struct TreeNode
+    {
+        World::Entity               entity;
+        String                      name;
+        TreeNode*                   parent;
+        std::vector<TreeNode*>      childs;
+        uint                        indexInParent;  // Maintaining this allows us to implement linear traversal more easily
+    };
+
+    TreeNode world;
+    std::vector<TreeNode> nodes;
+    
+    void TreeNodeSetOpen(TreeNode* node, bool open)
+    {
+        ImGui::GetStateStorage()->SetBool((ImGuiID)node->entity.id, open);
+    }
+
+    bool TreeNodeGetOpen(TreeNode* node)
+    {
+        return ImGui::GetStateStorage()->GetBool((ImGuiID)node->entity.id);
+    }
+
+    int TreeCloseAndUnselectChildNodes(TreeNode* node, ImGuiSelectionBasicStorage* selection, int depth = 0)
+    {
+        // Recursive close (the test for depth == 0 is because we call this on a node that was just closed!)
+        int unselected_count = selection->Contains((ImGuiID)node->entity.id) ? 1 : 0;
+        if (depth == 0 || TreeNodeGetOpen(node))
+        {
+            for (TreeNode* child : node->childs)
+                unselected_count += TreeCloseAndUnselectChildNodes(child, selection, depth + 1);
+            TreeNodeSetOpen(node, false);
+        }
+
+        // Select root node if any of its child was selected, otherwise unselect
+        selection->SetItemSelected((ImGuiID)node->entity.id, (depth == 0 && unselected_count > 0));
+        return unselected_count;
+    }
+
+    void DrawNode(TreeNode* node, ImGuiSelectionBasicStorage* selection)
+    {
+        ImGuiTreeNodeFlags tree_node_flags = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+        tree_node_flags |= ImGuiTreeNodeFlags_NavLeftJumpsBackHere; // Enable pressing left to jump to parent
+        if (node->childs.size() == 0)
+            tree_node_flags |= ImGuiTreeNodeFlags_Bullet | ImGuiTreeNodeFlags_Leaf;
+        if (selection->Contains((ImGuiID)node->entity.id))
+            tree_node_flags |= ImGuiTreeNodeFlags_Selected;
+
+        // Using SetNextItemStorageID() to specify storage id, so we can easily peek into
+        // the storage holding open/close stage, using our TreeNodeGetOpen/TreeNodeSetOpen() functions.
+        ImGui::SetNextItemSelectionUserData((ImGuiSelectionUserData)(intptr_t)node);
+        ImGui::SetNextItemStorageID((ImGuiID)node->entity.id);
+        if (ImGui::TreeNodeEx(node->name.c_str(), tree_node_flags))
+        {
+            for (TreeNode* child : node->childs)
+                DrawNode(child, selection);
+            ImGui::TreePop();
+        }
+        else if (ImGui::IsItemToggledOpen())
+        {
+            TreeCloseAndUnselectChildNodes(node, selection);
+        }
+    }
+
+    void TreeSetAllInOpenNodes(TreeNode* node, ImGuiSelectionBasicStorage* selection, bool selected)
+    {
+        if (node->parent != NULL) // Root node isn't visible nor selectable in our scheme
+            selection->SetItemSelected((ImGuiID)node->entity.id, selected);
+        if (node->parent == NULL || TreeNodeGetOpen(node))
+            for (TreeNode* child : node->childs)
+                TreeSetAllInOpenNodes(child, selection, selected);
+    }
+
+    TreeNode* TreeGetNextNodeInVisibleOrder(TreeNode* curr_node, TreeNode* last_node)
+    {
+        // Reached last node
+        if (curr_node == last_node)
+            return NULL;
+
+        // Recurse into childs. Query storage to tell if the node is open.
+        if (curr_node->childs.size() > 0 && TreeNodeGetOpen(curr_node))
+            return curr_node->childs[0];
+
+        // Next sibling, then into our own parent
+        while (curr_node->parent != NULL)
+        {
+            if (curr_node->indexInParent + 1 < curr_node->parent->childs.size())
+                return curr_node->parent->childs[curr_node->indexInParent + 1];
+            curr_node = curr_node->parent;
+        }
+        return NULL;
+    }
+
+    // Apply multi-selection requests
+    void ApplySelectionRequests(ImGuiMultiSelectIO* ms_io, TreeNode* tree, ImGuiSelectionBasicStorage* selection)
+    {
+        for (ImGuiSelectionRequest& req : ms_io->Requests)
+        {
+            if (req.Type == ImGuiSelectionRequestType_SetAll)
+            {
+                if (req.Selected)
+                    TreeSetAllInOpenNodes(tree, selection, req.Selected);
+                else
+                    selection->Clear();
+            }
+            else if (req.Type == ImGuiSelectionRequestType_SetRange)
+            {
+                TreeNode* first_node = (TreeNode*)(intptr_t)req.RangeFirstItem;
+                TreeNode* last_node = (TreeNode*)(intptr_t)req.RangeLastItem;
+                for (TreeNode* node = first_node; node != NULL; node = TreeGetNextNodeInVisibleOrder(node, last_node))
+                    selection->SetItemSelected((ImGuiID)node->entity.id, req.Selected);
+            }
+        }
+    }
+
+public:
+    bool dirty;
+    HierarchyWindow() : EditorWindow("HierarchyWindow") {}
+    void Update() override final
+    {
+        ZoneScoped;
+
+        if (dirty)
+        {
+            nodes.clear();
+
+            world.entity = entityInvalid;
+            world.name = "world";
+            world.parent = NULL;
+            world.childs.clear();
+            world.indexInParent = 0;
+
+            uint instanceQueryIndex = World::instance->Query(Components::Instance::mask | Components::WorldMatrix::mask, 0);
+            auto& result = World::instance->frameQueries[instanceQueryIndex];
+
+            for (uint i = 0; i < result.size(); i++)
+            {
+                TreeNode newNode;
+                newNode.entity = { result[i].Get<Components::Entity>().index };
+                newNode.name = std::format("{}{}", result[i].Get<Components::Name>().name, i);
+                newNode.parent = &world;
+                nodes.push_back(newNode);
+            }
+
+            for (uint i = 0; i < result.size(); i++)
+            {
+                TreeNode& node = nodes[i];
+                
+                bool hasParent = result[i].Has<Components::Parent>();
+                auto& pent = result[i].Get<Components::Parent>().entity;
+                if (!hasParent || !pent.IsValid() || !World::Entity(pent.Get().index).Has<Components::Instance>())
+                {
+                    node.parent = &world;
+                    node.indexInParent = world.childs.size();
+                    world.childs.push_back(&node);
+                    continue;
+                }
+
+                World::Entity parent = { pent.Get().index };
+                for (uint j = 0; j < result.size(); j++)
+                {
+                    TreeNode& nodeParent = nodes[j];
+                    if (nodeParent.entity == parent)
+                    {
+                        node.parent = &nodeParent;
+                        node.indexInParent = nodeParent.childs.size();
+                        nodeParent.childs.push_back(&node);
+                    }
+                }
+            }
+            //dirty = false;
+        }
+
+        if (!ImGui::Begin("HierarchyWindow", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+        ImGui::Checkbox("refresh", &dirty);
+        //if (nodes.size() > 0 && ImGui::TreeNode("World"))
+        {
+            static ImGuiSelectionBasicStorage selection;
+            if (world.childs.size() > 0 && ImGui::BeginChild("##Tree", ImVec2(-FLT_MIN, ImGui::GetFontSize() * 20), ImGuiChildFlags_FrameStyle | ImGuiChildFlags_ResizeY))
+            {
+                ImGuiMultiSelectFlags ms_flags = ImGuiMultiSelectFlags_ClearOnEscape | ImGuiMultiSelectFlags_BoxSelect2d;
+                ImGuiMultiSelectIO* ms_io = ImGui::BeginMultiSelect(ms_flags, selection.Size, -1);
+                ApplySelectionRequests(ms_io, &world, &selection);
+                DrawNode(&world, &selection);
+                ms_io = ImGui::EndMultiSelect();
+                ApplySelectionRequests(ms_io, &world, &selection);
+
+                ImGui::EndChild();
+            }
+
+            //ImGui::TreePop();
+        }
+
+        ImGui::End();
+    }
+};
+HierarchyWindow hierarchyWindow;
 
 class GPUResourcesWindow : public EditorWindow
 {
@@ -190,8 +397,8 @@ public:
         {
             ImGuiIO& io = ImGui::GetIO();
             auto desc = selectedResource.GetResource()->GetDesc();
-            float textureW = desc.Width;
-            float textureH = desc.Height;
+            float textureW = (float)desc.Width;
+            float textureH = (float)desc.Height;
             float ratio = textureW / textureH;
             ImVec2 img_sz = ImGui::GetContentRegionAvail();
             img_sz.y = img_sz.x / ratio;
@@ -274,6 +481,133 @@ public:
     }
 };
 OptionWindow optionWindow;
+
+
+class PropertyWindow : public EditorWindow
+{
+    enum class PropertyTypes : int
+    {
+        _none,
+        _int,
+        _uint,
+        _float,
+        _float2, 
+        _float3,
+        _float4,
+        _quaternion,
+        _assetID
+    };
+    // Simple representation of struct metadata/serialization data.
+    // (this is a minimal version of what a typical advanced application may provide)
+    struct MemberInfo
+    {
+        String          name;       // Member name
+        PropertyTypes   dataType;   // Member type
+        int             dataCount;  // Member count (1 when scalar)
+        int             offset;     // Offset inside parent structure
+    };
+    struct ComponentInfo
+    {
+        String          name;       // Member name
+        uint            mask;
+        std::vector<MemberInfo> members;
+    };
+
+    std::vector<ComponentInfo> componentsInfo;
+
+
+    // Metadata description of ExampleTreeNode struct.
+        /*
+    {
+        { "MyBool",     ImGuiDataType_Bool,    1, offsetof(ExampleTreeNode, DataMyBool) },
+        { "MyInt",      ImGuiDataType_S32,     1, offsetof(ExampleTreeNode, DataMyInt) },
+        { "MyVec2",     ImGuiDataType_Float,   2, offsetof(ExampleTreeNode, DataMyVec2) },
+    };
+        */
+
+public:
+    PropertyWindow() : EditorWindow("PropertyWindow") {}
+    void Update() override final
+    {
+        ParseCpp("G:\\Work\\Dev\\SeeD\\SeeD\\src\\World.h");
+        ZoneScoped;
+        if (!ImGui::Begin("PropertyWindow", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+
+        ImGui::End();
+    }
+
+    void ParseCpp(String path)
+    {
+        componentsInfo.clear();
+
+        std::ifstream fin(path);
+        if (fin.is_open())
+        {
+            String line;
+            while (getline(fin, line))
+            {
+                if (line.find(": ComponentBase<") != -1)
+                {
+                    ComponentInfo cmpInfo;
+                    while (line.find("};") == -1)
+                    {
+                        getline(fin, line);
+                        auto tokens = line.Split(" ");
+
+                        MemberInfo info;
+                        info.dataType = PropertyTypes::_none;
+
+                        if (tokens[0].find("uint") != -1)
+                        {
+                            info.dataType = PropertyTypes::_uint;
+                        }
+                        else if (tokens[0].find("assetID") != -1)
+                        {
+                            info.dataType = PropertyTypes::_assetID;
+                        }
+                        else if (tokens[0].find("float") != -1)
+                        {
+                            info.dataType = PropertyTypes::_float;
+                        }
+                        else if (tokens[0].find("float2") != -1)
+                        {
+                            info.dataType = PropertyTypes::_float2;
+                        }
+                        else if (tokens[0].find("float3") != -1)
+                        {
+                            info.dataType = PropertyTypes::_float3;
+                        }
+                        else if (tokens[0].find("float4") != -1)
+                        {
+                            info.dataType = PropertyTypes::_float4;
+                        }
+                        else if (tokens[0].find("quaternion") != -1)
+                        {
+                            info.dataType = PropertyTypes::_quaternion;
+                        }
+
+                        if (info.dataType != PropertyTypes::_none)
+                        {
+                            info.name = tokens[1];
+                            info.dataCount = 1;
+                            info.offset = 123;// offsetof(ComponentInfo, mask);
+                            cmpInfo.members.push_back(info);
+                        }
+                    }
+
+                    componentsInfo.push_back(cmpInfo);
+                }
+            }
+            fin.close();
+        }
+    }
+};
+PropertyWindow propertyWindow;
+
 
 /*
 class AboutWindow : public EditorWindow
