@@ -1486,6 +1486,7 @@ public:
             {
                 ZoneScoped;
                 this->viewWorld->instances.Upload();
+                this->viewWorld->materials.Upload();
                 this->raytracingContext.instancesRayTracing->Upload();
                 this->cullingContext.instancesInView.Resize(this->viewWorld->instances.Size());
                 this->cullingContext.meshletsInView.Resize(this->viewWorld->meshletsCount);

@@ -161,6 +161,7 @@ copy /Y "..\Third\assimp-master\out\build\x64-Release\bin\*.*" "..\x64\Release\"
     <ClInclude Include="..\Third\imgui-docking\imgui.h" />
     <ClInclude Include="..\Third\imgui-docking\imgui_internal.h" />
     <ClInclude Include="..\Third\imgui-docking\misc\cpp\imgui_stdlib.h" />
+    <ClInclude Include="src\ComponentsUIMetaData.h" />
     <ClInclude Include="src\Containers.h" />
     <ClInclude Include="src\Editor.h" />
     <ClInclude Include="src\GPU.h" />

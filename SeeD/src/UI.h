@@ -181,6 +181,8 @@ class HierarchyWindow : public EditorWindow
             tree_node_flags |= ImGuiTreeNodeFlags_Bullet | ImGuiTreeNodeFlags_Leaf;
         if (selection->Contains((ImGuiID)node->entity.id))
             tree_node_flags |= ImGuiTreeNodeFlags_Selected;
+        if(node == &world)
+            tree_node_flags |= ImGuiTreeNodeFlags_DefaultOpen;
 
         // Using SetNextItemStorageID() to specify storage id, so we can easily peek into
         // the storage holding open/close stage, using our TreeNodeGetOpen/TreeNodeSetOpen() functions.
@@ -250,13 +252,12 @@ class HierarchyWindow : public EditorWindow
     }
 
 public:
-    bool dirty;
     HierarchyWindow() : EditorWindow("HierarchyWindow") {}
     void Update() override final
     {
         ZoneScoped;
 
-        if (dirty)
+        if (editorState.dirtyHierarchy)
         {
             nodes.clear();
 
@@ -304,7 +305,7 @@ public:
                     }
                 }
             }
-            //dirty = false;
+            editorState.dirtyHierarchy = false;
         }
 
         if (!ImGui::Begin("HierarchyWindow", &isOpen, ImGuiWindowFlags_None))
@@ -312,7 +313,7 @@ public:
             ImGui::End();
             return;
         }
-        ImGui::Checkbox("refresh", &dirty);
+        //ImGui::Checkbox("refresh", &editorState.dirtyHierarchy);
         //if (nodes.size() > 0 && ImGui::TreeNode("World"))
         {
             static ImGuiSelectionBasicStorage selection;
@@ -324,6 +325,14 @@ public:
                 DrawNode(&world, &selection);
                 ms_io = ImGui::EndMultiSelect();
                 ApplySelectionRequests(ms_io, &world, &selection);
+
+                void* it = NULL;
+                ImGuiID id = 0;
+                selection.GetNextSelectedItem(&it, &id);
+                if (id != 0)
+                {
+                    editorState.selectedObject = { id };
+                }
 
                 ImGui::EndChild();
             }
@@ -482,54 +491,80 @@ public:
 };
 OptionWindow optionWindow;
 
+enum class PropertyTypes : int
+{
+    _none,
+    _int,
+    _uint,
+    _float,
+    _float2, 
+    _float3,
+    _float4,
+    _quaternion,
+    _float4x4,
+    _assetID
+};
+bool KnownType(String typeName)
+{
+    if (typeName == "int")
+        return true;
+    else if (typeName == "uint")
+        return true;
+    else if (typeName == "float")
+        return true;
+    else if (typeName == "float2")
+        return true;
+    else if (typeName == "float3")
+        return true;
+    else if (typeName == "float4")
+        return true;
+    else if (typeName == "quaternion")
+        return true;
+    else if (typeName == "float4x4")
+        return true;
+    else if (typeName == "assetID")
+        return true;
+    return false;
+}
+// Simple representation of struct metadata/serialization data.
+// (this is a minimal version of what a typical advanced application may provide)
+struct MemberInfoParse
+{
+    String name;
+    String dataType;
+    String dataCount;
+};
+struct ComponentInfoParse
+{
+    String name;
+    std::vector<MemberInfoParse> members;
+};
+struct MemberInfo
+{
+    String name;
+    PropertyTypes dataType;
+    int dataCount;
+    int offset;
+};
+struct ComponentInfo
+{
+    String name;       // Member name
+    Components::Mask mask;
+    std::vector<MemberInfo> members;
+};
+
+#include "ComponentsUIMetaData.h"
 
 class PropertyWindow : public EditorWindow
 {
-    enum class PropertyTypes : int
+    unsigned int getFirstSetBitPos(int n)
     {
-        _none,
-        _int,
-        _uint,
-        _float,
-        _float2, 
-        _float3,
-        _float4,
-        _quaternion,
-        _assetID
-    };
-    // Simple representation of struct metadata/serialization data.
-    // (this is a minimal version of what a typical advanced application may provide)
-    struct MemberInfo
-    {
-        String          name;       // Member name
-        PropertyTypes   dataType;   // Member type
-        int             dataCount;  // Member count (1 when scalar)
-        int             offset;     // Offset inside parent structure
-    };
-    struct ComponentInfo
-    {
-        String          name;       // Member name
-        uint            mask;
-        std::vector<MemberInfo> members;
-    };
-
-    std::vector<ComponentInfo> componentsInfo;
-
-
-    // Metadata description of ExampleTreeNode struct.
-        /*
-    {
-        { "MyBool",     ImGuiDataType_Bool,    1, offsetof(ExampleTreeNode, DataMyBool) },
-        { "MyInt",      ImGuiDataType_S32,     1, offsetof(ExampleTreeNode, DataMyInt) },
-        { "MyVec2",     ImGuiDataType_Float,   2, offsetof(ExampleTreeNode, DataMyVec2) },
-    };
-        */
-
+        return log2(n & -n) + 1;
+    }
 public:
     PropertyWindow() : EditorWindow("PropertyWindow") {}
     void Update() override final
     {
-        ParseCpp("G:\\Work\\Dev\\SeeD\\SeeD\\src\\World.h");
         ZoneScoped;
         if (!ImGui::Begin("PropertyWindow", &isOpen, ImGuiWindowFlags_None))
         {
@@ -537,72 +572,148 @@ public:
             return;
         }
 
+        if (ImGui::Button("Generate"))
+        {
+            ParseCpp("G:\\Work\\Dev\\SeeD\\SeeD\\src\\World.h");
+        }
+
+        if (editorState.selectedObject != entityInvalid)
+        {
+            for (uint i = 0; i < ARRAYSIZE(knownComponents); i++)
+            {
+                if ((editorState.selectedObject.GetMask() & knownComponents[i].mask) != 0)
+                {   
+                    auto& metaData = knownComponents[i];
+                    char* cmpData = editorState.selectedObject.Get(Components::MaskToBucket(metaData.mask));
+                    if (ImGui::CollapsingHeader(metaData.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+                    {
+                        for (uint memberIndex = 0; memberIndex < metaData.members.size(); memberIndex++)
+                        {
+                            auto& m = metaData.members[memberIndex];
+                            char* data = cmpData + m.offset;
+                            ImGui::Text(m.name.c_str());
+                            ImGui::SameLine();
+                            ImGui::PushID(memberIndex);
+                            switch (m.dataType)
+                            {
+                            case PropertyTypes::_int:
+                            case PropertyTypes::_uint:
+                                ImGui::InputInt("", (int*)data);
+                                break;
+                            case PropertyTypes::_float:
+                                ImGui::InputFloat("", (float*)data);
+                                break;
+                            case PropertyTypes::_float2:
+                                ImGui::InputFloat2("", (float*)data);
+                                break;
+                            case PropertyTypes::_float3:
+                                ImGui::InputFloat3("", (float*)data);
+                                break;
+                            case PropertyTypes::_float4:
+                                ImGui::InputFloat4("", (float*)data);
+                                break;
+                            case PropertyTypes::_quaternion:
+                                ImGui::InputFloat4("", (float*)data);
+                                break;
+                            case PropertyTypes::_float4x4:
+                                break;
+                            case PropertyTypes::_assetID:
+                                ImGui::InputInt("", (int*)data);
+                                break;
+                            default:
+                                break;
+                            }
+                            ImGui::PopID();
+                        }
+                    }
+                }
+            }
+        }
+
         ImGui::End();
+    }
+
+    String FormatMetaData(ComponentInfoParse cmpInfo)
+    {
+        String out = std::format( "static const ComponentInfo {0}MetaData = \n \t{{ \"{0}\", Components::{0}::mask, \n \t\t{{\n",  cmpInfo.name.c_str());
+
+        for (uint i = 0; i < cmpInfo.members.size(); i++)
+        {
+            auto& m = cmpInfo.members[i];
+            out += std::format("\t\t\t{{ \"{0}\", PropertyTypes::_{1}, {2}, offsetof(Components::{3}, {0}) }},\n", m.name.c_str(), m.dataType.c_str(), m.dataCount.c_str(), cmpInfo.name.c_str());
+        }
+
+        out += "\t\t}\n \t};\n";
+
+        return out;
+    }
+    String FormatComponentsArray(std::vector<String>& componentsInfo)
+    {
+        String out = "ComponentInfo knownComponents[] = \n{\n";
+
+        for (uint i = 0; i < componentsInfo.size(); i++)
+        {
+            auto& name = componentsInfo[i];
+            out += std::format("\t{}MetaData,\n", name.c_str());
+        }
+
+        out += "};\n";
+
+        return out;
     }
 
     void ParseCpp(String path)
     {
-        componentsInfo.clear();
 
         std::ifstream fin(path);
-        if (fin.is_open())
+        std::ofstream fout("G:\\Work\\Dev\\SeeD\\SeeD\\src\\ComponentsUIMetaData.h");
+        if (fin.is_open() && fout.is_open())
         {
+            fout << "#pragma once" << std::endl;
+
+            std::vector<String> componentsKnownNames;
             String line;
             while (getline(fin, line))
             {
                 if (line.find(": ComponentBase<") != -1)
                 {
-                    ComponentInfo cmpInfo;
+                    auto tokens = line.Split(" ");
+                    ComponentInfoParse cmpInfo;
+                    cmpInfo.name = tokens[1];
                     while (line.find("};") == -1)
                     {
                         getline(fin, line);
-                        auto tokens = line.Split(" ");
-
-                        MemberInfo info;
-                        info.dataType = PropertyTypes::_none;
-
-                        if (tokens[0].find("uint") != -1)
+                        tokens = line.Split(" ");
+                        if (tokens.size() == 2)
                         {
-                            info.dataType = PropertyTypes::_uint;
-                        }
-                        else if (tokens[0].find("assetID") != -1)
-                        {
-                            info.dataType = PropertyTypes::_assetID;
-                        }
-                        else if (tokens[0].find("float") != -1)
-                        {
-                            info.dataType = PropertyTypes::_float;
-                        }
-                        else if (tokens[0].find("float2") != -1)
-                        {
-                            info.dataType = PropertyTypes::_float2;
-                        }
-                        else if (tokens[0].find("float3") != -1)
-                        {
-                            info.dataType = PropertyTypes::_float3;
-                        }
-                        else if (tokens[0].find("float4") != -1)
-                        {
-                            info.dataType = PropertyTypes::_float4;
-                        }
-                        else if (tokens[0].find("quaternion") != -1)
-                        {
-                            info.dataType = PropertyTypes::_quaternion;
-                        }
-
-                        if (info.dataType != PropertyTypes::_none)
-                        {
-                            info.name = tokens[1];
-                            info.dataCount = 1;
-                            info.offset = 123;// offsetof(ComponentInfo, mask);
-                            cmpInfo.members.push_back(info);
+                            if (KnownType(tokens[0]))
+                            {
+                                MemberInfoParse info;
+                                info.dataType = tokens[0];
+                                info.name = tokens[1].substr(0, tokens[1].length()-1); //delete the ; at the end
+                                int bracketIndex = info.name.find("[");
+                                if (bracketIndex != -1)
+                                {
+                                    int bracketIndexOut = info.name.find("]");
+                                    info.dataCount = info.name.substr(bracketIndex+1, bracketIndexOut - bracketIndex - 1);
+                                    info.name = info.name.substr(0, bracketIndex);
+                                }
+                                else
+                                {
+                                    info.dataCount = "1";
+                                }
+                                cmpInfo.members.push_back(info);
+                            }
                         }
                     }
-
-                    componentsInfo.push_back(cmpInfo);
+                    fout << FormatMetaData(cmpInfo);
+                    componentsKnownNames.push_back(cmpInfo.name);
                 }
             }
+            fout << FormatComponentsArray(componentsKnownNames);
+
             fin.close();
+            fout.close();
         }
     }
 };

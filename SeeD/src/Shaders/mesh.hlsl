@@ -154,7 +154,7 @@ PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
     
     Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
     
-    o.albedo = float4(0.5, 0.5, 0.5, 1);
+    o.albedo = albedo.Sample(samplerLinear, inVerts.uv);
     //o.albedo = float4(inVerts.color, 1);
     o.normal = inVerts.normal.xyz;
     //o.entityID = 1;

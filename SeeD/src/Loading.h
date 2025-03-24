@@ -1015,6 +1015,8 @@ public:
         animationIndexToEntity.clear();
         skeletonIndexToEntity.clear();
         textureToEntity.clear();
+
+        editorState.dirtyHierarchy = true;
     }
 
     World::Entity CreateEntities(const aiScene* _scene, aiNode* node, World::Entity parentEntity = entityInvalid)

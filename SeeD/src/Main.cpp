@@ -44,6 +44,14 @@ void operator delete(void* ptr) noexcept
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
 
+
+#include "Containers.h"
+#include "String.h"
+
+#include "Time.h"
+#include "IO.h"
+#include "Tasks.h"
+#include "World.h"
 struct EditorState
 {
     bool show;
@@ -53,8 +61,9 @@ struct EditorState
 #else
         false;
 #endif
+    World::Entity selectedObject = entityInvalid;
+    bool dirtyHierarchy = true;
     /*
-    ECS::Entity selectedObject = { 0 };
     ECS::Entity lastSelectedObject = { 0 };
     uint activeWorld = 0;
     ImGui::FileBrowser fileDialog;
@@ -66,14 +75,6 @@ struct EditorState
     */
 };
 EditorState editorState;
-
-#include "Containers.h"
-#include "String.h"
-
-#include "Time.h"
-#include "IO.h"
-#include "Tasks.h"
-#include "World.h"
 #include "GPU.h"
 #include "Loading.h"
 #include "Renderer.h"

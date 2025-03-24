@@ -49,6 +49,13 @@ namespace Components
         return masksIndex - 1;
     }
 
+    static uint MaskToBucket(Mask mask)
+    {
+        unsigned long index;
+        _BitScanForward64(&index, mask.to_ullong());
+        return index;
+    }
+
     template<typename T>
     struct ComponentBase
     {
@@ -108,7 +115,7 @@ namespace Components
         static const uint maxTextures = 16;
         Handle<Texture> textures[maxTextures];
         static const uint maxParameters = 15;// not 16 so that the struct is 128bytes
-        float prameters[maxParameters];
+        float prameters[15];
     };
 
     struct Transform : ComponentBase<Transform>
@@ -223,6 +230,16 @@ public:
             auto& poolpool = World::instance->components[pool];
             return (poolpool.mask & T::mask) != 0;
         }
+        
+        char* Get(uint bucketIndex)
+        {
+            auto& poolpool = World::instance->components[pool];
+            // TODO : check that the pool have the right mask (debug assert ?)
+            seedAssert(bucketIndex < Components::componentMaxCount);
+            seedAssert(poolpool.data[bucketIndex] != nullptr);
+            char* data = (char*)poolpool.data[bucketIndex];
+            return &data[index * Components::strides[bucketIndex]];
+        }
 
         template <Components::IsComponent T>
         T& Get()
@@ -307,12 +324,25 @@ public:
             World::instance->entityFreeSlots.push_back(id);
         }
 
+        Components::Mask GetMask()
+        {
+            auto& slot = World::instance->entitySlots[id];
+            return World::instance->components[slot.pool].mask;
+        }
+
         template <Components::IsComponent T>
         bool Has()
         {
             // TODO : check that the pool have the right mask (debug assert ?)
             auto& slot = World::instance->entitySlots[id];
             return slot.Has<T>();
+        }
+
+        char* Get(uint bucketIndex)
+        {
+            // TODO : check that the pool have the right mask (debug assert ?)
+            auto& slot = World::instance->entitySlots[id];
+            return slot.Get(bucketIndex);
         }
 
         template <Components::IsComponent T>
