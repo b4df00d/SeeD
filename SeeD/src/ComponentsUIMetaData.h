@@ -1,88 +1,83 @@
 #pragma once
-static const ComponentInfo EntityMetaData = 
+void InitKnownComponents() { 
+
+static bool initialized = false;
+
+if(initialized) return;
+
+initialized = true;
+
+knownComponents.push_back(
  	{ "Entity", Components::Entity::mask, 
  		{
 		}
- 	};
-static const ComponentInfo NameMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "Name", Components::Name::mask, 
  		{
 		}
- 	};
-static const ComponentInfo ShaderMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "Shader", Components::Shader::mask, 
  		{
 			{ "id", PropertyTypes::_assetID, 1, offsetof(Components::Shader, id) },
 		}
- 	};
-static const ComponentInfo MeshMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "Mesh", Components::Mesh::mask, 
  		{
 			{ "id", PropertyTypes::_assetID, 1, offsetof(Components::Mesh, id) },
 		}
- 	};
-static const ComponentInfo TextureMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "Texture", Components::Texture::mask, 
  		{
 			{ "id", PropertyTypes::_assetID, 1, offsetof(Components::Texture, id) },
 		}
- 	};
-static const ComponentInfo MaterialMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "Material", Components::Material::mask, 
  		{
 			{ "prameters", PropertyTypes::_float, 15, offsetof(Components::Material, prameters) },
 		}
- 	};
-static const ComponentInfo TransformMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "Transform", Components::Transform::mask, 
  		{
 			{ "position", PropertyTypes::_float3, 1, offsetof(Components::Transform, position) },
 			{ "rotation", PropertyTypes::_quaternion, 1, offsetof(Components::Transform, rotation) },
 			{ "scale", PropertyTypes::_float3, 1, offsetof(Components::Transform, scale) },
 		}
- 	};
-static const ComponentInfo WorldMatrixMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "WorldMatrix", Components::WorldMatrix::mask, 
  		{
 			{ "matrix", PropertyTypes::_float4x4, 1, offsetof(Components::WorldMatrix, matrix) },
 		}
- 	};
-static const ComponentInfo InstanceMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "Instance", Components::Instance::mask, 
  		{
 		}
- 	};
-static const ComponentInfo ParentMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "Parent", Components::Parent::mask, 
  		{
 		}
- 	};
-static const ComponentInfo LightMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "Light", Components::Light::mask, 
  		{
 			{ "matrix", PropertyTypes::_float4x4, 1, offsetof(Components::Light, matrix) },
 		}
- 	};
-static const ComponentInfo CameraMetaData = 
+ 	}); 
+knownComponents.push_back(
  	{ "Camera", Components::Camera::mask, 
  		{
 			{ "fovY", PropertyTypes::_float, 1, offsetof(Components::Camera, fovY) },
 			{ "nearClip", PropertyTypes::_float, 1, offsetof(Components::Camera, nearClip) },
 			{ "farClip", PropertyTypes::_float, 1, offsetof(Components::Camera, farClip) },
 		}
- 	};
-ComponentInfo knownComponents[] = 
-{
-	EntityMetaData,
-	NameMetaData,
-	ShaderMetaData,
-	MeshMetaData,
-	TextureMetaData,
-	MaterialMetaData,
-	TransformMetaData,
-	WorldMatrixMetaData,
-	InstanceMetaData,
-	ParentMetaData,
-	LightMetaData,
-	CameraMetaData,
-};
+ 	}); 
+}
+

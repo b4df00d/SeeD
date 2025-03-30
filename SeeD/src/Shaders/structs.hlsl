@@ -1,4 +1,6 @@
 #pragma once
+#ifndef __STRUCTS__
+#define __STRUCTS__
 
 #ifdef __cplusplus // bah c´est surtout pour par avoir ca dans le HLSL
 #define SeeDalign __declspec(align(16))
@@ -16,6 +18,7 @@ struct Options
     bool stopFrustumUpdate;
     bool stopBufferUpload;
     bool stepMotion;
+    bool shaderReload;
 } options;
 
 namespace HLSL
@@ -61,15 +64,20 @@ namespace HLSL
     
     struct CullingContext
     {
+        uint frameNumber;
+        uint frameTime;
         uint cameraIndex;
         uint lightsIndex;
         uint culledInstanceIndex;
         uint culledMeshletsIndex;
         uint instancesCounterIndex;
         uint meshletsCounterIndex;
+        uint albedoIndex;
+        uint normalIndex;
+        uint depthIndex;
         uint HZB;
         uint HZBMipCount;
-        uint4 resolution;
+        float4 resolution;
     };
     
     struct Shader
@@ -254,9 +262,6 @@ namespace HLSL
         uint shadowsIndex;
         uint restirIndex;
         uint lightedIndex;
-        uint albedoIndex;
-        uint normalIndex;
-        uint depthIndex;
     };
     
     // Hit information, aka ray payload
@@ -266,11 +271,12 @@ namespace HLSL
     struct HitInfo
     {
         float3 color;
-        float rayDepth;
-        float3 currentPosition;
+        uint rayDepth;
         uint rndseed;
-        float3 normal;
-        float tCurrent;
+        float hitDistance;
+        //float tCurrent;
+        //float3 currentPosition;
+        //float3 normal;
     };
     
     // Attributes output by the raytracing when hitting a surface,
@@ -281,3 +287,4 @@ namespace HLSL
     };
     // ----------------- End RT stuff ------------------
 }
+#endif // __STRUCTS__

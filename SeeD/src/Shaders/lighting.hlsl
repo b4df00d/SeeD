@@ -15,19 +15,26 @@ cbuffer CustomRT : register(b2)
 [numthreads(16, 16, 1)]
 void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
-    RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
+    Texture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+    Texture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
-    RWTexture2D<float4> albedo = ResourceDescriptorHeap[rtParameters.albedoIndex];
+    Texture2D<float4> albedo = ResourceDescriptorHeap[cullingContext.albedoIndex];
+    
+    GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
     
     float3 indirect = GI[dtid.xy].xyz;
-    float3 direct = shadows[dtid.xy] * float3(1, 0.75, 0.65) * 3;
+    float3 direct = shadows[dtid.xy] * sunColor;
     
-    //indirect = 1;
-    //direct = 1;
+    SurfaceData s;
+    s.albedo = albedo[dtid.xy].xyz;
+    s.roughness = 0.99;
+    s.normal = cd.worldNorm;
+    s.metalness = 0.1;
     
-    float3 result = albedo[dtid.xy].xyz * (direct + indirect);
-    result *= 0.5;
+    float3 brdf = BRDF(s, cd.viewDir, sunDir, direct);
+    float3 ambient = indirect * s.albedo;
+    
+    float3 result = brdf + ambient;
     
     lighted[dtid.xy] = float4(result, 1);
 }

@@ -23,6 +23,7 @@ public:
 	INT64 deltaTicks{};
 
 	float deltaSeconds{};
+	float seconds{};
 
 	void On()
 	{
@@ -62,6 +63,8 @@ public:
 		deltaTicks = currentTicks - previousTicks;
 
 		deltaSeconds = deltaTicks / ticksPerMs / 1000.0f;
+
+		seconds = (currentTicks - startTicks) / ticksPerMs / 1000.0f;
 	}
 };
 Time* Time::instance;

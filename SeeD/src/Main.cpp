@@ -55,12 +55,6 @@ void operator delete(void* ptr) noexcept
 struct EditorState
 {
     bool show;
-    bool shaderReload =
-#ifdef _DEBUG
-        true;
-#else
-        false;
-#endif
     World::Entity selectedObject = entityInvalid;
     bool dirtyHierarchy = true;
     /*

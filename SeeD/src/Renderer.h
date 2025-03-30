@@ -83,17 +83,14 @@ UI* UI::instance;
 static constexpr uint invalidMapIndex = UINT_MAX;
 // is this is thread safe only because we allocate the max number of stuff we will find before the MT part
 // with the reserve in the lock this should now be ok ?
-template<typename keyType, typename cpuType, typename gpuType>
+template<typename keyType, typename gpuType>
 class Map
 {
     std::unordered_map<keyType, uint> keys;
-    std::vector<cpuType> data;
     StructuredUploadBuffer<gpuType> gpuData;
-    std::vector<bool> loaded; // and uploaded if applicable
 public:
     std::atomic_uint32_t count = 0;
     std::recursive_mutex lock;
-    uint maxLoading = 3;
 
     Map()
     {
@@ -125,7 +122,6 @@ public:
                 index = count++;
                 keys[key] = index;
                 Reserve(count);
-                SetLoaded(index, false);
             }
             lock.unlock();
             return true;
@@ -134,47 +130,12 @@ public:
     }
     void Reserve(uint size)
     {
-        if (data.size() < size)
+        if (gpuData.Size() < size)
         {
             lock.lock();
-            data.resize(size);
             gpuData.Resize(size);
-            loaded.resize(size);
             lock.unlock();
         }
-    }
-    bool GetLoaded(uint index)
-    {
-        return loaded[index];
-    }
-    bool GetLoaded(keyType key)
-    {
-        uint index;
-        bool present = Contains(key, index);
-        seedAssert(present);
-        return loaded[index];
-    }
-    void SetLoaded(uint index, bool value)
-    {
-        loaded[index] = value;
-    }
-    void SetLoaded(keyType key, bool value)
-    {
-        uint index;
-        bool present = Contains(key, index);
-        seedAssert(present);
-        loaded[index] = value;
-    }
-    cpuType& GetData(uint index)
-    {
-        return data[index];
-    }
-    cpuType& GetData(keyType key)
-    {
-        uint index;
-        bool present = Contains(key, index);
-        seedAssert(present);
-        return GetData(index);
     }
     gpuType& GetGPUData(uint index)
     {
@@ -193,7 +154,7 @@ public:
     }
     uint Size()
     {
-        return (uint)data.size();
+        return (uint)gpuData.Size();
     }
     void Upload()
     {
@@ -211,7 +172,7 @@ struct ViewWorld
     StructuredUploadBuffer<HLSL::CommonResourcesIndices> commonResourcesIndices;
     StructuredUploadBuffer<HLSL::Camera> cameras;
     StructuredUploadBuffer<HLSL::Light> lights;
-    Map<World::Entity, Material, HLSL::Material> materials;
+    Map<World::Entity, HLSL::Material> materials;
     StructuredUploadBuffer<HLSL::Instance> instances;
     StructuredBuffer<HLSL::Instance> instancesGPU; // only for instances created on GPU
 
@@ -365,14 +326,19 @@ public:
     {
         HLSL::CullingContext cullingContextParams;
 
+        cullingContextParams.frameNumber++;
+        cullingContextParams.frameTime = Time::instance->currentTicks;
         cullingContextParams.cameraIndex = options.stopFrustumUpdate ? 1 : 0;
         cullingContextParams.lightsIndex = 0;
         cullingContextParams.culledInstanceIndex = cullingContext.instancesInView.GetResource().uav.offset;
         cullingContextParams.culledMeshletsIndex = cullingContext.meshletsInView.GetResource().uav.offset;
         cullingContextParams.instancesCounterIndex = cullingContext.instancesCounter.GetResource().uav.offset;
         cullingContextParams.meshletsCounterIndex = cullingContext.meshletsCounter.GetResource().uav.offset;
+        cullingContextParams.albedoIndex = GetRegisteredResource("albedo").srv.offset;
+        cullingContextParams.normalIndex = GetRegisteredResource("normal").srv.offset;
+        cullingContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
         cullingContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
-        cullingContextParams.resolution = uint4(resolution, 0, 0);
+        cullingContextParams.resolution = float4(float(resolution.x), float(resolution.y), 1.0f / resolution.x, 1.0f / resolution.y);
         cullingContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
 
         cullingContext.cullingContext->Clear();
@@ -939,10 +905,7 @@ public:
         rtparams.giIndex = view->raytracingContext.GI.uav.offset;
         rtparams.shadowsIndex = view->raytracingContext.shadows.uav.offset;
         rtparams.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
-        rtparams.albedoIndex = albedo.Get().uav.offset;
         rtparams.lightedIndex = lighted.Get().uav.offset;
-        rtparams.normalIndex = normal.Get().srv.offset;
-        rtparams.depthIndex = depth.Get().srv.offset;
         view->raytracingContext.rtParameters->Add(rtparams);
         view->raytracingContext.rtParameters->Upload();
 
@@ -1252,8 +1215,6 @@ public:
 
                     uint materialIndex;
                     bool materialAdded = viewWorld->materials.Add(World::Entity(instanceCmp.material.index), materialIndex);
-                    if (!viewWorld->materials.GetLoaded(materialIndex))
-                        continue;
 
                     // everything should be loaded to be able to draw the instance
                     float4x4 worldMatrix = ComputeWorldMatrix(ent);
@@ -1331,7 +1292,7 @@ public:
                     if (frameWorld.materials.Contains(World::Entity(queryResult[i + subQuery].Get<Components::Entity>().index), materialIndex))
                     {
                         Components::Material& materialCmp = queryResult[i + subQuery].Get<Components::Material>();
-                        Material& material = frameWorld.materials.GetData(materialIndex);
+                        HLSL::Material& material = frameWorld.materials.GetGPUData(materialIndex);
 
                         material.shaderIndex = AssetLibrary::instance->GetIndex(materialCmp.shader.Get().id);
                         for (uint paramIndex = 0; paramIndex < Components::Material::maxParameters; paramIndex++)
@@ -1347,13 +1308,16 @@ public:
                                 Components::Texture& textureCmp = materialCmp.textures[texIndex].Get();
                                 Resource* texture = AssetLibrary::instance->Get<Resource>(textureCmp.id);
                                 if (!texture)
+                                {
                                     materialReady = false;
+                                    material.textures[texIndex] = ~0;
+                                }
                                 else
-                                    material.texturesSRV[texIndex] = texture->srv;
+                                    material.textures[texIndex] = texture->srv.offset;
                             }
+                            else
+                                material.textures[texIndex] = ~0;
                         }
-
-                        frameWorld.materials.SetLoaded(materialIndex, materialReady);
                     }
                 }
             }

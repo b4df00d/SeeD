@@ -350,104 +350,18 @@ public:
         req.Source.File.Source = fileHandle;
         req.Source.File.Offset = metadata.resourceOffset;
         req.Source.File.Size = metadata.resourceSizeCompressed;
+        req.Destination.Texture.Resource = resource.GetResource();
         req.Destination.MultipleSubresources.Resource = resource.GetResource();
         req.Destination.MultipleSubresources.FirstSubresource = 0;
         req.UncompressedSize = metadata.resourceSizeUncompressed;
 
-        req.CancellationTag = 1;
+        req.CancellationTag = 0;
         req.Name = (char*)path.c_str();
 
         queue->EnqueueRequest(&req);
         queue->Submit();
 
         return resource;
-
-        /*
-        IDStorageFile* file;
-        HRESULT hr = factory->OpenFile(path.ToWString().c_str(), IID_PPV_ARGS(&file));
-        if (FAILED(hr))
-        {
-            IOs::Log("could not load {}", path.c_str());
-            return resource;
-        }
-
-        BY_HANDLE_FILE_INFORMATION info{};
-        hr = file->GetFileInformation(&info);
-        uint32_t fileSize = info.nFileSizeLow;
-
-        // Create the ID3D12Resource buffer which will be populated with the file's contents
-        D3D12_HEAP_PROPERTIES bufferHeapProps = {};
-        bufferHeapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-        bufferDesc.SampleDesc.Count = 1;
-
-
-        // Enqueue a request to read the file contents into a destination D3D12 buffer resource.
-        // Note: The example request below is performing a single read of the entire file contents.
-        DSTORAGE_REQUEST request = {};
-        request.Options.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
-        request.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_BUFFER;
-        request.Source.File.Source = file;
-        request.Source.File.Offset = 0;
-        request.Source.File.Size = fileSize;
-        request.UncompressedSize = fileSize;
-        request.Destination.Buffer.Resource = resource.GetResource();
-        request.Destination.Buffer.Offset = 0;
-        request.Destination.Buffer.Size = request.Source.File.Size;
-
-        queue->EnqueueRequest(&request);
-        //queue->Submit();
-
-        return resource;
-
-
-        //-------------------------------------------------------------------
-        Resource resourceUpload = {};
-
-        DirectX::TexMetadata metadata;
-        DirectX::ScratchImage* image = new DirectX::ScratchImage();
-        HRESULT hr = DirectX::LoadFromDDSFile(path.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, *image);
-        if (FAILED(hr))
-        {
-            IOs::Log("Fail to load cache file {}", path.c_str());
-        }
-
-        D3D12_RESOURCE_DESC rdesc = {};
-        rdesc.Width = static_cast<UINT>(metadata.width);
-        rdesc.Height = static_cast<UINT>(metadata.height);
-        rdesc.MipLevels = static_cast<UINT16>(metadata.mipLevels);
-        rdesc.DepthOrArraySize = (metadata.dimension == DirectX::TEX_DIMENSION_TEXTURE3D)
-            ? static_cast<UINT16>(metadata.depth)
-            : static_cast<UINT16>(metadata.arraySize);
-        rdesc.Format = metadata.format;
-        rdesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-        rdesc.SampleDesc.Count = 1;
-        rdesc.Dimension = static_cast<D3D12_RESOURCE_DIMENSION>(metadata.dimension);
-
-        std::vector<D3D12_SUBRESOURCE_DATA> subresources;
-        hr = DirectX::PrepareUpload(GPU::instance->device, image->GetImages(), image->GetImageCount(), image->GetMetadata(), subresources);
-        if (FAILED(hr))
-        {
-            IOs::Log("Fail to load cache file {}", path.c_str());
-            return resource;
-        }
-
-        UINT64 uploadBufferSize = 0;
-        GPU::instance->device->GetCopyableFootprints(&rdesc, 0, subresources.size(), 0, nullptr, nullptr, nullptr, &uploadBufferSize);
-
-        resource.Create(rdesc, path);
-
-        UploadResource up = device->memory.GetTempUploadResource(*(D3D12_RESOURCE_DESC1*)&CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize));
-
-        cmd->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(res->gpuResource, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST));
-        UpdateSubresources(cmd, res->gpuResource, up.uploadResource, 0, 0, static_cast<unsigned int>(subresources.size()), subresources.data());
-        cmd->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(res->gpuResource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
-
-        auto uploadResourcesFinished = resourceUpload.End(device->commandQueue[0].commandQueue);
-        uploadResourcesFinished.wait();
-        decodedData.release();
-        decodedData.reset(NULL);
-        subresources.clear();
-        */
     }
 
     // Find best compressino for the given asset.
@@ -633,21 +547,22 @@ public:
         DirectX::ScratchImage mipChain;
         DirectX::GenerateMipMaps(image->GetImages(), image->GetImageCount(), metadata, DirectX::TEX_FILTER_DEFAULT, 0, mipChain);
 
+        /*
         DirectX::ScratchImage imageBC;
-        hr = DirectX::Compress(mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(), DXGI_FORMAT_BC7_UNORM, DirectX::TEX_COMPRESS_BC7_QUICK | DirectX::TEX_COMPRESS_PARALLEL, DirectX::TEX_THRESHOLD_DEFAULT, imageBC);
+        //hr = DirectX::Compress(mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(), DXGI_FORMAT_BC7_UNORM, DirectX::TEX_COMPRESS_BC7_QUICK | DirectX::TEX_COMPRESS_PARALLEL, DirectX::TEX_THRESHOLD_DEFAULT, imageBC);
+        hr = DirectX::Compress(mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(), DXGI_FORMAT_BC1_UNORM, DirectX::TEX_COMPRESS_UNIFORM | DirectX::TEX_COMPRESS_PARALLEL, DirectX::TEX_THRESHOLD_DEFAULT, imageBC);
         if (FAILED(hr))
         {
             IOs::Log("Fail to compress {}", name.c_str());
             return assetID::Invalid;
         }
-        /*
         if (needCompression)
         {
             DirectX::SaveToDDSFile(imageBC.GetImages(), imageBC.GetImageCount(), imageBC.GetMetadata(), DirectX::DDS_FLAGS_NONE, path.ToWString().c_str());
         }
-        */
 
         metadata = imageBC.GetMetadata();
+        */
 
         // Create resource desc.
         UINT subresourceCount = std::max(metadata.arraySize, metadata.depth) * metadata.mipLevels;
@@ -699,7 +614,7 @@ public:
 
             for (uint32_t y = 0; y < resolvedHeight; y++)
             {
-                memcpy((char*)resourcePtr + y * dstRowPitchBytes, imageBC.GetImages()[subResourceIdx].pixels + y * resolvedPackedRowPitch, resolvedPackedRowPitch);
+                memcpy((char*)resourcePtr + y * dstRowPitchBytes, mipChain.GetImages()[subResourceIdx].pixels + y * resolvedPackedRowPitch, resolvedPackedRowPitch);
             }
         }
 

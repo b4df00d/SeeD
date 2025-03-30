@@ -485,6 +485,7 @@ public:
         ImGui::Checkbox("stopFrustumUpdate", &options.stopFrustumUpdate);
         ImGui::Checkbox("stopBufferUpload", &options.stopBufferUpload);
         ImGui::Checkbox("stepMotion", &options.stepMotion);
+        ImGui::Checkbox("shaderHotReload", &options.shaderReload);
 
         ImGui::End();
     }
@@ -526,8 +527,6 @@ bool KnownType(String typeName)
         return true;
     return false;
 }
-// Simple representation of struct metadata/serialization data.
-// (this is a minimal version of what a typical advanced application may provide)
 struct MemberInfoParse
 {
     String name;
@@ -552,6 +551,7 @@ struct ComponentInfo
     Components::Mask mask;
     std::vector<MemberInfo> members;
 };
+std::vector<ComponentInfo> knownComponents;
 
 #include "ComponentsUIMetaData.h"
 
@@ -576,10 +576,12 @@ public:
         {
             ParseCpp("G:\\Work\\Dev\\SeeD\\SeeD\\src\\World.h");
         }
+        
+        InitKnownComponents();
 
         if (editorState.selectedObject != entityInvalid)
         {
-            for (uint i = 0; i < ARRAYSIZE(knownComponents); i++)
+            for (uint i = 0; i < knownComponents.size(); i++)
             {
                 if ((editorState.selectedObject.GetMask() & knownComponents[i].mask) != 0)
                 {   
@@ -633,9 +635,9 @@ public:
         ImGui::End();
     }
 
-    String FormatMetaData(ComponentInfoParse cmpInfo)
+    String FormatMetaData(ComponentInfoParse cmpInfo, uint& cmpIndex)
     {
-        String out = std::format( "static const ComponentInfo {0}MetaData = \n \t{{ \"{0}\", Components::{0}::mask, \n \t\t{{\n",  cmpInfo.name.c_str());
+        String out = std::format( "knownComponents.push_back(\n \t{{ \"{0}\", Components::{0}::mask, \n \t\t{{\n",  cmpInfo.name.c_str());
 
         for (uint i = 0; i < cmpInfo.members.size(); i++)
         {
@@ -643,8 +645,10 @@ public:
             out += std::format("\t\t\t{{ \"{0}\", PropertyTypes::_{1}, {2}, offsetof(Components::{3}, {0}) }},\n", m.name.c_str(), m.dataType.c_str(), m.dataCount.c_str(), cmpInfo.name.c_str());
         }
 
-        out += "\t\t}\n \t};\n";
+        out += "\t\t}\n \t}";
+        out += "); \n";
 
+        cmpIndex++;
         return out;
     }
     String FormatComponentsArray(std::vector<String>& componentsInfo)
@@ -671,8 +675,15 @@ public:
         {
             fout << "#pragma once" << std::endl;
 
+            //fout << "std::vector<ComponentInfo> knownComponents;" << std::endl;
+            fout << "void InitKnownComponents() { \n" << std::endl;
+            fout << "static bool initialized = false;\n" << std::endl;
+            fout << "if(initialized) return;\n" << std::endl;
+            fout << "initialized = true;\n" << std::endl;
+
             std::vector<String> componentsKnownNames;
             String line;
+            uint cmpIndex = 0;
             while (getline(fin, line))
             {
                 if (line.find(": ComponentBase<") != -1)
@@ -706,11 +717,13 @@ public:
                             }
                         }
                     }
-                    fout << FormatMetaData(cmpInfo);
+                    fout << FormatMetaData(cmpInfo, cmpIndex);
                     componentsKnownNames.push_back(cmpInfo.name);
                 }
             }
-            fout << FormatComponentsArray(componentsKnownNames);
+
+            fout << "}\n" << std::endl;
+            //fout << FormatComponentsArray(componentsKnownNames);
 
             fin.close();
             fout.close();

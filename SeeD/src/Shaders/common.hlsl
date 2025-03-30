@@ -1,6 +1,7 @@
 #pragma once
 
 #include "binding.hlsl"
+#include "structs.hlsl"
 
 static float4 complexity[10] =
 {
@@ -71,28 +72,6 @@ float4 QuaternionFromMatrix(const in float3x3 mat)
     }
     return quat;
 }
-
-
-struct Surface
-{
-    half3 albedo;
-    half opacity;
-    half metalness;
-    half3 emission;
-    half smoothness;
-    half occlusion;
-    float3 position;
-    half3 normal;
-    half3 GI;
-    half shadow;
-
-    half SSSPower;
-    half SSSAttenuation;
-    half SSSAmbient;
-    half SSSScale;
-    half SSSDelta;
-};
-
 
 float3 Max3(float a, float b, float c)
 {
@@ -831,4 +810,81 @@ float2 Panini_Generic(float2 view_pos, float d)
 
     float2 cyl_pos = view_pos * (cyl_dist / view_dist);
     return cyl_pos / (cyl_dist - d);
+}
+
+
+#define sunDir normalize(-float3(1, 1, 1))
+#define sunColor (float3(1, 0.85, 0.8) * 4)
+
+float3 StoreR11G11B10Normal(float3 normal)
+{
+    return normal * 0.5 + 0.5;
+}
+float3 ReadR11G11B10Normal(float3 normal)
+{
+    return normal * 2 - 1;
+}
+struct GBufferCameraData
+{
+    HLSL::Camera camera;
+    float3 worldPos;
+    float3 worldNorm;
+    float3 viewDir;
+    float viewDist;
+};
+GBufferCameraData GetGBufferCameraData(uint2 pixel)
+{
+    GBufferCameraData cd;
+    
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    cd.camera = cameras[0]; //cullingContext.cameraIndex];
+    
+    Texture2D<float> depth = ResourceDescriptorHeap[cullingContext.depthIndex];
+    Texture2D<float3> normalT = ResourceDescriptorHeap[cullingContext.normalIndex];
+    cd.worldNorm = ReadR11G11B10Normal(normalT[pixel]);
+    
+    // inverse y depth depth[uint2(launchIndex.x, rtParameters.resolution.y - launchIndex.y)]
+    float3 clipSpace = float3(pixel * cullingContext.resolution.zw * 2 - 1, depth[pixel]);
+    float4 worldSpace = mul(cd.camera.viewProj_inv, float4(clipSpace.x, -clipSpace.y, clipSpace.z, 1));
+    worldSpace.xyz /= worldSpace.w;
+    
+    float3 rayDir = worldSpace.xyz - cd.camera.worldPos.xyz;
+    float rayLength = length(rayDir);
+    rayDir /= rayLength;
+    //worldSpace.xyz = cd.camera.worldPos.xyz + rayDir * rayLength;
+    
+    cd.viewDir = rayDir;
+    cd.viewDist = rayLength;
+    cd.worldPos = worldSpace.xyz;
+    
+    return cd;
+}
+
+
+struct SurfaceData
+{
+    float3 albedo;
+    float metalness;
+    float3 normal;
+    float roughness;
+};
+SurfaceData GetSurfaceData()
+{
+    SurfaceData s;
+    return s;
+}
+
+float3 BRDF(SurfaceData s, float3 viewDir, float3 lightDir, float3 lightColor)
+{
+    float NdotV = dot(-viewDir, s.normal);
+    s.roughness = lerp(0, s.roughness, saturate(NdotV));
+    float smooth = 1 - s.roughness;
+    
+    float NdotL = dot(s.normal, -lightDir);
+    float3 diffuse = s.albedo * saturate(NdotL) * lightColor;
+    float3 reflectViewDir = reflect(-viewDir, s.normal);
+    float RdotL = dot(reflectViewDir, lightDir);
+    float3 specular = pow(saturate(RdotL), 1 + smooth * 100) * lerp(lightColor, length(lightColor) * s.albedo, s.metalness) * smooth;
+
+    return saturate(diffuse + specular);
 }

@@ -232,7 +232,7 @@ struct Shader
     std::map<String, __time64_t> creationTime;
     bool NeedReload()
     {
-        if (editorState.shaderReload)
+        if (options.shaderReload)
         {
             for (auto& item : creationTime)
             {
@@ -818,7 +818,8 @@ void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name)
 
     //exclude BC format for UAV
     if(!((resourceDesc.Format >= DXGI_FORMAT_BC1_TYPELESS && resourceDesc.Format <= DXGI_FORMAT_BC5_SNORM)
-        || (resourceDesc.Format >= DXGI_FORMAT_BC6H_TYPELESS && resourceDesc.Format <= DXGI_FORMAT_BC7_UNORM_SRGB)))
+        || (resourceDesc.Format >= DXGI_FORMAT_BC6H_TYPELESS && resourceDesc.Format <= DXGI_FORMAT_BC7_UNORM_SRGB)
+        || !(resourceDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)))
     {
         auto desc = GetResource()->GetDesc();
         D3D12_CPU_DESCRIPTOR_HANDLE handle;
