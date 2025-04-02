@@ -20,10 +20,14 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     Texture2D<float4> albedo = ResourceDescriptorHeap[cullingContext.albedoIndex];
     
+    //Should not have any preference on shading a specific light here (the sun)... let the raytracing handle any light stuff ?
+    StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
+    HLSL::Light light = lights[0];
+    
     GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
     
     float3 indirect = GI[dtid.xy].xyz;
-    float3 direct = shadows[dtid.xy] * sunColor;
+    float3 direct = shadows[dtid.xy] * light.color.xyz;
     
     SurfaceData s;
     s.albedo = albedo[dtid.xy].xyz;
@@ -31,10 +35,11 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     s.normal = cd.worldNorm;
     s.metalness = 0.1;
     
-    float3 brdf = BRDF(s, cd.viewDir, sunDir, direct);
+    float3 brdf = BRDF(s, cd.viewDir, light.dir.xyz, direct);
     float3 ambient = indirect * s.albedo;
     
     float3 result = brdf + ambient;
+    //result = indirect;
     
     lighted[dtid.xy] = float4(result, 1);
 }

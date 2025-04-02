@@ -68,7 +68,9 @@ knownComponents.push_back(
 knownComponents.push_back(
  	{ "Light", Components::Light::mask, 
  		{
-			{ "matrix", PropertyTypes::_float4x4, 1, offsetof(Components::Light, matrix) },
+			{ "angle", PropertyTypes::_float, 1, offsetof(Components::Light, angle) },
+			{ "range", PropertyTypes::_float, 1, offsetof(Components::Light, range) },
+			{ "color", PropertyTypes::_float4, 1, offsetof(Components::Light, color) },
 		}
  	}); 
 knownComponents.push_back(

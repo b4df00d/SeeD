@@ -227,9 +227,9 @@ namespace HLSL
 
     struct Light
     {
-        float3 pos;
-        float3 dir;
-        float3 color;
+        float4 pos;
+        float4 dir;
+        float4 color;
         float range;
         float angle;
     };

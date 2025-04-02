@@ -813,8 +813,8 @@ float2 Panini_Generic(float2 view_pos, float d)
 }
 
 
-#define sunDir normalize(-float3(1, 1, 1))
-#define sunColor (float3(1, 0.85, 0.8) * 4)
+//#define sunDir normalize(-float3(1, 1, 1))
+//#define sunColor (float3(1, 0.85, 0.8) * 4)
 
 float3 StoreR11G11B10Normal(float3 normal)
 {

@@ -19,6 +19,7 @@ public:
     static AssetLibrary* instance;
     std::unordered_map<assetID, Asset> map;
     String importPath = "..\\Assets\\";
+    std::unordered_map<assetID, String> allAssetsInImportPath;
     String assetsPath = "..\\Assets\\";
     String file = "..\\assetLibrary.txt";
     std::unordered_map<assetID, uint> loadingRequest;
@@ -254,17 +255,33 @@ public:
 
     String FindInImportPath(String name)
     {
+        ZoneScoped;
         size_t last = name.find_last_of("\\");
         if (last != -1)
             name = name.substr(last + 1);
-        for (const auto& p : std::filesystem::recursive_directory_iterator((std::string)importPath))
+
+
+        if (allAssetsInImportPath.size() == 0)
         {
-            if (!std::filesystem::is_directory(p))
+            for (const auto& p : std::filesystem::recursive_directory_iterator((std::string)importPath))
             {
-                String pName = p.path().filename().string();
-                if (p.path().filename().string() == name)
-                    return p.path().string();
+                if (!std::filesystem::is_directory(p))
+                {
+                    String pName = p.path().filename().string();
+                    assetID id;
+                    id.hash = std::hash<std::string>{}(pName);
+                    allAssetsInImportPath[id] = p.path().string();
+                }
             }
+            return "";
+        }
+        else
+        {
+            assetID id;
+            id.hash = std::hash<std::string>{}(name);
+
+            if (allAssetsInImportPath.contains(id))
+                return allAssetsInImportPath[id];
         }
         return "";
     }
@@ -327,6 +344,7 @@ public:
 
     Resource Read(String path)
     {
+        ZoneScoped;
         Resource resource = {};
 
         String metaPath = path.substr(0, path.length() - 4) + ".meta";
@@ -367,6 +385,7 @@ public:
     // Find best compressino for the given asset.
     int64_t CompressExhaustive(std::vector<uint8_t>& compressedDst, const std::vector<uint8_t>& uncompressedSrc, DSTORAGE_COMPRESSION_FORMAT* formatOut)
     {
+        ZoneScoped;
         // @todo this much be updated as formats and levels are added.
         DSTORAGE_COMPRESSION_FORMAT supportedFormatMax = DSTORAGE_COMPRESSION_FORMAT_GDEFLATE;
         DSTORAGE_COMPRESSION_FORMAT supportedFormatMin = DSTORAGE_COMPRESSION_FORMAT_NONE;
@@ -395,6 +414,7 @@ public:
 
     int64_t Compress(DSTORAGE_COMPRESSION_FORMAT format, DSTORAGE_COMPRESSION compressionLevel, std::vector<uint8_t>& compressedDst, const std::vector<uint8_t>& uncompressedSrc)
     {
+        ZoneScoped;
         if (format != DSTORAGE_COMPRESSION_FORMAT_NONE)
         {
             IDStorageCompressionCodec* codec;
@@ -430,6 +450,7 @@ public:
     
     bool CreateFileOnDisk(const wchar_t* const path, HANDLE* handleInOut)
     {
+        ZoneScoped;
         assert(handleInOut != nullptr);
 
         // Create files if necessary.
@@ -452,6 +473,7 @@ public:
 
     int64_t WriteDataToDisk(const HANDLE fileHandle, const void* const data, const size_t byteCount)
     {
+        ZoneScoped;
         LARGE_INTEGER filePointerOrStatus{ 0 };
         filePointerOrStatus.LowPart = SetFilePointer(fileHandle, 0, &filePointerOrStatus.HighPart, FILE_CURRENT);
 
@@ -480,6 +502,7 @@ public:
 
     assetID IsCached(String name)
     {
+        ZoneScoped;
         String path;
         assetID id;
         id.hash = std::hash<std::string>{}(name);
@@ -500,6 +523,7 @@ public:
     //https://github.com/GPUOpen-LibrariesAndSDKs/DirectStorageSample/blob/main/src/TextureConverter/TextureConverter.cpp#L273
     assetID Write(String name)
     {
+        ZoneScoped;
         bool compressionExhaustive = true;
         DSTORAGE_COMPRESSION_FORMAT compressionFormat = DSTORAGE_COMPRESSION_FORMAT_GDEFLATE;
         DSTORAGE_COMPRESSION compressionLevel = DSTORAGE_COMPRESSION_BEST_RATIO;
@@ -518,16 +542,19 @@ public:
 
         if (name.find(".dds") != -1)
         {
+            ZoneScopedN("DDS");
             hr = DirectX::LoadFromDDSFile(originalPath.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, *image);
             needCompression = false;
         }
         else if (name.find(".tga") != -1)
         {
+            ZoneScopedN("TGA");
             hr = DirectX::LoadFromTGAFile(originalPath.ToWString().c_str(), DirectX::TGA_FLAGS_NONE, &metadata, *image);
             needCompression = true;
         }
         else
         {
+            ZoneScopedN("WIC");
             hr = DirectX::LoadFromWICFile(originalPath.ToWString().c_str(), DirectX::WIC_FLAGS_NONE, &metadata, *image);
             needCompression = true;
         }
@@ -545,7 +572,10 @@ public:
             hr = E_INVALIDARG;
 
         DirectX::ScratchImage mipChain;
-        DirectX::GenerateMipMaps(image->GetImages(), image->GetImageCount(), metadata, DirectX::TEX_FILTER_DEFAULT, 0, mipChain);
+        {
+            ZoneScopedN("Mips");
+            DirectX::GenerateMipMaps(image->GetImages(), image->GetImageCount(), metadata, DirectX::TEX_FILTER_DEFAULT, 0, mipChain);
+        }
 
         /*
         DirectX::ScratchImage imageBC;
@@ -594,27 +624,30 @@ public:
         // Allocate memory to copy into.
         std::vector<uint8_t> textureData(subresourceTotalByteCount, 0);
 
-        // copy texture data...
-        for (UINT subResourceIdx = 0; subResourceIdx < subresourceCount; subResourceIdx++)
         {
-            // Src setup
-            size_t srcRowPitchBytes = ((DirectX::BitsPerPixel(metadata.format) * metadata.width) + 7) / 8; // rounded to nearest byte.
-            size_t srcSlicePitchBytes = srcRowPitchBytes * metadata.height; // assuming tightly packed image.
-
-            // Dst setup
-            const auto& resourceFootprint = subresourceFootprints[subResourceIdx];
-            auto resourcePtr = textureData.data() + resourceFootprint.Offset;
-            const auto& footprint = resourceFootprint.Footprint;
-            size_t dstRowPitchBytes = resourceFootprint.Footprint.RowPitch; // padded row pitch.
-            size_t dstRowPitchPackedBytes = subresourceRowByteCount[subResourceIdx];
-            size_t dstSlicePitchBytes = subresourceRowsCount[subResourceIdx] * dstRowPitchBytes;
-
-            size_t resolvedHeight = std::min(subresourceRowsCount[subResourceIdx], (uint)metadata.height);
-            size_t resolvedPackedRowPitch = std::min(std::min(dstRowPitchBytes, srcRowPitchBytes), dstRowPitchPackedBytes);
-
-            for (uint32_t y = 0; y < resolvedHeight; y++)
+            ZoneScopedN("COPY");
+            // copy texture data...
+            for (UINT subResourceIdx = 0; subResourceIdx < subresourceCount; subResourceIdx++)
             {
-                memcpy((char*)resourcePtr + y * dstRowPitchBytes, mipChain.GetImages()[subResourceIdx].pixels + y * resolvedPackedRowPitch, resolvedPackedRowPitch);
+                // Src setup
+                size_t srcRowPitchBytes = ((DirectX::BitsPerPixel(metadata.format) * metadata.width) + 7) / 8; // rounded to nearest byte.
+                size_t srcSlicePitchBytes = srcRowPitchBytes * metadata.height; // assuming tightly packed image.
+
+                // Dst setup
+                const auto& resourceFootprint = subresourceFootprints[subResourceIdx];
+                auto resourcePtr = textureData.data() + resourceFootprint.Offset;
+                const auto& footprint = resourceFootprint.Footprint;
+                size_t dstRowPitchBytes = resourceFootprint.Footprint.RowPitch; // padded row pitch.
+                size_t dstRowPitchPackedBytes = subresourceRowByteCount[subResourceIdx];
+                size_t dstSlicePitchBytes = subresourceRowsCount[subResourceIdx] * dstRowPitchBytes;
+
+                size_t resolvedHeight = std::min(subresourceRowsCount[subResourceIdx], (uint)metadata.height);
+                size_t resolvedPackedRowPitch = std::min(std::min(dstRowPitchBytes, srcRowPitchBytes), dstRowPitchPackedBytes);
+
+                for (uint32_t y = 0; y < resolvedHeight; y++)
+                {
+                    memcpy((char*)resourcePtr + y * dstRowPitchBytes, mipChain.GetImages()[subResourceIdx].pixels + y * resolvedPackedRowPitch, resolvedPackedRowPitch);
+                }
             }
         }
 
@@ -915,15 +948,9 @@ public:
         CreateAnimations(_scene);
         CreateMeshes(_scene);
         CreateMaterials(_scene);
-
-        //for (uint i = 0; i < 100; i++)
-        {
-            //_scene->mRootNode->mTransformation.a4 = Rand01() * 5.0f;
-            //_scene->mRootNode->mTransformation.b4 = Rand01() * 5.0f;
-            //_scene->mRootNode->mTransformation.c4 = Rand01() * 5.0f;
-
-            CreateEntities(_scene, _scene->mRootNode);
-        }
+        CreateEntities(_scene, _scene->mRootNode);
+        CreateLights(_scene);
+        CreateCameras(_scene);
 
         meshIndexToEntity.clear();
         matIndexToEntity.clear();
@@ -1011,7 +1038,6 @@ public:
                 instance.material = Components::Handle<Components::Material>{ matIndexToEntity[_scene->mMeshes[node->mMeshes[i]]->mMaterialIndex].id };
             }
         }
-
 
         for (unsigned int i = 0; i < node->mNumChildren; i++)
         {
@@ -1105,6 +1131,7 @@ public:
 
     Components::Handle<Components::Texture> CreateOrLoadTexture(aiMaterial* m, int channelCount, aiTextureType channels...)
     {
+        ZoneScoped;
         va_list args;
         va_start(args, channels);
 
@@ -1215,6 +1242,39 @@ public:
     void CreateAnimations(const aiScene* _scene)
     {
         ZoneScoped;
+    }
+
+    void CreateLights(const aiScene* _scene)
+    {
+        for (unsigned int i = 0; i < _scene->mNumLights; i++)
+        {
+            auto& l = _scene->mLights[i];
+
+            World::Entity ent;
+            ent.Find(l->mName.C_Str());
+
+            Components::Light light;
+
+            if (l->mAttenuationConstant <= 0 && l->mAttenuationLinear <= 0 && l->mAttenuationQuadratic <= 0)
+                l->mAttenuationQuadratic = 1;
+
+
+            if (l->mColorDiffuse.r == 0 && l->mColorDiffuse.g == 0 && l->mColorDiffuse.b == 0)
+                light.color = float4(1, 1, 1, 1);
+            else
+                light.color = float4(l->mColorDiffuse.r, l->mColorDiffuse.g, l->mColorDiffuse.b, 1);
+            float d = 1;
+            float lightIntensity = 1 / (l->mAttenuationConstant + l->mAttenuationLinear * d + l->mAttenuationQuadratic * d * d);
+            light.color *= lightIntensity;
+            light.range = lightIntensity * 20;
+
+            ent.Set(light);
+        }
+    }
+
+    void CreateCameras(const aiScene* _scene)
+    {
+
     }
 };
 SceneLoader* SceneLoader::instance = nullptr;

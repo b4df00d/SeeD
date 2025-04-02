@@ -1335,12 +1335,44 @@ public:
         uint entityStep = 1;
         ViewWorld& frameWorld = viewWorld.Get();
 
-        tf::Task task = subflow.for_each_index(0, entityCount, entityStep, [&world, &frameWorld, queryIndex](int i)
-            {
-                ZoneScopedN("UpdateLights");
+        // upload lights : no need to schedule that before all other passes for the moment because
+        // the proj and the planes are not used on the CPU
+        // we will need to make the task preced watherver pass needs to have up to date camera data
 
+        tf::Task task = subflow.emplace(
+            [this, &world]()
+            {
+                ZoneScoped;
+                uint queryIndex = world.Query(Components::Light::mask, 0);
+
+                uint entityCount = (uint)world.frameQueries[queryIndex].size();
+                uint entityStep = 1;
+                ViewWorld& frameWorld = viewWorld.Get();
+                auto& queryResult = world.frameQueries[queryIndex];
+
+                this->viewWorld->lights.Clear();
+
+                for (uint i = 0; i < entityCount; i++)
+                {
+                    auto& light = queryResult[i].Get<Components::Light>();
+                    //auto& trans = queryResult[i].Get<Components::WorldMatrix>();
+
+                    World::Entity ent = queryResult[i].Get<Components::Entity>().index;
+                    float4x4 worldMatrix = ComputeWorldMatrix(ent);
+
+                    HLSL::Light hlsllight;
+
+                    hlsllight.pos = float4(worldMatrix[3].xyz, 1);
+                    hlsllight.dir = float4(worldMatrix[2].xyz, 1);
+                    hlsllight.color = light.color;
+                    hlsllight.angle = light.angle;
+                    hlsllight.range = light.range;
+
+                    this->viewWorld->lights.Add(hlsllight);
+                }
+                this->viewWorld->lights.Upload();
             }
-        );
+        ).name("Update cameras");
         return task;
     }
 
@@ -1449,6 +1481,7 @@ public:
             [this]()
             {
                 ZoneScoped;
+                // put cameras and lights upload here too ?
                 this->viewWorld->instances.Upload();
                 this->viewWorld->materials.Upload();
                 this->raytracingContext.instancesRayTracing->Upload();

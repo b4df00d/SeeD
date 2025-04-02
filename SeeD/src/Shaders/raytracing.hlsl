@@ -128,11 +128,24 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     float2 uv = ((1 - attrib.bary.x - attrib.bary.y) * uv1 + attrib.bary.x * uv2 + attrib.bary.y * uv3);
 
     SurfaceData s;
-    Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
-    s.albedo = albedo.SampleLevel(samplerLinear, uv, 0).xyz;
-    Texture2D<float4> roughness = ResourceDescriptorHeap[material.textures[2]];
-    //s.roughness = roughness.SampleLevel(samplerLinear, uv, 0).x;
-    s.roughness = 0.99;
+    if (material.textures[0] != ~0)
+    {
+        Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
+        s.albedo = albedo.SampleLevel(samplerLinear, uv, 0).xyz;
+    }
+    else
+    {
+        s.albedo = 0.66;
+    }
+    if (material.textures[2] != ~0)
+    {
+        Texture2D<float4> roughness = ResourceDescriptorHeap[material.textures[2]];
+        s.roughness = roughness.SampleLevel(samplerLinear, uv, 0).x;
+    }
+    else
+    {
+        s.roughness = 0.99;
+    }
     s.metalness = 0.1;
 
     float3 nrm1 = verticesData[i1].normal;
@@ -181,9 +194,12 @@ void RayGen()
     
     RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
     
+    StructuredBuffer<HLSL:: Light > lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
+    HLSL::Light light = lights[0];
+    
     GBufferCameraData cd = GetGBufferCameraData(launchIndex);
     
-    float3 offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.001) + (cd.worldNorm * cd.viewDist * 0.001);
+    float3 offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.01) + (cd.worldNorm * cd.viewDist * 0.0001);
     
     uint seed = initRand(launchIndex.x + cullingContext.frameTime % 1024, launchIndex.y + cullingContext.frameTime % 1024, 3);
     
@@ -196,7 +212,7 @@ void RayGen()
     
         RayDesc ray;
         ray.Origin = offsetedWorldPos;
-        ray.Direction = -sunDir;
+        ray.Direction = -light.dir.xyz;
         ray.TMin = 0;
         ray.TMax = 100000;
 
@@ -208,28 +224,28 @@ void RayGen()
         shadow = shadowload.hitDistance >= ray.TMax ? 1 : 0;
     }
     
-    float3 light = 0;
-    float3 lightDir = 0;
+    float3 bounceLight = 0;
+    float3 bounceLightDir = 0;
     {
         HLSL::HitInfo payload;
         payload.color = float3(0.0, 0.0, 0.0);
         payload.rayDepth = 1;
         payload.rndseed = seed;
     
-        lightDir = lerp(cd.worldNorm, getCosHemisphereSample(payload.rndseed, cd.worldNorm), 0.9);
+        bounceLightDir = lerp(cd.worldNorm, getCosHemisphereSample(payload.rndseed, cd.worldNorm), 0.9);
         RayDesc ray;
         ray.Origin = offsetedWorldPos;
-        ray.Direction = lightDir;
+        ray.Direction = bounceLightDir;
         ray.TMin = 0;
         ray.TMax = 100000;
         
         TraceRay( BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
         
-        light += payload.color * saturate(dot(cd.worldNorm, lightDir));
+        bounceLight += payload.color * saturate(dot(cd.worldNorm, bounceLightDir));
     }
     
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    GI[launchIndex] = light;
+    GI[launchIndex] = bounceLight;
     RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     shadows[launchIndex] = shadow;
 
@@ -239,7 +255,8 @@ void RayGen()
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
     payload.hitDistance = RayTCurrent();
-    payload.color = float3(0.66, 0.75, 0.99) * pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 2);
+    payload.color = float3(0.66, 0.75, 0.99) * pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 2) * 0.3;
+    //payload.color = 0;
 }
 
 [shader("closesthit")]
@@ -250,16 +267,19 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     
     RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
     
+    StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
+    HLSL::Light light = lights[0];
+    
     SurfaceData s = GetRTSurfaceData(attrib);
     
-    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() - 0.00001f) + s.normal * 0.001f;
+    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() * 0.999f) + s.normal * 0.001f;
     
-    float3 light = 0;
-    float3 lightDir = 0;
+    float3 bounceLight = 0;
+    float3 bounceLightDir = 0;
     float hitDistance = 100000;
-    if (payload.rayDepth < HLSL::maxRTDepth - 1)
+    if (payload.rayDepth < HLSL::maxRTDepth-1)
     {
-        lightDir = lerp(s.normal, getCosHemisphereSample(payload.rndseed, s.normal), 0.9);
+        bounceLightDir = lerp(s.normal, getCosHemisphereSample(payload.rndseed, s.normal), 0.9);
         
         HLSL::HitInfo nextRay;
         nextRay.color = float3(0.0, 0.0, 0.0);
@@ -268,13 +288,13 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     
         RayDesc ray;
         ray.Origin = hitLocation;
-        ray.Direction = lightDir;
+        ray.Direction = bounceLightDir;
         ray.TMin = 0;
         ray.TMax = hitDistance;
         
         TraceRay(BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, nextRay);
         
-        light = nextRay.color;
+        bounceLight = nextRay.color;
     }
     float3 sun = 0;
     if (payload.rayDepth < HLSL::maxRTDepth)
@@ -287,7 +307,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     
         RayDesc ray;
         ray.Origin = hitLocation;
-        ray.Direction = -sunDir;
+        ray.Direction = -light.dir.xyz;
         ray.TMin = 0;
         ray.TMax = 100000;
         
@@ -297,10 +317,10 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
             TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, shadowload);
         }
         
-        sun = shadowload.hitDistance >= ray.TMax ? sunColor : 0;
+        sun = shadowload.hitDistance >= ray.TMax ? light.color.xyz : 0;
     }
-    payload.color = BRDF(s, WorldRayDirection(), -sunDir, sun);
-    payload.color += BRDF(s, WorldRayDirection(), lightDir, light);
+    payload.color = BRDF(s, WorldRayDirection(), -light.dir.xyz, sun);
+    payload.color += BRDF(s, WorldRayDirection(), bounceLightDir, bounceLight);
 }
 
 [shader("anyhit")]

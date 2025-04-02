@@ -1,5 +1,66 @@
 #pragma once
 
+enum class PropertyTypes : int
+{
+    _none,
+    _int,
+    _uint,
+    _float,
+    _float2,
+    _float3,
+    _float4,
+    _quaternion,
+    _float4x4,
+    _assetID
+};
+bool KnownType(String typeName)
+{
+    if (typeName == "int")
+        return true;
+    else if (typeName == "uint")
+        return true;
+    else if (typeName == "float")
+        return true;
+    else if (typeName == "float2")
+        return true;
+    else if (typeName == "float3")
+        return true;
+    else if (typeName == "float4")
+        return true;
+    else if (typeName == "quaternion")
+        return true;
+    else if (typeName == "float4x4")
+        return true;
+    else if (typeName == "assetID")
+        return true;
+    return false;
+}
+struct MemberInfoParse
+{
+    String name;
+    String dataType;
+    String dataCount;
+};
+struct ComponentInfoParse
+{
+    String name;
+    std::vector<MemberInfoParse> members;
+};
+struct MemberInfo
+{
+    String name;
+    PropertyTypes dataType;
+    int dataCount;
+    int offset;
+};
+struct ComponentInfo
+{
+    String name;       // Member name
+    Components::Mask mask;
+    std::vector<MemberInfo> members;
+};
+std::vector<ComponentInfo> knownComponents;
+
 class EditorWindow
 {
 public:
@@ -146,6 +207,8 @@ class HierarchyWindow : public EditorWindow
 
     TreeNode world;
     std::vector<TreeNode> nodes;
+
+    int componentFilterIndex = 0;
     
     void TreeNodeSetOpen(TreeNode* node, bool open)
     {
@@ -267,43 +330,60 @@ public:
             world.childs.clear();
             world.indexInParent = 0;
 
-            uint instanceQueryIndex = World::instance->Query(Components::Instance::mask | Components::WorldMatrix::mask, 0);
+            Components::Mask mask = Components::Entity::mask;
+            if(knownComponents.size() > 0)
+                mask = knownComponents[componentFilterIndex].mask;
+            uint instanceQueryIndex = World::instance->Query(mask, 0);
             auto& result = World::instance->frameQueries[instanceQueryIndex];
 
             for (uint i = 0; i < result.size(); i++)
             {
                 TreeNode newNode;
                 newNode.entity = { result[i].Get<Components::Entity>().index };
-                newNode.name = std::format("{}{}", result[i].Get<Components::Name>().name, i);
+                if (result[i].Has<Components::Name>())
+                {
+                    newNode.name = std::format("{}{}", result[i].Get<Components::Name>().name, i);
+                }
+                else
+                {
+                    newNode.name = std::format("{}{}", "un-name", i);
+                }
                 newNode.parent = &world;
                 nodes.push_back(newNode);
             }
 
-            for (uint i = 0; i < result.size(); i++)
+            for (uint i = 0; i < nodes.size(); i++)
             {
                 TreeNode& node = nodes[i];
                 
                 bool hasParent = result[i].Has<Components::Parent>();
-                auto& pent = result[i].Get<Components::Parent>().entity;
-                if (!hasParent || !pent.IsValid() || !World::Entity(pent.Get().index).Has<Components::Instance>())
+                if (!hasParent)
                 {
-                    node.parent = &world;
-                    node.indexInParent = world.childs.size();
-                    world.childs.push_back(&node);
-                    continue;
+                        node.parent = &world;
                 }
-
-                World::Entity parent = { pent.Get().index };
-                for (uint j = 0; j < result.size(); j++)
+                else
                 {
-                    TreeNode& nodeParent = nodes[j];
-                    if (nodeParent.entity == parent)
+                    auto& pent = result[i].Get<Components::Parent>().entity;
+                    if (!pent.IsValid())// || !World::Entity(pent.Get().index).Has<Components::Instance>())
                     {
-                        node.parent = &nodeParent;
-                        node.indexInParent = nodeParent.childs.size();
-                        nodeParent.childs.push_back(&node);
+                        node.parent = &world;
+                    }
+                    else
+                    {
+                        World::Entity parent = { pent.Get().index };
+                        for (uint j = 0; j < result.size(); j++)
+                        {
+                            TreeNode& nodeParent = nodes[j];
+                            if (nodeParent.entity == parent)
+                            {
+                                node.parent = &nodeParent;
+                            }
+                        }
                     }
                 }
+
+                node.indexInParent = node.parent->childs.size();
+                node.parent->childs.push_back(&node);
             }
             editorState.dirtyHierarchy = false;
         }
@@ -313,11 +393,10 @@ public:
             ImGui::End();
             return;
         }
-        //ImGui::Checkbox("refresh", &editorState.dirtyHierarchy);
-        //if (nodes.size() > 0 && ImGui::TreeNode("World"))
+        editorState.dirtyHierarchy = ImGui::Combo("Filter", &componentFilterIndex, [](void* data, int n) { return (*(std::vector<ComponentInfo>*)data)[n].name.c_str(); }, (void*)&knownComponents, knownComponents.size());
         {
             static ImGuiSelectionBasicStorage selection;
-            if (world.childs.size() > 0 && ImGui::BeginChild("##Tree", ImVec2(-FLT_MIN, ImGui::GetFontSize() * 20), ImGuiChildFlags_FrameStyle | ImGuiChildFlags_ResizeY))
+            if (world.childs.size() > 0 && ImGui::BeginChild("##Tree", ImVec2(-FLT_MIN, -FLT_MIN), ImGuiChildFlags_FrameStyle))
             {
                 ImGuiMultiSelectFlags ms_flags = ImGuiMultiSelectFlags_ClearOnEscape | ImGuiMultiSelectFlags_BoxSelect2d;
                 ImGuiMultiSelectIO* ms_io = ImGui::BeginMultiSelect(ms_flags, selection.Size, -1);
@@ -492,67 +571,6 @@ public:
 };
 OptionWindow optionWindow;
 
-enum class PropertyTypes : int
-{
-    _none,
-    _int,
-    _uint,
-    _float,
-    _float2, 
-    _float3,
-    _float4,
-    _quaternion,
-    _float4x4,
-    _assetID
-};
-bool KnownType(String typeName)
-{
-    if (typeName == "int")
-        return true;
-    else if (typeName == "uint")
-        return true;
-    else if (typeName == "float")
-        return true;
-    else if (typeName == "float2")
-        return true;
-    else if (typeName == "float3")
-        return true;
-    else if (typeName == "float4")
-        return true;
-    else if (typeName == "quaternion")
-        return true;
-    else if (typeName == "float4x4")
-        return true;
-    else if (typeName == "assetID")
-        return true;
-    return false;
-}
-struct MemberInfoParse
-{
-    String name;
-    String dataType;
-    String dataCount;
-};
-struct ComponentInfoParse
-{
-    String name;
-    std::vector<MemberInfoParse> members;
-};
-struct MemberInfo
-{
-    String name;
-    PropertyTypes dataType;
-    int dataCount;
-    int offset;
-};
-struct ComponentInfo
-{
-    String name;       // Member name
-    Components::Mask mask;
-    std::vector<MemberInfo> members;
-};
-std::vector<ComponentInfo> knownComponents;
-
 #include "ComponentsUIMetaData.h"
 
 class PropertyWindow : public EditorWindow
@@ -589,13 +607,14 @@ public:
                     char* cmpData = editorState.selectedObject.Get(Components::MaskToBucket(metaData.mask));
                     if (ImGui::CollapsingHeader(metaData.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
                     {
+                        uint pushID = 0;
                         for (uint memberIndex = 0; memberIndex < metaData.members.size(); memberIndex++)
                         {
                             auto& m = metaData.members[memberIndex];
                             char* data = cmpData + m.offset;
                             ImGui::Text(m.name.c_str());
                             ImGui::SameLine();
-                            ImGui::PushID(memberIndex);
+                            ImGui::PushID(pushID++);
                             switch (m.dataType)
                             {
                             case PropertyTypes::_int:
@@ -618,6 +637,13 @@ public:
                                 ImGui::InputFloat4("", (float*)data);
                                 break;
                             case PropertyTypes::_float4x4:
+                            {
+                                float4x4& mat = *(float4x4*)data;
+                                ImGui::InputFloat4("x", (float*)&mat[0]);
+                                ImGui::InputFloat4("y", (float*)&mat[1]);
+                                ImGui::InputFloat4("z", (float*)&mat[2]);
+                                ImGui::InputFloat4("pos", (float*)&mat[3]);
+                            }
                                 break;
                             case PropertyTypes::_assetID:
                                 ImGui::InputInt("", (int*)data);

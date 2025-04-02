@@ -143,7 +143,9 @@ namespace Components
 
     struct Light : ComponentBase<Light>
     {
-        float4x4 matrix;
+        float angle;
+        float range;
+        float4 color;
     };
 
     struct Camera : ComponentBase<Camera>
@@ -211,18 +213,8 @@ public:
 
     struct EntitySlot
     {
-        /*
-        union
-        {
-            struct {
-        */
-                uint pool : 16;
-                uint index : 16;
-        /*
-            };
-            uint slot{};
-        };
-        */
+        uint pool : 16;
+        uint index : 16;
 
         template <Components::IsComponent T>
         bool Has()
@@ -274,13 +266,6 @@ public:
 
         }
 
-        /*
-        explicit operator uint () const 
-        { 
-            return id; 
-        }
-        */
-
         bool operator==(const Entity& other) const
         {
             return id == other.id;
@@ -319,8 +304,20 @@ public:
 
         void Release()
         {
-            World::instance->entitySlots[id].index = poolInvalid;
-            World::instance->entitySlots[id].pool = poolInvalid;
+            EntitySlot& thisSlot = World::instance->entitySlots[id];
+
+            if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
+            {
+                EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
+                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>().index;
+                Copy(lastSlot, thisSlot);
+                World::instance->entitySlots[entityOfLastSlot.id] = thisSlot;
+            }
+            World::instance->components[thisSlot.pool].count--;
+            // TODO : consider removing the pool ...
+
+            thisSlot.index = poolInvalid;
+            thisSlot.pool = poolInvalid;
             World::instance->entityFreeSlots.push_back(id);
         }
 
@@ -356,20 +353,50 @@ public:
         template <Components::IsComponent T>
         void Set(T value)
         {
-            auto& slot = World::instance->entitySlots[id];
-            if (!(World::instance->components[slot.pool].mask & T::mask))
+            auto& thisSlot = World::instance->entitySlots[id];
+            if ((World::instance->components[thisSlot.pool].mask & T::mask) == 0)
             {
-                //TODO : make a temp copy Copy(from, to)
-                slot.pool = GetOrCreatePoolIndex(World::instance->components[slot.pool].mask | T::mask);
-                slot.index = World::instance->components[slot.pool].GetSlot();
+                IOs::Log("Auto add of compoenent via .Set<T>()");
+                EntitySlot newSlot;
+                newSlot.pool = GetOrCreatePoolIndex(World::instance->components[thisSlot.pool].mask | T::mask);
+                newSlot.index = World::instance->components[newSlot.pool].GetSlot();
+
+                Copy(thisSlot, newSlot);
+
+                if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
+                {
+                    EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
+                    Entity entityOfLastSlot = lastSlot.Get<Components::Entity>().index;
+                    Copy(lastSlot, thisSlot);
+                    World::instance->entitySlots[entityOfLastSlot.id] = thisSlot; //crash here !
+                }
+                World::instance->components[thisSlot.pool].count--;
+                // TODO : consider removing the pool ...
+
+                thisSlot = newSlot;
             }
-            auto& res = *(T*)World::instance->components[slot.pool].data[T::bucketIndex][slot.index * sizeof(T)];
+            auto& res = *(T*)Get(T::bucketIndex);
             res = value;
+        }
+
+        void Copy(Entity from)
+        {
+            auto& slotFrom = World::instance->entitySlots[from.id];
+            auto& slotTo = World::instance->entitySlots[id];
+            Copy(slotFrom, slotTo);
         }
 
         void Copy(EntitySlot from, EntitySlot to)
         {
-
+            Pool poolFrom = World::instance->components[from.pool];
+            Pool poolTo = World::instance->components[to.pool];
+            for (uint i = 0; i < poolFrom.data.size(); i++)
+            {
+                if (poolFrom.data[i] != nullptr && poolTo.data[i] != nullptr)
+                {
+                    memcpy(to.Get(i), from.Get(i), Components::strides[i]);
+                }
+            }
         }
 
         // not thread safe when need to create
@@ -389,9 +416,31 @@ public:
             World::instance->components.push_back(newPool);
             return (uint)World::instance->components.size() - 1;
         }
+
         Pool& GetOrCreatePool(Components::Mask mask)
         {
             return World::instance->components[GetOrCreatePoolIndex(mask)];       
+        }
+
+        bool Find(String name)
+        {
+            for (uint i = 0; i < World::instance->components.size(); i++)
+            {
+                Pool& pool = World::instance->components[i];
+                if (pool.Satisfy(Components::Name::mask, 0))
+                {
+                    for (uint j = 0; j < pool.count; j++)
+                    {
+                        EntitySlot slot = { i, j };
+                        if (name == slot.Get<Components::Name>().name)
+                        {
+                            *this = slot.Get<Components::Entity>().index;
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
         }
     };
 
@@ -562,7 +611,7 @@ namespace Systems
         {
             auto& cam = camera.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Camera::mask).Get<Components::Camera>();
             cam.fovY = 90;
-            cam.nearClip = 0.01;
+            cam.nearClip = 0.05;
             cam.farClip = 1000.0f;
             auto& trans = camera.Get<Components::Transform>();
             trans.position = float3(0, 1, -2);
