@@ -232,6 +232,7 @@ namespace HLSL
         float4 color;
         float range;
         float angle;
+        uint pad[2];
     };
     
     struct Globals

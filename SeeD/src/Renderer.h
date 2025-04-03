@@ -1372,7 +1372,7 @@ public:
                 }
                 this->viewWorld->lights.Upload();
             }
-        ).name("Update cameras");
+        ).name("Update lights");
         return task;
     }
 

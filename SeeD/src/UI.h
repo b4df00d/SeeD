@@ -599,6 +599,7 @@ public:
 
         if (editorState.selectedObject != entityInvalid)
         {
+            uint pushID = 0;
             for (uint i = 0; i < knownComponents.size(); i++)
             {
                 if ((editorState.selectedObject.GetMask() & knownComponents[i].mask) != 0)
@@ -607,7 +608,6 @@ public:
                     char* cmpData = editorState.selectedObject.Get(Components::MaskToBucket(metaData.mask));
                     if (ImGui::CollapsingHeader(metaData.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
                     {
-                        uint pushID = 0;
                         for (uint memberIndex = 0; memberIndex < metaData.members.size(); memberIndex++)
                         {
                             auto& m = metaData.members[memberIndex];
