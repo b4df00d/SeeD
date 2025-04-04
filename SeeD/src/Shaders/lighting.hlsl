@@ -26,7 +26,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     
     GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
     
-    float3 indirect = GI[dtid.xy].xyz;
+    float3 indirect = GI[dtid.xy].xyz * 10;
     float3 direct = shadows[dtid.xy] * light.color.xyz;
     
     SurfaceData s;
@@ -39,6 +39,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     float3 ambient = indirect * s.albedo;
     
     float3 result = brdf + ambient;
+    //result = direct;
     //result = indirect;
     
     lighted[dtid.xy] = float4(result, 1);

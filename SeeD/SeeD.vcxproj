@@ -161,6 +161,7 @@ copy /Y "..\Third\assimp-master\out\build\x64-Release\bin\*.*" "..\x64\Release\"
     <ClInclude Include="..\Third\imgui-docking\imgui.h" />
     <ClInclude Include="..\Third\imgui-docking\imgui_internal.h" />
     <ClInclude Include="..\Third\imgui-docking\misc\cpp\imgui_stdlib.h" />
+    <ClInclude Include="..\Third\ImGuizmo-master\ImGuizmo.h" />
     <ClInclude Include="src\ComponentsUIMetaData.h" />
     <ClInclude Include="src\Containers.h" />
     <ClInclude Include="src\Editor.h" />
@@ -187,6 +188,7 @@ copy /Y "..\Third\assimp-master\out\build\x64-Release\bin\*.*" "..\x64\Release\"
     <ClCompile Include="..\Third\imgui-docking\imgui_tables.cpp" />
     <ClCompile Include="..\Third\imgui-docking\imgui_widgets.cpp" />
     <ClCompile Include="..\Third\imgui-docking\misc\cpp\imgui_stdlib.cpp" />
+    <ClCompile Include="..\Third\ImGuizmo-master\ImGuizmo.cpp" />
     <ClCompile Include="src\Main.cpp" />
   </ItemGroup>
   <ItemGroup>

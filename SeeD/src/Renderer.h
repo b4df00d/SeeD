@@ -1160,7 +1160,6 @@ public:
         forward.Execute();
         postProcess.Execute();
         present.Execute();
-
     }
 
     tf::Task UpdateInstances(World& world, tf::Subflow& subflow)
@@ -1464,6 +1463,9 @@ public:
                     hlslcam.worldPos = worldPos;
 
                     this->viewWorld->cameras.Add(hlslcam);
+
+                    editorState.cameraView = trans.matrix;
+                    editorState.cameraProj = hlslcam.proj;
                 }
                 this->viewWorld->cameras.Add(hlslcamPrevious);
 

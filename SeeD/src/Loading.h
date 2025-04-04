@@ -64,6 +64,10 @@ public:
         {
             shaders[i].shaderBindingTable.Release();
         }
+        for (uint i = 0; i < textures.size(); i++)
+        {
+            textures[i].allocation->Release();
+        }
         instance = nullptr;
     }
 

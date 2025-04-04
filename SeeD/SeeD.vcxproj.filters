@@ -71,6 +71,9 @@
     <ClInclude Include="src\ComponentsUIMetaData.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\Third\ImGuizmo-master\ImGuizmo.h">
+      <Filter>Third Files\imgui</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Main.cpp">
@@ -101,6 +104,9 @@
       <Filter>Third Files\imgui</Filter>
     </ClCompile>
     <ClCompile Include="..\Third\imgui-docking\imgui_demo.cpp">
+      <Filter>Third Files\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Third\ImGuizmo-master\ImGuizmo.cpp">
       <Filter>Third Files\imgui</Filter>
     </ClCompile>
   </ItemGroup>

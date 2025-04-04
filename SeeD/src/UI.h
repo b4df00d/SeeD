@@ -759,6 +759,150 @@ public:
 PropertyWindow propertyWindow;
 
 
+#include "../../Third/ImGuizmo-master/ImGuizmo.h"
+class Guizmo : public EditorWindow
+{
+public:
+    Guizmo() : EditorWindow("Guizmo") {}
+
+    void SetWorldPositionRotationScale(World::Entity ent, float3 position, quaternion rotation, float3 scale)
+    {
+        Components::Transform& t = ent.Get<Components::Transform>();
+        Components::Parent* par = 0;
+        if (ent.Has<Components::Parent>())
+        {
+            par = &ent.Get<Components::Parent>();
+        }
+        if (par != NULL && par->entity.IsValid())
+        {
+            World::Entity parentEnt = par->entity.Get().index;
+            float4x4 parentMatrix = ComputeWorldMatrix(parentEnt);
+            float4x4 invParentMat = inverse(parentMatrix);
+
+            float4x4 rotationMat;
+            float4x4 translationMat;
+            float4x4 scaleMat;
+
+            translationMat = float4x4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, position.x, position.y, position.z, 1);
+            rotationMat = float4x4(normalize(rotation));
+            scaleMat = float4x4(scale.x, 0, 0, 0, 0, scale.y, 0, 0, 0, 0, scale.z, 0, 0, 0, 0, 1);
+
+            float4x4 matrix = mul(scaleMat, mul(rotationMat, translationMat));
+
+            float3x3 rotNormalized = mul(float3x3(matrix), inverse(float3x3(parentMatrix)));
+            rotNormalized[0] = normalize(rotNormalized[0]);
+            rotNormalized[1] = normalize(rotNormalized[1]);
+            rotNormalized[2] = normalize(rotNormalized[2]);
+            rotation = quaternion(rotNormalized);
+
+            matrix = mul(matrix, invParentMat);
+
+            scale = float3(length(matrix[0].xyz), length(matrix[1].xyz), length(matrix[2].xyz));
+            position = matrix[3].xyz;
+        }
+        t.position = position;
+        t.rotation = rotation;
+        t.scale = scale;
+    }
+
+    void EditTransform(const float4x4& cameraView, const float4x4& cameraProj, World::Entity selectedObject)
+    {
+        static ImGuizmo::OPERATION mCurrentGizmoOperation(ImGuizmo::TRANSLATE);
+        static ImGuizmo::MODE mCurrentGizmoMode(ImGuizmo::WORLD);
+        if (ImGui::IsKeyPressed(ImGuiKey_Z))
+            mCurrentGizmoOperation = ImGuizmo::TRANSLATE;
+        if (ImGui::IsKeyPressed(ImGuiKey_X))
+            mCurrentGizmoOperation = ImGuizmo::ROTATE;
+        if (ImGui::IsKeyPressed(ImGuiKey_C))
+            mCurrentGizmoOperation = ImGuizmo::SCALE;
+        if (ImGui::IsKeyPressed(ImGuiKey_V))
+            mCurrentGizmoMode = mCurrentGizmoMode == ImGuizmo::LOCAL ? ImGuizmo::WORLD : ImGuizmo::LOCAL;
+        /*
+        if (ImGui::RadioButton("Translate", mCurrentGizmoOperation == ImGuizmo::TRANSLATE))
+            mCurrentGizmoOperation = ImGuizmo::TRANSLATE;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Rotate", mCurrentGizmoOperation == ImGuizmo::ROTATE))
+            mCurrentGizmoOperation = ImGuizmo::ROTATE;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Scale", mCurrentGizmoOperation == ImGuizmo::SCALE))
+            mCurrentGizmoOperation = ImGuizmo::SCALE;
+        float matrixTranslation[3], matrixRotation[3], matrixScale[3];
+        ImGuizmo::DecomposeMatrixToComponents(matrix.m16, matrixTranslation, matrixRotation, matrixScale);
+        ImGui::InputFloat3("Tr", matrixTranslation, 3);
+        ImGui::InputFloat3("Rt", matrixRotation, 3);
+        ImGui::InputFloat3("Sc", matrixScale, 3);
+        ImGuizmo::RecomposeMatrixFromComponents(matrixTranslation, matrixRotation, matrixScale, matrix.m16);
+
+        if (mCurrentGizmoOperation != ImGuizmo::SCALE)
+        {
+            if (ImGui::RadioButton("Local", mCurrentGizmoMode == ImGuizmo::LOCAL))
+                mCurrentGizmoMode = ImGuizmo::LOCAL;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("World", mCurrentGizmoMode == ImGuizmo::WORLD))
+                mCurrentGizmoMode = ImGuizmo::WORLD;
+        }
+        static bool useSnap(false);
+        if (ImGui::IsKeyPressed(83))
+            useSnap = !useSnap;
+        ImGui::Checkbox("", &useSnap);
+        ImGui::SameLine();
+        vec_t snap;
+        switch (mCurrentGizmoOperation)
+        {
+        case ImGuizmo::TRANSLATE:
+            snap = config.mSnapTranslation;
+            ImGui::InputFloat3("Snap", &snap.x);
+            break;
+        case ImGuizmo::ROTATE:
+            snap = config.mSnapRotation;
+            ImGui::InputFloat("Angle Snap", &snap.x);
+            break;
+        case ImGuizmo::SCALE:
+            snap = config.mSnapScale;
+            ImGui::InputFloat("Scale Snap", &snap.x);
+            break;
+        }
+        */
+
+        ImGuizmo::BeginFrame();
+        ImGuiIO& io = ImGui::GetIO();
+        ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+
+        float4x4 worldMatrix = ComputeWorldMatrix(selectedObject);
+
+        float view[16];
+        store(inverse(cameraView), view);
+        float proj[16];
+        store(cameraProj, proj);
+        float world[16];
+        store(worldMatrix, world);
+
+        bool manipulated = ImGuizmo::Manipulate(view, proj, mCurrentGizmoOperation, mCurrentGizmoMode, world, NULL, NULL);// useSnap ? &snap.x : NULL);
+
+        if (manipulated)
+        {
+            float matrixTranslation[3], matrixRotation[3], matrixScale[3];
+            ImGuizmo::DecomposeMatrixToComponents(world, matrixTranslation, matrixRotation, matrixScale);
+            float4x4 worldMat;
+            load(worldMat, world);
+            worldMat[0] = normalize(worldMat[0]);
+            worldMat[1] = normalize(worldMat[1]);
+            worldMat[2] = normalize(worldMat[2]);
+            SetWorldPositionRotationScale(selectedObject, float3(matrixTranslation[0], matrixTranslation[1], matrixTranslation[2]), quaternion(float3x3(worldMat)), float3(matrixScale[0], matrixScale[1], matrixScale[2]));
+        }
+
+    }
+
+    void Update() override final
+    {
+        ZoneScoped;
+        if (editorState.selectedObject != entityInvalid && editorState.selectedObject.Has<Components::Transform>())
+            EditTransform(editorState.cameraView, editorState.cameraProj, editorState.selectedObject);
+    }
+};
+Guizmo guizmo;
+
+
 /*
 class AboutWindow : public EditorWindow
 {
