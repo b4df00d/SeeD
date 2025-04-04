@@ -393,9 +393,18 @@ public:
             ImGui::End();
             return;
         }
-        editorState.dirtyHierarchy = ImGui::Combo("Filter", &componentFilterIndex, [](void* data, int n) { return (*(std::vector<ComponentInfo>*)data)[n].name.c_str(); }, (void*)&knownComponents, knownComponents.size());
+        editorState.dirtyHierarchy |= ImGui::Combo("##Filter", &componentFilterIndex, [](void* data, int n) { return (*(std::vector<ComponentInfo>*)data)[n].name.c_str(); }, (void*)&knownComponents, knownComponents.size());
+        ImGui::SameLine();
+        if(ImGui::Button("new Entity"))
+        {
+            World::Entity ent;
+            ent.Make(knownComponents[componentFilterIndex].mask);
+            editorState.dirtyHierarchy |= true;
+        }
         {
             static ImGuiSelectionBasicStorage selection;
+            if (editorState.selectedObject == entityInvalid)
+                selection.Clear();
             if (world.childs.size() > 0 && ImGui::BeginChild("##Tree", ImVec2(-FLT_MIN, -FLT_MIN), ImGuiChildFlags_FrameStyle))
             {
                 ImGuiMultiSelectFlags ms_flags = ImGuiMultiSelectFlags_ClearOnEscape | ImGuiMultiSelectFlags_BoxSelect2d;
@@ -415,8 +424,6 @@ public:
 
                 ImGui::EndChild();
             }
-
-            //ImGui::TreePop();
         }
 
         ImGui::End();
@@ -572,9 +579,9 @@ public:
 OptionWindow optionWindow;
 
 #include "ComponentsUIMetaData.h"
-
 class PropertyWindow : public EditorWindow
 {
+    int componentAddIndex = 0;
     unsigned int getFirstSetBitPos(int n)
     {
         return log2(n & -n) + 1;
@@ -655,6 +662,14 @@ public:
                         }
                     }
                 }
+            }
+            
+            ImGui::Separator();
+            editorState.dirtyHierarchy |= ImGui::Combo("##AddComp", &componentAddIndex, [](void* data, int n) { return (*(std::vector<ComponentInfo>*)data)[n].name.c_str(); }, (void*)&knownComponents, knownComponents.size());
+            ImGui::SameLine();
+            if (ImGui::Button("add"))
+            {
+                editorState.selectedObject.Add(knownComponents[componentAddIndex].mask);
             }
         }
 
@@ -757,7 +772,6 @@ public:
     }
 };
 PropertyWindow propertyWindow;
-
 
 #include "../../Third/ImGuizmo-master/ImGuizmo.h"
 class Guizmo : public EditorWindow

@@ -350,6 +350,28 @@ public:
             return slot.Get<T>();
         }
 
+        void Add(Components::Mask mask)
+        {
+            auto& thisSlot = World::instance->entitySlots[id];
+            EntitySlot newSlot;
+            newSlot.pool = GetOrCreatePoolIndex(World::instance->components[thisSlot.pool].mask | mask);
+            newSlot.index = World::instance->components[newSlot.pool].GetSlot();
+
+            Copy(thisSlot, newSlot);
+
+            if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
+            {
+                EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
+                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>().index;
+                Copy(lastSlot, thisSlot);
+                World::instance->entitySlots[entityOfLastSlot.id] = thisSlot; //crash here !
+            }
+            World::instance->components[thisSlot.pool].count--;
+            // TODO : consider removing the pool ...
+
+            thisSlot = newSlot;
+        }
+
         template <Components::IsComponent T>
         void Set(T value)
         {
@@ -357,23 +379,7 @@ public:
             if ((World::instance->components[thisSlot.pool].mask & T::mask) == 0)
             {
                 IOs::Log("Auto add of compoenent via .Set<T>()");
-                EntitySlot newSlot;
-                newSlot.pool = GetOrCreatePoolIndex(World::instance->components[thisSlot.pool].mask | T::mask);
-                newSlot.index = World::instance->components[newSlot.pool].GetSlot();
-
-                Copy(thisSlot, newSlot);
-
-                if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
-                {
-                    EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
-                    Entity entityOfLastSlot = lastSlot.Get<Components::Entity>().index;
-                    Copy(lastSlot, thisSlot);
-                    World::instance->entitySlots[entityOfLastSlot.id] = thisSlot; //crash here !
-                }
-                World::instance->components[thisSlot.pool].count--;
-                // TODO : consider removing the pool ...
-
-                thisSlot = newSlot;
+                Add(T::mask);
             }
             auto& res = *(T*)Get(T::bucketIndex);
             res = value;
@@ -556,18 +562,22 @@ namespace Components
 
 float4x4 ComputeLocalMatrix(World::Entity ent)
 {
-    auto& trans = ent.Get<Components::Transform>();
+    if (ent.Has<Components::Transform>())
+    {
+        auto& trans = ent.Get<Components::Transform>();
 
-    float4x4 rotationMat;
-    float4x4 translationMat;
-    float4x4 scaleMat;
+        float4x4 rotationMat;
+        float4x4 translationMat;
+        float4x4 scaleMat;
 
-    rotationMat = float4x4(trans.rotation);
-    translationMat = float4x4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, trans.position.x, trans.position.y, trans.position.z, 1);
-    scaleMat = float4x4(trans.scale.x, 0, 0, 0, 0, trans.scale.y, 0, 0, 0, 0, trans.scale.z, 0, 0, 0, 0, 1);
+        rotationMat = float4x4(trans.rotation);
+        translationMat = float4x4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, trans.position.x, trans.position.y, trans.position.z, 1);
+        scaleMat = float4x4(trans.scale.x, 0, 0, 0, 0, trans.scale.y, 0, 0, 0, 0, trans.scale.z, 0, 0, 0, 0, 1);
 
-    float4x4 matrix = mul(scaleMat, mul(rotationMat, translationMat));
-    return matrix;
+        float4x4 matrix = mul(scaleMat, mul(rotationMat, translationMat));
+        return matrix;
+    }
+    return float4x4::identity();
 }
 
 float4x4 ComputeWorldMatrix(World::Entity ent)
