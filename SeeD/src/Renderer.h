@@ -169,7 +169,8 @@ public:
 // life time : frame
 struct ViewWorld
 {
-    StructuredUploadBuffer<HLSL::CommonResourcesIndices> commonResourcesIndices;
+    //StructuredUploadBuffer<HLSL::CommonResourcesIndices> commonResourcesIndices;
+    HLSL::CommonResourcesIndices commonResourcesIndices;
     StructuredUploadBuffer<HLSL::Camera> cameras;
     StructuredUploadBuffer<HLSL::Light> lights;
     Map<World::Entity, HLSL::Material> materials;
@@ -180,12 +181,12 @@ struct ViewWorld
 
     void Release()
     {
-        commonResourcesIndices.Release();
+        //commonResourcesIndices.Release();
         cameras.Release();
         lights.Release();
+        materials.Release();
         instances.Release();
         instancesGPU.Release();
-        materials.Release();
     }
 };
 
@@ -231,6 +232,8 @@ struct RayTracingContext
     Resource TLAS;
     Resource GI;
     Resource shadows;
+    Resource probes;
+    uint3 probesResolutution;
 
     void On(uint2 resolution)
     {
@@ -238,6 +241,7 @@ struct RayTracingContext
         //scratchBuffer.CreateBuffer(1000000, 1, false, "scratchBuffer");
         GI.CreateTexture(resolution, DXGI_FORMAT_R11G11B10_FLOAT, false, "GI");
         shadows.CreateTexture(resolution, DXGI_FORMAT_R8_UNORM, false, "shadows");
+        //probes.CreateBuffer()
     }
 
     void Off()
@@ -251,6 +255,12 @@ struct RayTracingContext
         //scratchBuffer.Release();
         GI.Release();
         shadows.Release();
+    }
+
+    void Reset()
+    {
+        rtParameters->Clear();
+        instancesRayTracing->Clear();
     }
 };
 
@@ -291,7 +301,7 @@ public:
         Resource& res = resources[hash];
         return res;
     }
-    void SetupViewParams()
+    HLSL::CommonResourcesIndices SetupViewParams()
     {
         HLSL::CommonResourcesIndices commonResourcesIndices;
 
@@ -318,9 +328,7 @@ public:
         commonResourcesIndices.instancesGPUHeapIndex = viewWorld->instancesGPU.gpuData.srv.offset;
         commonResourcesIndices.instanceGPUCount = viewWorld->instancesGPU.Size();
 
-        viewWorld->commonResourcesIndices.Clear();
-        viewWorld->commonResourcesIndices.Add(commonResourcesIndices);
-        viewWorld->commonResourcesIndices.Upload();
+        return commonResourcesIndices;
     }
     void SetupCullingContextParams()
     {
@@ -341,7 +349,6 @@ public:
         cullingContextParams.resolution = float4(float(resolution.x), float(resolution.y), 1.0f / resolution.x, 1.0f / resolution.y);
         cullingContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
 
-        cullingContext.cullingContext->Clear();
         cullingContext.cullingContext->Add(cullingContextParams);
         cullingContext.cullingContext->Upload();
     }
@@ -446,6 +453,7 @@ public:
 
     void Execute()
     {
+        ZoneScoped;
         if (commandBuffer->open)
             IOs::Log("{} OPEN !!", name.c_str());
 
@@ -468,7 +476,7 @@ public:
 
     void SetupView(View* view, Resource* RT, uint RTCount, bool clearRT, Resource* depth, bool clearDepth)
     {
-
+        ZoneScoped;
         UINT64 w = view->resolution.x;
         UINT64 h = view->resolution.y;
 
@@ -762,16 +770,17 @@ public:
         view->cullingContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
 
         auto& instances = view->viewWorld->instances;
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
 
         Shader& reset = *AssetLibrary::instance->Get<Shader>(cullingResetShader.Get().id, true);
         commandBuffer->SetCompute(reset);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
         commandBuffer->cmd->Dispatch(1, 1, 1);
 
         Shader& cullingInstances = *AssetLibrary::instance->Get<Shader>(cullingInstancesShader.Get().id, true);
         commandBuffer->SetCompute(cullingInstances);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
         commandBuffer->cmd->Dispatch(cullingInstances.DispatchX(instances.Size()), 1, 1);
 
@@ -780,7 +789,7 @@ public:
 
         Shader& cullingMeshlets = *AssetLibrary::instance->Get<Shader>(cullingMeshletsShader.Get().id, true);
         commandBuffer->SetCompute(cullingMeshlets);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress(0));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress(0));
         commandBuffer->cmd->ExecuteIndirect(cullingMeshlets.commandSignature, instances.Size(), view->cullingContext.instancesInView.GetResourcePtr(), 0, view->cullingContext.instancesCounter.GetResourcePtr(), 0);
 
@@ -849,10 +858,12 @@ public:
         Resource rts[] = { albedo.Get(), normal.Get() };
         SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true);
 
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+
         Shader& shader = *AssetLibrary::instance->Get<Shader>(meshShader.Get().id, true);
         commandBuffer->SetGraphic(shader);
 
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress());
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
 
         uint maxDraw = view->cullingContext.meshletsInView.Size();
@@ -860,6 +871,59 @@ public:
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+
+        Close();
+    }
+};
+
+class LightingProbs : public Pass
+{
+    Components::Handle<Components::Shader> rayProbesDispatchShader;
+
+public:
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        
+        rayProbesDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracingprobes.hlsl");
+    }
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        HLSL::RTParameters rtparams;
+        rtparams.BVH = view->raytracingContext.TLAS.srv.offset;
+        rtparams.giIndex = view->raytracingContext.GI.uav.offset;
+        rtparams.shadowsIndex = view->raytracingContext.shadows.uav.offset;
+        rtparams.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
+        rtparams.probesIndex = view->raytracingContext.probes.uav.offset;
+        rtparams.probesResolution = view->raytracingContext.probesResolutution;
+        view->raytracingContext.rtParameters->Add(rtparams);
+        view->raytracingContext.rtParameters->Upload();
+
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+
+        Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayProbesDispatchShader.Get().id, true);
+        commandBuffer->SetRaytracing(rayDispatch);
+        // global root sig for ray tracing is the same as compute shaders
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, view->raytracingContext.rtParameters->GetGPUVirtualAddress());
+
+        D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
+        drd.Width = view->raytracingContext.probesResolutution.x;
+        drd.Height = view->raytracingContext.probesResolutution.y;
+        drd.Depth = view->raytracingContext.probesResolutution.z;
+
+        commandBuffer->cmd->DispatchRays(&drd);
+
+        view->raytracingContext.GI.Barrier(commandBuffer.Get());
 
         Close();
     }
@@ -900,7 +964,6 @@ public:
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
 
         HLSL::RTParameters rtparams;
-        view->raytracingContext.rtParameters->Clear();
         rtparams.BVH = view->raytracingContext.TLAS.srv.offset;
         rtparams.giIndex = view->raytracingContext.GI.uav.offset;
         rtparams.shadowsIndex = view->raytracingContext.shadows.uav.offset;
@@ -909,10 +972,12 @@ public:
         view->raytracingContext.rtParameters->Add(rtparams);
         view->raytracingContext.rtParameters->Upload();
 
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
         commandBuffer->SetRaytracing(rayDispatch); 
         // global root sig for ray tracing is the same as compute shaders
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress());
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, view->raytracingContext.rtParameters->GetGPUVirtualAddress());
 
@@ -926,7 +991,7 @@ public:
 
         Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
         commandBuffer->SetCompute(applyLighting);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress());
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, view->raytracingContext.rtParameters->GetGPUVirtualAddress());
         commandBuffer->cmd->Dispatch(applyLighting.DispatchX(view->resolution.x), applyLighting.DispatchY(view->resolution.y), 1);
@@ -1013,9 +1078,11 @@ public:
         ppParameters->Add(ppparams);
         ppParameters->Upload();
 
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+
         Shader& postProcess = *AssetLibrary::instance->Get<Shader>(postProcessShader.Get().id, true);
         commandBuffer->SetCompute(postProcess);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, view->viewWorld->commonResourcesIndices.GetGPUVirtualAddress());
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, view->cullingContext.cullingContext->GetGPUVirtualAddress());
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, ppParameters->GetGPUVirtualAddress());
         commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->resolution.x), postProcess.DispatchY(view->resolution.y), 1);
@@ -1116,6 +1183,7 @@ public:
     {
         ZoneScoped;
 
+        tf::Task reset = Reset(world, subflow);
         tf::Task updateInstances = UpdateInstances(world, subflow);
         tf::Task updateMaterials = UpdateMaterials(world, subflow);
         tf::Task updateLights = UpdateLights(world, subflow);
@@ -1135,6 +1203,8 @@ public:
         SUBTASKVIEWPASS(forward);
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
+
+        reset.precede(updateInstances, updateMaterials, updateLights, updateCameras); // should precede all, user need to check that
 
         updateInstances.precede(updateMaterials, uploadAndSetup);
         uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
@@ -1162,13 +1232,30 @@ public:
         present.Execute();
     }
 
+    tf::Task Reset(World& world, tf::Subflow& subflow)
+    {
+        ZoneScoped;
+
+        tf::Task task = subflow.emplace(
+            [this]()
+            {
+                ZoneScoped;
+                // should call a view method with all that ?
+                viewWorld->instances.Clear();
+                viewWorld->meshletsCount = 0;
+                viewWorld->lights.Clear();
+                viewWorld->cameras.Clear();
+                //viewWorld->commonResourcesIndices.Clear();
+                cullingContext.cullingContext->Clear();
+                raytracingContext.instancesRayTracing->Clear();
+            }
+        ).name("Reset");
+        return task;
+    }
+
     tf::Task UpdateInstances(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
-        viewWorld->instances.Clear();
-        viewWorld->meshletsCount = 0;
-        raytracingContext.instancesRayTracing->Clear();
-
 
 #define UpdateInstancesStepSize 128
         ViewWorld& frameWorld = viewWorld.Get();
@@ -1349,8 +1436,6 @@ public:
                 ViewWorld& frameWorld = viewWorld.Get();
                 auto& queryResult = world.frameQueries[queryIndex];
 
-                this->viewWorld->lights.Clear();
-
                 for (uint i = 0; i < entityCount; i++)
                 {
                     auto& light = queryResult[i].Get<Components::Light>();
@@ -1362,7 +1447,7 @@ public:
                     HLSL::Light hlsllight;
 
                     hlsllight.pos = float4(worldMatrix[3].xyz, 1);
-                    hlsllight.dir = float4(worldMatrix[2].xyz, 1);
+                    hlsllight.dir = float4(normalize(worldMatrix[2].xyz), 1);
                     hlsllight.color = light.color;
                     hlsllight.angle = light.angle;
                     hlsllight.range = light.range;
@@ -1396,13 +1481,11 @@ public:
                 static HLSL::Camera hlslcamPrevious = {};
                 if (!options.stopFrustumUpdate)
                 {
-                    if (this->viewWorld->cameras.Size() > 0)
+                    if (this->viewWorld.GetPrevious().cameras.Size() > 0)
                     {
-                        hlslcamPrevious = this->viewWorld->cameras[0];
+                        hlslcamPrevious = this->viewWorld.GetPrevious().cameras[0];
                     }
                 }
-
-                this->viewWorld->cameras.Clear();
 
                 for (uint i = 0; i < entityCount; i++)
                 {
@@ -1489,7 +1572,7 @@ public:
                 this->raytracingContext.instancesRayTracing->Upload();
                 this->cullingContext.instancesInView.Resize(this->viewWorld->instances.Size());
                 this->cullingContext.meshletsInView.Resize(this->viewWorld->meshletsCount);
-                SetupViewParams();
+                this->viewWorld->commonResourcesIndices = SetupViewParams();
                 SetupCullingContextParams();
             }
         ).name("upload instances buffer");
@@ -1552,10 +1635,14 @@ public:
     }
 };
 
+
+// https://www.youtube.com/watch?v=cGB3wT0U5Ao&ab_channel=CppCon
+// use DAG
 class Renderer
 {
 public:
     static Renderer* instance;
+    ConstantBuffer constantBuffer;
     MeshStorage meshStorage;
     MainView mainView;
     EditorView editorView;
@@ -1563,6 +1650,7 @@ public:
     void On(IOs::WindowInformation& window)
     {
         instance = this;
+        constantBuffer.On();
         meshStorage.On();
         mainView.On(window);
         editorView.On(window);
@@ -1575,6 +1663,7 @@ public:
         editorView.Off();
         mainView.Off();
         meshStorage.Off();
+        constantBuffer.Off();
         instance = nullptr;
     }
 
@@ -1585,6 +1674,8 @@ public:
         Profiler::instance->frameData.instancesCount = mainView.viewWorld->instances.Size();
         Profiler::instance->frameData.meshletsCount = mainView.viewWorld->meshletsCount;
         Profiler::instance->frameData.verticesCount = 0;
+
+        constantBuffer.Reset();
 
         auto mainViewEndTask = mainView.Schedule(world, subflow);
         auto editorViewEndTask = editorView.Schedule(world, subflow);
@@ -1641,7 +1732,6 @@ public:
             WaitForSingleObject(previousFrame.fenceEvent, 10000);
         }
 
-        //Resource::CleanUploadResources();
         Resource::ReleaseResources();
     }
 

@@ -13,6 +13,8 @@
 // sse2 is. and thus can have a similar memory layout as hlsl compilation
 // but prefere float4 or uint4 instead of float2 float3 because hlsl++ will still reserve a full float4 even for a float2
 
+#include "sphericalharmonics.hlsl"
+
 struct Options
 {
     bool stopFrustumUpdate;
@@ -64,6 +66,7 @@ namespace HLSL
     
     struct CullingContext
     {
+        float4 resolution;
         uint frameNumber;
         uint frameTime;
         uint cameraIndex;
@@ -77,7 +80,6 @@ namespace HLSL
         uint depthIndex;
         uint HZB;
         uint HZBMipCount;
-        float4 resolution;
     };
     
     struct Shader
@@ -263,6 +265,9 @@ namespace HLSL
         uint shadowsIndex;
         uint restirIndex;
         uint lightedIndex;
+        
+        uint probesIndex;
+        uint3 probesResolution;
     };
     
     // Hit information, aka ray payload

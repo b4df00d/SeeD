@@ -813,9 +813,6 @@ float2 Panini_Generic(float2 view_pos, float d)
 }
 
 
-//#define sunDir normalize(-float3(1, 1, 1))
-//#define sunColor (float3(1, 0.85, 0.8) * 4)
-
 float3 StoreR11G11B10Normal(float3 normal)
 {
     return normal * 0.5 + 0.5;
@@ -887,4 +884,89 @@ float3 BRDF(SurfaceData s, float3 viewDir, float3 lightDir, float3 lightColor)
     float3 specular = pow(saturate(RdotL), 1 + smooth * 100) * lerp(lightColor, length(lightColor) * s.albedo, s.metalness) * smooth;
 
     return saturate(diffuse + specular);
+}
+
+SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
+{
+    StructuredBuffer<HLSL:: Instance > instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+    HLSL::Instance instance = instances[InstanceID()];
+    
+    StructuredBuffer<HLSL:: Material > materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
+    HLSL::Material material = materials[instance.materialIndex];
+    
+    StructuredBuffer<HLSL:: Mesh > meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
+    HLSL::Mesh mesh = meshes[instance.meshIndex];
+    
+    StructuredBuffer<HLSL:: Vertex > verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
+    
+    StructuredBuffer<uint> indicesData = ResourceDescriptorHeap[commonResourcesIndices.indicesHeapIndex];
+
+    uint iBase = PrimitiveIndex() * 3 + mesh.indexOffset;
+    uint i1 = indicesData[iBase + 0];
+    uint i2 = indicesData[iBase + 1];
+    uint i3 = indicesData[iBase + 2];
+
+    float2 uv1 = verticesData[i1].uv;
+    float2 uv2 = verticesData[i2].uv;
+    float2 uv3 = verticesData[i3].uv;
+
+    float2 uv = ((1 - attrib.bary.x - attrib.bary.y) * uv1 + attrib.bary.x * uv2 + attrib.bary.y * uv3);
+
+    SurfaceData s;
+    if (material.textures[0] != ~0)
+    {
+        Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
+        s.albedo = albedo.SampleLevel(samplerLinear, uv, 0).xyz;
+    }
+    else
+    {
+        s.albedo = 0.66;
+    }
+    if (material.textures[2] != ~0)
+    {
+        Texture2D<float4> roughness = ResourceDescriptorHeap[material.textures[2]];
+        s.roughness = roughness.SampleLevel(samplerLinear, uv, 0).x;
+    }
+    else
+    {
+        s.roughness = 0.99;
+    }
+    s.metalness = 0.1;
+
+    float3 nrm1 = verticesData[i1].normal;
+    float3 nrm2 = verticesData[i2].normal;
+    float3 nrm3 = verticesData[i3].normal;
+
+    float3 normal = ((1 - attrib.bary.x - attrib.bary.y) * nrm1 + attrib.bary.x * nrm2 + attrib.bary.y * nrm3);
+    normal = normalize(normal);
+    float4x4 worldMatrix = instance.unpack();
+    float3 worldNormal = mul((float3x3) worldMatrix, normal);
+    s.normal = normal;
+    
+    return s;
+}
+// Utility function to get a vector perpendicular to an input vector 
+//    (from "Efficient Construction of Perpendicular Vectors Without Branching")
+float3 getPerpendicularVector(float3 u)
+{
+    float3 a = abs(u);
+    uint xm = ((a.x - a.y) < 0 && (a.x - a.z) < 0) ? 1 : 0;
+    uint ym = (a.y - a.z) < 0 ? (1 ^ xm) : 0;
+    uint zm = 1 ^ (xm | ym);
+    return cross(u, float3(xm, ym, zm));
+}
+float3 getCosHemisphereSample(inout uint randSeed, float3 hitNorm)
+{
+    hitNorm = normalize(hitNorm);
+    // Get 2 random numbers to select our sample with
+    float2 randVal = float2(nextRand(randSeed), nextRand(randSeed));
+
+    // Cosine weighted hemisphere sample from RNG
+    float3 bitangent = getPerpendicularVector(hitNorm);
+    float3 tangent = cross(bitangent, hitNorm);
+    float r = sqrt(randVal.x);
+    float phi = 2.0f * 3.14159265f * randVal.y;
+
+    // Get our cosine-weighted hemisphere lobe sample direction
+    return normalize(tangent * (r * cos(phi).x) + bitangent * (r * sin(phi)) + hitNorm.xyz * sqrt(1 - randVal.x));
 }

@@ -95,11 +95,9 @@ public:
         const uint alignment = D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT;
         return (bufferSize + (alignment - 1)) & ~(alignment - 1);
     }
-    //static void CleanUploadResources(bool everything = false);
     static void ReleaseResources(bool everything = false);
 
     static std::mutex lock;
-    //static std::vector<std::pair<uint, Resource*>> uploadResources; // could we remove that and only use releaseResources ? 
     static std::vector<Resource> allResources;
     static std::vector<String> allResourcesNames;
     static std::vector<std::pair<uint, Resource>> releaseResources;
@@ -515,6 +513,10 @@ public:
     T& Get()
     {
         return Get(g_frameIndex);
+    }
+    T& GetPrevious()
+    {
+        return Get((g_frameIndex + 1) % FRAMEBUFFERING);
     }
     T* operator -> ()
     {
@@ -1532,35 +1534,6 @@ void Resource::Barrier(CommandBuffer& cb)
     cb.cmd->ResourceBarrier(1, &trans);
 }
 
-/*
-void Resource::CleanUploadResources(bool everything)
-{
-    //ZoneScoped;
-    uint frameNumberThreshold = GPU::instance->frameNumber - 1;
-    if (everything)
-        frameNumberThreshold = UINT_MAX;
-    for (int i = (int)uploadResources.size() - 1; i >= 0 ; i--)
-    {
-        if (uploadResources[i].first < frameNumberThreshold)
-        {
-            Resource* res = uploadResources[i].second;
-            for (int j = (int)allResources.size() - 1; j >= 0; j--)
-            {
-                if (allResources[j] == res)
-                {
-                    allResources.erase(allResources.begin() + j);
-                    allResourcesNames.erase(allResourcesNames.begin() + j);
-                }
-            }
-            {
-                res->Release();
-            }
-            uploadResources.erase(uploadResources.begin() + i);
-        }
-    }
-}
-*/
-
 void Resource::ReleaseResources(bool everything)
 {
     //ZoneScoped; 
@@ -1579,7 +1552,6 @@ void Resource::ReleaseResources(bool everything)
 }
 
 std::mutex Resource::lock;
-//std::vector<std::pair<uint, Resource*>> Resource::uploadResources;
 std::vector<Resource> Resource::allResources;
 std::vector<String> Resource::allResourcesNames;
 std::vector< std::pair<uint, Resource>> Resource::releaseResources;
@@ -1726,8 +1698,11 @@ public:
     }
     uint Add(const T& value)
     {
+        lock.lock();
         cpuData.push_back(value);
-        return (uint)cpuData.size();
+        uint index = (uint)cpuData.size() - 1;
+        lock.unlock();
+        return index;
     }
     uint AddUnique(const T& value)
     {
@@ -1847,6 +1822,68 @@ public:
         gpuData.Release();
     }
 };
+
+class ConstantBuffer
+{
+    std::mutex lock;
+    PerFrame<std::vector<Resource>> pages;
+    uint count;
+    static constexpr uint pageSize = 128;
+    static constexpr uint pageStride = 256;
+
+public:
+    static ConstantBuffer* instance;
+
+    void On()
+    {
+        instance = this;
+        count = 0;
+    }
+
+    void Off()
+    {
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            auto& res = pages.Get(i);
+            for (uint j = 0; j < res.size(); j++)
+            {
+                res[j].Release();
+            }
+        }
+    }
+
+    void Reset()
+    {
+        count = 0;
+    }
+    D3D12_GPU_VIRTUAL_ADDRESS PushConstantBuffer(void* data)
+    {
+        lock.lock();
+        uint page = count / pageSize;
+        uint index = count % pageSize;
+        count++;
+        if (pages->size() <= page)
+        {
+            auto& newPage = pages->emplace_back();
+            newPage.CreateBuffer(pageSize * pageStride, pageStride, true, "constant buffer");
+        }
+        auto& pageBuff = pages.Get()[page];
+
+        char* buf;
+        D3D12_RANGE rangeRead = { 0 , 0 }; // dont read
+        D3D12_RANGE rangeWrite = { index , index + pageStride };
+        auto hr = pageBuff.GetResource()->Map(0, &rangeRead, (void**)&buf);
+        if (SUCCEEDED(hr))
+        {
+            buf += index * pageStride;
+            memcpy(buf, data, pageStride);
+            pageBuff.GetResource()->Unmap(0, &rangeWrite);
+        }
+        lock.unlock();
+        return pageBuff.GetResource()->GetGPUVirtualAddress() + (index * pageStride);
+    }
+};
+ConstantBuffer* ConstantBuffer::instance;
 
 // https://github.com/TheRealMJP/DeferredTexturing/blob/experimental/SampleFramework12/v1.01/Graphics/Profiler.cpp
 // use https://github.com/Raikiri/LegitProfiler for display ?

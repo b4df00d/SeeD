@@ -17,6 +17,9 @@ public:
         uint indexInVector = ~0;
     };
     static AssetLibrary* instance;
+    // https://www.youtube.com/watch?v=cGB3wT0U5Ao&ab_channel=CppCon
+    // used Open Addressing Hash Map ?
+    // plf::colony ?
     std::unordered_map<assetID, Asset> map;
     String importPath = "..\\Assets\\";
     std::unordered_map<assetID, String> allAssetsInImportPath;
