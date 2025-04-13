@@ -260,14 +260,19 @@ namespace HLSL
     struct RTParameters
     {
         float4 resolution; //x, y, 1/x, 1/y
+        
+        float4 probesBBMin;
+        float4 probesBBMax;
+        uint4 probesResolution;
+        uint4 probesAddressOffset;
+        uint probesIndex;
+        uint probesSamplesPerFrame;
+        
         uint BVH;
         uint giIndex;
         uint shadowsIndex;
         uint restirIndex;
         uint lightedIndex;
-        
-        uint probesIndex;
-        uint3 probesResolution;
     };
     
     // Hit information, aka ray payload

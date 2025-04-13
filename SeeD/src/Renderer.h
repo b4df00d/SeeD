@@ -8,6 +8,8 @@
 #include "FidelityFX/host/backends/dx12/ffx_dx12.h"
 #include "FidelityFX/host/ffx_spd.h"
 
+// https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf
+
 class UI
 {
     ID3D12DescriptorHeap* pd3dSrvDescHeap = NULL;
@@ -164,8 +166,6 @@ public:
     auto end() { return keys.end(); }
 };
 
-
-
 // life time : frame
 struct ViewWorld
 {
@@ -227,7 +227,8 @@ struct RayTracingContext
     Resource GI;
     Resource shadows;
     Resource probes;
-    uint3 probesResolutution;
+    uint3 probesResolution;
+    float3 probesBBSize;
 
     void On(uint2 resolution)
     {
@@ -235,7 +236,11 @@ struct RayTracingContext
         //scratchBuffer.CreateBuffer(1000000, 1, false, "scratchBuffer");
         GI.CreateTexture(resolution, DXGI_FORMAT_R11G11B10_FLOAT, false, "GI");
         shadows.CreateTexture(resolution, DXGI_FORMAT_R8_UNORM, false, "shadows");
-        //probes.CreateBuffer()
+
+        probesResolution = uint3(64, 64, 64);
+        probesBBSize = float3(16, 16, 16);
+        uint bufferCount = probesResolution.x * probesResolution.y * probesResolution.z;
+        probes.CreateBuffer<HLSL::SHProbe>(bufferCount, "probes");
     }
 
     void Off()
@@ -248,6 +253,7 @@ struct RayTracingContext
         //scratchBuffer.Release();
         GI.Release();
         shadows.Release();
+        probes.Release();
     }
 
     void Reset()
@@ -342,6 +348,30 @@ public:
         cullingContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
 
         return cullingContextParams;
+    }
+
+    HLSL::RTParameters SetupRayTracingContextParams()
+    {
+        HLSL::RTParameters rayTracingContextParams;
+
+        rayTracingContextParams.BVH = raytracingContext.TLAS.srv.offset;
+        rayTracingContextParams.giIndex = raytracingContext.GI.uav.offset;
+        rayTracingContextParams.shadowsIndex = raytracingContext.shadows.uav.offset;
+        rayTracingContextParams.resolution = float4(1.0f * resolution.x, 1.0f * resolution.y, 1.0f / resolution.x, 1.0f / resolution.y);
+        //rayTracingContextParams.lightedIndex = lighted.Get().uav.offset;
+
+        rayTracingContextParams.probesIndex = raytracingContext.probes.uav.offset;
+        rayTracingContextParams.probesResolution = uint4(raytracingContext.probesResolution, 0);
+        rayTracingContextParams.probesSamplesPerFrame = 3;
+        float3 probeCellSize = (raytracingContext.probesBBSize / float3(raytracingContext.probesResolution));
+        float3 camWorldPos = viewWorld->cameras[0].worldPos.xyz + inverse(viewWorld->cameras[0].view)[2].xyz * raytracingContext.probesBBSize * 0.33f;
+        int3 camCellPos = floor(camWorldPos / probeCellSize);
+        camWorldPos = float3(camCellPos) * probeCellSize;
+        rayTracingContextParams.probesBBMin = float4(camWorldPos.xyz - raytracingContext.probesBBSize * 0.5f, 0);
+        rayTracingContextParams.probesBBMax = float4(camWorldPos.xyz + raytracingContext.probesBBSize * 0.5f, 0);
+        rayTracingContextParams.probesAddressOffset = uint4(ModulusI(camCellPos, int3(raytracingContext.probesResolution)), 0);
+
+        return rayTracingContextParams;
     }
 };
 
@@ -869,7 +899,7 @@ public:
     }
 };
 
-class LightingProbs : public Pass
+class LightingProbes : public Pass
 {
     Components::Handle<Components::Shader> rayProbesDispatchShader;
 
@@ -878,7 +908,6 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        
         rayProbesDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracingprobes.hlsl");
     }
     void Setup(View* view) override
@@ -889,13 +918,6 @@ public:
     {
         ZoneScoped;
         Open();
-
-        view->raytracingContext.rtParameters.BVH = view->raytracingContext.TLAS.srv.offset;
-        view->raytracingContext.rtParameters.giIndex = view->raytracingContext.GI.uav.offset;
-        view->raytracingContext.rtParameters.shadowsIndex = view->raytracingContext.shadows.uav.offset;
-        view->raytracingContext.rtParameters.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
-        view->raytracingContext.rtParameters.probesIndex = view->raytracingContext.probes.uav.offset;
-        view->raytracingContext.rtParameters.probesResolution = view->raytracingContext.probesResolutution;
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
         auto cullingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->cullingContext.cullingContext);
@@ -909,9 +931,9 @@ public:
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
 
         D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
-        drd.Width = view->raytracingContext.probesResolutution.x;
-        drd.Height = view->raytracingContext.probesResolutution.y;
-        drd.Depth = view->raytracingContext.probesResolutution.z;
+        drd.Width = view->raytracingContext.probesResolution.x;
+        drd.Height = view->raytracingContext.probesResolution.y;
+        drd.Depth = view->raytracingContext.probesResolution.z;
 
         commandBuffer->cmd->DispatchRays(&drd);
 
@@ -955,10 +977,6 @@ public:
 
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
 
-        view->raytracingContext.rtParameters.BVH = view->raytracingContext.TLAS.srv.offset;
-        view->raytracingContext.rtParameters.giIndex = view->raytracingContext.GI.uav.offset;
-        view->raytracingContext.rtParameters.shadowsIndex = view->raytracingContext.shadows.uav.offset;
-        view->raytracingContext.rtParameters.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
         view->raytracingContext.rtParameters.lightedIndex = lighted.Get().uav.offset;
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
@@ -1122,6 +1140,7 @@ public:
     Culling culling;
     ZPrepass zPrepass;
     GBuffers gBuffers;
+    LightingProbes lightingProbes;
     Lighting lighting;
     Forward forward;
     PostProcess postProcess;
@@ -1140,7 +1159,8 @@ public:
         culling.On(this, GPU::instance->graphicQueue, "culling", &hzb.commandBuffer, nullptr);
         zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer, nullptr);
         gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
-        lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers.commandBuffer, &accelerationStructure.commandBuffer);
+        lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &accelerationStructure.commandBuffer, nullptr);
+        lighting.On(this, GPU::instance->graphicQueue, "lighting", &lightingProbes.commandBuffer, &accelerationStructure.commandBuffer);
         forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer, nullptr);
         postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &forward.commandBuffer, nullptr);
         present.On(this, GPU::instance->graphicQueue, "present", &postProcess.commandBuffer, nullptr);
@@ -1156,6 +1176,7 @@ public:
         culling.Off();
         zPrepass.Off();
         gBuffers.Off();
+        lightingProbes.Off();
         lighting.Off();
         forward.Off();
         postProcess.Off();
@@ -1184,6 +1205,7 @@ public:
         SUBTASKVIEWPASS(culling);
         SUBTASKVIEWPASS(zPrepass);
         SUBTASKVIEWPASS(gBuffers);
+        SUBTASKVIEWPASS(lightingProbes);
         SUBTASKVIEWPASS(lighting);
         SUBTASKVIEWPASS(forward);
         SUBTASKVIEWPASS(postProcess);
@@ -1192,10 +1214,11 @@ public:
         reset.precede(updateInstances, updateMaterials, updateLights, updateCameras); // should precede all, user need to check that
 
         updateInstances.precede(updateMaterials, uploadAndSetup);
-        uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+        updateCameras.precede(uploadAndSetup);
+        uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask);
 
         presentTask.succeed(updateInstances, updateMaterials, uploadAndSetup);
-        presentTask.succeed(hzbTask, skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, postProcessTask);
+        presentTask.succeed(hzbTask, skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
     }
@@ -1211,6 +1234,7 @@ public:
         culling.Execute();
         zPrepass.Execute();
         gBuffers.Execute();
+        lightingProbes.Execute();
         lighting.Execute();
         forward.Execute();
         postProcess.Execute();
@@ -1557,6 +1581,7 @@ public:
                 this->cullingContext.meshletsInView.Resize(this->viewWorld->meshletsCount);
                 this->viewWorld->commonResourcesIndices = SetupViewParams();
                 this->cullingContext.cullingContext = SetupCullingContextParams();
+                this->raytracingContext.rtParameters = SetupRayTracingContextParams();
             }
         ).name("upload instances buffer");
 

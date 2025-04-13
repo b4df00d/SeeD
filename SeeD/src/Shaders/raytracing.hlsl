@@ -115,7 +115,7 @@ void RayGen()
     
     float3 offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.01) + (cd.worldNorm * cd.viewDist * 0.0001);
     
-    uint seed = initRand(launchIndex.x + cullingContext.frameTime % 1024, launchIndex.y + cullingContext.frameTime % 1024, 3);
+    uint seed = initRand(launchIndex.x + cullingContext.frameTime % 234 * 1.621f, launchIndex.y + cullingContext.frameTime % 431 * 1.432f, 4);
     
     float shadow = 0;
     {
@@ -176,6 +176,7 @@ void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 [shader("closesthit")]
 void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
+    //payload.color = 0; return;
     payload.hitDistance = RayTCurrent();
     if (payload.rayDepth >= HLSL::maxRTDepth) return;
     
@@ -183,11 +184,40 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     
     StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
     HLSL::Light light = lights[0];
+    //light.dir.xyz = -light.dir.xyz;
     
     SurfaceData s = GetRTSurfaceData(attrib);
     
     float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() * 0.999f) + s.normal * 0.001f;
+    float3 sun = 0;
+    if (payload.rayDepth < HLSL::maxRTDepth)
+    {
+        // shadow
+        HLSL::HitInfo shadowload;
+        shadowload.color = float3(0.0, 0.0, 0.0);
+        shadowload.rayDepth = 1000000;
+        shadowload.rndseed = payload.rndseed;
+        shadowload.hitDistance = 10000;
     
+        RayDesc ray;
+        ray.Origin = hitLocation;
+        ray.Direction = -light.dir.xyz;
+        ray.TMin = 0;
+        ray.TMax = shadowload.hitDistance;
+        
+        shadowload.hitDistance = 0;
+        if (dot(-s.normal, -ray.Direction) > 0)
+        {
+            //TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, shadowload);
+            TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, shadowload);
+        }
+        
+        sun = shadowload.hitDistance >= ray.TMax ? light.color.xyz : 0;
+    }
+    //payload.color = BRDF(s, WorldRayDirection(), -light.dir.xyz, sun) * 10;
+    payload.color = dot(s.normal, -light.dir.xyz) * sun * s.albedo;
+    
+#if false
     float3 bounceLight = 0;
     float3 bounceLightDir = 0;
     float hitDistance = 100000;
@@ -210,31 +240,23 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
         
         bounceLight = nextRay.color;
     }
-    float3 sun = 0;
-    if (payload.rayDepth < HLSL::maxRTDepth)
-    {
-        // shadow
-        HLSL::HitInfo shadowload;
-        shadowload.color = float3(0.0, 0.0, 0.0);
-        shadowload.rayDepth = 1000000;
-        shadowload.rndseed = payload.rndseed;
+    //payload.color += BRDF(s, WorldRayDirection(), bounceLightDir, bounceLight);
+    payload.color += bounceLight * s.albedo;
+#else
+    float3 bounceLightDir = lerp(s.normal, getCosHemisphereSample(payload.rndseed, s.normal), 0.9);
     
-        RayDesc ray;
-        ray.Origin = hitLocation;
-        ray.Direction = -light.dir.xyz;
-        ray.TMin = 0;
-        ray.TMax = 100000;
-        
-        if (dot(-s.normal, ray.Direction) > 0)
-        {
-            //TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, shadowload);
-            TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, shadowload);
-        }
-        
-        sun = shadowload.hitDistance >= ray.TMax ? light.color.xyz : 0;
-    }
-    payload.color = BRDF(s, WorldRayDirection(), -light.dir.xyz, sun);
-    payload.color += BRDF(s, WorldRayDirection(), bounceLightDir, bounceLight);
+    float3 samplePos = hitLocation;
+    float3 cellSize = float3(rtParameters.probesBBMax.xyz - rtParameters.probesBBMin.xyz) / float3(rtParameters.probesResolution.xyz);
+    int3 launchIndex = (samplePos - rtParameters.probesBBMin.xyz) / (rtParameters.probesBBMax.xyz - rtParameters.probesBBMin.xyz) * rtParameters.probesResolution.xyz;
+    uint3 wrapIndex = ModulusI(launchIndex.xyz + rtParameters.probesAddressOffset.xyz, rtParameters.probesResolution.xyz);
+    uint probeIndex = wrapIndex.x + wrapIndex.y * rtParameters.probesResolution.x + wrapIndex.z * (rtParameters.probesResolution.x * rtParameters.probesResolution.y);
+    StructuredBuffer<HLSL::SHProbe> probes = ResourceDescriptorHeap[rtParameters.probesIndex];
+    HLSL::SHProbe probe = probes[probeIndex];
+    float3 bounceLight = max(0.0f, shUnproject(probe.R, probe.G, probe.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
+    
+    //payload.color += BRDF(s, WorldRayDirection(), bounceLightDir, bounceLight);
+    payload.color += bounceLight * s.albedo;
+#endif
 }
 
 [shader("anyhit")]

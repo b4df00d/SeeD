@@ -60,12 +60,22 @@
 #ifndef SPHERICAL_HARMONICS_HLSL
 #define SPHERICAL_HARMONICS_HLSL
 
+#define sh2 float4
+// TODO sh3
+
+namespace HLSL
+{
+    struct SHProbe
+    {
+        sh2 R;
+        sh2 G;
+        sh2 B;
+    };
+}
 
 #ifndef __cplusplus // bah c´est surtout pour par avoir ca dans le HLSL
 
 #define shPI 3.1415926536f
-
-
 
 // Generates a uniform distribution of directions over a unit sphere. 
 // Adapted from http://www.pbr-book.org/3ed-2018/Monte_Carlo_Integration/2D_Sampling_with_Multidimensional_Transformations.html#fragment-SamplingFunctionDefinitions-6
@@ -78,11 +88,6 @@ float3 shGetUniformSphereSample(float azimuthX, float zenithY)
     float r = sqrt(max(0.0f, 1.0f - z * z));
     return float3(r * cos(phi), z, r * sin(phi));
 }
-
-
-
-#define sh2 float4
-// TODO sh3
 
 sh2 shZero()
 {

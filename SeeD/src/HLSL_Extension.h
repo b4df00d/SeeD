@@ -4,6 +4,10 @@
 
 namespace hlslpp
 {
+	inline uint3 ModulusI(int3 a, int3 b)
+	{
+		return (int3(a % b) + b) % b;
+	}
 
 	inline float4 PlaneFromPointNormal(float3 Point, float3 Normal)
 	{

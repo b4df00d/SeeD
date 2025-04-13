@@ -812,6 +812,10 @@ float2 Panini_Generic(float2 view_pos, float d)
     return cyl_pos / (cyl_dist - d);
 }
 
+inline uint3 ModulusI(uint3 a, uint3 b)
+{
+    return (uint3(a % b) + b) % b;
+}
 
 float3 StoreR11G11B10Normal(float3 normal)
 {
