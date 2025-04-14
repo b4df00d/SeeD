@@ -1132,6 +1132,7 @@ public:
 class MainView : public View
 {
 public:
+    std::mutex InstanceRTSync;
     HZB hzb;
     Skinning skinning;
     Particles particles;
@@ -1213,12 +1214,13 @@ public:
 
         reset.precede(updateInstances, updateMaterials, updateLights, updateCameras); // should precede all, user need to check that
 
-        updateInstances.precede(updateMaterials, uploadAndSetup);
+        updateInstances.precede(updateMaterials);
+        updateMaterials.precede(uploadAndSetup);
         updateCameras.precede(uploadAndSetup);
+        updateLights.precede(uploadAndSetup);
         uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask);
 
-        presentTask.succeed(updateInstances, updateMaterials, uploadAndSetup);
-        presentTask.succeed(hzbTask, skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask);
+        presentTask.succeed(uploadAndSetup, hzbTask, skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask);
 
         return presentTask;
     }
@@ -1346,10 +1348,12 @@ public:
                     instanceRayTracingCount++;
                 }
 
+                this->InstanceRTSync.lock();
                 viewWorld->instances.AddRange(localInstances.data(), instanceCount);
                 viewWorld->meshletsCount += localMeshletCount;
                 raytracingContext.instancesRayTracing->AddRangeWithTransform(localInstancesRayTracing.data(), instanceRayTracingCount, [](int index, D3D12_RAYTRACING_INSTANCE_DESC& data) { data.InstanceID = index; });
                 // THIS IS WRONG : data.InstanceID should be equal to the instance index in viewWorld.instances : this is not guarantied
+                this->InstanceRTSync.unlock();
             }
         );
 
