@@ -36,9 +36,9 @@ float GranTurismoTonemapper(float x)
 {
     float P = 1;
     float a = 1;
-    float m = 0.22;
-    float l = 0.4;
-    float c = 1.33;
+    float m = 0.4;
+    float l = 0.2;
+    float c = 1;
     float b = 0;
     float l0 = (P - m) * l / a;
     float L0 = m - m / a;
@@ -68,11 +68,15 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     RWTexture2D<float4> albedo = ResourceDescriptorHeap[ppParameters.albedoIndex];
     
     float4 HDR = lighted[dtid.xy];
+    HDR *= 3;
+    HDR = max(0, HDR - 0.125);
     
     float r = GranTurismoTonemapper(HDR.r);
     float g = GranTurismoTonemapper(HDR.g);
     float b = GranTurismoTonemapper(HDR.b);
     float4 SDR = float4(r, g, b, HDR.a);
+    
+    //if(any(HDR.xyz>=2.0)) SDR = float4(1, 0, 0, 0);
     
     albedo[dtid.xy] = SDR; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
 }

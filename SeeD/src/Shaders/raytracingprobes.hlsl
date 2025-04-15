@@ -124,7 +124,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
         ray.TMax = shadowload.hitDistance;
         
         shadowload.hitDistance = 0;
-        if (dot(-s.normal, ray.Direction) > 0)
+        //if (dot(s.normal, ray.Direction) > 0)
         {
             //TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, shadowload);
             TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, shadowload);
@@ -133,7 +133,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
         sun = shadowload.hitDistance >= ray.TMax ? light.color.xyz : 0;
     }
     //payload.color = BRDF(s, WorldRayDirection(), -light.dir.xyz, sun);
-    payload.color = dot(s.normal, -light.dir.xyz) * sun * s.albedo;
+    payload.color = saturate(dot(s.normal, -light.dir.xyz)) * sun * s.albedo;
 }
 
 [shader("anyhit")]

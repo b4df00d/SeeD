@@ -108,7 +108,7 @@ void RayGen()
     
     RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
     
-    StructuredBuffer<HLSL:: Light > lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
+    StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
     HLSL::Light light = lights[0];
     
     GBufferCameraData cd = GetGBufferCameraData(launchIndex);
@@ -155,8 +155,43 @@ void RayGen()
         
         TraceRay( BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
         
-        bounceLight += payload.color * saturate(dot(cd.worldNorm, bounceLightDir));
+        bounceLight = payload.color * saturate(dot(cd.worldNorm, bounceLightDir));
+        
+        RWStructuredBuffer<HLSL::GIReservoir> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
+        HLSL::GIReservoir r = giReservoir[launchIndex.x + launchIndex.y * rtParameters.resolution.x];
+        
+        float blend = 0;
+        uint maxFrameFilteringCount = 200;
+        uint frameFilteringCount = max(0, saturate(1 - blend) * maxFrameFilteringCount);
+        float frameFilteringDecay = (0.33f / float(frameFilteringCount));
+    
+        // if not first time fill with previous frame reservoir
+        if (rtParameters.frame == 0)
+        {
+            r.color_W = 0;
+            r.dir_Wsum = 0;
+            r.pos_Wcount = 0;
+        }
+        else if (r.pos_Wcount.w >= frameFilteringCount)
+        {
+            float decay = 0;//r.color_W.w * frameFilteringDecay;
+            r.color_W.w = max(0, r.color_W.w - decay);
+            r.dir_Wsum.w *= float(frameFilteringCount) / max(r.pos_Wcount.w, 0.0f) - decay;
+            r.pos_Wcount.w = frameFilteringCount;
+        }
+        
+        HLSL::GIReservoir newR;
+        newR.color_W = float4(bounceLight, length(bounceLight));
+        newR.dir_Wsum = float4(bounceLightDir, 0);
+        newR.pos_Wcount = float4(offsetedWorldPos, 0);
+        
+        UpdateGIReservoir(r, newR);
+        
+        giReservoir[launchIndex.x + launchIndex.y * rtParameters.resolution.x] = r;
+        
+        bounceLight = r.color_W.xyz * (r.dir_Wsum.w / r.pos_Wcount.w);
     }
+    
     
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     GI[launchIndex] = bounceLight;
@@ -169,8 +204,7 @@ void RayGen()
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
     payload.hitDistance = RayTCurrent();
-    payload.color = float3(0.66, 0.75, 0.99) * pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 2) * 0.3;
-    //payload.color = 0;
+    payload.color = float3(0.66, 0.75, 0.99) * saturate(pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 1.5)) * 0.1;
 }
 
 [shader("closesthit")]
@@ -184,7 +218,6 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     
     StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
     HLSL::Light light = lights[0];
-    //light.dir.xyz = -light.dir.xyz;
     
     SurfaceData s = GetRTSurfaceData(attrib);
     
@@ -206,7 +239,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
         ray.TMax = shadowload.hitDistance;
         
         shadowload.hitDistance = 0;
-        if (dot(-s.normal, -ray.Direction) > 0)
+        if (dot(s.normal, ray.Direction) > 0)
         {
             //TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, shadowload);
             TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, shadowload);
@@ -215,7 +248,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
         sun = shadowload.hitDistance >= ray.TMax ? light.color.xyz : 0;
     }
     //payload.color = BRDF(s, WorldRayDirection(), -light.dir.xyz, sun) * 10;
-    payload.color = dot(s.normal, -light.dir.xyz) * sun * s.albedo;
+    payload.color = saturate(dot(s.normal, -light.dir.xyz)) * sun * s.albedo;
     
 #if false
     float3 bounceLight = 0;

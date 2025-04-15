@@ -227,6 +227,7 @@ struct RayTracingContext
     Resource GI;
     Resource shadows;
     Resource probes;
+    Resource giReservoir;
     uint3 probesResolution;
     float3 probesBBSize;
 
@@ -241,6 +242,8 @@ struct RayTracingContext
         probesBBSize = float3(16, 16, 16);
         uint bufferCount = probesResolution.x * probesResolution.y * probesResolution.z;
         probes.CreateBuffer<HLSL::SHProbe>(bufferCount, "probes");
+
+        giReservoir.CreateBuffer<HLSL::GIReservoir>(resolution.x * resolution.y, "GIReservoir");
     }
 
     void Off()
@@ -254,6 +257,7 @@ struct RayTracingContext
         GI.Release();
         shadows.Release();
         probes.Release();
+        giReservoir.Release();
     }
 
     void Reset()
@@ -265,6 +269,7 @@ struct RayTracingContext
 class View
 {
 public:
+    uint frame;
     uint2 resolution;
     PerFrame<ViewWorld> viewWorld;
     RayTracingContext raytracingContext;
@@ -274,6 +279,7 @@ public:
     virtual void On(IOs::WindowInformation& window)
     {
         resolution = window.windowResolution;
+        frame = 0;
         raytracingContext.On(resolution);
         cullingContext.On();
     }
@@ -293,12 +299,14 @@ public:
     }
     virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
     virtual void Execute() = 0;
+    
     Resource& GetRegisteredResource(String name)
     {
         UINT64 hash = std::hash<std::string>{}(name);
         Resource& res = resources[hash];
         return res;
     }
+    
     HLSL::CommonResourcesIndices SetupViewParams()
     {
         HLSL::CommonResourcesIndices commonResourcesIndices;
@@ -328,6 +336,7 @@ public:
 
         return commonResourcesIndices;
     }
+    
     HLSL::CullingContext SetupCullingContextParams()
     {
         HLSL::CullingContext cullingContextParams;
@@ -354,10 +363,14 @@ public:
     {
         HLSL::RTParameters rayTracingContextParams;
 
+        rayTracingContextParams.frame = frame++;
+        if (IOs::instance->keys.pressed[VK_R])
+            rayTracingContextParams.frame = 0;
         rayTracingContextParams.BVH = raytracingContext.TLAS.srv.offset;
         rayTracingContextParams.giIndex = raytracingContext.GI.uav.offset;
         rayTracingContextParams.shadowsIndex = raytracingContext.shadows.uav.offset;
         rayTracingContextParams.resolution = float4(1.0f * resolution.x, 1.0f * resolution.y, 1.0f / resolution.x, 1.0f / resolution.y);
+        rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.uav.offset;
         //rayTracingContextParams.lightedIndex = lighted.Get().uav.offset;
 
         rayTracingContextParams.probesIndex = raytracingContext.probes.uav.offset;
@@ -1353,6 +1366,7 @@ public:
                 viewWorld->meshletsCount += localMeshletCount;
                 raytracingContext.instancesRayTracing->AddRangeWithTransform(localInstancesRayTracing.data(), instanceRayTracingCount, [](int index, D3D12_RAYTRACING_INSTANCE_DESC& data) { data.InstanceID = index; });
                 // THIS IS WRONG : data.InstanceID should be equal to the instance index in viewWorld.instances : this is not guarantied
+                // BUT ! I have InstanceRTSync now ...
                 this->InstanceRTSync.unlock();
             }
         );

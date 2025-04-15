@@ -43,7 +43,6 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     float3 result = brdf + ambient;
     //result = direct;
     //result = indirect;
-    //result *= 10;
 #if false
     float3 samplePos = cd.worldPos + cd.worldNorm * 0.25;
     float3 cellSize = float3(rtParameters.probesBBMax.xyz - rtParameters.probesBBMin.xyz) / float3(rtParameters.probesResolution.xyz);
@@ -57,5 +56,5 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     //result = RandUINT(probeIndex);
 #endif
     
-    lighted[dtid.xy] = float4(result, 1);
+    lighted[dtid.xy] = float4(result * 0.33, 1);
 }

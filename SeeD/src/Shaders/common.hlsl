@@ -949,6 +949,19 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     
     return s;
 }
+
+void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current)
+{
+    previous.pos_Wcount.w += 1;
+    previous.dir_Wsum.w += current.color_W.w;
+    if(previous.color_W.w < current.color_W.w)
+    {
+        previous.color_W = current.color_W; // keep the new W so take the xyzw
+        previous.dir_Wsum.xyz = current.dir_Wsum.xyz;
+        previous.pos_Wcount.xyz = current.pos_Wcount.xyz;
+    }
+}
+
 // Utility function to get a vector perpendicular to an input vector 
 //    (from "Efficient Construction of Perpendicular Vectors Without Branching")
 float3 getPerpendicularVector(float3 u)
@@ -959,6 +972,7 @@ float3 getPerpendicularVector(float3 u)
     uint zm = 1 ^ (xm | ym);
     return cross(u, float3(xm, ym, zm));
 }
+
 float3 getCosHemisphereSample(inout uint randSeed, float3 hitNorm)
 {
     hitNorm = normalize(hitNorm);

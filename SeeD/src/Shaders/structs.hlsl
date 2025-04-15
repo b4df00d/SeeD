@@ -256,7 +256,7 @@ namespace HLSL
     
     
     // ----------------- RT stuff ------------------
-    static const uint maxRTDepth = 3;
+    static const uint maxRTDepth = 2;
     struct RTParameters
     {
         float4 resolution; //x, y, 1/x, 1/y
@@ -265,8 +265,12 @@ namespace HLSL
         float4 probesBBMax;
         uint4 probesResolution;
         uint4 probesAddressOffset;
+        
+        uint frame;
+        
         uint probesIndex;
         uint probesSamplesPerFrame;
+        uint giReservoirIndex;
         
         uint BVH;
         uint giIndex;
@@ -295,6 +299,13 @@ namespace HLSL
     struct Attributes
     {
         float2 bary;
+    };
+    
+    struct GIReservoir
+    {
+        float4 color_W;
+        float4 dir_Wsum;
+        float4 pos_Wcount;
     };
     // ----------------- End RT stuff ------------------
 }
