@@ -219,6 +219,26 @@ struct CullingContext
     }
 };
 
+struct ProbeGrid
+{
+    Resource probes;
+    uint3 probesResolution;
+    float3 probesBBSize;
+
+    void On(uint3 res, float3 size)
+    {
+        probesResolution = res;
+        probesBBSize = size;
+        uint bufferCount = probesResolution.x * probesResolution.y * probesResolution.z;
+        probes.CreateBuffer<HLSL::SHProbe>(bufferCount, "probes");
+    }
+
+    void Off()
+    {
+        probes.Release();
+    }
+};
+
 struct RayTracingContext
 {
     HLSL::RTParameters rtParameters;
@@ -226,10 +246,8 @@ struct RayTracingContext
     Resource TLAS;
     Resource GI;
     Resource shadows;
-    Resource probes;
     Resource giReservoir;
-    uint3 probesResolution;
-    float3 probesBBSize;
+    ProbeGrid probes[3];
 
     void On(uint2 resolution)
     {
@@ -237,13 +255,11 @@ struct RayTracingContext
         //scratchBuffer.CreateBuffer(1000000, 1, false, "scratchBuffer");
         GI.CreateTexture(resolution, DXGI_FORMAT_R11G11B10_FLOAT, false, "GI");
         shadows.CreateTexture(resolution, DXGI_FORMAT_R8_UNORM, false, "shadows");
-
-        probesResolution = uint3(64, 64, 64);
-        probesBBSize = float3(16, 16, 16);
-        uint bufferCount = probesResolution.x * probesResolution.y * probesResolution.z;
-        probes.CreateBuffer<HLSL::SHProbe>(bufferCount, "probes");
-
         giReservoir.CreateBuffer<HLSL::GIReservoir>(resolution.x * resolution.y, "GIReservoir");
+
+        probes[0].On(uint3(16, 16, 16), float3(8, 8, 8));
+        probes[1].On(uint3(16, 16, 16), float3(32, 32, 32));
+        probes[2].On(uint3(16, 16, 16), float3(128, 128, 128));
     }
 
     void Off()
@@ -256,8 +272,11 @@ struct RayTracingContext
         //scratchBuffer.Release();
         GI.Release();
         shadows.Release();
-        probes.Release();
         giReservoir.Release();
+
+        probes[0].Off();
+        probes[1].Off();
+        probes[2].Off();
     }
 
     void Reset()
@@ -373,16 +392,19 @@ public:
         rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.uav.offset;
         //rayTracingContextParams.lightedIndex = lighted.Get().uav.offset;
 
-        rayTracingContextParams.probesIndex = raytracingContext.probes.uav.offset;
-        rayTracingContextParams.probesResolution = uint4(raytracingContext.probesResolution, 0);
-        rayTracingContextParams.probesSamplesPerFrame = 3;
-        float3 probeCellSize = (raytracingContext.probesBBSize / float3(raytracingContext.probesResolution));
-        float3 camWorldPos = viewWorld->cameras[0].worldPos.xyz + inverse(viewWorld->cameras[0].view)[2].xyz * raytracingContext.probesBBSize * 0.33f;
-        int3 camCellPos = floor(camWorldPos / probeCellSize);
-        camWorldPos = float3(camCellPos) * probeCellSize;
-        rayTracingContextParams.probesBBMin = float4(camWorldPos.xyz - raytracingContext.probesBBSize * 0.5f, 0);
-        rayTracingContextParams.probesBBMax = float4(camWorldPos.xyz + raytracingContext.probesBBSize * 0.5f, 0);
-        rayTracingContextParams.probesAddressOffset = uint4(ModulusI(camCellPos, int3(raytracingContext.probesResolution)), 0);
+        for (uint i = 0; i < ARRAYSIZE(raytracingContext.probes); i++)
+        {
+            rayTracingContextParams.probes[i].probesSamplesPerFrame = 3 * (3 - i);
+            rayTracingContextParams.probes[i].probesIndex = raytracingContext.probes[i].probes.uav.offset;
+            rayTracingContextParams.probes[i].probesResolution = uint4(raytracingContext.probes[i].probesResolution, 0);
+            float3 probeCellSize = (raytracingContext.probes[i].probesBBSize / float3(raytracingContext.probes[i].probesResolution));
+            float3 camWorldPos = viewWorld->cameras[0].worldPos.xyz + inverse(viewWorld->cameras[0].view)[2].xyz * raytracingContext.probes[i].probesBBSize * 0.33f;
+            int3 camCellPos = floor(camWorldPos / probeCellSize);
+            camWorldPos = float3(camCellPos) * probeCellSize;
+            rayTracingContextParams.probes[i].probesBBMin = float4(camWorldPos.xyz - raytracingContext.probes[i].probesBBSize * 0.5f, 0);
+            rayTracingContextParams.probes[i].probesBBMax = float4(camWorldPos.xyz + raytracingContext.probes[i].probesBBSize * 0.5f, 0);
+             rayTracingContextParams.probes[i].probesAddressOffset = uint4(ModulusI(camCellPos, int3(raytracingContext.probes[i].probesResolution)), 0);
+        }
 
         return rayTracingContextParams;
     }
@@ -934,21 +956,26 @@ public:
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
         auto cullingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->cullingContext.cullingContext);
-        auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
 
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayProbesDispatchShader.Get().id, true);
         commandBuffer->SetRaytracing(rayDispatch);
         // global root sig for ray tracing is the same as compute shaders
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, cullingContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
 
-        D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
-        drd.Width = view->raytracingContext.probesResolution.x;
-        drd.Height = view->raytracingContext.probesResolution.y;
-        drd.Depth = view->raytracingContext.probesResolution.z;
+        for (uint i = 0; i < ARRAYSIZE(view->raytracingContext.probes); i++)
+        {
+            view->raytracingContext.rtParameters.probeToCompute = i;
+            auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
 
-        commandBuffer->cmd->DispatchRays(&drd);
+            D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
+            drd.Width = view->raytracingContext.probes[i].probesResolution.x;
+            drd.Height = view->raytracingContext.probes[i].probesResolution.y;
+            drd.Depth = view->raytracingContext.probes[i].probesResolution.z;
+
+            commandBuffer->cmd->DispatchRays(&drd);
+        }
 
         view->raytracingContext.GI.Barrier(commandBuffer.Get());
 
@@ -1174,7 +1201,7 @@ public:
         zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer, nullptr);
         gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
         lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &accelerationStructure.commandBuffer, nullptr);
-        lighting.On(this, GPU::instance->graphicQueue, "lighting", &lightingProbes.commandBuffer, &accelerationStructure.commandBuffer);
+        lighting.On(this, GPU::instance->graphicQueue, "lighting", &accelerationStructure.commandBuffer, &lightingProbes.commandBuffer);
         forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer, nullptr);
         postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &forward.commandBuffer, nullptr);
         present.On(this, GPU::instance->graphicQueue, "present", &postProcess.commandBuffer, nullptr);

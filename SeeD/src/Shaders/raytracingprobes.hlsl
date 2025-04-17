@@ -22,21 +22,21 @@ GlobalRootSignature SeeDRootSignatureRT =
 [shader("raygeneration")]
 void RayGen()
 {
-    
     RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
     
     uint3 launchIndex = DispatchRaysIndex().xyz;
-    float3 t = float3(launchIndex.xyz) / float3(rtParameters.probesResolution.xyz);
-    float3 probeWorldPos = lerp(rtParameters.probesBBMin.xyz, rtParameters.probesBBMax.xyz, t);
     
-    uint3 wrapIndex = ModulusI(launchIndex.xyz + rtParameters.probesAddressOffset.xyz, rtParameters.probesResolution.xyz);
-    uint probeIndex = wrapIndex.x + wrapIndex.y * rtParameters.probesResolution.x + wrapIndex.z * (rtParameters.probesResolution.x * rtParameters.probesResolution.y);
+    HLSL::ProbeGrid probes = rtParameters.probes[rtParameters.probeToCompute];
+    
+    float3 t = float3(launchIndex.xyz) / float3(probes.probesResolution.xyz);
+    float3 probeWorldPos = lerp(probes.probesBBMin.xyz, probes.probesBBMax.xyz, t);
+    
+    uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
+    uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
   
-    RWStructuredBuffer<HLSL::SHProbe> probes = ResourceDescriptorHeap[rtParameters.probesIndex];
-    //float3 rc = RandUINT(probeIndex);
+    RWStructuredBuffer<HLSL::SHProbe> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
     
     uint seed = initRand(launchIndex.x + cullingContext.frameTime % 234 * 1.621f, launchIndex.y + cullingContext.frameTime % 431 * 1.432f, 4);
-    //uint seed = initRand(launchIndex.x, launchIndex.y, 4);
     
     // Initialise sh to 0
     HLSL::SHProbe probe;
@@ -45,11 +45,11 @@ void RayGen()
     probe.B = shZero();
     
     // Accumulate coefficients according to surounding direction/color tuples.
-    for (float az = 0.5f; az < rtParameters.probesSamplesPerFrame; az += 1.0f)
+    for (float az = 0.5f; az < probes.probesSamplesPerFrame; az += 1.0f)
     {
-        for (float ze = 0.5f; ze < rtParameters.probesSamplesPerFrame; ze += 1.0f)
+        for (float ze = 0.5f; ze < probes.probesSamplesPerFrame; ze += 1.0f)
     	{
-            float3 rayDir = shGetUniformSphereSample(az / rtParameters.probesSamplesPerFrame, ze / rtParameters.probesSamplesPerFrame);
+            float3 rayDir = shGetUniformSphereSample(az / probes.probesSamplesPerFrame, ze / probes.probesSamplesPerFrame);
             
             HLSL::HitInfo payload;
             payload.color = float3(0.0, 0.0, 0.0);
@@ -57,7 +57,7 @@ void RayGen()
             payload.rndseed = seed;
     
             RayDesc ray;
-            float3 randVal = (float3(nextRand(seed), nextRand(seed), nextRand(seed)) * 2.f - 1.f) * 0.0f;
+            float3 randVal = (float3(nextRand(seed), nextRand(seed), nextRand(seed)) * 2.f - 1.f) * 0.25f;
             ray.Origin = probeWorldPos + randVal;
             ray.Direction = rayDir;
             ray.TMin = 0;
@@ -75,12 +75,12 @@ void RayGen()
     }
     
     // integrating over a sphere so each sample has a weight of 4*PI/samplecount (uniform solid angle, for each sample)
-    float shFactor = 4.0 * shPI / (rtParameters.probesSamplesPerFrame * rtParameters.probesSamplesPerFrame);
+    float shFactor = 4.0 * shPI / (probes.probesSamplesPerFrame * probes.probesSamplesPerFrame);
     probe.R = shScale(probe.R, shFactor);
     probe.G = shScale(probe.G, shFactor);
     probe.B = shScale(probe.B, shFactor);
     
-    probes[probeIndex] = probe;
+    probesBuffer[probeIndex] = probe;
 }
 
 [shader("miss")]

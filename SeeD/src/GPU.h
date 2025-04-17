@@ -1829,7 +1829,26 @@ class ConstantBuffer
     PerFrame<std::vector<Resource>> pages;
     uint count;
     static constexpr uint pageSize = 128;
-    static constexpr uint pageStride = 256;
+    static constexpr uint pageStride = 512;
+
+    struct range
+    {
+        uint start;
+        uint end;
+    };
+    std::vector<range> ranges;
+    void DebugRanges(uint start, uint end)
+    {
+#if _DEBUG
+        for (uint i = 0; i < ranges.size(); i++)
+        {
+            if (start >= ranges[i].start && start <= ranges[i].end)
+            {
+                IOs::instance->Log("range overlap start {} end {}, range start {} end {}", start, end, ranges[i].start, ranges[i].end);
+            }
+        }
+#endif
+    }
 
 public:
     static ConstantBuffer* instance;
@@ -1855,7 +1874,9 @@ public:
     void Reset()
     {
         count = 0;
+        ranges.clear();
     }
+
     D3D12_GPU_VIRTUAL_ADDRESS PushConstantBuffer(void* data)
     {
         lock.lock();
@@ -1865,16 +1886,17 @@ public:
         if (pages->size() <= page)
         {
             auto& newPage = pages->emplace_back();
-            newPage.CreateBuffer(pageSize * pageStride, pageStride, true, "constant buffer");
+            newPage.CreateBuffer((pageSize+1) * pageStride, pageStride, true, "constant buffer");
         }
         auto& pageBuff = pages.Get()[page];
 
         char* buf;
         D3D12_RANGE rangeRead = { 0 , 0 }; // dont read
-        D3D12_RANGE rangeWrite = { index , index + pageStride };
+        D3D12_RANGE rangeWrite = { index * pageStride, index * pageStride + pageStride };
         auto hr = pageBuff.GetResource()->Map(0, &rangeRead, (void**)&buf);
         if (SUCCEEDED(hr))
         {
+            DebugRanges(rangeWrite.Begin, rangeWrite.End);
             buf += index * pageStride;
             memcpy(buf, data, pageStride);
             pageBuff.GetResource()->Unmap(0, &rangeWrite);

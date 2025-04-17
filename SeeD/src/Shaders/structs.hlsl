@@ -254,6 +254,17 @@ namespace HLSL
         uint backBufferIndex;
     };
     
+    struct ProbeGrid
+    {
+        float4 probesBBMin;
+        float4 probesBBMax;
+        uint4 probesResolution;
+        uint4 probesAddressOffset;
+        uint probesIndex;
+        uint probesSamplesPerFrame;
+        uint pad1; // dont use a uint[2] it does some more alignement and thus put pad between probesSamplesPerFrame and our pad
+        uint pad2;
+    };
     
     // ----------------- RT stuff ------------------
     static const uint maxRTDepth = 2;
@@ -261,22 +272,18 @@ namespace HLSL
     {
         float4 resolution; //x, y, 1/x, 1/y
         
-        float4 probesBBMin;
-        float4 probesBBMax;
-        uint4 probesResolution;
-        uint4 probesAddressOffset;
-        
         uint frame;
-        
-        uint probesIndex;
-        uint probesSamplesPerFrame;
-        uint giReservoirIndex;
         
         uint BVH;
         uint giIndex;
+        uint giReservoirIndex;
         uint shadowsIndex;
-        uint restirIndex;
         uint lightedIndex;
+        
+        uint pad1;
+        
+        uint probeToCompute;
+        ProbeGrid probes[3];
     };
     
     // Hit information, aka ray payload

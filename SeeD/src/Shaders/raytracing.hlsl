@@ -279,12 +279,20 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     float3 bounceLightDir = lerp(s.normal, getCosHemisphereSample(payload.rndseed, s.normal), 0.9);
     
     float3 samplePos = hitLocation;
-    float3 cellSize = float3(rtParameters.probesBBMax.xyz - rtParameters.probesBBMin.xyz) / float3(rtParameters.probesResolution.xyz);
-    int3 launchIndex = (samplePos - rtParameters.probesBBMin.xyz) / (rtParameters.probesBBMax.xyz - rtParameters.probesBBMin.xyz) * rtParameters.probesResolution.xyz;
-    uint3 wrapIndex = ModulusI(launchIndex.xyz + rtParameters.probesAddressOffset.xyz, rtParameters.probesResolution.xyz);
-    uint probeIndex = wrapIndex.x + wrapIndex.y * rtParameters.probesResolution.x + wrapIndex.z * (rtParameters.probesResolution.x * rtParameters.probesResolution.y);
-    StructuredBuffer<HLSL::SHProbe> probes = ResourceDescriptorHeap[rtParameters.probesIndex];
-    HLSL::SHProbe probe = probes[probeIndex];
+    
+    uint probeGridIndex = 0;
+    HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
+    while(probeGridIndex < 3 && (any(samplePos.xyz < probes.probesBBMin.xyz) || any(samplePos.xyz > probes.probesBBMax.xyz)))
+    {
+        probeGridIndex++;
+        probes = rtParameters.probes[probeGridIndex];
+    }
+    float3 cellSize = float3(probes.probesBBMax.xyz - probes.probesBBMin.xyz) / float3(probes.probesResolution.xyz);
+    int3 launchIndex = (samplePos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz) * probes.probesResolution.xyz;
+    uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
+    uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
+    StructuredBuffer<HLSL::SHProbe> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
+    HLSL::SHProbe probe = probesBuffer[probeIndex];
     float3 bounceLight = max(0.0f, shUnproject(probe.R, probe.G, probe.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
     
     //payload.color += BRDF(s, WorldRayDirection(), bounceLightDir, bounceLight);
