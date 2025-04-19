@@ -470,6 +470,19 @@ hlslpp_module_export namespace hlslpp
 		hlslpp_inline float3x4(float3x4&& m) hlslpp_noexcept : vec0(m.vec0), vec1(m.vec1), vec2(m.vec2) {}
 		hlslpp_inline float3x4& operator = (float3x4&& m) hlslpp_noexcept { vec0 = m.vec0; vec1 = m.vec1; vec2 = m.vec2; return *this; }
 
+
+		float4& operator[](int N)
+		{
+			hlslpp_assert(N >= 0 && N <= 2);
+			return *(&reinterpret_cast<float4&>(vec0) + N);
+		}
+
+		const float4& operator[](int N) const
+		{
+			hlslpp_assert(N >= 0 && N <= 2);
+			return *(&reinterpret_cast<const float4&>(vec0) + N);
+		}
+
 		union
 		{
 			n128 vec0;
@@ -512,6 +525,18 @@ hlslpp_module_export namespace hlslpp
 
 		hlslpp_inline float4x3(float4x3&& m) hlslpp_noexcept : vec0(m.vec0), vec1(m.vec1), vec2(m.vec2) {}
 		hlslpp_inline float4x3& operator = (float4x3&& m) hlslpp_noexcept { vec0 = m.vec0; vec1 = m.vec1; vec2 = m.vec2; return *this; }
+
+		float4& operator[](int N)
+		{
+			hlslpp_assert(N >= 0 && N <= 2);
+			return *(&reinterpret_cast<float4&>(vec0) + N);
+		}
+
+		const float4& operator[](int N) const
+		{
+			hlslpp_assert(N >= 0 && N <= 2);
+			return *(&reinterpret_cast<const float4&>(vec0) + N);
+		}
 
 		union
 		{

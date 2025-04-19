@@ -35,9 +35,9 @@ void CullingMeshlet(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThrea
     HLSL::Meshlet meshlet = meshlets[meshletIndex];
     
     
-    float4x4 worldMatrix = instance.unpack();
+    float4x4 worldMatrix = instance.unpack(instance.current);
     float3 center = mul(worldMatrix, float4(meshlet.boundingSphere.xyz, 1)).xyz;
-    float radius = abs(max(max(length(instance.matA.xyz), length(instance.matA.xyz)), length(instance.matC.xyz)) * meshlet.boundingSphere.w); // assume uniform scaling
+    float radius = abs(max(max(length(worldMatrix[0].xyz), length(worldMatrix[1].xyz)), length(worldMatrix[2].xyz)) * meshlet.boundingSphere.w); // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
     
     bool culled = FrustumCulling(camera, boundingSphere);

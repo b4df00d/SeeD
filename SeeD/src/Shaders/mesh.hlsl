@@ -31,7 +31,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     
     uint meshletCount = min(256, mesh.meshletCount);
     
-    float4x4 worldMatrix = instance.unpack();
+    float4x4 worldMatrix = instance.unpack(instance.current);
     float4 boundingSphere = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1));
     boundingSphere.w = mesh.boundingSphere.w;
     
@@ -88,7 +88,7 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
     if (groupThreadId.x < meshlet.vertexCount)
     {
-        float4x4 worldMatrix = instance.unpack();
+        float4x4 worldMatrix = instance.unpack(instance.current);
         uint tmpIndex = meshlet.vertexOffset + groupThreadId.x;
         uint index = meshletVertices[tmpIndex];
         float4 pos = float4(verticesData[index].pos.xyz, 1);

@@ -886,6 +886,7 @@ class GBuffers : public Pass
     ViewResource albedo;
     ViewResource normal;
     ViewResource depth;
+    ViewResource motion;
     Components::Handle<Components::Shader> meshShader;
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
@@ -897,6 +898,8 @@ public:
         normal.Register("normal", view);
         normal.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R11G11B10_FLOAT, "normal");
         depth.Register("depth", view);
+        motion.Register("motion", view);
+        motion.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R16G16_FLOAT, "motion");
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
@@ -1086,7 +1089,10 @@ class PostProcess : public Pass
     ViewResource normal;
     ViewResource depth;
     Components::Handle<Components::Shader> postProcessShader;
+
 public:
+    HLSL::PostProcessParameters ppparams;
+
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
@@ -1096,6 +1102,15 @@ public:
         normal.Register("normal", view);
         depth.Register("depth", view);
         postProcessShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\PostProcess.hlsl");
+
+        ppparams.P = 1;
+        ppparams.a = 1;
+        ppparams.m = 0.22;
+        ppparams.l = 0.4;
+        ppparams.c = 1.33;
+        ppparams.b = 0.0;
+        ppparams.expoAdd = 0;
+        ppparams.expoMul = 1;
     }
     virtual void Off() override
     {
@@ -1111,13 +1126,13 @@ public:
         ZoneScoped;
         Open();
 
-        HLSL::PostProcessParameters ppparams;
         ppparams.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
         ppparams.lightedIndex = lighted.Get().uav.offset;
         ppparams.albedoIndex = albedo.Get().uav.offset;
         ppparams.normalIndex = normal.Get().uav.offset;
         ppparams.depthIndex = depth.Get().uav.offset;
         ppparams.backBufferIndex = GPU::instance->backBuffer.Get().uav.offset;
+
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
         auto cullingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->cullingContext.cullingContext);
@@ -1360,7 +1375,7 @@ public:
                     instance.meshIndex = meshIndex;
                     instance.materialIndex = materialIndex;
                     //instance.worldMatrix = worldMatrix;
-                    instance.pack(worldMatrix);
+                    instance.current = instance.pack(worldMatrix);
                     // count instances with shader
                     instanceCount++;
 

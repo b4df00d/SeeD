@@ -943,7 +943,7 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
 
     float3 normal = ((1 - attrib.bary.x - attrib.bary.y) * nrm1 + attrib.bary.x * nrm2 + attrib.bary.y * nrm3);
     normal = normalize(normal);
-    float4x4 worldMatrix = instance.unpack();
+    float4x4 worldMatrix = instance.unpack(instance.current);
     float3 worldNormal = mul((float3x3) worldMatrix, normal);
     s.normal = normal;
     

@@ -26,7 +26,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     
     GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
     
-    float3 indirect = GI[dtid.xy].xyz * 2;
+    float3 indirect = GI[dtid.xy].xyz;
     float3 direct = shadows[dtid.xy] * light.color.xyz;
     
     SurfaceData s;
@@ -65,5 +65,5 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     //result = RandUINT(probeIndex);
 #endif
     
-    lighted[dtid.xy] = float4(result * 0.33, 1);
+    lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
 }

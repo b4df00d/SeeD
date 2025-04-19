@@ -131,32 +131,50 @@ namespace HLSL
     
     struct Instance
     {
-        //float4x4 worldMatrix;
-        float4 matA;
-        float4 matB;
-        float4 matC;
+        float4x3 current; // FFS hlsl++ does store 4x3 and 4x3 in the same way ... BS !
+        float4x3 previous;
         uint meshIndex;
         uint materialIndex;
-        uint pad[2];
+        uint pad1;
+        uint pad2;
         
-        float4x4 unpack()
+        float4x4 unpack(float4x3 mat)
         {
-            return float4x4(matA.x, matB.x, matC.x, matA.w,
-                            matA.y, matB.y, matC.y, matB.w,
-                            matA.z, matB.z, matC.z, matC.w,
+#ifndef __cplusplus
+            return float4x4(mat[0].x, mat[1].x, mat[2].x, mat[3].x,
+                            mat[0].y, mat[1].y, mat[2].y, mat[3].y,
+                            mat[0].z, mat[1].z, mat[2].z, mat[3].z,
                             0, 0, 0, 1);
+#else
+            return float4x4(mat[0].x, mat[1].x, mat[2].x, mat[3].x,
+                            mat[0].y, mat[1].y, mat[2].y, mat[3].y,
+                            mat[0].z, mat[1].z, mat[2].z, mat[3].z,
+                            0, 0, 0, 1);
+#endif
         }
         
-        void pack(float4x4 mat)
+        float4x3 pack(float4x4 mat)
         {
-            matA.xyz = mat[0].xyz;
-            matA.w = mat[3].x;
+            float4x3 res;
+#ifndef __cplusplus
+            res[0].xyz = mat[0].xyz;
+            res[1].xyz = mat[1].xyz;
+            res[2].xyz = mat[2].xyz;
             
-            matB.xyz = mat[1].xyz;
-            matB.w = mat[3].y;
+            res[3].x = mat[3].x;
+            res[3].y = mat[3].y;
+            res[3].z = mat[3].z;
+#else
+            res[0].xyz = mat[0].xyz;
+            res[1].xyz = mat[1].xyz;
+            res[2].xyz = mat[2].xyz;
             
-            matC.xyz = mat[2].xyz;
-            matC.w = mat[3].z;
+            res[0].w = mat[3].x;
+            res[1].w = mat[3].y;
+            res[2].w = mat[3].z;
+#endif
+            
+            return res;
         }
     };
     
@@ -252,7 +270,17 @@ namespace HLSL
         uint normalIndex;
         uint depthIndex;
         uint backBufferIndex;
+        //tonemap
+        float P;
+        float a;
+        float m;
+        float l;
+        float c;
+        float b;
+        float expoAdd;
+        float expoMul;
     };
+    static const float brightnessClippingAdjust = 4;
     
     struct ProbeGrid
     {

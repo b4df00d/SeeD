@@ -32,14 +32,23 @@ float H_f(float x, float e0, float e1)
     return (x - e0) / (e1 - e0);
 }
 
+//https://www.desmos.com/calculator/gslcdxvipg
 float GranTurismoTonemapper(float x)
 {
+    float P = ppParameters.P;
+    float a = ppParameters.a;
+    float m = ppParameters.m;
+    float l = ppParameters.l;
+    float c = ppParameters.c;
+    float b = ppParameters.b;
+    /*
     float P = 1;
     float a = 1;
-    float m = 0.4;
-    float l = 0.2;
-    float c = 1;
-    float b = 0;
+    float m = 0.5;
+    float l = 0.5;
+    float c = 0.5;
+    float b = 0.0;
+    */
     float l0 = (P - m) * l / a;
     float L0 = m - m / a;
     float L1 = m + (1 - m) / a;
@@ -67,9 +76,10 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
     RWTexture2D<float4> albedo = ResourceDescriptorHeap[ppParameters.albedoIndex];
     
-    float4 HDR = lighted[dtid.xy];
-    HDR *= 3;
-    HDR = max(0, HDR - 0.125);
+    float4 HDR = lighted[dtid.xy] * HLSL::brightnessClippingAdjust;
+    HDR -= ppParameters.expoAdd;
+    HDR *= ppParameters.expoMul;
+    HDR += ppParameters.expoAdd;
     
     float r = GranTurismoTonemapper(HDR.r);
     float g = GranTurismoTonemapper(HDR.g);

@@ -578,6 +578,33 @@ public:
 };
 OptionWindow optionWindow;
 
+class PostProcessWindow : public EditorWindow
+{
+public:
+    PostProcessWindow() : EditorWindow("PostProcess") {}
+    void Update() override final
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("PostProcessWindow", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+
+        ImGui::SliderFloat("expoMul", &Renderer::instance->mainView.postProcess.ppparams.expoMul, 0, 8);
+        ImGui::SliderFloat("expoAdd", &Renderer::instance->mainView.postProcess.ppparams.expoAdd, -1, 1);
+        ImGui::SliderFloat("P", &Renderer::instance->mainView.postProcess.ppparams.P, 0, 2);
+        ImGui::SliderFloat("a", &Renderer::instance->mainView.postProcess.ppparams.a, 0, 2);
+        ImGui::SliderFloat("m", &Renderer::instance->mainView.postProcess.ppparams.m, 0, 2);
+        ImGui::SliderFloat("l", &Renderer::instance->mainView.postProcess.ppparams.l, 0, 2);
+        ImGui::SliderFloat("c", &Renderer::instance->mainView.postProcess.ppparams.c, 0, 3);
+        ImGui::SliderFloat("b", &Renderer::instance->mainView.postProcess.ppparams.b, 0, 1);
+
+        ImGui::End();
+    }
+};
+PostProcessWindow postProcessWindow;
+
 #include "ComponentsUIMetaData.h"
 class PropertyWindow : public EditorWindow
 {

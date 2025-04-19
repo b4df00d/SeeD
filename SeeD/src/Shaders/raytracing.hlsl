@@ -138,6 +138,7 @@ void RayGen()
         shadow = shadowload.hitDistance >= ray.TMax ? 1 : 0;
     }
     
+    float precisionAdjust = 100;
     float3 bounceLight = 0;
     float3 bounceLightDir = 0;
     {
@@ -155,13 +156,14 @@ void RayGen()
         
         TraceRay( BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
         
-        bounceLight = payload.color * saturate(dot(cd.worldNorm, bounceLightDir));
+        bounceLight = payload.color * saturate(dot(cd.worldNorm, bounceLightDir)) * precisionAdjust; // BRDF here ?
         
+        // ReSTIR
         RWStructuredBuffer<HLSL::GIReservoir> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
         HLSL::GIReservoir r = giReservoir[launchIndex.x + launchIndex.y * rtParameters.resolution.x];
         
         float blend = 0;
-        uint maxFrameFilteringCount = 200;
+        uint maxFrameFilteringCount = 100;
         uint frameFilteringCount = max(0, saturate(1 - blend) * maxFrameFilteringCount);
         float frameFilteringDecay = (0.33f / float(frameFilteringCount));
     
@@ -174,9 +176,9 @@ void RayGen()
         }
         else if (r.pos_Wcount.w >= frameFilteringCount)
         {
-            float decay = 0;//r.color_W.w * frameFilteringDecay;
-            r.color_W.w = max(0, r.color_W.w - decay);
-            r.dir_Wsum.w *= float(frameFilteringCount) / max(r.pos_Wcount.w, 0.0f) - decay;
+            float factor = max(0, float(frameFilteringCount) / max(r.pos_Wcount.w, 0.0f));
+            r.color_W.w = max(0, r.color_W.w * factor);
+            r.dir_Wsum.w *= factor;
             r.pos_Wcount.w = frameFilteringCount;
         }
         
@@ -190,11 +192,12 @@ void RayGen()
         giReservoir[launchIndex.x + launchIndex.y * rtParameters.resolution.x] = r;
         
         bounceLight = r.color_W.xyz * (r.dir_Wsum.w / r.pos_Wcount.w);
+        // end ReSTIR
     }
     
     
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    GI[launchIndex] = bounceLight;
+    GI[launchIndex] = bounceLight / precisionAdjust;
     RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     shadows[launchIndex] = shadow;
 
@@ -204,7 +207,7 @@ void RayGen()
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
     payload.hitDistance = RayTCurrent();
-    payload.color = float3(0.66, 0.75, 0.99) * saturate(pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 1.5)) * 0.1;
+    payload.color = float3(0.66, 0.75, 0.99) * saturate(pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 1.5)) * 0.2;
 }
 
 [shader("closesthit")]
@@ -248,7 +251,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
         sun = shadowload.hitDistance >= ray.TMax ? light.color.xyz : 0;
     }
     //payload.color = BRDF(s, WorldRayDirection(), -light.dir.xyz, sun) * 10;
-    payload.color = saturate(dot(s.normal, -light.dir.xyz)) * sun * s.albedo;
+    payload.color = saturate(dot(s.normal, -light.dir.xyz)) * sun;
     
 #if false
     float3 bounceLight = 0;
@@ -296,8 +299,9 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     float3 bounceLight = max(0.0f, shUnproject(probe.R, probe.G, probe.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
     
     //payload.color += BRDF(s, WorldRayDirection(), bounceLightDir, bounceLight);
-    payload.color += bounceLight * s.albedo;
+    payload.color += bounceLight;
 #endif
+    payload.color *= s.albedo;
 }
 
 [shader("anyhit")]

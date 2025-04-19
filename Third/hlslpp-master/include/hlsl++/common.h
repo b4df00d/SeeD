@@ -374,10 +374,10 @@ hlslpp_module_export namespace hlslpp
 	typedef float3x1 float32_t3x1;
 	typedef float3x2 float32_t3x2;
 	typedef float3x3 float32_t3x3;
-	typedef float3x4 float32_t3x4;
+	typedef float3x4 float32_t4x3;
 	typedef float4x1 float32_t4x1;
 	typedef float4x2 float32_t4x2;
-	typedef float4x3 float32_t4x3;
+	typedef float4x3 float32_t3x4;
 	typedef float4x4 float32_t4x4;
 
 	// Typedefs for common hlsl types
