@@ -65,6 +65,24 @@ float GranTurismoTonemapper(float x)
     return f_x;
 }
 
+float3 Saturation(float3 input, float strength)
+{
+    const float3 LuminanceWeights = float3(0.299, 0.587, 0.114);
+    float luminance = dot(input, LuminanceWeights);
+    return lerp(luminance, input, strength);
+}
+
+// ACES tone mapping curve fit to go from HDR to LDR
+//https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
+float3 ACESFilm(float3 x)
+{
+    float a = 2.51f;
+    float b = 0.03f;
+    float c = 2.43f;
+    float d = 0.59f;
+    float e = 0.14f;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0f, 1.0f);
+}
 
 [RootSignature(SeeDRootSignature)]
 [numthreads(16, 16, 1)]
@@ -74,14 +92,7 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
         return;
     
     Texture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
-    RWTexture2D<float4> albedo = ResourceDescriptorHeap[ppParameters.albedoIndex];
-    
-    /*
-    Texture2D<float2> motionT = ResourceDescriptorHeap[cullingContext.motionIndex];
-    float2 motion = motionT[dtid.xy] * 0.01;
-    albedo[dtid.xy] = float4(motion.x, motion.y, 0, 1);
-    return;
-    */
+    RWTexture2D<float4> albedo = ResourceDescriptorHeap[cullingContext.albedoIndex];
     
     float4 HDR = lighted[dtid.xy] * HLSL::brightnessClippingAdjust;
     HDR -= ppParameters.expoAdd;
@@ -96,4 +107,11 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     //if(any(HDR.xyz>=2.0)) SDR = float4(1, 0, 0, 0);
     
     albedo[dtid.xy] = SDR; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
+    
+    /*
+    Texture2D<float2> motionT = ResourceDescriptorHeap[cullingContext.motionIndex];
+    float2 motion = motionT[dtid.xy];
+    motion *= 0.1;
+    albedo[dtid.xy].xy += abs(motion.xy);
+    */
 }

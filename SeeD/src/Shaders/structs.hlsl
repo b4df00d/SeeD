@@ -67,7 +67,7 @@ namespace HLSL
     
     struct CullingContext
     {
-        float4 resolution;
+        float4 resolution; //x, y, 1/x, 1/y
         uint frameNumber;
         uint frameTime;
         uint cameraIndex;
@@ -121,7 +121,8 @@ namespace HLSL
         uint vertexCount;
         uint indexOffset;
         uint indexCount;
-        uint pad[2];
+        uint pad1;
+        uint pad2;
     };
     
     struct Material
@@ -233,22 +234,10 @@ namespace HLSL
         uint pad2;
     };
     
-    struct Globals
-    {
-        float4 resolution; //x, y, 1/x, 1/y
-        uint albedoIndex;
-        uint normalIndex;
-        uint motionIndex;
-    };
-    
     struct PostProcessParameters
     {
         float4 resolution; //x, y, 1/x, 1/y
         uint lightedIndex;
-        uint albedoIndex;
-        uint normalIndex;
-        uint depthIndex;
-        uint motionIndex;
         uint backBufferIndex;
         //tonemap
         float P;
@@ -301,12 +290,9 @@ namespace HLSL
     struct HitInfo
     {
         float3 color;
-        uint rayDepth;
-        uint rndseed;
         float hitDistance;
-        //float tCurrent;
-        //float3 currentPosition;
-        //float3 normal;
+        uint rayDepth; //pack depth and seed in 1 uint
+        uint rndseed;
     };
     
     // Attributes output by the raytracing when hitting a surface,

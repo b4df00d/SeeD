@@ -88,25 +88,6 @@ float dot2(float3 p)
     return dot(p, p);
 }
 
-float3 Saturation(float3 input, float strength)
-{
-    const float3 LuminanceWeights = float3(0.299, 0.587, 0.114);
-    float luminance = dot(input, LuminanceWeights);
-    return lerp(luminance, input, strength);
-}
-
-// ACES tone mapping curve fit to go from HDR to LDR
-//https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
-float3 ACESFilm(float3 x)
-{
-    float a = 2.51f;
-    float b = 0.03f;
-    float c = 2.43f;
-    float d = 0.59f;
-    float e = 0.14f;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0f, 1.0f);
-}
-
 float3 WorldNormal(float3 nrm, float3x3 tbn, float scale)
 {
 	//nrm = float3(0.5, 0.5, 1);
@@ -661,72 +642,8 @@ LightComp GetLightComp(in uint globalLightIndex, float3 normal, float3 position,
     }
     return l;
 }
-
-// ------ Reprojection ------------------------------
-
-static const
-float2 pattern[9] =
-{
-    float2(0, 0),
-	float2(-1, 0),
-	float2(0, -1),
-	float2(0, 1),
-	float2(1, 0),
-	float2(1, 1),
-	float2(-1, 1),
-	float2(1, -1),
-	float2(-1, -1)
-};
-
-float2 ComputeMoVec(in float4 posCurr, in float4 posPrev)
-{
-    float4 moVec = float4((posCurr.xyz / posCurr.w) - (posPrev.xyz / posPrev.w), 0);
-    //float4 moVec = float4((posCurr.xyz) - (posPrev.xyz), 0);
-    //moVec.y = -moVec.y;
-    moVec.xyz *= 0.5; //because we need to go from -1,1 to 0,1
-    return moVec.xy;
-}
-
-
-// return confidence 0 to 1
-float GetReprojectedUV(in int2 pixelPos, out float2 prevUV, in float2 resolution, float2 moVecDir = 1)
-{
-    float2 UV = (float2(pixelPos) + 0.5f) / resolution.xy;
-    uint2 fullResPixelPos = UV * float2(globals.screenResolution.xy);
-    float2 moVec = srv2Dfloat2[globals.moVec][fullResPixelPos].xy;
-    moVec.y = -moVec.y;
-    float2 reprojUV = UV - moVec;
-
-    float blend = 0.00333;
-
-    if (any(reprojUV.xy >= 1.0) || any(reprojUV.xy <= 0.0))
-        blend = 1;
-	
-    reprojUV = saturate(reprojUV);
-    float D = srv2Dfloat[globals.depth][fullResPixelPos];
-    D = linearZ(D, camera.camClips.x, camera.camClips.y);
-    float DPrev = srv2Dfloat[globals.previousDepth][reprojUV * globals.screenResolution];
-    DPrev = linearZ(DPrev, camera.camClips.x, camera.camClips.y);
-    if (abs(D - DPrev) > 0.0001)
-        blend = 1;
-	
-    blend = saturate(blend);
-	
-    prevUV = reprojUV;
-	
-    return blend;
-}
-
-float GetReprojectedPixelPos(in int2 pixelPos, out int2 prevPixelPos, in uint2 resolution, float2 moVecDir = 1)
-{
-    float2 reprojUV;
-    float blend = GetReprojectedUV(pixelPos, reprojUV, resolution, moVecDir);
-	
-    prevPixelPos = reprojUV * resolution.xy;
-	
-    return blend;
-}
 */
+
 // ------ Panini-------------------------------------
 
 // Back-ported & adapted from the work of the Stockholm demo team - thanks Lasse

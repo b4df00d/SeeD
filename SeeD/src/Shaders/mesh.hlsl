@@ -181,10 +181,11 @@ PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
     o.normal = StoreR11G11B10Normal(normalize(inVerts.normal.xyz));
     
     float2 currScreenPos = inVerts.pos.xy;
-    float2 prevScreenPos = (inVerts.previousPos.xy / inVerts.previousPos.w) * 0.5 + 0.5;
-    prevScreenPos.y = 1 - prevScreenPos.y;
+    float4 previousPos = inVerts.previousPos;
+    previousPos.y = -previousPos.y;
+    float2 prevScreenPos = (previousPos.xy / previousPos.w) * 0.5 + 0.5;
     prevScreenPos *= cullingContext.resolution.xy;
-    o.motion = (currScreenPos - prevScreenPos);
+    o.motion = (prevScreenPos - currScreenPos);
     
     //o.entityID = 1;
     return o;

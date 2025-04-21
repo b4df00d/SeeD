@@ -159,8 +159,14 @@ void RayGen()
         bounceLight = payload.color * saturate(dot(cd.worldNorm, bounceLightDir)) * precisionAdjust; // BRDF here ?
         
         // ReSTIR
+        
+        Texture2D<float2> motionT = ResourceDescriptorHeap[cullingContext.motionIndex];
+        float2 motion = motionT[launchIndex.xy];
+        //motion = 0;
+        uint2 previousLaunchIndex = min(max(launchIndex.xy + int2(motion), 0), rtParameters.resolution.xy);
+        
         RWStructuredBuffer<HLSL::GIReservoir> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-        HLSL::GIReservoir r = giReservoir[launchIndex.x + launchIndex.y * rtParameters.resolution.x];
+        HLSL::GIReservoir r = giReservoir[previousLaunchIndex.x + previousLaunchIndex.y * rtParameters.resolution.x];
         
         float blend = 0;
         uint maxFrameFilteringCount = 100;

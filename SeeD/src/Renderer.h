@@ -1133,10 +1133,6 @@ public:
 
         ppparams.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
         ppparams.lightedIndex = lighted.Get().uav.offset;
-        ppparams.albedoIndex = albedo.Get().uav.offset;
-        ppparams.normalIndex = normal.Get().uav.offset;
-        ppparams.motionIndex = motion.Get().uav.offset;
-        ppparams.depthIndex = depth.Get().uav.offset;
         ppparams.backBufferIndex = GPU::instance->backBuffer.Get().uav.offset;
 
 
