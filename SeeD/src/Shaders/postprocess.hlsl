@@ -73,8 +73,15 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     if (dtid.x > ppParameters.resolution.x || dtid.y > ppParameters.resolution.y)
         return;
     
-    RWTexture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
+    Texture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
     RWTexture2D<float4> albedo = ResourceDescriptorHeap[ppParameters.albedoIndex];
+    
+    /*
+    Texture2D<float2> motionT = ResourceDescriptorHeap[cullingContext.motionIndex];
+    float2 motion = motionT[dtid.xy] * 0.01;
+    albedo[dtid.xy] = float4(motion.x, motion.y, 0, 1);
+    return;
+    */
     
     float4 HDR = lighted[dtid.xy] * HLSL::brightnessClippingAdjust;
     HDR -= ppParameters.expoAdd;

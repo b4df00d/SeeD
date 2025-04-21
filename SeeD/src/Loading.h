@@ -1938,7 +1938,7 @@ public :
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader);
                         D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[4], "ps_6_6");
                         PipelineStateStream stream{}; 
-                        DXGI_FORMAT targetFormat[] = { DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R11G11B10_FLOAT };
+                        DXGI_FORMAT targetFormat[] = { DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16G16_FLOAT };
                         D3D12_RT_FORMAT_ARRAY RTVFormats = {};
                         RTVFormats.NumRenderTargets = ARRAYSIZE(targetFormat);
                         for (uint i = 0; i < ARRAYSIZE(targetFormat); i++)

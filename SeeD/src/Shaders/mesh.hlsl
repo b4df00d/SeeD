@@ -88,15 +88,22 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
     if (groupThreadId.x < meshlet.vertexCount)
     {
-        float4x4 worldMatrix = instance.unpack(instance.current);
         uint tmpIndex = meshlet.vertexOffset + groupThreadId.x;
         uint index = meshletVertices[tmpIndex];
         float4 pos = float4(verticesData[index].pos.xyz, 1);
+        
+        float4x4 worldMatrix = instance.unpack(instance.current);
         float4 worldPos = mul(worldMatrix, pos);
+        outVerts[groupThreadId.x].pos = mul(camera.viewProj, worldPos);
+        
+        float4x4 previousWorldMatrix = instance.unpack(instance.previous);
+        float4 previousWorldPos = mul(previousWorldMatrix, pos);
+        outVerts[groupThreadId.x].previousPos = mul(camera.previousViewProj, previousWorldPos);
+        
         float3 normal = verticesData[index].normal.xyz;
         float3 worldNormal = mul((float3x3)worldMatrix, normal);
-        outVerts[groupThreadId.x].pos = mul(camera.viewProj, worldPos);
         outVerts[groupThreadId.x].normal = normalize(worldNormal);
+        
         outVerts[groupThreadId.x].color = RandUINT(meshletIndexIndirect);
         outVerts[groupThreadId.x].uv = verticesData[index].uv;
     }
@@ -127,6 +134,7 @@ struct PS_OUTPUT_FORWARD
 {
     float4 albedo : SV_Target0;
     float3 normal : SV_Target1;
+    float2 motion : SV_Target2;
     //uint entityID : SV_Target1;
 };
 
@@ -137,7 +145,14 @@ PS_OUTPUT_FORWARD PixelForward(HLSL::MSVert inVerts)
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
     o.albedo = float4(inVerts.color, 1);
-    o.normal = inVerts.normal.xyz;
+    o.normal = StoreR11G11B10Normal(normalize(inVerts.normal.xyz));
+    
+    float2 currScreenPos = inVerts.pos.xy;
+    float2 prevScreenPos = (inVerts.previousPos.xy / inVerts.previousPos.w) * 0.5 + 0.5;
+    prevScreenPos.y = 1 - prevScreenPos.y;
+    prevScreenPos *= cullingContext.resolution.xy;
+    o.motion = (currScreenPos - prevScreenPos) * 0.1;
+    
     //o.entityID = 1;
     return o;
 }
@@ -163,8 +178,14 @@ PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
         o.albedo = 0.66;
     }
     
-    //o.albedo = float4(inVerts.color, 1);
     o.normal = StoreR11G11B10Normal(normalize(inVerts.normal.xyz));
+    
+    float2 currScreenPos = inVerts.pos.xy;
+    float2 prevScreenPos = (inVerts.previousPos.xy / inVerts.previousPos.w) * 0.5 + 0.5;
+    prevScreenPos.y = 1 - prevScreenPos.y;
+    prevScreenPos *= cullingContext.resolution.xy;
+    o.motion = (currScreenPos - prevScreenPos);
+    
     //o.entityID = 1;
     return o;
 }

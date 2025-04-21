@@ -31,9 +31,10 @@ namespace HLSL
     struct MSVert
     {
         float4 pos : SV_Position;
+        float4 previousPos : TEXCOORD0;
         float3 normal : NORMAL;
         float3 color : COLOR0;
-        float2 uv : TEXCOORD0;
+        float2 uv : TEXCOORD1;
     };
 #endif
     
@@ -77,6 +78,7 @@ namespace HLSL
         uint meshletsCounterIndex;
         uint albedoIndex;
         uint normalIndex;
+        uint motionIndex;
         uint depthIndex;
         uint HZB;
         uint HZBMipCount;
@@ -131,50 +133,21 @@ namespace HLSL
     
     struct Instance
     {
-        float4x3 current; // FFS hlsl++ does store 4x3 and 4x3 in the same way ... BS !
-        float4x3 previous;
+        float4x4 current; // FFS hlsl++ does store 4x3 and 4x3 in the same way ... BS ! TODO : make the 4x3 packing work
+        float4x4 previous;
         uint meshIndex;
         uint materialIndex;
         uint pad1;
         uint pad2;
         
-        float4x4 unpack(float4x3 mat)
+        float4x4 unpack(float4x4 mat)
         {
-#ifndef __cplusplus
-            return float4x4(mat[0].x, mat[1].x, mat[2].x, mat[3].x,
-                            mat[0].y, mat[1].y, mat[2].y, mat[3].y,
-                            mat[0].z, mat[1].z, mat[2].z, mat[3].z,
-                            0, 0, 0, 1);
-#else
-            return float4x4(mat[0].x, mat[1].x, mat[2].x, mat[3].x,
-                            mat[0].y, mat[1].y, mat[2].y, mat[3].y,
-                            mat[0].z, mat[1].z, mat[2].z, mat[3].z,
-                            0, 0, 0, 1);
-#endif
+            return mat;
         }
         
-        float4x3 pack(float4x4 mat)
+        float4x4 pack(float4x4 mat)
         {
-            float4x3 res;
-#ifndef __cplusplus
-            res[0].xyz = mat[0].xyz;
-            res[1].xyz = mat[1].xyz;
-            res[2].xyz = mat[2].xyz;
-            
-            res[3].x = mat[3].x;
-            res[3].y = mat[3].y;
-            res[3].z = mat[3].z;
-#else
-            res[0].xyz = mat[0].xyz;
-            res[1].xyz = mat[1].xyz;
-            res[2].xyz = mat[2].xyz;
-            
-            res[0].w = mat[3].x;
-            res[1].w = mat[3].y;
-            res[2].w = mat[3].z;
-#endif
-            
-            return res;
+            return mat;
         }
     };
     
@@ -237,12 +210,16 @@ namespace HLSL
     
     struct Camera
     {
+        // current
         float4x4 view;
         float4x4 proj;
         float4x4 viewProj;
         float4x4 viewProj_inv;
         float4 planes[6];
         float4 worldPos;
+        
+        //previous
+        float4x4 previousViewProj;
     };
 
     struct Light
@@ -252,7 +229,8 @@ namespace HLSL
         float4 color;
         float range;
         float angle;
-        uint pad[2];
+        uint pad1;
+        uint pad2;
     };
     
     struct Globals
@@ -260,6 +238,7 @@ namespace HLSL
         float4 resolution; //x, y, 1/x, 1/y
         uint albedoIndex;
         uint normalIndex;
+        uint motionIndex;
     };
     
     struct PostProcessParameters
@@ -269,6 +248,7 @@ namespace HLSL
         uint albedoIndex;
         uint normalIndex;
         uint depthIndex;
+        uint motionIndex;
         uint backBufferIndex;
         //tonemap
         float P;

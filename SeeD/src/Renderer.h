@@ -370,6 +370,7 @@ public:
         cullingContextParams.meshletsCounterIndex = cullingContext.meshletsCounter.GetResource().uav.offset;
         cullingContextParams.albedoIndex = GetRegisteredResource("albedo").srv.offset;
         cullingContextParams.normalIndex = GetRegisteredResource("normal").srv.offset;
+        cullingContextParams.motionIndex = GetRegisteredResource("motion").srv.offset;
         cullingContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
         cullingContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
         cullingContextParams.resolution = float4(float(resolution.x), float(resolution.y), 1.0f / resolution.x, 1.0f / resolution.y);
@@ -914,8 +915,9 @@ public:
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        Resource rts[] = { albedo.Get(), normal.Get() };
+        Resource rts[] = { albedo.Get(), normal.Get(), motion.Get() };
         SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true);
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
@@ -932,6 +934,7 @@ public:
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
 
         Close();
     }
@@ -1087,6 +1090,7 @@ class PostProcess : public Pass
     ViewResource lighted;
     ViewResource albedo;
     ViewResource normal;
+    ViewResource motion;
     ViewResource depth;
     Components::Handle<Components::Shader> postProcessShader;
 
@@ -1100,6 +1104,7 @@ public:
         lighted.Register("lighted", view);
         albedo.Register("albedo", view);
         normal.Register("normal", view);
+        motion.Register("motion", view);
         depth.Register("depth", view);
         postProcessShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\PostProcess.hlsl");
 
@@ -1130,6 +1135,7 @@ public:
         ppparams.lightedIndex = lighted.Get().uav.offset;
         ppparams.albedoIndex = albedo.Get().uav.offset;
         ppparams.normalIndex = normal.Get().uav.offset;
+        ppparams.motionIndex = motion.Get().uav.offset;
         ppparams.depthIndex = depth.Get().uav.offset;
         ppparams.backBufferIndex = GPU::instance->backBuffer.Get().uav.offset;
 
@@ -1367,15 +1373,19 @@ public:
                     bool materialAdded = viewWorld->materials.Add(World::Entity(instanceCmp.material.index), materialIndex);
 
                     // everything should be loaded to be able to draw the instance
-                    float4x4 worldMatrix = ComputeWorldMatrix(ent);
 
-                    //worldMatrix[3][1] = sin(worldMatrix[3][2] + 1.0f * Time::instance->currentTicks * 0.0000001f);
+                    Components::WorldMatrix& matrixCmp = slot.Get<Components::WorldMatrix>();
+                    float4x4 previousWorldMatrix = matrixCmp.matrix;
+                    float4x4 worldMatrix = ComputeWorldMatrix(ent);
+                    //worldMatrix[3][1] = sin(worldMatrix[3][2] + 1.0f * Time::instance->currentTicks * 0.000001f);
+                    matrixCmp.matrix = worldMatrix;
 
                     HLSL::Instance& instance = localInstances[instanceCount];
                     instance.meshIndex = meshIndex;
                     instance.materialIndex = materialIndex;
                     //instance.worldMatrix = worldMatrix;
                     instance.current = instance.pack(worldMatrix);
+                    instance.previous = instance.pack(previousWorldMatrix);
                     // count instances with shader
                     instanceCount++;
 
@@ -1557,18 +1567,22 @@ public:
                 for (uint i = 0; i < entityCount; i++)
                 {
                     auto& cam = queryResult[i].Get<Components::Camera>();
-                    auto& trans = queryResult[i].Get<Components::WorldMatrix>();
+                    auto& trans = queryResult[i].Get<Components::Transform>();
+                    auto& mat = queryResult[i].Get<Components::WorldMatrix>();
+                    float4x4 previousMat = mat.matrix;
+                    mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
 
                     float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip);
-                    float4x4 viewProj = mul(inverse(trans.matrix), proj);
-                    float4 worldPos = float4(trans.matrix[3].xyz, 1);
+                    float4x4 viewProj = mul(inverse(mat.matrix), proj);
+                    float4x4 previousViewProj = mul(inverse(previousMat), proj);
+                    float4 worldPos = float4(mat.matrix[3].xyz, 1);
 
                     float4 planes[6];
                     float3 worldCorners[8];
                     //float sizeCulling;
 
                     // compute planes
-                    float4x4 mat = mul(inverse(proj), trans.matrix);
+                    float4x4 matProj = mul(inverse(proj), mat.matrix);
 
                     //create the 8 points of a cube in unit-space
                     float4 cube[8];
@@ -1586,7 +1600,7 @@ public:
                     float4 tmp;
                     for (int i = 0; i < 8; i++)
                     {
-                        tmp = float4(mul(cube[i], mat).vec);
+                        tmp = float4(mul(cube[i], matProj).vec);
                         worldCorners[i] = float3((tmp / tmp.w).vec);
                     }
 
@@ -1600,7 +1614,7 @@ public:
 
                     HLSL::Camera hlslcam;
 
-                    hlslcam.view = inverse(trans.matrix);
+                    hlslcam.view = inverse(mat.matrix);
                     hlslcam.proj = proj;
                     hlslcam.viewProj = viewProj;
                     hlslcam.viewProj_inv = inverse(hlslcam.viewProj);
@@ -1612,9 +1626,11 @@ public:
                     hlslcam.planes[5] = planes[5];
                     hlslcam.worldPos = worldPos;
 
+                    hlslcam.previousViewProj = previousViewProj;
+
                     this->viewWorld->cameras.Add(hlslcam);
 
-                    editorState.cameraView = trans.matrix;
+                    editorState.cameraView = mat.matrix;
                     editorState.cameraProj = hlslcam.proj;
                 }
                 this->viewWorld->cameras.Add(hlslcamPrevious);

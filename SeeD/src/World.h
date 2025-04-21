@@ -644,7 +644,9 @@ namespace Systems
 
             auto& cam = camera.Get<Components::Camera>();
             auto& trans = camera.Get<Components::Transform>();
-            auto& mat = camera.Get<Components::WorldMatrix>();
+            //auto& mat = camera.Get<Components::WorldMatrix>();
+            Components::WorldMatrix mat;
+            mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
 
             sensibility += IOs::instance->mouse.mouseWheel * .001f * sensibility;
             sensibility = clamp(float1(sensibility), 0.0025f, 1000.0f);
