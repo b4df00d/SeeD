@@ -221,6 +221,8 @@ namespace HLSL
         
         //previous
         float4x4 previousViewProj;
+        float4x4 previousViewProj_inv;
+        float4 previousWorldPos;
     };
 
     struct Light
@@ -274,6 +276,7 @@ namespace HLSL
         uint BVH;
         uint giIndex;
         uint giReservoirIndex;
+        uint previousgiReservoirIndex;
         uint shadowsIndex;
         uint lightedIndex;
         

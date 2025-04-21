@@ -91,6 +91,8 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     if (dtid.x > ppParameters.resolution.x || dtid.y > ppParameters.resolution.y)
         return;
     
+    GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
+    
     Texture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
     RWTexture2D<float4> albedo = ResourceDescriptorHeap[cullingContext.albedoIndex];
     
@@ -114,4 +116,6 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     motion *= 0.1;
     albedo[dtid.xy].xy += abs(motion.xy);
     */
+    
+   // albedo[dtid.xy] = max(cd.viewDistDiff-0.04, 0) * 10;
 }

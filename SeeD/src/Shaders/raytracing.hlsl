@@ -159,18 +159,12 @@ void RayGen()
         bounceLight = payload.color * saturate(dot(cd.worldNorm, bounceLightDir)) * precisionAdjust; // BRDF here ?
         
         // ReSTIR
+        RWStructuredBuffer<HLSL::GIReservoir> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
+        HLSL::GIReservoir r = previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * rtParameters.resolution.x];
         
-        Texture2D<float2> motionT = ResourceDescriptorHeap[cullingContext.motionIndex];
-        float2 motion = motionT[launchIndex.xy];
-        //motion = 0;
-        uint2 previousLaunchIndex = min(max(launchIndex.xy + int2(motion), 0), rtParameters.resolution.xy);
-        
-        RWStructuredBuffer<HLSL::GIReservoir> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-        HLSL::GIReservoir r = giReservoir[previousLaunchIndex.x + previousLaunchIndex.y * rtParameters.resolution.x];
-        
-        float blend = 0;
+        float blend = max(cd.viewDistDiff-0.04, 0) * 10;
         uint maxFrameFilteringCount = 100;
-        uint frameFilteringCount = max(0, saturate(1 - blend) * maxFrameFilteringCount);
+        uint frameFilteringCount = max(1, saturate(1 - blend) * maxFrameFilteringCount);
         float frameFilteringDecay = (0.33f / float(frameFilteringCount));
     
         // if not first time fill with previous frame reservoir
@@ -195,6 +189,7 @@ void RayGen()
         
         UpdateGIReservoir(r, newR);
         
+        RWStructuredBuffer<HLSL::GIReservoir> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
         giReservoir[launchIndex.x + launchIndex.y * rtParameters.resolution.x] = r;
         
         bounceLight = r.color_W.xyz * (r.dir_Wsum.w / r.pos_Wcount.w);
@@ -213,7 +208,7 @@ void RayGen()
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
     payload.hitDistance = RayTCurrent();
-    payload.color = float3(0.66, 0.75, 0.99) * saturate(pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 1.5)) * 0.2;
+    payload.color = float3(0.66, 0.75, 0.99) * saturate(pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 1.5)) * 0.1;
 }
 
 [shader("closesthit")]

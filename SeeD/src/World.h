@@ -621,7 +621,7 @@ namespace Systems
         {
             auto& cam = camera.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Camera::mask).Get<Components::Camera>();
             cam.fovY = 90;
-            cam.nearClip = 0.05;
+            cam.nearClip = 0.1;
             cam.farClip = 1000.0f;
             auto& trans = camera.Get<Components::Transform>();
             trans.position = float3(0, 1, -2);

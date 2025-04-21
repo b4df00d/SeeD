@@ -749,6 +749,8 @@ struct GBufferCameraData
     float3 worldNorm;
     float3 viewDir;
     float viewDist;
+    float viewDistDiff;
+    uint2 previousPixel;
 };
 GBufferCameraData GetGBufferCameraData(uint2 pixel)
 {
@@ -757,11 +759,11 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     cd.camera = cameras[0]; //cullingContext.cameraIndex];
     
-    Texture2D<float> depth = ResourceDescriptorHeap[cullingContext.depthIndex];
     Texture2D<float3> normalT = ResourceDescriptorHeap[cullingContext.normalIndex];
     cd.worldNorm = ReadR11G11B10Normal(normalT[pixel]);
     
     // inverse y depth depth[uint2(launchIndex.x, rtParameters.resolution.y - launchIndex.y)]
+    Texture2D<float> depth = ResourceDescriptorHeap[cullingContext.depthIndex];
     float3 clipSpace = float3(pixel * cullingContext.resolution.zw * 2 - 1, depth[pixel]);
     float4 worldSpace = mul(cd.camera.viewProj_inv, float4(clipSpace.x, -clipSpace.y, clipSpace.z, 1));
     worldSpace.xyz /= worldSpace.w;
@@ -769,11 +771,25 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     float3 rayDir = worldSpace.xyz - cd.camera.worldPos.xyz;
     float rayLength = length(rayDir);
     rayDir /= rayLength;
-    //worldSpace.xyz = cd.camera.worldPos.xyz + rayDir * rayLength;
+    
+    Texture2D<float2> motionT = ResourceDescriptorHeap[cullingContext.motionIndex];
+    float2 motion = motionT[pixel.xy];
+    uint2 previousPixel = min(max(pixel.xy + int2(motion), 0), cullingContext.resolution.xy);
+    cd.previousPixel = previousPixel;
+    
+    Texture2D<float> previousDepth = ResourceDescriptorHeap[cullingContext.HZB];
+    float3 previousClipSpace = float3(previousPixel * cullingContext.resolution.zw * 2 - 1, previousDepth[previousPixel]);
+    float4 previousWorldSpace = mul(cd.camera.previousViewProj_inv, float4(previousClipSpace.x, -previousClipSpace.y, previousClipSpace.z, 1));
+    previousWorldSpace.xyz /= previousWorldSpace.w;
+    
+    float3 previousRayDir = previousWorldSpace.xyz - cd.camera.previousWorldPos.xyz;
+    float previousRayLength = length(previousRayDir);
+    previousRayDir /= previousRayLength;
     
     cd.viewDir = rayDir;
     cd.viewDist = rayLength;
     cd.worldPos = worldSpace.xyz;
+    cd.viewDistDiff = abs(rayLength - previousRayLength);
     
     return cd;
 }

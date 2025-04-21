@@ -246,7 +246,7 @@ struct RayTracingContext
     Resource TLAS;
     Resource GI;
     Resource shadows;
-    Resource giReservoir;
+    PerFrame<Resource> giReservoir;
     ProbeGrid probes[3];
 
     void On(uint2 resolution)
@@ -255,7 +255,11 @@ struct RayTracingContext
         //scratchBuffer.CreateBuffer(1000000, 1, false, "scratchBuffer");
         GI.CreateTexture(resolution, DXGI_FORMAT_R11G11B10_FLOAT, false, "GI");
         shadows.CreateTexture(resolution, DXGI_FORMAT_R8_UNORM, false, "shadows");
-        giReservoir.CreateBuffer<HLSL::GIReservoir>(resolution.x * resolution.y, "GIReservoir");
+
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            giReservoir.Get(i).CreateBuffer<HLSL::GIReservoir>(resolution.x * resolution.y, "GIReservoir");
+        }
 
         probes[0].On(uint3(16, 16, 16), float3(8, 8, 8));
         probes[1].On(uint3(16, 16, 16), float3(32, 32, 32));
@@ -272,7 +276,11 @@ struct RayTracingContext
         //scratchBuffer.Release();
         GI.Release();
         shadows.Release();
-        giReservoir.Release();
+
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            giReservoir.Get(i).Release();
+        }
 
         probes[0].Off();
         probes[1].Off();
@@ -390,7 +398,8 @@ public:
         rayTracingContextParams.giIndex = raytracingContext.GI.uav.offset;
         rayTracingContextParams.shadowsIndex = raytracingContext.shadows.uav.offset;
         rayTracingContextParams.resolution = float4(1.0f * resolution.x, 1.0f * resolution.y, 1.0f / resolution.x, 1.0f / resolution.y);
-        rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.uav.offset;
+        rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get().uav.offset;
+        rayTracingContextParams.previousgiReservoirIndex = raytracingContext.giReservoir.GetPrevious().uav.offset;
         //rayTracingContextParams.lightedIndex = lighted.Get().uav.offset;
 
         for (uint i = 0; i < ARRAYSIZE(raytracingContext.probes); i++)
@@ -1570,8 +1579,9 @@ public:
 
                     float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip);
                     float4x4 viewProj = mul(inverse(mat.matrix), proj);
-                    float4x4 previousViewProj = mul(inverse(previousMat), proj);
                     float4 worldPos = float4(mat.matrix[3].xyz, 1);
+                    float4x4 previousViewProj = mul(inverse(previousMat), proj);
+                    float4 previousWorldPos = float4(previousMat[3].xyz, 1);
 
                     float4 planes[6];
                     float3 worldCorners[8];
@@ -1623,6 +1633,8 @@ public:
                     hlslcam.worldPos = worldPos;
 
                     hlslcam.previousViewProj = previousViewProj;
+                    hlslcam.previousViewProj_inv = inverse(hlslcam.previousViewProj);
+                    hlslcam.previousWorldPos = previousWorldPos;
 
                     this->viewWorld->cameras.Add(hlslcam);
 
