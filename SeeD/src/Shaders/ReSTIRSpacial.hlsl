@@ -40,33 +40,26 @@ void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThread
     float3 worldNorm = ReadR11G11B10Normal(normalT[dtid.xy]);
     float depth = depthT[dtid.xy];
     
-    uint pattern = (dtid.x + dtid.y + rtParameters.passNumber) % 2;
+    uint pattern = (dtid.x + dtid.y + rtParameters.passNumber + rtParameters.frame) % 2;
     for (uint i = 0; i < 4; i++)
     {
-        int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] * 6 : patternB[i] * 4);
+        float radius = 6;
+        int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] * 2 * radius : patternB[i] * radius);
         if(!(any(pixel<0) || any(pixel>cullingContext.resolution.xy)))
         {
             float3 worldNormNeightbor = ReadR11G11B10Normal(normalT[pixel.xy]);
             float depthNeightbor = depthT[pixel.xy];
-            if(abs(depth - depthNeightbor) > 0.001)
+            if(abs(depth - depthNeightbor) > 0.002)
                 continue;
-            if(dot(worldNorm, worldNormNeightbor) < 0.9)
+            if(dot(worldNorm, worldNormNeightbor) < 0.95)
                 continue;
             HLSL::GIReservoir rNeightbor = giReservoir[pixel.x + pixel.y * rtParameters.resolution.x];
             UpdateGIReservoir(r, rNeightbor);
-            
         }
     }
-    /*
-    if (r.pos_Wcount.w >= maxFrameFilteringCount)
-    {
-        float factor = max(0, float(maxFrameFilteringCount) / max(r.pos_Wcount.w, 0.0f));
-        r.color_W.w = max(0, r.color_W.w * factor);
-        r.dir_Wsum.w *= factor;
-        r.pos_Wcount.w = maxFrameFilteringCount;
-    }
-    */
+    
+    ScaleGIReservoir(r, maxFrameFilteringCount);
     
     RWStructuredBuffer<HLSL::GIReservoir> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
-    //previousgiReservoir[dtid.x + dtid.y * rtParameters.resolution.x] = r;
+    previousgiReservoir[dtid.x + dtid.y * rtParameters.resolution.x] = r;
 }

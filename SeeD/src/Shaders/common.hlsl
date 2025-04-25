@@ -885,16 +885,26 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     return s;
 }
 
-static uint maxFrameFilteringCount = 10;
-void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current)
+static uint maxFrameFilteringCount = 5;
+void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float WBias = 1)
 {
     previous.pos_Wcount.w += current.pos_Wcount.w;
     previous.dir_Wsum.w += current.dir_Wsum.w;
-    if(previous.color_W.w < current.color_W.w)
+    if(previous.color_W.w * WBias < current.color_W.w)
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.dir_Wsum.xyz = current.dir_Wsum.xyz;
         previous.pos_Wcount.xyz = current.pos_Wcount.xyz;
+    }
+}
+void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
+{
+    if (r.pos_Wcount.w >= frameFilteringCount)
+    {
+        float factor = max(0, float(frameFilteringCount) / max(r.pos_Wcount.w, 1.0f));
+        r.color_W.w = max(0, r.color_W.w * lerp(factor, 1, 0.33));
+        r.dir_Wsum.w *= factor;
+        r.pos_Wcount.w *= factor;
     }
 }
 

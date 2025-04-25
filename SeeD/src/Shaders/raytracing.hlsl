@@ -167,6 +167,12 @@ void RayGen()
         uint frameFilteringCount = max(1, saturate(1 - blend) * maxFrameFilteringCount);
         //float frameFilteringDecay = (0.33f / float(frameFilteringCount));
     
+        HLSL::GIReservoir newR;
+        float W = length(bounceLight); 
+        newR.color_W = float4(bounceLight, W);
+        newR.dir_Wsum = float4(bounceLightDir, W);
+        newR.pos_Wcount = float4(offsetedWorldPos, 1);
+        
         // if not first time fill with previous frame reservoir
         if (rtParameters.frame == 0)
         {
@@ -174,21 +180,9 @@ void RayGen()
             r.dir_Wsum = 0;
             r.pos_Wcount = 0;
         }
-        else if (r.pos_Wcount.w >= frameFilteringCount)
-        {
-            float factor = max(0, float(frameFilteringCount) / max(r.pos_Wcount.w, 0.0f));
-            r.color_W.w = max(0, r.color_W.w * factor);
-            r.dir_Wsum.w *= factor;
-            r.pos_Wcount.w = frameFilteringCount;
-        }
-        
-        HLSL::GIReservoir newR;
-        float W = length(bounceLight); 
-        newR.color_W = float4(bounceLight, W);
-        newR.dir_Wsum = float4(bounceLightDir, W);
-        newR.pos_Wcount = float4(offsetedWorldPos, 1);
         
         UpdateGIReservoir(r, newR);
+        ScaleGIReservoir(r, frameFilteringCount);
         
         RWStructuredBuffer<HLSL::GIReservoir> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
         giReservoir[launchIndex.x + launchIndex.y * rtParameters.resolution.x] = r;
@@ -225,6 +219,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     HLSL::Light light = lights[0];
     
     SurfaceData s = GetRTSurfaceData(attrib);
+    if(dot(s.normal, WorldRayDirection()) > 0) s.normal = -s.normal; // if we touch the backface, invert the normal ?
     
     float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() * 0.999f) + s.normal * 0.001f;
     float3 sun = 0;
