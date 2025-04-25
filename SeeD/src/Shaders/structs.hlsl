@@ -253,6 +253,12 @@ namespace HLSL
     };
     static const float brightnessClippingAdjust = 4;
     
+    struct ProbeData
+    {
+        HLSL::SHProbe sh;
+        float4 position;
+    };
+    
     struct ProbeGrid
     {
         float4 probesBBMin;
@@ -280,7 +286,7 @@ namespace HLSL
         uint shadowsIndex;
         uint lightedIndex;
         
-        uint pad1;
+        uint passNumber;
         
         uint probeToCompute;
         ProbeGrid probes[3];

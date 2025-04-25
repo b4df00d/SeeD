@@ -854,11 +854,13 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     {
         Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
         s.albedo = albedo.SampleLevel(samplerLinear, uv, 0).xyz;
+        s.albedo = pow(s.albedo, 1.f/2.2f);
     }
     else
     {
         s.albedo = 0.66;
     }
+    
     if (material.textures[2] != ~0)
     {
         Texture2D<float4> roughness = ResourceDescriptorHeap[material.textures[2]];
@@ -883,10 +885,11 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     return s;
 }
 
+static uint maxFrameFilteringCount = 10;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current)
 {
-    previous.pos_Wcount.w += 1;
-    previous.dir_Wsum.w += current.color_W.w;
+    previous.pos_Wcount.w += current.pos_Wcount.w;
+    previous.dir_Wsum.w += current.dir_Wsum.w;
     if(previous.color_W.w < current.color_W.w)
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw

@@ -230,7 +230,7 @@ struct ProbeGrid
         probesResolution = res;
         probesBBSize = size;
         uint bufferCount = probesResolution.x * probesResolution.y * probesResolution.z;
-        probes.CreateBuffer<HLSL::SHProbe>(bufferCount, "probes");
+        probes.CreateBuffer<HLSL::ProbeData>(bufferCount, "probes");
     }
 
     void Off()
@@ -261,9 +261,10 @@ struct RayTracingContext
             giReservoir.Get(i).CreateBuffer<HLSL::GIReservoir>(resolution.x * resolution.y, "GIReservoir");
         }
 
-        probes[0].On(uint3(16, 16, 16), float3(8, 8, 8));
-        probes[1].On(uint3(16, 16, 16), float3(32, 32, 32));
-        probes[2].On(uint3(16, 16, 16), float3(128, 128, 128));
+        float multi = 2;
+        probes[0].On(uint3(16, 16, 16) * multi, float3(8, 8, 8) * multi);
+        probes[1].On(uint3(16, 16, 16) * multi, float3(32, 32, 32) * multi);
+        probes[2].On(uint3(16, 16, 16) * multi, float3(128, 128, 128) * multi);
     }
 
     void Off()
@@ -400,6 +401,7 @@ public:
         rayTracingContextParams.resolution = float4(1.0f * resolution.x, 1.0f * resolution.y, 1.0f / resolution.x, 1.0f / resolution.y);
         rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get().uav.offset;
         rayTracingContextParams.previousgiReservoirIndex = raytracingContext.giReservoir.GetPrevious().uav.offset;
+        rayTracingContextParams.passNumber = 0;
         //rayTracingContextParams.lightedIndex = lighted.Get().uav.offset;
 
         for (uint i = 0; i < ARRAYSIZE(raytracingContext.probes); i++)
@@ -1005,6 +1007,7 @@ class Lighting : public Pass
     ViewResource depth;
     ViewResource normal;
     Components::Handle<Components::Shader> rayDispatchShader;
+    Components::Handle<Components::Shader> ReSTIRSpacialShader;
     Components::Handle<Components::Shader> applyLightingShader;
 
 public:
@@ -1018,6 +1021,7 @@ public:
         depth.Register("depth", view);
         normal.Register("normal", view);
         rayDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracing.hlsl");
+        ReSTIRSpacialShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\ReSTIRSpacial.hlsl");
         applyLightingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\lighting.hlsl");
     }
     void Setup(View* view) override
@@ -1038,6 +1042,7 @@ public:
         auto cullingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->cullingContext.cullingContext);
         auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
 
+        // Trace rays (+ temporal ReSTIR)
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
         commandBuffer->SetRaytracing(rayDispatch); 
         // global root sig for ray tracing is the same as compute shaders
@@ -1051,6 +1056,28 @@ public:
 
         commandBuffer->cmd->DispatchRays(&drd);
 
+        // Spacial ReSTIR pass 1
+        view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
+        Shader& ReSTIRSpacial = *AssetLibrary::instance->Get<Shader>(ReSTIRSpacialShader.Get().id, true);
+        commandBuffer->SetCompute(ReSTIRSpacial);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, cullingContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
+        commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->resolution.x), ReSTIRSpacial.DispatchY(view->resolution.y), 1);
+
+        // Spacial ReSTIR pass 2
+        view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
+        uint tmp = view->raytracingContext.rtParameters.giReservoirIndex;
+        view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.rtParameters.previousgiReservoirIndex;
+        view->raytracingContext.rtParameters.previousgiReservoirIndex = tmp;
+        //std::swap(view->raytracingContext.rtParameters.giReservoirIndex, view->raytracingContext.rtParameters.previousgiReservoirIndex);
+        view->raytracingContext.rtParameters.passNumber = 1;
+        auto raytracingContextAddress2 = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress2);
+        commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->resolution.x), ReSTIRSpacial.DispatchY(view->resolution.y), 1);
+        //std::swap(view->raytracingContext.rtParameters.giReservoirIndex, view->raytracingContext.rtParameters.previousgiReservoirIndex); // reverse again if somebody need the original latter ?
+
+        // Lighting
         view->raytracingContext.GI.Barrier(commandBuffer.Get());
 
         Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);

@@ -30,15 +30,18 @@ void RayGen()
     
     float3 t = float3(launchIndex.xyz) / float3(probes.probesResolution.xyz);
     float3 probeWorldPos = lerp(probes.probesBBMin.xyz, probes.probesBBMax.xyz, t);
+    float3 cellSize = float3(probes.probesBBMax.xyz - probes.probesBBMin.xyz) / float3(probes.probesResolution.xyz);
+    probeWorldPos += cellSize * 0.5;
     
     uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
     uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
   
-    RWStructuredBuffer<HLSL::SHProbe> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
+    RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
     
     uint seed = initRand(launchIndex.x + cullingContext.frameTime % 234 * 1.621f, launchIndex.y + cullingContext.frameTime % 431 * 1.432f, 4);
     
     // Initialise sh to 0
+    HLSL::ProbeData probeData;
     HLSL::SHProbe probe;
     probe.R = shZero();
     probe.G = shZero();
@@ -53,12 +56,12 @@ void RayGen()
             
             HLSL::HitInfo payload;
             payload.color = float3(0.0, 0.0, 0.0);
-            payload.rayDepth = 2;
+            payload.rayDepth = 1;
             payload.rndseed = seed;
     
             RayDesc ray;
-            float3 randVal = (float3(nextRand(seed), nextRand(seed), nextRand(seed)) * 2.f - 1.f) * 0.25f;
-            ray.Origin = probeWorldPos + randVal;
+            float3 randVal = (float3(nextRand(seed), nextRand(seed), nextRand(seed)) * 2.f - 1.f) * cellSize * 0.125f;
+            ray.Origin = probeWorldPos + probesBuffer[probeIndex].position.xyz;//  + randVal;
             ray.Direction = rayDir;
             ray.TMin = 0;
             ray.TMax = 100000;
@@ -80,7 +83,9 @@ void RayGen()
     probe.G = shScale(probe.G, shFactor);
     probe.B = shScale(probe.B, shFactor);
     
-    probesBuffer[probeIndex] = probe;
+    probeData.sh = probe;
+    probeData.position = 100000;
+    probesBuffer[probeIndex] = probeData;
 }
 
 [shader("miss")]
@@ -88,7 +93,7 @@ void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
     //payload.color = float3(0, 0, 1); return;
     payload.hitDistance = RayTCurrent();
-    payload.color = float3(0.66, 0.75, 0.99) * pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 2) * 0.1;
+    payload.color = float3(0.66, 0.75, 0.99) * pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 2) * 1;
 }
 
 [shader("closesthit")]
@@ -133,7 +138,8 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
         sun = shadowload.hitDistance >= ray.TMax ? light.color.xyz : 0;
     }
     //payload.color = BRDF(s, WorldRayDirection(), -light.dir.xyz, sun);
-    payload.color = saturate(dot(s.normal, -light.dir.xyz)) * sun * s.albedo;
+    payload.color = saturate(dot(s.normal, -light.dir.xyz)) * sun;
+    payload.color *= saturate(s.albedo * 1);
 }
 
 [shader("anyhit")]
