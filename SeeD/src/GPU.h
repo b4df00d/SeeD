@@ -2179,7 +2179,7 @@ struct MeshStorage
     // could we just store BLASes in big bulk resources like above ?
     std::vector<Mesh> allMeshes;
     Resource scratchBLAS;
-    uint maxScratchSizeInBytes = 50000000;
+    uint maxScratchSizeInBytes = 150000000;
 
     std::recursive_mutex lock;
 

@@ -177,6 +177,7 @@ PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
     {
         o.albedo = 0.66;
     }
+    //o.albedo = float4(inVerts.color, 1);
     
     o.normal = StoreR11G11B10Normal(normalize(inVerts.normal.xyz));
     

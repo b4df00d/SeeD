@@ -74,19 +74,19 @@ public:
     String name;
     static void UpdateWindows()
     {
-        for (uint i = 0; i < guiWindows.size(); i++)
+        if (IOs::instance->keys.pressed[VK_TAB])
+            editorState.show = !editorState.show;
+
+        if (editorState.show)
         {
-            guiWindows[i]->Update();
-        }
-    }
-    static void DisplayMenu()
-    {
-        for (uint i = 0; i < guiWindows.size(); i++)
-        {
-            if (ImGui::MenuItem(guiWindows[i]->name.c_str()))
+            for (uint i = 0; i < guiWindows.size(); i++)
             {
-                guiWindows[i]->Open();
+                guiWindows[i]->Update();
             }
+        }
+        else
+        {
+            ImGui::End();
         }
     }
 
@@ -943,6 +943,89 @@ public:
 };
 Guizmo guizmo;
 
+class MainMenu : public EditorWindow
+{
+public:
+    MainMenu() : EditorWindow("MainMenu") {}
+    void Update() override final
+    {
+        ZoneScoped;
+
+        if (ImGui::BeginMenuBar())
+        {
+            if (ImGui::MenuItem(World::instance->playing ? "Stop" : "Play") || IOs::instance->keys.pressed[VK_F2])
+            {
+                World::instance->playing = !World::instance->playing;
+            }
+            ImGui::Separator();
+
+            if (ImGui::BeginMenu("File"))
+            {
+                if (ImGui::MenuItem("Save World"))
+                {
+                    World::instance->Save("Save");
+                }
+                if (ImGui::MenuItem("Load World"))
+                {
+                    editorState.selectedObject = {};
+                    std::string file = "Save";
+                    World::instance->Load(file);
+                }
+                if (ImGui::MenuItem("Clear World"))
+                {
+                    World::instance->Clear();
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Edit"))
+            {
+                if (ImGui::BeginMenu("New Entity"))
+                {
+                    if (ImGui::MenuItem("Empty"))
+                    {
+                        World::Entity ent;
+                        editorState.selectedObject = ent.Make(0);
+                    }
+                    if (ImGui::MenuItem("Light Directional"))
+                    {
+                        World::Entity ent;
+                        editorState.selectedObject = ent.Make(Components::Light::mask | Components::Transform::mask, "Directional Light");
+                        auto& trans = ent.Get<Components::Transform>();
+                        trans.position = float3(0);
+                        trans.rotation = quaternion(0, 0, 0, 1);
+                        trans.scale = float3(1);
+                        auto& light = ent.Get<Components::Light>();
+                        light.color = float4(2, 1.75, 1.5, 1);
+                    }
+                    ImGui::EndMenu();
+                }
+
+                if (ImGui::MenuItem("Recompute Bounding Boxes"))
+                {
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("View"))
+            {
+                for (uint i = 0; i < guiWindows.size(); i++)
+                {
+                    if (ImGui::MenuItem(guiWindows[i]->name.c_str()))
+                    {
+                        guiWindows[i]->Open();
+                    }
+                }
+                ImGui::EndMenu();
+            }
+
+            //duplicate of profiler framerate info
+            ImGui::Text("average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+            ImGui::Separator();
+
+            ImGui::EndMainMenuBar();
+        }
+    }
+};
+MainMenu mainMenu;
 
 /*
 class AboutWindow : public EditorWindow

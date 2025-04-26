@@ -54,7 +54,7 @@ void operator delete(void* ptr) noexcept
 #include "World.h"
 struct EditorState
 {
-    bool show;
+    bool show = true;
     World::Entity selectedObject = entityInvalid;
     bool dirtyHierarchy = true;
 
@@ -211,12 +211,15 @@ public:
 
     void ScheduleEditor(tf::Subflow& subflow)
     {
+        EditorWindow::UpdateWindows();
+        /*
         for (uint i = 0; i < EditorWindow::guiWindows.size(); i++)
         {
             auto window = EditorWindow::guiWindows[i];
             //SUBTASKWINDOW(window); // no multithreading draw for imgui ?
             window->Update();
         }
+        */
     }
      
     void ScheduleRenderer(tf::Subflow& subflow)
@@ -256,11 +259,13 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Human\\the-queen-of-swords\\the queen of swords.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\_Environment.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\toko.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Blokcing_obj.obj");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\GTA.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Bistro\\BistroInterior.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Provence\\Provence.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\tokyo\\source\\Export.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\WildWest\\WildWest2.gltf");
-    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Halo.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Halo.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Stronghold.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\BOURDON-V01.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Objects\\primitives.fbx");

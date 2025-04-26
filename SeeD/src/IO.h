@@ -147,6 +147,7 @@ public:
         memcpy(&mouse, &_mouse, sizeof(Mouse));
         memcpy(&keys, &_keys, sizeof(Keys));
 
+		// reset all inputs
         for (unsigned int i = 0; i < 256; i++)
         {
             _keys.pressed[i] = false;

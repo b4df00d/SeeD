@@ -163,6 +163,8 @@ namespace Systems
     struct SystemBase
     {
         Components::Mask mask;
+        virtual void On() = 0;
+        virtual void Off() = 0;
         virtual void Update(World* world) = 0;
     };
 }
@@ -277,9 +279,12 @@ public:
             return *this;
         }
 
-        Entity Make(Components::Mask mask)
+        Entity Make(Components::Mask mask, String name = "")
         {
             mask |= Components::Entity::mask;
+
+            if (!name.empty())
+                mask |= Components::Name::mask;
 
             EntitySlot slot;
             slot.pool = GetOrCreatePoolIndex(mask);
@@ -299,9 +304,15 @@ public:
 
             Get<Components::Entity>().index = id;
 
+            if (!name.empty())
+            {
+                strcpy(Get<Components::Name>().name, name.c_str());
+            }
+
             return *this;
         }
 
+        // not used yet. Is this the proper way ?
         void Release()
         {
             EntitySlot& thisSlot = World::instance->entitySlots[id];
@@ -428,6 +439,7 @@ public:
             return World::instance->components[GetOrCreatePoolIndex(mask)];       
         }
 
+        // if found set the calling entity to the found entity
         bool Find(String name)
         {
             for (uint i = 0; i < World::instance->components.size(); i++)
@@ -461,14 +473,42 @@ public:
 
     std::vector<Systems::SystemBase*> systems;
 
+    bool playing;
+
     void On()
     {
         instance = this;
+        playing = false;
     }
 
     void Off()
     {
         instance = nullptr;
+    }
+
+    void Load(String name)
+    {
+
+    }
+
+    void Save(String name)
+    {
+
+    }
+
+    void Clear()
+    {
+        for (uint i = 0; i < systems.size(); i++)
+        {
+            auto sys = systems[i];
+            sys->Off();
+        }
+        components.clear();
+        for (uint i = 0; i < systems.size(); i++)
+        {
+            auto sys = systems[i];
+            sys->On();
+        }
     }
 
     void Schedule(tf::Subflow& subflow)
@@ -612,12 +652,11 @@ namespace Systems
 {
     struct Player : SystemBase
     {
-        bool loaded = false;
         World::Entity camera;
         float sensibility = 1.0f;
         float sensibilityLook = 0.003f;
 
-        void On()
+        void On() override
         {
             auto& cam = camera.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Camera::mask).Get<Components::Camera>();
             cam.fovY = 90;
@@ -631,7 +670,7 @@ namespace Systems
             World::instance->systems.push_back(this);
         }
 
-        void Off()
+        void Off() override
         {
             auto item = std::find(World::instance->systems.begin(), World::instance->systems.end(), this);
             if(item != World::instance->systems.end())
