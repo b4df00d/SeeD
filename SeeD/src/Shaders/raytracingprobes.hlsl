@@ -40,12 +40,14 @@ void RayGen()
     
     uint seed = initRand(launchIndex.x + cullingContext.frameTime % 234 * 1.621f, launchIndex.y + cullingContext.frameTime % 431 * 1.432f, 4);
     
-    // Initialise sh to 0
-    HLSL::ProbeData probeData;
-    HLSL::SHProbe probe;
-    probe.R = shZero();
-    probe.G = shZero();
-    probe.B = shZero();
+    
+    HLSL::ProbeData probeData = probesBuffer[probeIndex];
+    HLSL::SHProbe probe = probeData.sh;
+    
+    //Initialise sh to 0
+    //probe.R = shZero();
+    //probe.G = shZero();
+    //probe.B = shZero();
     
     // Accumulate coefficients according to surounding direction/color tuples.
     for (float az = 0.5f; az < probes.probesSamplesPerFrame; az += 1.0f)
@@ -61,7 +63,7 @@ void RayGen()
     
             RayDesc ray;
             float3 randVal = (float3(nextRand(seed), nextRand(seed), nextRand(seed)) * 2.f - 1.f) * cellSize * 0.125f;
-            ray.Origin = probeWorldPos + probesBuffer[probeIndex].position.xyz;//  + randVal;
+            ray.Origin = probeWorldPos + probeData.position.xyz;//  + randVal;
             ray.Direction = rayDir;
             ray.TMin = 0;
             ray.TMax = 100000;
@@ -78,7 +80,8 @@ void RayGen()
     }
     
     // integrating over a sphere so each sample has a weight of 4*PI/samplecount (uniform solid angle, for each sample)
-    float shFactor = 4.0 * shPI / (probes.probesSamplesPerFrame * probes.probesSamplesPerFrame);
+    // and take in consideration the previous samples too ? (if we do not reset to zero above)
+    float shFactor = 4.0 * shPI / ((probes.probesSamplesPerFrame * probes.probesSamplesPerFrame) * 1.44);
     probe.R = shScale(probe.R, shFactor);
     probe.G = shScale(probe.G, shFactor);
     probe.B = shScale(probe.B, shFactor);

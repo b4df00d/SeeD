@@ -1273,6 +1273,7 @@ public:
             float d = 1;
             float lightIntensity = 1 / (l->mAttenuationConstant + l->mAttenuationLinear * d + l->mAttenuationQuadratic * d * d);
             light.color *= lightIntensity;
+            light.color = min(4, light.color);
             light.range = lightIntensity * 20;
 
             ent.Set(light);
@@ -1953,6 +1954,18 @@ public :
                         //stream.AS = amplificationShaderBytecode;
                         stream.MS = meshShaderBytecode;
                         stream.PS = bufferShaderBytecode;
+                        /*
+                        // per shader depth desc ?
+                        D3D12_DEPTH_STENCIL_DESC1& desc = stream.DepthStencil;
+                        desc.DepthEnable = false;
+                        desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+                        desc.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+                        desc.StencilEnable = false;
+                        desc.FrontFace.StencilFailOp = desc.FrontFace.StencilDepthFailOp = desc.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+                        desc.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+                        desc.BackFace = desc.FrontFace;
+                        */
+
                         shader.pso = CreatePSO(stream);
                         compiled = shader.pso != nullptr;
 					}

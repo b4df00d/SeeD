@@ -447,6 +447,7 @@ public:
     {
         HLSL::CullingContext cullingContextParams;
 
+        cullingContextParams.reverseZ = true;
         cullingContextParams.frameNumber++;
         cullingContextParams.frameTime = Time::instance->currentTicks;
         cullingContextParams.cameraIndex = options.stopFrustumUpdate ? 1 : 0;
@@ -484,7 +485,7 @@ public:
 
         for (uint i = 0; i < ARRAYSIZE(raytracingContext.probes); i++)
         {
-            rayTracingContextParams.probes[i].probesSamplesPerFrame = 3 * (3 - i);
+            rayTracingContextParams.probes[i].probesSamplesPerFrame = 2 * (3 - i);
             rayTracingContextParams.probes[i].probesIndex = raytracingContext.probes[i].probes.uav.offset;
             rayTracingContextParams.probes[i].probesResolution = uint4(raytracingContext.probes[i].probesResolution, 0);
             float3 probeCellSize = (raytracingContext.probes[i].probesBBSize / float3(raytracingContext.probes[i].probesResolution));
@@ -658,6 +659,7 @@ public:
         if (depth)
         {
             float clearDepthValue(1.0f);
+            if (HLSL::reverseZ) clearDepthValue = 0;
             UINT8 clearStencilValue(0);
             commandBuffer->cmd->ClearDepthStencilView(depth->dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepthValue, clearStencilValue, 1, &rect);
         }
@@ -835,6 +837,7 @@ public:
         initializationParameters.flags |= FFX_SPD_WAVE_INTEROP_LDS;
         initializationParameters.flags |= FFX_SPD_MATH_PACKED;
         initializationParameters.downsampleFilter = FFX_SPD_DOWNSAMPLE_FILTER_MAX;
+        if (HLSL::reverseZ) initializationParameters.downsampleFilter = FFX_SPD_DOWNSAMPLE_FILTER_MIN;
         ffxSpdContextCreate(&context, &initializationParameters);
 
     }
@@ -1682,7 +1685,7 @@ public:
                     float4x4 previousMat = mat.matrix;
                     mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
 
-                    float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip);
+                    float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip, HLSL::reverseZ);
                     float4x4 viewProj = mul(inverse(mat.matrix), proj);
                     float4 worldPos = float4(mat.matrix[3].xyz, 1);
                     float4x4 previousViewProj = mul(inverse(previousMat), proj);
@@ -1693,7 +1696,7 @@ public:
                     //float sizeCulling;
 
                     // compute planes
-                    float4x4 matProj = mul(inverse(proj), mat.matrix);
+                    float4x4 matProj = mul(inverse(MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip, false)), mat.matrix);
 
                     //create the 8 points of a cube in unit-space
                     float4 cube[8];
@@ -1740,6 +1743,25 @@ public:
                     hlslcam.previousViewProj = previousViewProj;
                     hlslcam.previousViewProj_inv = inverse(hlslcam.previousViewProj);
                     hlslcam.previousWorldPos = previousWorldPos;
+
+                    /*
+                    // do the same
+                    hlslcam.view = inverse(mat.matrix);
+                    hlslcam.proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip, HLSL::reverseZ);
+                    hlslcam.viewProj = mul(inverse(mat.matrix), hlslcam.proj);
+                    hlslcam.viewProj_inv = inverse(hlslcam.viewProj);
+                    hlslcam.planes[0] = planes[0];
+                    hlslcam.planes[1] = planes[1];
+                    hlslcam.planes[2] = planes[2];
+                    hlslcam.planes[3] = planes[3];
+                    hlslcam.planes[4] = planes[4];
+                    hlslcam.planes[5] = planes[5];
+                    hlslcam.worldPos = worldPos;
+
+                    hlslcam.previousViewProj = mul(inverse(previousMat), hlslcam.proj);
+                    hlslcam.previousViewProj_inv = inverse(hlslcam.previousViewProj);
+                    hlslcam.previousWorldPos = previousWorldPos;
+                    */
 
                     this->viewWorld->cameras.Add(hlslcam);
 

@@ -25,6 +25,8 @@ struct Options
 
 namespace HLSL
 {
+    static const bool reverseZ = true;
+    
     static const uint max_vertices = 64;
     static const uint max_triangles = 124;
 #ifndef __cplusplus
@@ -68,6 +70,7 @@ namespace HLSL
     struct CullingContext
     {
         float4 resolution; //x, y, 1/x, 1/y
+        uint reverseZ;
         uint frameNumber;
         uint frameTime;
         uint cameraIndex;

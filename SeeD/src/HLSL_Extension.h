@@ -240,7 +240,8 @@ namespace hlslpp
 		float FovAngleY,
 		float AspectRatio,
 		float NearZ,
-		float FarZ
+		float FarZ,
+		bool reverseZ
 	)
 	{
 		/*
@@ -260,6 +261,7 @@ namespace hlslpp
 		float Width = Height / AspectRatio;
 		float fRange = FarZ / (FarZ - NearZ);
 
+
 		float4x4 M;
 		
 		M[0].x = Width;
@@ -272,8 +274,8 @@ namespace hlslpp
 		M[1].z = 0.0f;
 		M[1].w = 0.0f;
 
-		M[2].x = 0.0f; // il manque un truc ici ?
-		M[2].y = 0.0f; // il manque un truc ici ?
+		M[2].x = 0.0f;
+		M[2].y = 0.0f;
 		M[2].z = fRange;
 		M[2].w = 1.0f;
 		
@@ -281,6 +283,14 @@ namespace hlslpp
 		M[3].y = 0.0f;
 		M[3].z = -fRange * NearZ;
 		M[3].w = 0.0f;
+
+		if (reverseZ)
+		{
+			float4x4 reverse = float4x4::identity();
+			reverse.f32_128_2[2] = -1;
+			reverse.f32_128_3[2] = 1;
+			M = mul(M, reverse);
+		}
 
 		return M;
 

@@ -29,7 +29,7 @@ void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     float radius = abs(max(max(length(worldMatrix[0].xyz), length(worldMatrix[1].xyz)), length(worldMatrix[2].xyz)) * mesh.boundingSphere.w); // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
     
-    bool culled = FrustumCulling(camera, boundingSphere);
+    bool culled = false;//FrustumCulling(camera, boundingSphere);
     if(!culled) culled = OcclusionCulling(camera, boundingSphere);
     
     if (!culled)

@@ -536,6 +536,12 @@ bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
     float fMaxOcclusionDepth = max(max(max(vOcclusionDepth.x, vOcclusionDepth.y), vOcclusionDepth.z), vOcclusionDepth.w);
     bool bCulled = fMaxOcclusionDepth < fBoundSphereDepth;
     
+    if(HLSL::reverseZ)
+    {
+        float fMinOcclusionDepth = min(min(min(vOcclusionDepth.x, vOcclusionDepth.y), vOcclusionDepth.z), vOcclusionDepth.w);
+        bCulled = fMinOcclusionDepth > fBoundSphereDepth;
+    }
+    
     return bCulled;
 }
 
@@ -733,6 +739,10 @@ inline uint3 ModulusI(uint3 a, uint3 b)
 {
     return (uint3(a % b) + b) % b;
 }
+
+//  !! rip off from microsoft miniengine !!
+// https://github.com/GPUOpen-LibrariesAndSDKs/nBodyD3D12/blob/master/MiniEngine/Core/Shaders/PixelPacking.hlsli
+
 // RGBE, aka R9G9B9E5_SHAREDEXP, is an unsigned float HDR pixel format where red, green,
 // and blue all share the same exponent.  The color channels store a 9-bit value ranging
 // from [0/512, 511/512] which multiplies by 2^Exp and Exp ranges from [-15, 16].
@@ -795,14 +805,6 @@ float3 UnpackRGBE_sqrt(uint p)
     float3 rgb = (uint3(p, p >> 9, p >> 18) & 0x1FF) / 511.0;
     return ldexp(rgb * rgb, (int)(p >> 27) - 15);
 }
-float3 StoreR11G11B10Normal(float3 normal)
-{
-    return normal * 0.5 + 0.5;
-}
-float3 ReadR11G11B10Normal(float3 normal)
-{
-    return normal * 2 - 1;
-}
 
 // The standard 32-bit HDR color format
 uint Pack_R11G11B10_FLOAT( float3 rgb )
@@ -819,6 +821,17 @@ float3 Unpack_R11G11B10_FLOAT( uint rgb )
 	float g = f16tof32((rgb >> 6 ) & 0x7FF0);
 	float b = f16tof32((rgb << 5 ) & 0x7FE0);
 	return float3(r, g, b);
+}
+
+// end microsoft miniengine rip off
+
+float3 StoreR11G11B10Normal(float3 normal)
+{
+    return normal * 0.5 + 0.5;
+}
+float3 ReadR11G11B10Normal(float3 normal)
+{
+    return normal * 2 - 1;
 }
 
 struct GBufferCameraData
@@ -853,7 +866,7 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     
     Texture2D<float2> motionT = ResourceDescriptorHeap[cullingContext.motionIndex];
     float2 motion = motionT[pixel.xy];
-    uint2 previousPixel = min(max(pixel.xy + int2(motion), 0), (cullingContext.resolution.xy-1));
+    uint2 previousPixel = min(max(pixel.xy + int2(motion), 1), (cullingContext.resolution.xy-1));
     cd.previousPixel = previousPixel;
     
     Texture2D<float> previousDepth = ResourceDescriptorHeap[cullingContext.HZB];
@@ -965,11 +978,11 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
 }
 
 static uint maxFrameFilteringCount = 5;
-void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float WBias = 1)
+void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current)
 {
     previous.pos_Wsum.w += current.pos_Wsum.w;
     previous.dir_Wcount.w += current.dir_Wcount.w;
-    if(previous.color_W.w * WBias < current.color_W.w)
+    if(previous.color_W.w < current.color_W.w)
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.pos_Wsum.xyz = current.pos_Wsum.xyz;
