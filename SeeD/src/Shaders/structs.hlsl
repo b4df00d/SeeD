@@ -314,9 +314,29 @@ namespace HLSL
     struct GIReservoir
     {
         float4 color_W;
-        float4 dir_Wsum;
-        float4 pos_Wcount;
+        float4 dir_Wcount;
+        float4 pos_Wsum;
     };
+    
+    struct GIReservoirCompressed
+    {
+        float4 pos_Wsum;
+        uint dir;
+        uint color;
+        uint Wcount_W;
+    };
+ /*
+not packed 220fps
+
+packed color only = 270fps
+
+packed : 
+        float4 pos_Wsum;
+        uint dir;
+        uint color;
+        uint Wcount_W;
+        = 318fps
+*/
     // ----------------- End RT stuff ------------------
 }
 #endif // __STRUCTS__

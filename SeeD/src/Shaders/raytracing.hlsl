@@ -159,8 +159,8 @@ void RayGen()
         bounceLight = payload.color * saturate(dot(cd.worldNorm, bounceLightDir)); // BRDF here ?
         
         // ReSTIR
-        RWStructuredBuffer<HLSL::GIReservoir> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
-        HLSL::GIReservoir r = previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * rtParameters.resolution.x];
+        RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
+        HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * rtParameters.resolution.x]);
         
         //uint maxFrameFilteringCount = 100;
         float blend = max(cd.viewDistDiff-0.04, 0) * 10;
@@ -170,24 +170,24 @@ void RayGen()
         HLSL::GIReservoir newR;
         float W = length(bounceLight); 
         newR.color_W = float4(bounceLight, W);
-        newR.dir_Wsum = float4(bounceLightDir, W);
-        newR.pos_Wcount = float4(offsetedWorldPos, 1);
+        newR.dir_Wcount = float4(bounceLightDir, 1);
+        newR.pos_Wsum = float4(offsetedWorldPos, W);
         
         // if not first time fill with previous frame reservoir
         if (rtParameters.frame == 0)
         {
             r.color_W = 0;
-            r.dir_Wsum = 0;
-            r.pos_Wcount = 0;
+            r.dir_Wcount = 0;
+            r.pos_Wsum = 0;
         }
         
         UpdateGIReservoir(r, newR);
         ScaleGIReservoir(r, frameFilteringCount);
         
-        RWStructuredBuffer<HLSL::GIReservoir> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-        giReservoir[launchIndex.x + launchIndex.y * rtParameters.resolution.x] = r;
+        RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
+        giReservoir[launchIndex.x + launchIndex.y * rtParameters.resolution.x] = PackGIReservoir(r);
         
-        bounceLight = r.color_W.xyz * (r.dir_Wsum.w / r.pos_Wcount.w);
+        bounceLight = r.color_W.xyz * (r.pos_Wsum.w / r.dir_Wcount.w);
         // end ReSTIR
     }
     

@@ -336,7 +336,7 @@ struct RayTracingContext
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            giReservoir.Get(i).CreateBuffer<HLSL::GIReservoir>(resolution.x * resolution.y, "GIReservoir");
+            giReservoir.Get(i).CreateBuffer<HLSL::GIReservoirCompressed>(resolution.x * resolution.y, "GIReservoir");
         }
 
         float multi = 2;

@@ -733,7 +733,68 @@ inline uint3 ModulusI(uint3 a, uint3 b)
 {
     return (uint3(a % b) + b) % b;
 }
+// RGBE, aka R9G9B9E5_SHAREDEXP, is an unsigned float HDR pixel format where red, green,
+// and blue all share the same exponent.  The color channels store a 9-bit value ranging
+// from [0/512, 511/512] which multiplies by 2^Exp and Exp ranges from [-15, 16].
+// Floating point specials are not encoded.
+uint PackRGBE(float3 rgb)
+{
+    // To determine the shared exponent, we must clamp the channels to an expressible range
+    const float kMaxVal = asfloat(0x477F8000); // 1.FF x 2^+15
+    const float kMinVal = asfloat(0x37800000); // 1.00 x 2^-16
 
+    // Non-negative and <= kMaxVal
+    rgb = clamp(rgb, 0, kMaxVal);
+
+    // From the maximum channel we will determine the exponent.  We clamp to a min value
+    // so that the exponent is within the valid 5-bit range.
+    float MaxChannel = max(max(kMinVal, rgb.r), max(rgb.g, rgb.b));
+
+    // 'Bias' has to have the biggest exponent plus 15 (and nothing in the mantissa).  When
+    // added to the three channels, it shifts the explicit '1' and the 8 most significant
+    // mantissa bits into the low 9 bits.  IEEE rules of float addition will round rather
+    // than truncate the discarded bits.  Channels with smaller natural exponents will be
+    // shifted further to the right (discarding more bits).
+    float Bias = asfloat((asuint(MaxChannel) + 0x07804000) & 0x7F800000);
+
+    // Shift bits into the right places
+    uint3 RGB = asuint(rgb + Bias);
+    uint E = (asuint(Bias) << 4) + 0x10000000;
+    return E | RGB.b << 18 | RGB.g << 9 | (RGB.r & 0x1FF);
+}
+
+float3 UnpackRGBE(uint p)
+{
+    float3 rgb = uint3(p, p >> 9, p >> 18) & 0x1FF;
+    return ldexp(rgb, (int)(p >> 27) - 24);
+}
+
+// This non-standard variant applies a non-linear ramp to the mantissa to get better precision
+// with bright and saturated colors.  These colors tend to have one or two channels that prop
+// up the shared exponent, leaving little to no information in the dark channels.
+uint PackRGBE_sqrt(float3 rgb)
+{
+    // To determine the shared exponent, we must clamp the channels to an expressible range
+    const float kMaxVal = asfloat(0x477FFFFF); // 1.FFFFFF x 2^+15
+    const float kMinVal = asfloat(0x37800000); // 1.000000 x 2^-16
+
+    rgb = clamp(rgb, 0, kMaxVal);
+
+    float MaxChannel = max(max(kMinVal, rgb.r), max(rgb.g, rgb.b));
+
+    // Scaling the maximum channel puts it into the range [0, 1).  It does this by negating
+    // and subtracting one from the max exponent.
+    float Scale = asfloat((0x7EFFFFFF - asuint(MaxChannel)) & 0x7F800000);
+    uint3 RGB = sqrt(rgb * Scale) * 511.0 + 0.5;
+    uint E = (0x47000000 - asuint(Scale)) << 4;
+    return E | RGB.b << 18 | RGB.g << 9 | RGB.r;
+}
+
+float3 UnpackRGBE_sqrt(uint p)
+{
+    float3 rgb = (uint3(p, p >> 9, p >> 18) & 0x1FF) / 511.0;
+    return ldexp(rgb * rgb, (int)(p >> 27) - 15);
+}
 float3 StoreR11G11B10Normal(float3 normal)
 {
     return normal * 0.5 + 0.5;
@@ -742,6 +803,24 @@ float3 ReadR11G11B10Normal(float3 normal)
 {
     return normal * 2 - 1;
 }
+
+// The standard 32-bit HDR color format
+uint Pack_R11G11B10_FLOAT( float3 rgb )
+{
+	uint r = (f32tof16(rgb.x) << 17) & 0xFFE00000;
+	uint g = (f32tof16(rgb.y) << 6 ) & 0x001FFC00;
+	uint b = (f32tof16(rgb.z) >> 5 ) & 0x000003FF;
+	return r | g | b;
+}
+
+float3 Unpack_R11G11B10_FLOAT( uint rgb )
+{
+	float r = f16tof32((rgb >> 17) & 0x7FF0);
+	float g = f16tof32((rgb >> 6 ) & 0x7FF0);
+	float b = f16tof32((rgb << 5 ) & 0x7FE0);
+	return float3(r, g, b);
+}
+
 struct GBufferCameraData
 {
     HLSL::Camera camera;
@@ -774,7 +853,7 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     
     Texture2D<float2> motionT = ResourceDescriptorHeap[cullingContext.motionIndex];
     float2 motion = motionT[pixel.xy];
-    uint2 previousPixel = min(max(pixel.xy + int2(motion), 0), cullingContext.resolution.xy);
+    uint2 previousPixel = min(max(pixel.xy + int2(motion), 0), (cullingContext.resolution.xy-1));
     cd.previousPixel = previousPixel;
     
     Texture2D<float> previousDepth = ResourceDescriptorHeap[cullingContext.HZB];
@@ -888,24 +967,44 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
 static uint maxFrameFilteringCount = 5;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float WBias = 1)
 {
-    previous.pos_Wcount.w += current.pos_Wcount.w;
-    previous.dir_Wsum.w += current.dir_Wsum.w;
+    previous.pos_Wsum.w += current.pos_Wsum.w;
+    previous.dir_Wcount.w += current.dir_Wcount.w;
     if(previous.color_W.w * WBias < current.color_W.w)
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
-        previous.dir_Wsum.xyz = current.dir_Wsum.xyz;
-        previous.pos_Wcount.xyz = current.pos_Wcount.xyz;
+        previous.pos_Wsum.xyz = current.pos_Wsum.xyz;
+        previous.dir_Wcount.xyz = current.dir_Wcount.xyz;
     }
 }
 void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
 {
-    if (r.pos_Wcount.w >= frameFilteringCount)
+    if (r.dir_Wcount.w >= frameFilteringCount)
     {
-        float factor = max(0, float(frameFilteringCount) / max(r.pos_Wcount.w, 1.0f));
+        float factor = max(0, float(frameFilteringCount) / max(r.dir_Wcount.w, 1.0f));
         r.color_W.w = max(0, r.color_W.w * lerp(factor, 1, 0.33));
-        r.dir_Wsum.w *= factor;
-        r.pos_Wcount.w *= factor;
+        r.pos_Wsum.w *= factor;
+        r.dir_Wcount.w *= factor;
     }
+}
+
+HLSL::GIReservoirCompressed PackGIReservoir(HLSL::GIReservoir r)
+{
+    HLSL::GIReservoirCompressed result;
+    result.color = PackRGBE_sqrt(r.color_W.xyz);
+    result.Wcount_W = (asuint(f32tof16(r.dir_Wcount.w)) << 16) + asuint(f32tof16(r.color_W.w));
+    result.dir = Pack_R11G11B10_FLOAT(r.dir_Wcount.xyz);
+    result.pos_Wsum = r.pos_Wsum;
+    return result;
+}
+HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
+{
+    HLSL::GIReservoir result;
+    result.color_W.xyz = UnpackRGBE_sqrt(r.color);
+    result.color_W.w = f16tof32(r.Wcount_W & 0xffff);
+    result.dir_Wcount.w = f16tof32(r.Wcount_W >> 16u);
+    result.dir_Wcount.xyz = Unpack_R11G11B10_FLOAT(r.dir);
+    result.pos_Wsum = r.pos_Wsum;
+    return result;
 }
 
 // Utility function to get a vector perpendicular to an input vector 
