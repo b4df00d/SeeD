@@ -113,7 +113,7 @@ void RayGen()
     
     GBufferCameraData cd = GetGBufferCameraData(launchIndex);
     
-    float3 offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.01) + (cd.worldNorm * cd.viewDist * 0.0001);
+    float3 offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.0025) + (cd.worldNorm * cd.viewDist * 0.0005);
     
     uint seed = initRand(launchIndex.x + cullingContext.frameTime % 234 * 1.621f, launchIndex.y + cullingContext.frameTime % 431 * 1.432f, 4);
     
@@ -162,10 +162,8 @@ void RayGen()
         RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
         HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * rtParameters.resolution.x]);
         
-        //uint maxFrameFilteringCount = 100;
         float blend = max(cd.viewDistDiff-0.04, 0) * 10;
         uint frameFilteringCount = max(1, saturate(1 - blend) * maxFrameFilteringCount);
-        //float frameFilteringDecay = (0.33f / float(frameFilteringCount));
     
         HLSL::GIReservoir newR;
         float W = length(bounceLight); 
@@ -203,7 +201,7 @@ void RayGen()
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
     payload.hitDistance = RayTCurrent();
-    payload.color = float3(0.66, 0.75, 0.99) * saturate(pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 1.5)) * 2;
+    payload.color = float3(0.66, 0.75, 0.99) * saturate(pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 1.5)) * 0.5;
 }
 
 [shader("closesthit")]
@@ -276,32 +274,10 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     //payload.color += BRDF(s, WorldRayDirection(), bounceLightDir, bounceLight);
     payload.color += bounceLight * s.albedo;
 #else
-    float3 bounceLightDir = lerp(s.normal, getCosHemisphereSample(payload.rndseed, s.normal), 0.9);
-    
-    float3 samplePos = hitLocation;
-    
-    uint probeGridIndex = 0;
-    HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
-    while(probeGridIndex < 3 && (any(samplePos.xyz < probes.probesBBMin.xyz) || any(samplePos.xyz > probes.probesBBMax.xyz)))
-    {
-        probeGridIndex++;
-        probes = rtParameters.probes[probeGridIndex];
-    }
-    float3 cellSize = float3(probes.probesBBMax.xyz - probes.probesBBMin.xyz) / float3(probes.probesResolution.xyz);
-    int3 launchIndex = (samplePos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz) * probes.probesResolution.xyz;
-    uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
-    uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
-    RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
-    HLSL::ProbeData probe = probesBuffer[probeIndex];
-    float3 bounceLight = max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
-    
-    float3 probeCenter = launchIndex * cellSize + (cellSize * 0.5) + probes.probesBBMin.xyz;
-    float3 probeOffset = samplePos - probeCenter;
-    if(length(probeOffset) < length(probe.position.xyz))
-        probesBuffer[probeIndex].position = float4(probeOffset, 0);
-    
+    float3 bounceLight = SampleProbes(rtParameters, hitLocation, s.normal, true);
     //payload.color += BRDF(s, WorldRayDirection(), bounceLightDir, bounceLight);
     payload.color += bounceLight;
+    
 #endif
     payload.color *= saturate(s.albedo * 1);
 }

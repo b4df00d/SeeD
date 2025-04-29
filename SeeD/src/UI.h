@@ -86,7 +86,21 @@ public:
         }
         else
         {
-            ImGui::End();
+            if (ImGui::BeginMenuBar())
+            {
+                if (ImGui::MenuItem(World::instance->playing ? "Stop" : "Play") || IOs::instance->keys.pressed[VK_F2])
+                {
+                    World::instance->playing = !World::instance->playing;
+                }
+                ImGui::Separator();
+
+                //duplicate of profiler framerate info
+                ImGui::Text("average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+                ImGui::Separator();
+
+                ImGui::EndMainMenuBar();
+            }
+            //ImGui::End();
         }
     }
 
@@ -992,7 +1006,7 @@ public:
                         editorState.selectedObject = ent.Make(Components::Light::mask | Components::Transform::mask, "Directional Light");
                         auto& trans = ent.Get<Components::Transform>();
                         trans.position = float3(0);
-                        trans.rotation = quaternion(0, 0, 0, 1);
+                        trans.rotation = quaternion(0.5, 0, 0, 0.866);
                         trans.scale = float3(1);
                         auto& light = ent.Get<Components::Light>();
                         light.color = float4(2, 1.75, 1.5, 1);

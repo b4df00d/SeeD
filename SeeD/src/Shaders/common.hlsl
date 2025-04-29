@@ -514,7 +514,7 @@ bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
     
     float3 sphereClosestPointToCamera = viewSphere.xyz - normalize(viewSphere.xyz) * boundingSphere.w;
     float4 clipSphere = mul(camera.proj, float4(sphereClosestPointToCamera.xyz, 1));
-    float fBoundSphereDepth = saturate(clipSphere.z / clipSphere.w - 0.001);
+    float fBoundSphereDepth = saturate(clipSphere.z / clipSphere.w + (HLSL::reverseZ ? 0.001 : - 0.001));
     
     float3 vHZB = float3(cullingContext.resolution.x, cullingContext.resolution.y, cullingContext.HZBMipCount);
     Texture2D<float> tHZB = ResourceDescriptorHeap[cullingContext.HZB];
@@ -1046,3 +1046,64 @@ float3 getCosHemisphereSample(inout uint randSeed, float3 hitNorm)
     // Get our cosine-weighted hemisphere lobe sample direction
     return normalize(tangent * (r * cos(phi).x) + bitangent * (r * sin(phi)) + hitNorm.xyz * sqrt(1 - randVal.x));
 }
+
+float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, float3 worldNorm, bool writeWorldPosAsOffset = false)
+{
+    uint probeGridIndex = 0;
+    HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
+    while(probeGridIndex < 3 && (any(worldPos.xyz < probes.probesBBMin.xyz) || any(worldPos.xyz > probes.probesBBMax.xyz)))
+    {
+        probeGridIndex++;
+        probes = rtParameters.probes[probeGridIndex];
+    }
+    if(probeGridIndex >= 3) return 0;
+    float3 cellSize = float3(probes.probesBBMax.xyz - probes.probesBBMin.xyz) / float3(probes.probesResolution.xyz);
+    
+    if(writeWorldPosAsOffset)
+    {
+        //non jittered sample pos for setting pos offset
+        int3 launchIndex = (worldPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz) * probes.probesResolution.xyz;
+        uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
+        uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
+        RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
+        float3 probeCenter = launchIndex * cellSize + probes.probesBBMin.xyz;
+        float3 probeOffset = worldPos - probeCenter;
+        float currentOffsetLength = length(probesBuffer[probeIndex].position.xyz);
+        if(currentOffsetLength == 0 || length(probeOffset) < currentOffsetLength) probesBuffer[probeIndex].position = float4(probeOffset, 0);
+    }
+    
+    //with jitter for sampling
+    float3 jitteredPos = worldPos + worldNorm * cellSize;
+    jitteredPos.x += sin(worldPos.z * 25) * cellSize.x * 0.125;
+    jitteredPos.z += sin(worldPos.x * 25) * cellSize.z * 0.125;
+    jitteredPos.y += sin(worldPos.x * 25) * cellSize.y * 0.125;
+    int3 launchIndex = (jitteredPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz) * probes.probesResolution.xyz;
+    uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
+    uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
+    StructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
+    HLSL::ProbeData probe = probesBuffer[probeIndex];
+    return max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, worldNorm)); // A "max" is usually recomended to avoid negative values (can happen with SH)
+}
+
+  /*
+    float3 samplePos = hitLocation + s.normal;// + sin(hitLocation * 50);
+    
+    uint probeGridIndex = 0;
+    HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
+    while(probeGridIndex < 3 && (any(samplePos.xyz < probes.probesBBMin.xyz) || any(samplePos.xyz > probes.probesBBMax.xyz)))
+    {
+        probeGridIndex++;
+        probes = rtParameters.probes[probeGridIndex];
+    }
+    float3 cellSize = float3(probes.probesBBMax.xyz - probes.probesBBMin.xyz) / float3(probes.probesResolution.xyz);
+    int3 launchIndex = (samplePos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz) * probes.probesResolution.xyz;
+    uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
+    uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
+    RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
+    HLSL::ProbeData probe = probesBuffer[probeIndex];
+    float3 bounceLight = max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
+    
+    float3 probeCenter = launchIndex * cellSize + probes.probesBBMin.xyz;
+    float3 probeOffset = samplePos - probeCenter;
+    if(length(probeOffset) < length(probe.position.xyz)) probesBuffer[probeIndex].position = float4(-probeOffset, 0);
+*/

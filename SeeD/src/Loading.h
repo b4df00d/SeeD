@@ -280,9 +280,9 @@ public:
                     allAssetsInImportPath[id] = p.path().string();
                 }
             }
-            return "";
+            //return "";
         }
-        else
+        //else
         {
             assetID id;
             id.hash = std::hash<std::string>{}(name);
@@ -547,13 +547,13 @@ public:
         DirectX::ScratchImage* image = new DirectX::ScratchImage();
         bool needCompression = false;
 
-        if (name.find(".dds") != -1)
+        if (originalPath.find(".dds") != -1)
         {
             ZoneScopedN("DDS");
             hr = DirectX::LoadFromDDSFile(originalPath.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, *image);
             needCompression = false;
         }
-        else if (name.find(".tga") != -1)
+        else if (originalPath.find(".tga") != -1)
         {
             ZoneScopedN("TGA");
             hr = DirectX::LoadFromTGAFile(originalPath.ToWString().c_str(), DirectX::TGA_FLAGS_NONE, &metadata, *image);

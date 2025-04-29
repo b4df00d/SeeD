@@ -340,9 +340,9 @@ struct RayTracingContext
         }
 
         float multi = 2;
-        probes[0].On(uint3(16, 16, 16) * multi, float3(8, 8, 8) * multi);
-        probes[1].On(uint3(16, 16, 16) * multi, float3(32, 32, 32) * multi);
-        probes[2].On(uint3(16, 16, 16) * multi, float3(128, 128, 128) * multi);
+        probes[0].On(uint3(8, 8, 8) * multi, float3(16, 16, 16) * multi);
+        probes[1].On(uint3(8, 8, 8) * multi, float3(32, 32, 32) * multi);
+        probes[2].On(uint3(8, 8, 8) * multi, float3(128, 128, 128) * multi);
     }
 
     void Off()
@@ -1743,25 +1743,6 @@ public:
                     hlslcam.previousViewProj = previousViewProj;
                     hlslcam.previousViewProj_inv = inverse(hlslcam.previousViewProj);
                     hlslcam.previousWorldPos = previousWorldPos;
-
-                    /*
-                    // do the same
-                    hlslcam.view = inverse(mat.matrix);
-                    hlslcam.proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip, HLSL::reverseZ);
-                    hlslcam.viewProj = mul(inverse(mat.matrix), hlslcam.proj);
-                    hlslcam.viewProj_inv = inverse(hlslcam.viewProj);
-                    hlslcam.planes[0] = planes[0];
-                    hlslcam.planes[1] = planes[1];
-                    hlslcam.planes[2] = planes[2];
-                    hlslcam.planes[3] = planes[3];
-                    hlslcam.planes[4] = planes[4];
-                    hlslcam.planes[5] = planes[5];
-                    hlslcam.worldPos = worldPos;
-
-                    hlslcam.previousViewProj = mul(inverse(previousMat), hlslcam.proj);
-                    hlslcam.previousViewProj_inv = inverse(hlslcam.previousViewProj);
-                    hlslcam.previousWorldPos = previousWorldPos;
-                    */
 
                     this->viewWorld->cameras.Add(hlslcam);
 

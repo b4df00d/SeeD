@@ -43,27 +43,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     float3 result = brdf + ambient;
     //result = direct;
     //result = indirect;
-#if false
-    float3 samplePos = cd.worldPos;
-    
-    uint probeGridIndex = 0;
-    HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
-    while(probeGridIndex < 3 && (any(samplePos.xyz < probes.probesBBMin.xyz) || any(samplePos.xyz > probes.probesBBMax.xyz)))
-    {
-        probeGridIndex++;
-        probes = rtParameters.probes[probeGridIndex];
-    }
-    
-    float3 cellSize = float3(probes.probesBBMax.xyz - probes.probesBBMin.xyz) / float3(probes.probesResolution.xyz);
-    int3 launchIndex = (samplePos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz) * probes.probesResolution.xyz;
-    //launchIndex = min(max(0, launchIndex), probes.probesResolution.xyz);
-    uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
-    uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
-    StructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
-    HLSL::ProbeData probe = probesBuffer[probeIndex];
-    result = max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
-    //result = RandUINT(probeIndex);
-#endif
+    //result = SampleProbes(rtParameters, cd.worldPos, cd.worldNorm);
     
     lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
     //lighted[dtid.xy] = float4(s.albedo, 1);

@@ -45,9 +45,9 @@ void RayGen()
     HLSL::SHProbe probe = probeData.sh;
     
     //Initialise sh to 0
-    //probe.R = shZero();
-    //probe.G = shZero();
-    //probe.B = shZero();
+    probe.R = shZero();
+    probe.G = shZero();
+    probe.B = shZero();
     
     // Accumulate coefficients according to surounding direction/color tuples.
     for (float az = 0.5f; az < probes.probesSamplesPerFrame; az += 1.0f)
@@ -81,13 +81,13 @@ void RayGen()
     
     // integrating over a sphere so each sample has a weight of 4*PI/samplecount (uniform solid angle, for each sample)
     // and take in consideration the previous samples too ? (if we do not reset to zero above)
-    float shFactor = 4.0 * shPI / ((probes.probesSamplesPerFrame * probes.probesSamplesPerFrame) * 1.44);
+    float shFactor = 4.0 * shPI / ((probes.probesSamplesPerFrame * probes.probesSamplesPerFrame) * 1);
     probe.R = shScale(probe.R, shFactor);
     probe.G = shScale(probe.G, shFactor);
     probe.B = shScale(probe.B, shFactor);
     
     probeData.sh = probe;
-    probeData.position = 100000;
+    probeData.position = 0;
     probesBuffer[probeIndex] = probeData;
 }
 
