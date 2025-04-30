@@ -1179,7 +1179,11 @@ public:
 
             if (id != assetID::Invalid)
             {
-                ent.Make(Components::Texture::mask);
+                ent.Make(Components::Texture::mask | Components::Name::mask);
+
+                auto& name = ent.Get<Components::Name>();
+                strcpy_s(name.name, 256, texName.C_Str());
+
                 ent.Get<Components::Texture>().id = id;
             }
         }
@@ -1230,7 +1234,7 @@ public:
             }
             */
 
-            for (uint j = 0; j < newMat.maxTextures; j++)
+            for (uint j = 0; j < HLSL::MaterialTextureCount; j++)
             {
                 newMat.textures[j] = { entityInvalid };
             }

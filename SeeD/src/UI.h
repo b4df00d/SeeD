@@ -11,7 +11,8 @@ enum class PropertyTypes : int
     _float4,
     _quaternion,
     _float4x4,
-    _assetID
+    _assetID,
+    _Handle
 };
 bool KnownType(String typeName)
 {
@@ -33,12 +34,15 @@ bool KnownType(String typeName)
         return true;
     else if (typeName == "assetID")
         return true;
+    else if (typeName == "Handle")
+        return true;
     return false;
 }
 struct MemberInfoParse
 {
     String name;
     String dataType;
+    String dataTemplateType;
     String dataCount;
 };
 struct ComponentInfoParse
@@ -50,6 +54,7 @@ struct MemberInfo
 {
     String name;
     PropertyTypes dataType;
+    Components::Mask dataTemplateType;
     int dataCount;
     int offset;
 };
@@ -447,14 +452,14 @@ HierarchyWindow hierarchyWindow;
 
 class GPUResourcesWindow : public EditorWindow
 {
-    bool openDemo;
+    //bool openDemo;
 public:
     GPUResourcesWindow() : EditorWindow("GPUResources") {}
     void Update() override final
     {
         ZoneScoped;
 
-        ImGui::ShowDemoWindow(&openDemo);
+        //ImGui::ShowDemoWindow(&openDemo);
 
         if (!ImGui::Begin("GPUResources", &isOpen, ImGuiWindowFlags_None))
         {
@@ -619,6 +624,102 @@ public:
 };
 PostProcessWindow postProcessWindow;
 
+class HandlePickingWindow : public EditorWindow
+{
+    struct HandleEntry
+    {
+        int handle;
+        String name;
+    };
+    std::vector<HandleEntry> entries;
+    
+    void* handle;
+    World::Entity selectedEntity = entityInvalid;
+public:
+    HandlePickingWindow() : EditorWindow("HandlePickingWindow") { isOpen = false; }
+    void Update() override final
+    {
+        ZoneScoped;
+
+        if (handle == nullptr)
+            return;
+
+        if (!ImGui::Begin("Handle Picking", &isOpen, ImGuiWindowFlags_NoCollapse))
+        {
+            ImGui::End();
+            return;
+        }
+
+        ImGuiStyle& style = ImGui::GetStyle();
+        ImGui::BeginGroup();
+        const ImGuiWindowFlags child_flags = ImGuiWindowFlags_MenuBar;
+        ImGuiID child_id = ImGui::GetID((void*)(intptr_t)0);
+        const bool child_is_visible = ImGui::BeginChild(child_id, ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y - 23), ImGuiChildFlags_Borders, child_flags);
+        for (int i = 0; i < entries.size(); i++)
+        {
+            ImGui::PushID(i);
+            bool selected;
+            selected = selectedEntity.id == entries[i].handle;
+            if (selected)
+            {
+                ImGui::TextColored(ImVec4(1, 1, 0, 1), entries[i].name.c_str());
+            }
+            else
+            {
+                ImGui::Selectable(entries[i].name.c_str(), &selected);
+                if (selected)
+                    selectedEntity.id = entries[i].handle;
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        ImGui::EndGroup();
+
+        if (ImGui::Button("Select"))
+        {
+            *(int*)handle = selectedEntity.id;
+            handle = nullptr;
+            isOpen = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel"))
+        {
+            handle = nullptr;
+            isOpen = false;
+        }
+
+        ImGui::End();
+    }
+
+    void Open(Components::Mask mask, void* _handle)
+    {
+        uint resCount = World::instance->CountQuery(mask, 0);
+        uint instanceQueryIndex = World::instance->Query(mask, 0);
+        auto& result = World::instance->frameQueries[instanceQueryIndex];
+
+        entries.clear();
+        for (uint i = 0; i < result.size(); i++)
+        {
+            HandleEntry entry;
+            World::Entity entity = { result[i].Get<Components::Entity>().index };
+            if (entity.Has<Components::Name>())
+            {
+                entry.name = entity.Get<Components::Name>().name;
+            }
+            else
+            {
+                entry.name = "toto";
+            }
+            entry.handle = entity.id;
+            entries.push_back(entry);
+        }
+        handle = _handle;
+        selectedEntity = *(int*)handle;
+        isOpen = true;
+    }
+};
+HandlePickingWindow handlePickingWindow;
+
 #include "ComponentsUIMetaData.h"
 class PropertyWindow : public EditorWindow
 {
@@ -662,44 +763,63 @@ public:
                             char* data = cmpData + m.offset;
                             ImGui::Text(m.name.c_str());
                             ImGui::SameLine();
-                            ImGui::PushID(pushID++);
-                            switch (m.dataType)
+                            for (uint dc = 0; dc < m.dataCount; dc++)
                             {
-                            case PropertyTypes::_int:
-                            case PropertyTypes::_uint:
-                                ImGui::InputInt("", (int*)data);
-                                break;
-                            case PropertyTypes::_float:
-                                ImGui::InputFloat("", (float*)data);
-                                break;
-                            case PropertyTypes::_float2:
-                                ImGui::InputFloat2("", (float*)data);
-                                break;
-                            case PropertyTypes::_float3:
-                                ImGui::InputFloat3("", (float*)data);
-                                break;
-                            case PropertyTypes::_float4:
-                                ImGui::InputFloat4("", (float*)data);
-                                break;
-                            case PropertyTypes::_quaternion:
-                                ImGui::InputFloat4("", (float*)data);
-                                break;
-                            case PropertyTypes::_float4x4:
-                            {
-                                float4x4& mat = *(float4x4*)data;
-                                ImGui::InputFloat4("x", (float*)&mat[0]);
-                                ImGui::InputFloat4("y", (float*)&mat[1]);
-                                ImGui::InputFloat4("z", (float*)&mat[2]);
-                                ImGui::InputFloat4("pos", (float*)&mat[3]);
+                                ImGui::PushID(pushID++);
+                                switch (m.dataType)
+                                {
+                                case PropertyTypes::_int:
+                                case PropertyTypes::_uint:
+                                    ImGui::InputInt("", &((int*)data)[dc]);
+                                    break;
+                                case PropertyTypes::_float:
+                                    ImGui::InputFloat("", &((float*)data)[dc]);
+                                    break;
+                                case PropertyTypes::_float2:
+                                    ImGui::InputFloat2("", &((float*)data)[dc]);
+                                    break;
+                                case PropertyTypes::_float3:
+                                    ImGui::InputFloat3("", &((float*)data)[dc]);
+                                    break;
+                                case PropertyTypes::_float4:
+                                    ImGui::InputFloat4("", &((float*)data)[dc]);
+                                    break;
+                                case PropertyTypes::_quaternion:
+                                    ImGui::InputFloat4("", &((float*)data)[dc]);
+                                    break;
+                                case PropertyTypes::_float4x4:
+                                {
+                                    float4x4& mat = ((float4x4*)data)[dc];
+                                    ImGui::InputFloat4("x", (float*)&mat[0]);
+                                    ImGui::InputFloat4("y", (float*)&mat[1]);
+                                    ImGui::InputFloat4("z", (float*)&mat[2]);
+                                    ImGui::InputFloat4("pos", (float*)&mat[3]);
+                                }
+                                    break;
+                                case PropertyTypes::_assetID:
+                                    ImGui::InputInt("", &((int*)data)[dc]);
+                                    break;
+                                case PropertyTypes::_Handle:
+                                {
+                                    World::Entity handleTarget = ((int*)data)[dc];
+                                    String handleName = "toto";
+                                    if (handleTarget != entityInvalid && handleTarget.Has<Components::Name>())
+                                    {
+                                        handleName = handleTarget.Get<Components::Name>().name;
+                                    }
+                                    if (ImGui::SmallButton("o"))
+                                    {
+                                        handlePickingWindow.Open(m.dataTemplateType, &((int*)data)[dc]);
+                                    }
+                                    ImGui::SameLine();
+                                    ImGui::Text(handleName.c_str());
+                                }
+                                    break;
+                                default:
+                                    break;
+                                }
+                                ImGui::PopID();
                             }
-                                break;
-                            case PropertyTypes::_assetID:
-                                ImGui::InputInt("", (int*)data);
-                                break;
-                            default:
-                                break;
-                            }
-                            ImGui::PopID();
                         }
                     }
                 }
@@ -724,7 +844,7 @@ public:
         for (uint i = 0; i < cmpInfo.members.size(); i++)
         {
             auto& m = cmpInfo.members[i];
-            out += std::format("\t\t\t{{ \"{0}\", PropertyTypes::_{1}, {2}, offsetof(Components::{3}, {0}) }},\n", m.name.c_str(), m.dataType.c_str(), m.dataCount.c_str(), cmpInfo.name.c_str());
+            out += std::format("\t\t\t{{ \"{0}\", PropertyTypes::_{1}, {2}, {3}, offsetof(Components::{4}, {0}) }},\n", m.name.c_str(), m.dataType.c_str(), m.dataTemplateType.c_str(), m.dataCount.c_str(), cmpInfo.name.c_str());
         }
 
         out += "\t\t}\n \t}";
@@ -779,10 +899,20 @@ public:
                         tokens = line.Split(" ");
                         if (tokens.size() == 2)
                         {
-                            if (KnownType(tokens[0]))
+                            String typeToken = tokens[0];
+                            String templateTypeToken = "Components::Entity::mask"; // a BS component but one that is always here
+                            int chevron = typeToken.find("<");
+                            if (chevron != -1)
+                            {
+                                templateTypeToken = typeToken.substr(chevron + 1, typeToken.find(">") - chevron - 1);
+                                templateTypeToken = std::format("Components::{0}::mask", templateTypeToken.c_str());
+                                typeToken = typeToken.substr(0, chevron);
+                            }
+                            if (KnownType(typeToken))
                             {
                                 MemberInfoParse info;
-                                info.dataType = tokens[0];
+                                info.dataType = typeToken;
+                                info.dataTemplateType = templateTypeToken;
                                 info.name = tokens[1].substr(0, tokens[1].length()-1); //delete the ; at the end
                                 int bracketIndex = info.name.find("[");
                                 if (bracketIndex != -1)

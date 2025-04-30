@@ -128,10 +128,12 @@ namespace HLSL
         uint pad2;
     };
     
+    static const uint MaterialTextureCount = 16;
+    static const uint MaterialParametersCount = 15;
     struct Material
     {
-        uint textures[16];
-        float parameters[15];
+        uint textures[MaterialTextureCount];
+        float parameters[MaterialParametersCount];
         uint shaderIndex;
     };
     

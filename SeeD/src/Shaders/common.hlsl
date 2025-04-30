@@ -514,7 +514,7 @@ bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
     
     float3 sphereClosestPointToCamera = viewSphere.xyz - normalize(viewSphere.xyz) * boundingSphere.w;
     float4 clipSphere = mul(camera.proj, float4(sphereClosestPointToCamera.xyz, 1));
-    float fBoundSphereDepth = saturate(clipSphere.z / clipSphere.w + (HLSL::reverseZ ? 0.001 : - 0.001));
+    float fBoundSphereDepth = saturate(clipSphere.z / clipSphere.w + (HLSL::reverseZ ? 0.00005 : - 0.001));
     
     float3 vHZB = float3(cullingContext.resolution.x, cullingContext.resolution.y, cullingContext.HZBMipCount);
     Texture2D<float> tHZB = ResourceDescriptorHeap[cullingContext.HZB];

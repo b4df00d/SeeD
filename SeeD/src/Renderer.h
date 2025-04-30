@@ -1571,13 +1571,13 @@ public:
                         HLSL::Material& material = frameWorld.materials.GetGPUData(materialIndex);
 
                         material.shaderIndex = AssetLibrary::instance->GetIndex(materialCmp.shader.Get().id);
-                        for (uint paramIndex = 0; paramIndex < Components::Material::maxParameters; paramIndex++)
+                        for (uint paramIndex = 0; paramIndex < HLSL::MaterialParametersCount; paramIndex++)
                         {
                             // memcpy ? it is even just a cashline 
                             material.parameters[paramIndex] = materialCmp.prameters[paramIndex];
                         }
                         bool materialReady = true;
-                        for (uint texIndex = 0; texIndex < Components::Material::maxTextures; texIndex++)
+                        for (uint texIndex = 0; texIndex < HLSL::MaterialTextureCount; texIndex++)
                         {
                             if (materialCmp.textures[texIndex].index != entityInvalid)
                             {

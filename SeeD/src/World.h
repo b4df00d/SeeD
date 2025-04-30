@@ -111,11 +111,9 @@ namespace Components
 
     struct Material : ComponentBase<Material>
     {
+        Handle<Texture> textures[HLSL::MaterialTextureCount];
+        float prameters[HLSL::MaterialParametersCount];
         Handle<Shader> shader;
-        static const uint maxTextures = 16;
-        Handle<Texture> textures[maxTextures];
-        static const uint maxParameters = 15;// not 16 so that the struct is 128bytes
-        float prameters[15];
     };
 
     struct Transform : ComponentBase<Transform>
@@ -660,8 +658,8 @@ namespace Systems
         {
             auto& cam = camera.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Camera::mask).Get<Components::Camera>();
             cam.fovY = 90;
-            cam.nearClip = 0.1;
-            cam.farClip = 1000.0f;
+            cam.nearClip = 0.01;
+            cam.farClip = 10000.0f;
             auto& trans = camera.Get<Components::Transform>();
             trans.position = float3(0, 1, -2);
             trans.rotation = quaternion::identity();
