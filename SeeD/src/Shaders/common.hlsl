@@ -889,14 +889,48 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
 
 struct SurfaceData
 {
-    float3 albedo;
+    float4 albedo; //with alpha
     float metalness;
     float3 normal;
     float roughness;
 };
-SurfaceData GetSurfaceData()
+SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal)
 {
     SurfaceData s;
+    uint textureIndex = ~0;
+    
+    s.albedo = material.parameters[0];
+    textureIndex = material.textures[0];
+    if(textureIndex != ~0)
+    {
+        Texture2D<float4> albedo = ResourceDescriptorHeap[textureIndex];
+        s.albedo *= albedo.Sample(samplerLinear, uv);
+    }
+    
+    s.roughness = material.parameters[1];
+    textureIndex = material.textures[1];
+    if(textureIndex != ~0)
+    {
+        Texture2D<float4> roughtness = ResourceDescriptorHeap[textureIndex];
+        s.roughness *= roughtness.Sample(samplerLinear, uv).x;
+    }
+    
+    s.metalness = material.parameters[2];
+    textureIndex = material.textures[2];
+    if(textureIndex != ~0)
+    {
+        Texture2D<float4> metalness = ResourceDescriptorHeap[textureIndex];
+        s.metalness *= metalness.Sample(samplerLinear, uv).x;
+    }
+    
+    s.normal = normal;
+    textureIndex = material.textures[3];
+    if(textureIndex != ~0)
+    {
+        Texture2D<float4> normals = ResourceDescriptorHeap[textureIndex];
+        s.normal *= normals.Sample(samplerLinear, uv).xyz;
+    }
+    
     return s;
 }
 
@@ -907,10 +941,10 @@ float3 BRDF(SurfaceData s, float3 viewDir, float3 lightDir, float3 lightColor)
     float smooth = 1 - s.roughness;
     
     float NdotL = dot(s.normal, -lightDir);
-    float3 diffuse = s.albedo * saturate(NdotL) * lightColor;
+    float3 diffuse = s.albedo.xyz * saturate(NdotL) * lightColor;
     float3 reflectViewDir = reflect(-viewDir, s.normal);
     float RdotL = dot(reflectViewDir, lightDir);
-    float3 specular = pow(saturate(RdotL), 1 + smooth * 100) * lerp(lightColor, length(lightColor) * s.albedo, s.metalness) * smooth;
+    float3 specular = pow(saturate(RdotL), 1 + smooth * 100) * lerp(lightColor, length(lightColor) * s.albedo.xyz, s.metalness) * smooth;
 
     return saturate(diffuse + specular);
 }
@@ -945,8 +979,8 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     if (material.textures[0] != ~0)
     {
         Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
-        s.albedo = albedo.SampleLevel(samplerLinear, uv, 0).xyz;
-        s.albedo = pow(s.albedo, 1.f/2.2f);
+        s.albedo = albedo.SampleLevel(samplerLinear, uv, 0);
+        s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
     }
     else
     {

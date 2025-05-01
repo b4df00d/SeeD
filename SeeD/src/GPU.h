@@ -213,7 +213,9 @@ struct Shader
     ID3D12RootSignature* rootSignature;
     ID3D12PipelineState* pso;
 
-    uint3 numthreads; // read that from shader reflection
+    // read those from shader reflection
+    uint3 numthreads;
+    std::vector<DXGI_FORMAT> outputs;
 
     // for raytracing
     ID3D12StateObject* rtStateObject;

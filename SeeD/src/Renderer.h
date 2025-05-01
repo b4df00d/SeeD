@@ -457,6 +457,8 @@ public:
         cullingContextParams.instancesCounterIndex = cullingContext.instancesCounter.GetResource().uav.offset;
         cullingContextParams.meshletsCounterIndex = cullingContext.meshletsCounter.GetResource().uav.offset;
         cullingContextParams.albedoIndex = GetRegisteredResource("albedo").srv.offset;
+        cullingContextParams.metalnessIndex = GetRegisteredResource("metalness").srv.offset;
+        cullingContextParams.roughnessIndex = GetRegisteredResource("roughness").srv.offset;
         cullingContextParams.normalIndex = GetRegisteredResource("normal").srv.offset;
         cullingContextParams.motionIndex = GetRegisteredResource("motion").srv.offset;
         cullingContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
@@ -978,6 +980,8 @@ class GBuffers : public Pass
 {
     ViewResource albedo;
     ViewResource normal;
+    ViewResource metalness;
+    ViewResource roughness;
     ViewResource depth;
     ViewResource motion;
     Components::Handle<Components::Shader> meshShader;
@@ -990,6 +994,10 @@ public:
         albedo.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R8G8B8A8_UNORM, "albedo"); // must be same as backbuffer for a resource copy at end of frame 
         normal.Register("normal", view);
         normal.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R11G11B10_FLOAT, "normal");
+        metalness.Register("metalness", view);
+        metalness.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R8_UNORM, "metalness");
+        roughness.Register("roughness", view);
+        roughness.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R8_UNORM, "roughness");
         depth.Register("depth", view);
         motion.Register("motion", view);
         motion.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R16G16_FLOAT, "motion");
@@ -1007,9 +1015,11 @@ public:
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        Resource rts[] = { albedo.Get(), normal.Get(), motion.Get() };
+        Resource rts[] = { albedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get() };
         SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true);
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
@@ -1026,6 +1036,8 @@ public:
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
 
         Close();

@@ -1246,6 +1246,12 @@ public:
             newMat.textures[4] = CreateOrLoadTexture(m, 2, aiTextureType_AMBIENT_OCCLUSION, aiTextureType_AMBIENT);
             newMat.textures[5] = CreateOrLoadTexture(m, 2, aiTextureType_EMISSION_COLOR, aiTextureType_EMISSIVE);
 
+
+            for (uint j = 0; j < HLSL::MaterialParametersCount; j++)
+            {
+                newMat.prameters[j] = { 1 };
+            }
+
             matIndexToEntity.push_back(ent);
         }
     }
@@ -1406,7 +1412,7 @@ public :
             CreateRTShaderLibrary(shader, pResults);
         }
 
-        ShaderReflection(pResults, shader, nullptr, nullptr);
+        ShaderReflection(pResults, shader);
 
 #if 0
         // Save pdb.
@@ -1720,7 +1726,7 @@ public :
         return pso;
     }
 
-    void ShaderReflection(IDxcResult* pResults, Shader* shader = NULL, std::vector<D3D12_INPUT_ELEMENT_DESC>* inputLayoutElements = NULL, std::vector<DXGI_FORMAT>* outputLayoutElements = NULL)
+    void ShaderReflection(IDxcResult* pResults, Shader* shader = NULL)
     {
         // Reflection to get custom cbuffer layout
         IDxcBlob* pReflectionData;
@@ -1741,6 +1747,59 @@ public :
         pShaderReflection->GetDesc(&refDesc);
 
         std::cout << "InstructionCounts (float | int | texture | total): " << refDesc.FloatInstructionCount << " | " << refDesc.IntInstructionCount << " | " << refDesc.TextureLoadInstructions << " | " << refDesc.InstructionCount << " -- TempRegisterCount : " << refDesc.TempRegisterCount << std::endl;
+
+        if (shader != NULL)
+        {
+            uint x;
+            uint y;
+            uint z;
+            pShaderReflection->GetThreadGroupSize(&x, &y, &z);
+            shader->numthreads = uint3(x, y, z);
+
+            // Read input layout description from shader info
+            for (uint i = 0; i < refDesc.OutputParameters; i++)
+            {
+                D3D12_SIGNATURE_PARAMETER_DESC paramDesc;
+                pShaderReflection->GetOutputParameterDesc(i, &paramDesc);
+
+                // Create the SO Declaration
+                D3D12_SO_DECLARATION_ENTRY entry;
+                entry.SemanticIndex = paramDesc.SemanticIndex;
+                entry.SemanticName = paramDesc.SemanticName;
+                entry.Stream = paramDesc.Stream;
+                entry.StartComponent = 0; // Assume starting at 0
+                entry.OutputSlot = 0; // Assume the first output slot
+
+                DXGI_FORMAT format;
+                // determine DXGI format
+                if (paramDesc.Mask == 1)
+                {
+                    if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32_UINT;
+                    else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32_SINT;
+                    else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32_FLOAT;
+                }
+                else if (paramDesc.Mask <= 3)
+                {
+                    if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32G32_UINT;
+                    else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32G32_SINT;
+                    else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32G32_FLOAT;
+                }
+                else if (paramDesc.Mask <= 7)
+                {
+                    if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32G32B32_UINT;
+                    else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32G32B32_SINT;
+                    else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32G32B32_FLOAT;
+                }
+                else if (paramDesc.Mask <= 15)
+                {
+                    if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32G32B32A32_UINT;
+                    else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32G32B32A32_SINT;
+                    else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+                }
+
+                shader->outputs.push_back(format);
+            }
+        }
         /*
         if (shader != NULL)
         {
@@ -1835,63 +1894,9 @@ public :
             }
 
             // Create imput Layout
-            if (outputLayoutElements != NULL)
-            {
-                // Read input layout description from shader info
-                for (uint i = 0; i < refDesc.OutputParameters; i++)
-                {
-                    D3D12_SIGNATURE_PARAMETER_DESC paramDesc;
-                    pShaderReflection->GetOutputParameterDesc(i, &paramDesc);
 
-                    // Create the SO Declaration
-                    D3D12_SO_DECLARATION_ENTRY entry;
-                    entry.SemanticIndex = paramDesc.SemanticIndex;
-                    entry.SemanticName = paramDesc.SemanticName;
-                    entry.Stream = paramDesc.Stream;
-                    entry.StartComponent = 0; // Assume starting at 0
-                    entry.OutputSlot = 0; // Assume the first output slot
-
-                    DXGI_FORMAT format;
-                    // determine DXGI format
-                    if (paramDesc.Mask == 1)
-                    {
-                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32_UINT;
-                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32_SINT;
-                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32_FLOAT;
-                    }
-                    else if (paramDesc.Mask <= 3)
-                    {
-                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32G32_UINT;
-                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32G32_SINT;
-                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32G32_FLOAT;
-                    }
-                    else if (paramDesc.Mask <= 7)
-                    {
-                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32G32B32_UINT;
-                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32G32B32_SINT;
-                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32G32B32_FLOAT;
-                    }
-                    else if (paramDesc.Mask <= 15)
-                    {
-                        if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_UINT32) format = DXGI_FORMAT_R32G32B32A32_UINT;
-                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_SINT32) format = DXGI_FORMAT_R32G32B32A32_SINT;
-                        else if (paramDesc.ComponentType == D3D_REGISTER_COMPONENT_FLOAT32) format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-                    }
-
-                    outputLayoutElements->push_back(format);
-                }
-            }
         }
         */
-
-        if (shader != NULL)
-        {
-            uint x;
-            uint y;
-            uint z;
-            pShaderReflection->GetThreadGroupSize(&x, &y, &z);
-            shader->numthreads = uint3(x, y, z);
-        }
     }
 
     bool Parse(Shader& shader, String file)
@@ -1922,7 +1927,12 @@ public :
 					}
 				}
 
-				if (line._Starts_with("#pragma "))
+                else if (line.find("SV_Target0") != -1)
+                {
+
+                }
+
+				else if (line._Starts_with("#pragma "))
 				{
 					auto tokens = line.Split(" ");
 
@@ -1931,26 +1941,21 @@ public :
 					{
 						tokens.push_back(" ");
 					}
-					/*
-					#pragma gBuffer meshMain pixelBuffers
-					#pragma zPrepass vertexDepth
-					#pragma forward meshMain pixelMain
-					*/
+
 					if (tokens[1] == "gBuffer")
 					{
                         shader.type = Shader::Type::Graphic;
                         //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader);
-                        D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[4], "ps_6_6");
-                        PipelineStateStream stream{}; 
-                        DXGI_FORMAT targetFormat[] = { DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16G16_FLOAT };
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6");
+                        D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader);
+                        PipelineStateStream stream{};
                         D3D12_RT_FORMAT_ARRAY RTVFormats = {};
-                        RTVFormats.NumRenderTargets = ARRAYSIZE(targetFormat);
-                        for (uint i = 0; i < ARRAYSIZE(targetFormat); i++)
+                        RTVFormats.NumRenderTargets = shader.outputs.size();
+                        for (uint i = 0; i < shader.outputs.size(); i++)
                         {
-                            RTVFormats.RTFormats[i] = targetFormat[i];
+                            RTVFormats.RTFormats[i] = shader.outputs[i];
                         }
-                        for (uint i = ARRAYSIZE(targetFormat); i < 8; i++)
+                        for (uint i = shader.outputs.size(); i < 8; i++)
                         {
                             RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
                         }
@@ -1986,14 +1991,24 @@ public :
                     {
                         shader.type = Shader::Type::Graphic;
                         //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader);
-                        D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6");
+                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6");
+                        D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader);
                         PipelineStateStream stream;
+                        D3D12_RT_FORMAT_ARRAY RTVFormats = {};
+                        RTVFormats.NumRenderTargets = shader.outputs.size();
+                        for (uint i = 0; i < shader.outputs.size(); i++)
+                        {
+                            RTVFormats.RTFormats[i] = shader.outputs[i];
+                        }
+                        for (uint i = shader.outputs.size(); i < 8; i++)
+                        {
+                            RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
+                        }
+                        stream.RTFormats = RTVFormats;
                         //stream.AS = amplificationShaderBytecode;
                         stream.MS = meshShaderBytecode;
                         stream.PS = forwardShaderBytecode;
-                        stream.pRootSignature = shader.rootSignature;
-                        shader.pso = nullptr;
+
                         shader.pso = CreatePSO(stream);
                         compiled = shader.pso != nullptr;
                     }

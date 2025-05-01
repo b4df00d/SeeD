@@ -80,6 +80,8 @@ namespace HLSL
         uint instancesCounterIndex;
         uint meshletsCounterIndex;
         uint albedoIndex;
+        uint metalnessIndex;
+        uint roughnessIndex;
         uint normalIndex;
         uint motionIndex;
         uint depthIndex;

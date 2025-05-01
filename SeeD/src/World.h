@@ -658,8 +658,8 @@ namespace Systems
         {
             auto& cam = camera.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Camera::mask).Get<Components::Camera>();
             cam.fovY = 90;
-            cam.nearClip = 0.01;
-            cam.farClip = 10000.0f;
+            cam.nearClip = 0.02;
+            cam.farClip = 8000.0f;
             auto& trans = camera.Get<Components::Transform>();
             trans.position = float3(0, 1, -2);
             trans.rotation = quaternion::identity();

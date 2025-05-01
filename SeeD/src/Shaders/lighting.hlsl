@@ -19,6 +19,8 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     Texture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     Texture2D<float4> albedo = ResourceDescriptorHeap[cullingContext.albedoIndex];
+    Texture2D<float> metalness = ResourceDescriptorHeap[cullingContext.metalnessIndex];
+    Texture2D<float> roughness = ResourceDescriptorHeap[cullingContext.roughnessIndex];
     
     //Should not have any preference on shading a specific light here (the sun)... let the raytracing handle any light stuff ?
     StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
@@ -30,14 +32,14 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     float3 direct = shadows[dtid.xy] * light.color.xyz;
     
     SurfaceData s;
-    s.albedo = albedo[dtid.xy].xyz;
-    s.roughness = 0.99;
+    s.albedo = albedo[dtid.xy];
+    s.metalness = metalness[dtid.xy];
+    s.roughness = roughness[dtid.xy];
     s.normal = cd.worldNorm;
-    s.metalness = 0.1;
     
     
     float3 brdf = BRDF(s, cd.viewDir, light.dir.xyz, direct);
-    float3 ambient = indirect * s.albedo;
+    float3 ambient = indirect * s.albedo.xyz;
     //ambient = (dot(s.normal, float3(0, 1, 0)) * 0.5 + 0.5) * 0.5;
     
     float3 result = brdf + ambient;

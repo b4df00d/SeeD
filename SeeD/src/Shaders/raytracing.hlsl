@@ -279,7 +279,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     payload.color += bounceLight;
     
 #endif
-    payload.color *= saturate(s.albedo * 1);
+    payload.color *= saturate(s.albedo.xyz * 1);
 }
 
 [shader("anyhit")]

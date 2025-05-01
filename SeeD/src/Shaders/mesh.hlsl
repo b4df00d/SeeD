@@ -2,8 +2,20 @@
 #include "binding.hlsl"
 #include "common.hlsl"
 
+// define the output of shader before the call to shader so that the parser can know it before compiling
+// the comment after the SV_target is important
+struct PS_OUTPUT
+{
+    float4 albedo : SV_Target0; //DXGI_FORMAT_R8G8B8A8_UNORM
+    float3 normal : SV_Target1; //DXGI_FORMAT_R11G11B10_FLOAT
+    float metalness : SV_Target2; //DXGI_FORMAT_R8_UNORM
+    float roughness : SV_Target3; //DXGI_FORMAT_R8_UNORM
+    float2 motion : SV_Target4; //DXGI_FORMAT_R16G16_FLOAT
+};
+
 #pragma gBuffer AmplificationMain MeshMain PixelgBuffer
 //#pragma forward AmplificationMain MeshMain PixelgBuffer
+
 
 struct Payload
 {
@@ -29,7 +41,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[cullingContext.cameraIndex];
     
-    uint meshletCount = min(256, mesh.meshletCount);
+    uint meshletCount = min(512, mesh.meshletCount);
     
     float4x4 worldMatrix = instance.unpack(instance.current);
     float4 boundingSphere = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1));
@@ -130,22 +142,22 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
     }
 }
 
-struct PS_OUTPUT_FORWARD
+PS_OUTPUT PixelForward(HLSL::MSVert inVerts)
 {
-    float4 albedo : SV_Target0;
-    float3 normal : SV_Target1;
-    float2 motion : SV_Target2;
-    //uint entityID : SV_Target1;
-};
-
-PS_OUTPUT_FORWARD PixelForward(HLSL::MSVert inVerts)
-{
-    PS_OUTPUT_FORWARD o;
+    PS_OUTPUT o;
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
-    o.albedo = float4(inVerts.color, 1);
-    o.normal = StoreR11G11B10Normal(normalize(inVerts.normal.xyz));
+    
+    StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
+    HLSL::Material material = materials[instance.materialIndex];
+    
+    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal);
+    
+    o.albedo = s.albedo;
+    o.roughness = s.roughness;
+    o.metalness = s.metalness;
+    o.normal = StoreR11G11B10Normal(normalize(s.normal));
     
     float2 currScreenPos = inVerts.pos.xy;
     float2 prevScreenPos = (inVerts.previousPos.xy / inVerts.previousPos.w) * 0.5 + 0.5;
@@ -157,9 +169,9 @@ PS_OUTPUT_FORWARD PixelForward(HLSL::MSVert inVerts)
     return o;
 }
 
-PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
+PS_OUTPUT PixelgBuffer(HLSL::MSVert inVerts)
 {
-    PS_OUTPUT_FORWARD o;
+    PS_OUTPUT o;
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
@@ -167,19 +179,12 @@ PS_OUTPUT_FORWARD PixelgBuffer(HLSL::MSVert inVerts)
     StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
     HLSL::Material material = materials[instance.materialIndex];
     
-    uint textureIndex = material.textures[0];
-    if(textureIndex != ~0)
-    {
-        Texture2D<float4> albedo = ResourceDescriptorHeap[textureIndex];
-        o.albedo = albedo.Sample(samplerLinear, inVerts.uv);
-    }
-    else
-    {
-        o.albedo = 0.66;
-    }
-    //o.albedo = float4(inVerts.color, 1);
+    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal);
     
-    o.normal = StoreR11G11B10Normal(normalize(inVerts.normal.xyz));
+    o.albedo = s.albedo;
+    o.roughness = s.roughness;
+    o.metalness = s.metalness;
+    o.normal = StoreR11G11B10Normal(normalize(s.normal));
     
     float2 currScreenPos = inVerts.pos.xy;
     float4 previousPos = inVerts.previousPos;
