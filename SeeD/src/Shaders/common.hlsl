@@ -886,15 +886,24 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     return cd;
 }
 
-
 struct SurfaceData
 {
     float4 albedo; //with alpha
-    float metalness;
     float3 normal;
+    float3 tangent;
+    float3 binormal;
+    float metalness;
     float roughness;
+    float specularTint;
+    float _specular;
+    float sheen;
+    float sheenTint;
+    float anisotropic;
+    float clearcoat;
+    float clearcoatGloss;
+    float subsurface;
 };
-SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal)
+SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, float3 tangent, float3 binormal)
 {
     SurfaceData s;
     uint textureIndex = ~0;
@@ -924,6 +933,8 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal)
     }
     
     s.normal = normal;
+    s.tangent = tangent;
+    s.binormal = binormal;
     textureIndex = material.textures[3];
     if(textureIndex != ~0)
     {
@@ -931,22 +942,163 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal)
         s.normal *= normals.Sample(samplerLinear, uv).xyz;
     }
     
+    s.specularTint = 0;
+    s._specular = 0;
+    s.sheen = 0;
+    s.sheenTint = 0.5;
+    s.anisotropic = 0;
+    s.clearcoat = 0;
+    s.clearcoatGloss = 1;
+    s.subsurface = 0;
+    
     return s;
 }
 
-float3 BRDF(SurfaceData s, float3 viewDir, float3 lightDir, float3 lightColor)
+SurfaceData GetSurfaceData(uint2 pixel)
 {
-    float NdotV = dot(-viewDir, s.normal);
-    s.roughness = lerp(0, s.roughness, saturate(NdotV));
-    float smooth = 1 - s.roughness;
+    Texture2D<float4> albedo = ResourceDescriptorHeap[cullingContext.albedoIndex];
+    Texture2D<float> metalness = ResourceDescriptorHeap[cullingContext.metalnessIndex];
+    Texture2D<float> roughness = ResourceDescriptorHeap[cullingContext.roughnessIndex];
+    Texture2D<float3> normal = ResourceDescriptorHeap[cullingContext.normalIndex];
     
-    float NdotL = dot(s.normal, -lightDir);
-    float3 diffuse = s.albedo.xyz * saturate(NdotL) * lightColor;
-    float3 reflectViewDir = reflect(-viewDir, s.normal);
-    float RdotL = dot(reflectViewDir, lightDir);
-    float3 specular = pow(saturate(RdotL), 1 + smooth * 100) * lerp(lightColor, length(lightColor) * s.albedo.xyz, s.metalness) * smooth;
+    SurfaceData s;
+    
+    s.albedo = albedo[pixel];
+    s.normal = ReadR11G11B10Normal(normal[pixel]);
+    s.metalness = metalness[pixel];
+    s.roughness = roughness[pixel];
+    s.tangent = cross(s.normal, float3(1, 0, 0));
+    s.binormal = cross(s.normal, s.tangent);
+    s.specularTint = 0;
+    s._specular = 0;
+    s.sheen = 0;
+    s.sheenTint = 0.5;
+    s.anisotropic = 0;
+    s.clearcoat = 0;
+    s.clearcoatGloss = 1;
+    s.subsurface = 0;
+    
+    return s;
+}
 
-    return saturate(diffuse + specular);
+// disney stuff https://media.disneyanimation.com/uploads/production/publication_asset/48/asset/s2012_pbs_disney_brdf_notes_v3.pdf
+// explanation for cpp https://schuttejoe.github.io/post/disneybsdf/
+// raytraced https://www.shadertoy.com/view/cll3R4
+//https://seblagarde.wordpress.com/wp-content/uploads/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf
+// simple stuff http://filmicworlds.com/blog/optimizing-ggx-shaders-with-dotlh/
+
+
+// copy past from https://discussions.unity.com/t/disney-principled-brdf-shader/742743
+static const float PI = 3.14159265358979323846;
+
+float sqr(float x) { return x*x; }
+
+float SchlickFresnel(float u)
+{
+    float m = clamp(1-u, 0, 1);
+    float m2 = m*m;
+    return m2*m2*m; // pow(m,5)
+}
+
+float GTR1(float NdotH, float a)
+{
+    if (a >= 1) return 1/PI;
+    float a2 = a*a;
+    float t = 1 + (a2-1)*NdotH*NdotH;
+    return (a2-1) / (PI*log(a2)*t);
+}
+
+float GTR2(float NdotH, float a)
+{
+    float a2 = a*a;
+    float t = 1 + (a2-1)*NdotH*NdotH;
+    return a2 / (PI * t*t);
+}
+
+float GTR2_aniso(float NdotH, float HdotX, float HdotY, float ax, float ay)
+{
+    return 1 / (PI * ax*ay * sqr( sqr(HdotX/ax) + sqr(HdotY/ay) + NdotH*NdotH ));
+}
+
+float smithG_GGX(float NdotV, float alphaG)
+{
+    float a = alphaG*alphaG;
+    float b = NdotV*NdotV;
+    return 1 / (NdotV + sqrt(a + b - a*b));
+}
+
+float smithG_GGX_aniso(float NdotV, float VdotX, float VdotY, float ax, float ay)
+{
+    return 1 / (NdotV + sqrt( sqr(VdotX*ax) + sqr(VdotY*ay) + sqr(NdotV) ));
+}
+
+float3 mon2lin(float3 x)
+{
+    return float3(pow(x[0], 2.2), pow(x[1], 2.2), pow(x[2], 2.2));
+}
+
+float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor)
+{
+    s.roughness = 0.5;
+    s.metalness = 0.0;
+    s._specular = 0.1;
+    s.normal = normalize(s.normal);
+    L = normalize(-L);
+    V = normalize(-V);
+    
+    
+    float NdotL = max(dot(s.normal,L),0.0);
+    float NdotV = max(dot(s.normal,V),0.0);
+
+    float3 H = normalize(L+V);
+    float NdotH = max(dot(s.normal,H),0.0);
+    float LdotH = max(dot(L,H),0.0);
+
+    float3 Cdlin = mon2lin(s.albedo.xyz);
+    float Cdlum = .3*Cdlin[0] + .6*Cdlin[1]  + .1*Cdlin[2]; // luminance approx.
+
+    float3 Ctint = Cdlum > 0 ? Cdlin/Cdlum : float3(1,1,1); // normalize lum. to isolate hue+sat
+    float3 Cspec0 = lerp(s._specular*.08*lerp(float3(1,1,1), Ctint, s.specularTint), Cdlin, s.metalness);
+    float3 Csheen = lerp(float3(1,1,1), Ctint, s.sheenTint);
+
+    // Diffuse fresnel - go from 1 at normal incidence to .5 at grazing
+    // and lerp in diffuse retro-reflection based on roughness
+    float FL = SchlickFresnel(NdotL), FV = SchlickFresnel(NdotV);
+    float Fd90 = 0.5 + 2 * LdotH*LdotH*s.roughness;
+    float Fd = lerp(1.0, Fd90, FL) * lerp(1.0, Fd90, FV);
+
+    // Based on Hanrahan-Krueger brdf approximation of isotropic bssrdf
+    // 1.25 scale is used to (roughly) preserve albedo
+    // Fss90 used to "flatten" retroreflection based on roughness
+    float Fss90 = LdotH*LdotH*s.roughness;
+    float Fss = lerp(1.0, Fss90, FL) * lerp(1.0, Fss90, FV);
+    float ss = 1.25 * (Fss * (1 / (NdotL + NdotV) - .5) + .5);
+
+    // specular
+    float aspect = sqrt(1-s.anisotropic*.9);
+    aspect = 1;
+    float ax = max(.001, sqr(s.roughness)/aspect);
+    float ay = max(.001, sqr(s.roughness)*aspect);
+    //float Ds = GTR2_aniso(NdotH, dot(H, s.tangent), dot(H, s.binormal), ax, ay);
+    float Ds = GTR2(NdotH, ax);
+    float FH = SchlickFresnel(LdotH);
+    float3 Fs = lerp(Cspec0, float3(1,1,1), FH);
+    //float Gs  = smithG_GGX_aniso(NdotL, dot(L, s.tangent), dot(L, s.binormal), ax, ay);
+    //Gs *= smithG_GGX_aniso(NdotV, dot(V, s.tangent), dot(V, s.binormal), ax, ay);
+    float Gs  = smithG_GGX(NdotL, ax);
+    Gs *= smithG_GGX(NdotV, ax);
+
+    // sheen
+    float3 Fsheen = FH * s.sheen * Csheen;
+
+    // clearcoat (ior = 1.5 -> F0 = 0.04)
+    float Dr = GTR1(NdotH, lerp(.1,.001,s.clearcoatGloss));
+    float Fr = lerp(.04, 1.0, FH);
+    float Gr = smithG_GGX(NdotL, .25) * smithG_GGX(NdotV, .25);
+
+    float3 result = ((1/PI) * lerp(Fd, ss, s.subsurface)*Cdlin + Fsheen) * (1-s.metalness) + Gs*Fs*Ds + .25*s.clearcoat*Gr*Fr*Dr;
+    result *= LColor;
+    return result;
 }
 
 SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
@@ -980,7 +1132,7 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     {
         Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
         s.albedo = albedo.SampleLevel(samplerLinear, uv, 0);
-        s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
+        //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
     }
     else
     {
@@ -1011,7 +1163,7 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     return s;
 }
 
-static uint maxFrameFilteringCount = 5;
+static uint maxFrameFilteringCount = 10;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current)
 {
     previous.pos_Wsum.w += current.pos_Wsum.w;

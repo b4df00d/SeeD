@@ -16,6 +16,16 @@ struct PS_OUTPUT
 #pragma gBuffer AmplificationMain MeshMain PixelgBuffer
 //#pragma forward AmplificationMain MeshMain PixelgBuffer
 
+struct MSVert
+{
+    float4 pos : SV_Position;
+    float4 previousPos : TEXCOORD0;
+    float3 normal : NORMAL;
+    float3 tangent : TEXCOORD1;
+    float3 binormal : TEXCOORD2;
+    float3 color : COLOR0;
+    float2 uv : TEXCOORD3;
+};
 
 struct Payload
 {
@@ -81,7 +91,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
 [RootSignature(SeeDRootSignature)]
 [outputtopology("triangle")]
 [numthreads(HLSL::max_triangles, 1, 1)]
-void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices HLSL::MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])
+void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])
 {
     StructuredBuffer<HLSL:: Camera > cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[0]; //cullingContext.cameraIndex];
@@ -115,6 +125,8 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         float3 normal = verticesData[index].normal.xyz;
         float3 worldNormal = mul((float3x3)worldMatrix, normal);
         outVerts[groupThreadId.x].normal = normalize(worldNormal);
+        outVerts[groupThreadId.x].tangent = 0;// TODO : compute those 
+        outVerts[groupThreadId.x].binormal = 0;// TODO : compute those 
         
         outVerts[groupThreadId.x].color = RandUINT(meshletIndexIndirect);
         outVerts[groupThreadId.x].uv = verticesData[index].uv;
@@ -142,7 +154,7 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
     }
 }
 
-PS_OUTPUT PixelForward(HLSL::MSVert inVerts)
+PS_OUTPUT PixelForward(MSVert inVerts)
 {
     PS_OUTPUT o;
     
@@ -152,7 +164,7 @@ PS_OUTPUT PixelForward(HLSL::MSVert inVerts)
     StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
     HLSL::Material material = materials[instance.materialIndex];
     
-    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal);
+    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent, inVerts.binormal);
     
     o.albedo = s.albedo;
     o.roughness = s.roughness;
@@ -169,7 +181,7 @@ PS_OUTPUT PixelForward(HLSL::MSVert inVerts)
     return o;
 }
 
-PS_OUTPUT PixelgBuffer(HLSL::MSVert inVerts)
+PS_OUTPUT PixelgBuffer(MSVert inVerts)
 {
     PS_OUTPUT o;
     
@@ -179,7 +191,7 @@ PS_OUTPUT PixelgBuffer(HLSL::MSVert inVerts)
     StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
     HLSL::Material material = materials[instance.materialIndex];
     
-    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal);
+    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent, inVerts.binormal);
     
     o.albedo = s.albedo;
     o.roughness = s.roughness;

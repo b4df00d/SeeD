@@ -51,7 +51,7 @@ void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThread
             float depthNeightbor = depthT[pixel.xy];
             if(abs(depth - depthNeightbor) > 0.002)
                 continue;
-            if(dot(worldNorm, worldNormNeightbor) < 0.95)
+            if(dot(worldNorm, worldNormNeightbor) < 0.9)
                 continue;
             HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * rtParameters.resolution.x]);
             UpdateGIReservoir(r, rNeightbor);

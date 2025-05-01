@@ -29,16 +29,6 @@ namespace HLSL
     
     static const uint max_vertices = 64;
     static const uint max_triangles = 124;
-#ifndef __cplusplus
-    struct MSVert
-    {
-        float4 pos : SV_Position;
-        float4 previousPos : TEXCOORD0;
-        float3 normal : NORMAL;
-        float3 color : COLOR0;
-        float2 uv : TEXCOORD1;
-    };
-#endif
     
     static const uint invalidUINT = 4294967295;
     struct CommonResourcesIndices

@@ -18,9 +18,6 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     Texture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     Texture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
-    Texture2D<float4> albedo = ResourceDescriptorHeap[cullingContext.albedoIndex];
-    Texture2D<float> metalness = ResourceDescriptorHeap[cullingContext.metalnessIndex];
-    Texture2D<float> roughness = ResourceDescriptorHeap[cullingContext.roughnessIndex];
     
     //Should not have any preference on shading a specific light here (the sun)... let the raytracing handle any light stuff ?
     StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
@@ -31,12 +28,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     float3 indirect = GI[dtid.xy].xyz;
     float3 direct = shadows[dtid.xy] * light.color.xyz;
     
-    SurfaceData s;
-    s.albedo = albedo[dtid.xy];
-    s.metalness = metalness[dtid.xy];
-    s.roughness = roughness[dtid.xy];
-    s.normal = cd.worldNorm;
-    
+    SurfaceData s = GetSurfaceData(dtid.xy);
     
     float3 brdf = BRDF(s, cd.viewDir, light.dir.xyz, direct);
     float3 ambient = indirect * s.albedo.xyz;
@@ -48,5 +40,5 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     //result = SampleProbes(rtParameters, cd.worldPos, cd.worldNorm);
     
     lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
-    //lighted[dtid.xy] = float4(s.albedo, 1);
+    //lighted[dtid.xy] = float4(brdf, 1);
 }
