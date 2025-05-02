@@ -15,7 +15,6 @@ cbuffer CustomRT : register(b2)
 [numthreads(16, 16, 1)]
 void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
-    Texture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     Texture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     
@@ -24,20 +23,25 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     HLSL::Light light = lights[0];
     
     GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
-    
-    float3 indirect = GI[dtid.xy].xyz;
-    float3 direct = shadows[dtid.xy] * light.color.xyz;
-    
     SurfaceData s = GetSurfaceData(dtid.xy);
     
-    float3 brdf = BRDF(s, cd.viewDir, light.dir.xyz, direct);
-    float3 ambient = indirect * s.albedo.xyz;
-    //ambient = (dot(s.normal, float3(0, 1, 0)) * 0.5 + 0.5) * 0.5;
+    float3 direct = BRDF(s, cd.viewDir, light.dir.xyz, shadows[dtid.xy] * light.color.xyz);
     
-    float3 result = brdf + ambient;
+#if lighted
+    Texture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+    float3 indirect = GI[dtid.xy].xyz;
+#else
+    RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];   
+    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * rtParameters.resolution.x]);
+    float3 indirect = BRDF(s, cd.viewDir, r.dir_Wcount.xyz, r.color_W.xyz * (r.pos_Wsum.w / r.dir_Wcount.w) * 1, 0.2);
+    //indirect = r.color_W.xyz * (r.pos_Wsum.w / r.dir_Wcount.w);
+    //indirect = r.dir_Wcount.xyz;
+#endif
+    //indirect = SampleProbes(rtParameters, cd.worldPos, cd.worldNorm);
+    
+    float3 result = direct + indirect;
     //result = direct;
     //result = indirect;
-    //result = SampleProbes(rtParameters, cd.worldPos, cd.worldNorm);
     
     lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
     //lighted[dtid.xy] = float4(brdf, 1);

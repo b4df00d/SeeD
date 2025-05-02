@@ -156,7 +156,7 @@ void RayGen()
         
         TraceRay( BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
         
-        bounceLight = payload.color * saturate(dot(cd.worldNorm, bounceLightDir)); // BRDF here ?
+        bounceLight = payload.color;// * saturate(dot(cd.worldNorm, bounceLightDir)); // BRDF here ?
         
         // ReSTIR
         RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
@@ -279,7 +279,8 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     payload.color += bounceLight;
     
 #endif
-    payload.color *= saturate(s.albedo.xyz * 1);
+    if (payload.rayDepth > 0)
+        payload.color *= saturate(s.albedo.xyz * 1); // fake lighting equation
 }
 
 [shader("anyhit")]

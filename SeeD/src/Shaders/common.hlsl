@@ -914,6 +914,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     {
         Texture2D<float4> albedo = ResourceDescriptorHeap[textureIndex];
         s.albedo *= albedo.Sample(samplerLinear, uv);
+        s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
     }
     
     s.roughness = material.parameters[1];
@@ -1037,11 +1038,11 @@ float3 mon2lin(float3 x)
     return float3(pow(x[0], 2.2), pow(x[1], 2.2), pow(x[2], 2.2));
 }
 
-float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor)
+float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor, float specMul = 1)
 {
-    s.roughness = 0.5;
+    s.roughness = 0.9;
     s.metalness = 0.0;
-    s._specular = 0.1;
+    s._specular = 0.0;
     s.normal = normalize(s.normal);
     L = normalize(-L);
     V = normalize(-V);
@@ -1087,6 +1088,7 @@ float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor)
     //Gs *= smithG_GGX_aniso(NdotV, dot(V, s.tangent), dot(V, s.binormal), ax, ay);
     float Gs  = smithG_GGX(NdotL, ax);
     Gs *= smithG_GGX(NdotV, ax);
+    Gs *= specMul;
 
     // sheen
     float3 Fsheen = FH * s.sheen * Csheen;
@@ -1132,7 +1134,7 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     {
         Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
         s.albedo = albedo.SampleLevel(samplerLinear, uv, 0);
-        //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
+        s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
     }
     else
     {
@@ -1163,7 +1165,7 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     return s;
 }
 
-static uint maxFrameFilteringCount = 10;
+static uint maxFrameFilteringCount = 20;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current)
 {
     previous.pos_Wsum.w += current.pos_Wsum.w;
@@ -1191,7 +1193,7 @@ HLSL::GIReservoirCompressed PackGIReservoir(HLSL::GIReservoir r)
     HLSL::GIReservoirCompressed result;
     result.color = PackRGBE_sqrt(r.color_W.xyz);
     result.Wcount_W = (asuint(f32tof16(r.dir_Wcount.w)) << 16) + asuint(f32tof16(r.color_W.w));
-    result.dir = Pack_R11G11B10_FLOAT(r.dir_Wcount.xyz);
+    result.dir = Pack_R11G11B10_FLOAT(normalize(r.dir_Wcount.xyz) * 0.5 + 0.5);
     result.pos_Wsum = r.pos_Wsum;
     return result;
 }
@@ -1201,7 +1203,7 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
     result.color_W.xyz = UnpackRGBE_sqrt(r.color);
     result.color_W.w = f16tof32(r.Wcount_W & 0xffff);
     result.dir_Wcount.w = f16tof32(r.Wcount_W >> 16u);
-    result.dir_Wcount.xyz = Unpack_R11G11B10_FLOAT(r.dir);
+    result.dir_Wcount.xyz = normalize(Unpack_R11G11B10_FLOAT(r.dir) * 2 - 1);
     result.pos_Wsum = r.pos_Wsum;
     return result;
 }

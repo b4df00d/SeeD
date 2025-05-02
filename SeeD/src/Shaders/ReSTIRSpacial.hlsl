@@ -40,11 +40,13 @@ void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThread
     float3 worldNorm = ReadR11G11B10Normal(normalT[dtid.xy]);
     float depth = depthT[dtid.xy];
     
+    uint seed = initRand(gtid.x + cullingContext.frameTime % 234 * 1.621f, gtid.y + cullingContext.frameTime % 431 * 1.432f, 4);
+    
     uint pattern = (dtid.x + dtid.y + rtParameters.passNumber + rtParameters.frame) % 2;
     for (uint i = 0; i < 4; i++)
     {
-        float radius = 6;
-        int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] * 2 * radius : patternB[i] * radius);
+        float radius = 24;
+        int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] * 2 * radius : patternB[i] * radius) * lerp(nextRand(seed), 1, 0.125);
         if(!(any(pixel<0) || any(pixel>cullingContext.resolution.xy)))
         {
             float3 worldNormNeightbor = ReadR11G11B10Normal(normalT[pixel.xy]);
