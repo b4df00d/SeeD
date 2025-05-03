@@ -915,6 +915,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         Texture2D<float4> albedo = ResourceDescriptorHeap[textureIndex];
         s.albedo *= albedo.Sample(samplerLinear, uv);
         s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
+        if(length(s.albedo.xyz) < 0.1) s.albedo.xyz = 1;
     }
     
     s.roughness = material.parameters[1];
@@ -1135,6 +1136,7 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
         Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
         s.albedo = albedo.SampleLevel(samplerLinear, uv, 0);
         s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
+        if(length(s.albedo.xyz) < 0.1) s.albedo.xyz = 1;
     }
     else
     {

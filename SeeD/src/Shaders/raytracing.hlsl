@@ -191,7 +191,7 @@ void RayGen()
     
     
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    GI[launchIndex] = bounceLight;
+    //GI[launchIndex] = bounceLight;
     RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     shadows[launchIndex] = shadow;
 

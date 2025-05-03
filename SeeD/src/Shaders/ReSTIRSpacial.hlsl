@@ -45,7 +45,7 @@ void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThread
     uint pattern = (dtid.x + dtid.y + rtParameters.passNumber + rtParameters.frame) % 2;
     for (uint i = 0; i < 4; i++)
     {
-        float radius = 24;
+        float radius = 12;
         int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] * 2 * radius : patternB[i] * radius) * lerp(nextRand(seed), 1, 0.125);
         if(!(any(pixel<0) || any(pixel>cullingContext.resolution.xy)))
         {
