@@ -8,8 +8,6 @@
 #include "FidelityFX/host/backends/dx12/ffx_dx12.h"
 #include "FidelityFX/host/ffx_spd.h"
 
-// https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf
-
 class UI
 {
     ID3D12DescriptorHeap* pd3dSrvDescHeap = NULL;
@@ -158,7 +156,6 @@ public:
 
 };
 UI* UI::instance;
-
 
 static constexpr uint invalidMapIndex = UINT_MAX;
 // is this is thread safe only because we allocate the max number of stuff we will find before the MT part

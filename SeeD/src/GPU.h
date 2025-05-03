@@ -13,6 +13,12 @@
 #include "D3d12sdklayers.h"
 #include "../../Third/D3D12MemoryAllocator-master/include/D3D12MemAlloc.h"
 
+
+// https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf
+#include "nvsdk_ngx.h"
+//#include "nvsdk_ngx_helpers.h"
+#define APP_ID 231313132
+
 extern "C" { _declspec(dllexport) extern const UINT D3D12SDKVersion = 4; }
 extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
 
@@ -561,6 +567,7 @@ public:
     uint frameIndex{};
     uint frameNumber{};
 
+    NVSDK_NGX_Parameter* ngx_parameters = nullptr;
 
     void On(IOs::WindowInformation* window)
     {
@@ -572,7 +579,7 @@ public:
         descriptorHeap.On(device);
         CreateSwapChain(window);
         CreateMemoryAllocator();
-
+        CreateDLSS();
     }
 
     void Off()
@@ -741,6 +748,146 @@ public:
         allocatorDesc.Flags = D3D12MA::ALLOCATOR_FLAG_MSAA_TEXTURES_ALWAYS_COMMITTED | D3D12MA::ALLOCATOR_FLAG_DEFAULT_POOLS_NOT_ZEROED; // These flags are optional but recommended.
 
         hr = D3D12MA::CreateAllocator(&allocatorDesc, &allocator);
+    }
+
+
+#define SUCCESS(hr)   (hr == NVSDK_NGX_Result_Success)
+#define FAIL(hr)      (hr != NVSDK_NGX_Result_Success)
+    void CreateDLSS()
+    {
+        /*
+        NVSDK_NGX_Result Result = NVSDK_NGX_Result_Fail;
+        Result = NVSDK_NGX_D3D12_Init(APP_ID, L".", device);
+        NVSDK_NGX_FeatureDiscoveryInfo FeatureDiscoveryInfo;
+        NVSDK_NGX_FeatureRequirement OutSupported;
+        Result = NVSDK_NGX_D3D12_GetFeatureRequirements(adapter, &FeatureDiscoveryInfo, &OutSupported);
+        */
+
+        /*
+        const NVSDK_NGX_FeatureCommonInfo featureCommonInfo = {
+            .LoggingInfo = NVSDK_NGX_LoggingInfo {
+                .LoggingCallback = [](const char* msg, NVSDK_NGX_Logging_Level level, NVSDK_NGX_Feature source) {
+                    IOs::Log("NGX: {}", msg);
+                },
+                .DisableOtherLoggingSinks = false }
+        };
+
+        static constexpr const char* _projectId = "33edfdb6-226b-463c-8c08-5f43e8aa6b82";
+        static constexpr NVSDK_NGX_EngineType _engineType = NVSDK_NGX_ENGINE_TYPE_CUSTOM;
+        static constexpr const char* _engineVersion = "1";
+
+        const NVSDK_NGX_FeatureDiscoveryInfo discovery = {
+            .SDKVersion = NVSDK_NGX_Version_API,
+            .FeatureID = NVSDK_NGX_Feature_SuperSampling,
+            .Identifier = NVSDK_NGX_Application_Identifier {
+                .IdentifierType = NVSDK_NGX_Application_Identifier_Type_Project_Id,
+                .v = NVSDK_NGX_ProjectIdDescription {
+                    .ProjectId = _projectId,
+                    .EngineType = _engineType,
+                    .EngineVersion = _engineVersion } },
+            .ApplicationDataPath = L".",
+            .FeatureInfo = &featureCommonInfo
+        };
+
+        NVSDK_NGX_FeatureRequirement requirement = {};
+        if (FAIL(NVSDK_NGX_D3D12_GetFeatureRequirements(adapter, &discovery, &requirement))) 
+        {
+            return;
+        }
+        if (requirement.FeatureSupported != NVSDK_NGX_Feature_Support_Result::NVSDK_NGX_FeatureSupportResult_Supported) 
+        {
+            std::string errorString;
+
+            if (requirement.FeatureSupported & NVSDK_NGX_FeatureSupportResult_Supported) {
+                errorString += " NVSDK_NGX_FeatureSupportResult_Supported";
+            }
+
+            if (requirement.FeatureSupported & NVSDK_NGX_FeatureSupportResult_CheckNotPresent) {
+                errorString += " NVSDK_NGX_FeatureSupportResult_CheckNotPresent";
+            }
+
+            if (requirement.FeatureSupported & NVSDK_NGX_FeatureSupportResult_DriverVersionUnsupported) {
+                errorString += " NVSDK_NGX_FeatureSupportResult_DriverVersionUnsupported";
+            }
+
+            if (requirement.FeatureSupported & NVSDK_NGX_FeatureSupportResult_AdapterUnsupported) {
+                errorString += " NVSDK_NGX_FeatureSupportResult_AdapterUnsupported";
+            }
+
+            if (requirement.FeatureSupported & NVSDK_NGX_FeatureSupportResult_OSVersionBelowMinimumSupported) {
+                errorString += " NVSDK_NGX_FeatureSupportResult_OSVersionBelowMinimumSupported";
+            }
+
+            if (requirement.FeatureSupported & NVSDK_NGX_FeatureSupportResult_NotImplemented) {
+                errorString += " NVSDK_NGX_FeatureSupportResult_NotImplemented";
+            }
+
+            IOs::Log("NVSDK_NGX_D3D11_GetFeatureRequirements failed: {}\n", errorString);
+            return;
+        }
+
+        if (FAIL(NVSDK_NGX_D3D12_Init_with_ProjectID(_projectId, _engineType, _engineVersion, L".", device, &featureCommonInfo)))
+        {
+            return;
+        }
+        */
+
+
+        // cant find _nvngx.dll or nvmgx.dll ... copied from some driver repo in the OS (do a global search)
+
+
+
+        static const wchar_t* dll_paths[] =
+        {
+        //SOLUTION_DIR L"\\External\\DLSS\\lib\\dev",
+        //SOLUTION_DIR L"\\External\\DLSS\\lib\\rel",
+            L".",
+            L"G:\\Work\\Dev\\SeeD\\Third\\DLSS-main\\lib\\Windows_x86_64\\dev",
+        };
+
+        NVSDK_NGX_FeatureCommonInfo feature_common_info{};
+        feature_common_info.LoggingInfo.LoggingCallback = [](const char* msg, NVSDK_NGX_Logging_Level level, NVSDK_NGX_Feature source) {
+            IOs::Log("NGX: {}", msg);
+            };
+        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+        feature_common_info.LoggingInfo.DisableOtherLoggingSinks = true;
+        feature_common_info.PathListInfo.Path = dll_paths;
+        feature_common_info.PathListInfo.Length = NVSDK_NGX_ARRAY_LEN(dll_paths);
+
+        static constexpr char const* project_guid = "b0f87b54-1daf-4964-90ae-c4035a19df34";
+        NVSDK_NGX_Result result = NVSDK_NGX_D3D12_Init_with_ProjectID(
+            project_guid,
+            NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+            "1.0",
+            L".",
+            device, &feature_common_info);
+
+        result = NVSDK_NGX_D3D12_GetCapabilityParameters(&ngx_parameters);
+        if (NVSDK_NGX_FAILED(result)) return;
+
+        int needs_updated_driver = 0;
+        uint min_driver_version_major = 0;
+        uint min_driver_version_minor = 0;
+        NVSDK_NGX_Result result_updated_driver = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &needs_updated_driver);
+        NVSDK_NGX_Result result_min_driver_version_major = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMajor, &min_driver_version_major);
+        NVSDK_NGX_Result result_min_driver_version_minor = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMinor, &min_driver_version_minor);
+        if (NVSDK_NGX_SUCCEED(result_updated_driver))
+        {
+            if (needs_updated_driver)
+            {
+                if (NVSDK_NGX_SUCCEED(result_min_driver_version_major) &&
+                    NVSDK_NGX_SUCCEED(result_min_driver_version_minor))
+                {
+                    IOs::Log("Nvidia DLSS cannot be loaded due to outdated driver, min driver version: %ul.%ul", min_driver_version_major, min_driver_version_minor);
+                    return;
+                }
+                IOs::Log("Nvidia DLSS cannot be loaded due to outdated driver");
+            }
+        }
+
+        int dlss_available = 0;
+        result = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &dlss_available);
+        if (NVSDK_NGX_FAILED(result) || !dlss_available) return;
     }
 
     void Resize(IOs::WindowInformation* window)

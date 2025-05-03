@@ -106,7 +106,7 @@
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Third\FidelityFX-SDK-v1.1.3\ffx-api\include;..\Third\FidelityFX-SDK-v1.1.3\sdk\include;..\Third\imgui-docking\;..\Third\imgui-docking\backends;..\Third\imgui-docking\misc\cpp;..\Third\assimp-master\include;..\Third\assimp-master\out\build\x64-Debug\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Third\FidelityFX-SDK-v1.1.3\ffx-api\include;..\Third\FidelityFX-SDK-v1.1.3\sdk\include;..\Third\imgui-docking\;..\Third\imgui-docking\backends;..\Third\imgui-docking\misc\cpp;..\Third\assimp-master\include;..\Third\assimp-master\out\build\x64-Debug\include;..\Third\DLSS-main\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>false</ExceptionHandling>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
@@ -118,12 +118,17 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>..\Third\meshoptimizer-master\out\build\x64-Debug\meshoptimizer.lib;..\Third\assimp-master\out\build\x64-Debug\lib\assimp-vc143-mtd.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_backend_dx12_x64d.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_spd_x64d.lib;..\Third\DirectXTex-main\DirectXTex\Bin\Desktop_2022\x64\Debug\DirectXTex.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>..\Third\meshoptimizer-master\out\build\x64-Debug\meshoptimizer.lib;..\Third\assimp-master\out\build\x64-Debug\lib\assimp-vc143-mtd.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_backend_dx12_x64d.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_spd_x64d.lib;..\Third\DirectXTex-main\DirectXTex\Bin\Desktop_2022\x64\Debug\DirectXTex.lib;..\Third\DLSS-main\lib\Windows_x86_64\x64\nvsdk_ngx_d_dbg.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "..\Third\DirectXShaderCompiler-main\bin\x64\*.*" "..\x64\Debug\"
-copy /Y "..\Third\assimp-master\out\build\x64-Debug\bin\*.*" "..\x64\Debug\"</Command>
+copy /Y "..\Third\assimp-master\out\build\x64-Debug\bin\*.*" "..\x64\Debug\"
+copy /Y "..\Third\DLSS-main\lib\Windows_x86_64\rel\*.*" "..\x64\Debug\"</Command>
     </PostBuildEvent>
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -134,7 +139,7 @@ copy /Y "..\Third\assimp-master\out\build\x64-Debug\bin\*.*" "..\x64\Debug\"</Co
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>..\Third\FidelityFX-SDK-v1.1.3\ffx-api\include;..\Third\FidelityFX-SDK-v1.1.3\sdk\include;..\Third\imgui-docking\;..\Third\imgui-docking\backends;..\Third\imgui-docking\misc\cpp;..\Third\assimp-master\include;..\Third\assimp-master\out\build\x64-Release\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\Third\FidelityFX-SDK-v1.1.3\ffx-api\include;..\Third\FidelityFX-SDK-v1.1.3\sdk\include;..\Third\imgui-docking\;..\Third\imgui-docking\backends;..\Third\imgui-docking\misc\cpp;..\Third\assimp-master\include;..\Third\assimp-master\out\build\x64-Release\include;..\Third\DLSS-main\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>false</ExceptionHandling>
       <BufferSecurityCheck>false</BufferSecurityCheck>
       <EnableEnhancedInstructionSet>StreamingSIMDExtensions2</EnableEnhancedInstructionSet>
@@ -147,11 +152,12 @@ copy /Y "..\Third\assimp-master\out\build\x64-Debug\bin\*.*" "..\x64\Debug\"</Co
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>..\Third\meshoptimizer-master\out\build\x64-Release\meshoptimizer.lib;..\Third\assimp-master\out\build\x64-Release\lib\assimp-vc143-mt.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_backend_dx12_x64.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_spd_x64.lib;..\Third\DirectXTex-main\DirectXTex\Bin\Desktop_2022\x64\Release\DirectXTex.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>..\Third\meshoptimizer-master\out\build\x64-Release\meshoptimizer.lib;..\Third\assimp-master\out\build\x64-Release\lib\assimp-vc143-mt.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_backend_dx12_x64.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_spd_x64.lib;..\Third\DirectXTex-main\DirectXTex\Bin\Desktop_2022\x64\Release\DirectXTex.lib;..\Third\DLSS-main\lib\Windows_x86_64\x64\nvsdk_ngx_d.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "..\Third\DirectXShaderCompiler-main\bin\x64\*.*" "..\x64\Release\"
-copy /Y "..\Third\assimp-master\out\build\x64-Release\bin\*.*" "..\x64\Release\"</Command>
+copy /Y "..\Third\assimp-master\out\build\x64-Release\bin\*.*" "..\x64\Release\"
+copy /Y "..\Third\DLSS-main\lib\Windows_x86_64\rel\*.*" "..\x64\Release\"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
