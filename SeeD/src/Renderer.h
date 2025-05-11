@@ -382,8 +382,8 @@ public:
 
     virtual void On(uint2 _displayResolution, uint2 _renderResolution)
     {
-        displayResolution = _renderResolution;
-        renderResolution = _displayResolution;
+        renderResolution = _renderResolution;
+        displayResolution = _displayResolution;
         frame = 0;
         raytracingContext.On(renderResolution);
         viewContext.On();
@@ -1880,6 +1880,7 @@ public:
     {
         instance = this;
         displayResolution = _displayResolution;
+        renderResolution = displayResolution / 2;
         CreateDLSS();
 
         constantBuffer.On();
@@ -1903,6 +1904,7 @@ public:
     {
         // cant find _nvngx.dll or nvmgx.dll ... copied from some driver repo in the OS (do a global search)
         // in faact its not needed it is working fine on the laptop .... why not on the descktop ?
+        // why does it work on the laptop 4050 ?!
 
         static const wchar_t* dll_paths[] =
         {

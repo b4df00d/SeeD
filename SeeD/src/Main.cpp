@@ -249,16 +249,16 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 #endif
     window.fullScreen = false;
     window.windowInstance = hInstance;
-    window.windowResolution = uint2(float2(1600.0f, 900.0f) * 1.f);
+    window.windowResolution = uint2(float2(1600.0f, 900.0f) * 1.5f);
 
     Engine engine;
     engine.On(window);
-    engine.assetLibrary.importPath = "C:\\Users\\ponso\\Documents\\Dev\\EngineAssets\\";
-    engine.sceneLoader.Load("C:\\Users\\ponso\\Documents\\Dev\\EngineAssets\\RainbowRoad\\Rainbow Road.obj"); 
+    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\5v5GameMap.fbx"); 
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Human\\the-queen-of-swords\\the queen of swords.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\_Environment.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\toko.fbx");
+    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\toko.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Blokcing_obj.obj");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\GTA.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Bistro\\BistroInterior.fbx");
