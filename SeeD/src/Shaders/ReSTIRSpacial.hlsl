@@ -32,22 +32,22 @@ static int2 patternB[4] =
 void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];   
-    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * rtParameters.resolution.x]);
+    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
  
-    Texture2D<float3> normalT = ResourceDescriptorHeap[cullingContext.normalIndex];
-    Texture2D<float> depthT = ResourceDescriptorHeap[cullingContext.depthIndex];
+    Texture2D<float3> normalT = ResourceDescriptorHeap[viewContext.normalIndex];
+    Texture2D<float> depthT = ResourceDescriptorHeap[viewContext.depthIndex];
     
     float3 worldNorm = ReadR11G11B10Normal(normalT[dtid.xy]);
     float depth = depthT[dtid.xy];
     
-    uint seed = initRand(gtid.x + cullingContext.frameTime % 234 * 1.621f, gtid.y + cullingContext.frameTime % 431 * 1.432f, 4);
+    uint seed = initRand(gtid.x + viewContext.frameTime % 234 * 1.621f, gtid.y + viewContext.frameTime % 431 * 1.432f, 4);
     
-    uint pattern = (dtid.x + dtid.y + rtParameters.passNumber + rtParameters.frame) % 2;
+    uint pattern = (dtid.x + dtid.y + rtParameters.passNumber + viewContext.frameNumber) % 2;
     for (uint i = 0; i < 4; i++)
     {
         float radius = 12;
         int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] * 2 * radius : patternB[i] * radius) * lerp(nextRand(seed), 1, 0.125);
-        if(!(any(pixel<0) || any(pixel>cullingContext.resolution.xy)))
+        if (!(any(pixel < 0) || any(pixel > viewContext.renderResolution.xy)))
         {
             float3 worldNormNeightbor = ReadR11G11B10Normal(normalT[pixel.xy]);
             float depthNeightbor = depthT[pixel.xy];
@@ -55,7 +55,7 @@ void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThread
                 continue;
             if(dot(worldNorm, worldNormNeightbor) < 0.9)
                 continue;
-            HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * rtParameters.resolution.x]);
+            HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
             UpdateGIReservoir(r, rNeightbor);
         }
     }
@@ -63,5 +63,5 @@ void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThread
     ScaleGIReservoir(r, maxFrameFilteringCount);
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
-    previousgiReservoir[dtid.x + dtid.y * rtParameters.resolution.x] = PackGIReservoir(r);
+    previousgiReservoir[dtid.x + dtid.y * viewContext.renderResolution.x] = PackGIReservoir(r);
 }

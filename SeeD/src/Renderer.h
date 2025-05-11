@@ -264,9 +264,9 @@ struct ViewWorld
 };
 
 // life time : view (only updated on GPU)
-struct CullingContext
+struct viewContext
 {
-    HLSL::CullingContext cullingContext; // to bind to rootSig
+    HLSL::viewContext viewContext; // to bind to rootSig
 
     StructuredBuffer<HLSL::Camera> camera;
     StructuredBuffer<HLSL::Light> lights;
@@ -373,18 +373,20 @@ class View
 {
 public:
     uint frame;
-    uint2 resolution;
+    uint2 renderResolution;
+    uint2 displayResolution;
     PerFrame<ViewWorld> viewWorld;
     RayTracingContext raytracingContext;
-    CullingContext cullingContext;
+    viewContext viewContext;
     std::map<UINT64, Resource> resources;
 
-    virtual void On(IOs::WindowInformation& window)
+    virtual void On(uint2 _displayResolution, uint2 _renderResolution)
     {
-        resolution = window.windowResolution;
+        displayResolution = _renderResolution;
+        renderResolution = _displayResolution;
         frame = 0;
-        raytracingContext.On(resolution);
-        cullingContext.On();
+        raytracingContext.On(renderResolution);
+        viewContext.On();
     }
     virtual void Off()
     {
@@ -393,7 +395,7 @@ public:
             viewWorld.Get(i).Release();
         }
         raytracingContext.Off();
-        cullingContext.Off();
+        viewContext.Off();
 
         for (auto& item : resources)
         {
@@ -440,43 +442,45 @@ public:
         return commonResourcesIndices;
     }
     
-    HLSL::CullingContext SetupCullingContextParams()
+    HLSL::viewContext SetupviewContextParams()
     {
-        HLSL::CullingContext cullingContextParams;
+        HLSL::viewContext viewContextParams;
 
-        cullingContextParams.reverseZ = true;
-        cullingContextParams.frameNumber++;
-        cullingContextParams.frameTime = Time::instance->currentTicks;
-        cullingContextParams.cameraIndex = options.stopFrustumUpdate ? 1 : 0;
-        cullingContextParams.lightsIndex = 0;
-        cullingContextParams.culledInstanceIndex = cullingContext.instancesInView.GetResource().uav.offset;
-        cullingContextParams.culledMeshletsIndex = cullingContext.meshletsInView.GetResource().uav.offset;
-        cullingContextParams.instancesCounterIndex = cullingContext.instancesCounter.GetResource().uav.offset;
-        cullingContextParams.meshletsCounterIndex = cullingContext.meshletsCounter.GetResource().uav.offset;
-        cullingContextParams.albedoIndex = GetRegisteredResource("albedo").srv.offset;
-        cullingContextParams.metalnessIndex = GetRegisteredResource("metalness").srv.offset;
-        cullingContextParams.roughnessIndex = GetRegisteredResource("roughness").srv.offset;
-        cullingContextParams.normalIndex = GetRegisteredResource("normal").srv.offset;
-        cullingContextParams.motionIndex = GetRegisteredResource("motion").srv.offset;
-        cullingContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
-        cullingContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
-        cullingContextParams.resolution = float4(float(resolution.x), float(resolution.y), 1.0f / resolution.x, 1.0f / resolution.y);
-        cullingContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
+        viewContextParams.renderResolution = float4(float(renderResolution.x), float(renderResolution.y), 1.0f / renderResolution.x, 1.0f / renderResolution.y);
+        viewContextParams.displayResolution = float4(float(displayResolution.x), float(displayResolution.y), 1.0f / displayResolution.x, 1.0f / displayResolution.y);
+        viewContextParams.frameNumber++;
+        if (IOs::instance->keys.pressed[VK_R])
+            viewContextParams.frameNumber = 0;
+        viewContextParams.frameTime = Time::instance->currentTicks;
+        viewContextParams.cameraIndex = options.stopFrustumUpdate ? 1 : 0;
+        viewContextParams.lightsIndex = 0;
+        viewContextParams.culledInstanceIndex = viewContext.instancesInView.GetResource().uav.offset;
+        viewContextParams.culledMeshletsIndex = viewContext.meshletsInView.GetResource().uav.offset;
+        viewContextParams.instancesCounterIndex = viewContext.instancesCounter.GetResource().uav.offset;
+        viewContextParams.meshletsCounterIndex = viewContext.meshletsCounter.GetResource().uav.offset;
+        viewContextParams.albedoIndex = GetRegisteredResource("albedo").srv.offset;
+        viewContextParams.metalnessIndex = GetRegisteredResource("metalness").srv.offset;
+        viewContextParams.roughnessIndex = GetRegisteredResource("roughness").srv.offset;
+        viewContextParams.normalIndex = GetRegisteredResource("normal").srv.offset;
+        viewContextParams.motionIndex = GetRegisteredResource("motion").srv.offset;
+        viewContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
+        viewContextParams.reverseZ = true;
+        viewContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
+        viewContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
 
-        return cullingContextParams;
+        return viewContextParams;
     }
 
     HLSL::RTParameters SetupRayTracingContextParams()
     {
         HLSL::RTParameters rayTracingContextParams;
 
-        rayTracingContextParams.frame = frame++;
-        if (IOs::instance->keys.pressed[VK_R])
-            rayTracingContextParams.frame = 0;
+        //rayTracingContextParams.resolution = float4(1.0f * resolution.x, 1.0f * resolution.y, 1.0f / resolution.x, 1.0f / resolution.y);
+        //rayTracingContextParams.frame = frame++;
+        //if (IOs::instance->keys.pressed[VK_R]) rayTracingContextParams.frame = 0;
         rayTracingContextParams.BVH = raytracingContext.TLAS.srv.offset;
         rayTracingContextParams.giIndex = raytracingContext.GI.uav.offset;
         rayTracingContextParams.shadowsIndex = raytracingContext.shadows.uav.offset;
-        rayTracingContextParams.resolution = float4(1.0f * resolution.x, 1.0f * resolution.y, 1.0f / resolution.x, 1.0f / resolution.y);
         rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get().uav.offset;
         rayTracingContextParams.previousgiReservoirIndex = raytracingContext.giReservoir.GetPrevious().uav.offset;
         rayTracingContextParams.passNumber = 0;
@@ -620,11 +624,17 @@ public:
         commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
-    void SetupView(View* view, Resource* RT, uint RTCount, bool clearRT, Resource* depth, bool clearDepth)
+    void SetupView(View* view, Resource* RT, uint RTCount, bool clearRT, Resource* depth, bool clearDepth, bool displayResolution)
     {
         ZoneScoped;
-        UINT64 w = view->resolution.x;
-        UINT64 h = view->resolution.y;
+        UINT64 w = view->renderResolution.x;
+        UINT64 h = view->renderResolution.y;
+
+        if (displayResolution)
+        {
+            w = view->displayResolution.x;
+            h = view->displayResolution.y;
+        }
 
         float4 panScale(0.0f, 0.0f, 1.0f, 1.0f);
 
@@ -822,7 +832,7 @@ public:
 
         depth.Register("depth", view);
         depthDownSample.Register("depthDownSample", view);
-        depthDownSample.Get().CreateTexture(view->resolution, DXGI_FORMAT_R32_FLOAT, true, "depthDownSample");
+        depthDownSample.Get().CreateTexture(view->renderResolution, DXGI_FORMAT_R32_FLOAT, true, "depthDownSample");
 
         // create backend interface (DX12)
         size_t scratchBufferSize = ffxGetScratchMemorySizeDX12(1);
@@ -912,38 +922,38 @@ public:
         ZoneScoped;
         Open();
 
-        view->cullingContext.instancesInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
-        view->cullingContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
-        view->cullingContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
-        view->cullingContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+        view->viewContext.instancesInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+        view->viewContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+        view->viewContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+        view->viewContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
 
         auto& instances = view->viewWorld->instances;
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
-        auto cullingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->cullingContext.cullingContext);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
 
         Shader& reset = *AssetLibrary::instance->Get<Shader>(cullingResetShader.Get().id, true);
         commandBuffer->SetCompute(reset);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, cullingContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
         commandBuffer->cmd->Dispatch(1, 1, 1);
 
         Shader& cullingInstances = *AssetLibrary::instance->Get<Shader>(cullingInstancesShader.Get().id, true);
         commandBuffer->SetCompute(cullingInstances);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, cullingContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
         commandBuffer->cmd->Dispatch(cullingInstances.DispatchX(instances.Size()), 1, 1);
 
-        view->cullingContext.instancesInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        view->cullingContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        view->viewContext.instancesInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        view->viewContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
         Shader& cullingMeshlets = *AssetLibrary::instance->Get<Shader>(cullingMeshletsShader.Get().id, true);
         commandBuffer->SetCompute(cullingMeshlets);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, cullingContextAddress);
-        commandBuffer->cmd->ExecuteIndirect(cullingMeshlets.commandSignature, instances.Size(), view->cullingContext.instancesInView.GetResourcePtr(), 0, view->cullingContext.instancesCounter.GetResourcePtr(), 0);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->ExecuteIndirect(cullingMeshlets.commandSignature, instances.Size(), view->viewContext.instancesInView.GetResourcePtr(), 0, view->viewContext.instancesCounter.GetResourcePtr(), 0);
 
-        view->cullingContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        view->cullingContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        view->viewContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        view->viewContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
         Close();
     }
@@ -958,7 +968,7 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         depth.Register("depth", view);
-        depth.Get().CreateDepthTarget(view->resolution, "depth");
+        depth.Get().CreateDepthTarget(view->renderResolution, "depth");
     }
     void Setup(View* view) override
     {
@@ -988,16 +998,16 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         albedo.Register("albedo", view);
-        albedo.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R8G8B8A8_UNORM, "albedo"); // must be same as backbuffer for a resource copy at end of frame 
+        albedo.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "albedo");
         normal.Register("normal", view);
-        normal.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R11G11B10_FLOAT, "normal");
+        normal.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R11G11B10_FLOAT, "normal");
         metalness.Register("metalness", view);
-        metalness.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R8_UNORM, "metalness");
+        metalness.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8_UNORM, "metalness");
         roughness.Register("roughness", view);
-        roughness.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R8_UNORM, "roughness");
+        roughness.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8_UNORM, "roughness");
         depth.Register("depth", view);
         motion.Register("motion", view);
-        motion.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R16G16_FLOAT, "motion");
+        motion.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16_FLOAT, "motion");
         meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
@@ -1017,19 +1027,19 @@ public:
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         Resource rts[] = { albedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get() };
-        SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true);
+        SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true, false);
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
-        auto cullingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->cullingContext.cullingContext);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
 
         Shader& shader = *AssetLibrary::instance->Get<Shader>(meshShader.Get().id, true);
         commandBuffer->SetGraphic(shader);
 
         commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, cullingContextAddress);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, viewContextAddress);
 
-        uint maxDraw = view->cullingContext.meshletsInView.Size();
-        commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->cullingContext.meshletsInView.GetResourcePtr(), 0, view->cullingContext.meshletsCounter.GetResourcePtr(), 0);
+        uint maxDraw = view->viewContext.meshletsInView.Size();
+        commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->viewContext.meshletsInView.GetResourcePtr(), 0, view->viewContext.meshletsCounter.GetResourcePtr(), 0);
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
@@ -1062,13 +1072,13 @@ public:
         Open();
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
-        auto cullingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->cullingContext.cullingContext);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
 
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayProbesDispatchShader.Get().id, true);
         commandBuffer->SetRaytracing(rayDispatch);
         // global root sig for ray tracing is the same as compute shaders
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, cullingContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
 
         for (uint i = 0; i < ARRAYSIZE(view->raytracingContext.probes); i++)
         {
@@ -1106,7 +1116,7 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         lighted.Register("lighted", view);
-        lighted.Get().CreateRenderTarget(view->resolution, DXGI_FORMAT_R10G10B10A2_UNORM, "lighted");
+        lighted.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R10G10B10A2_UNORM, "lighted");
         albedo.Register("albedo", view);
         depth.Register("depth", view);
         normal.Register("normal", view);
@@ -1129,7 +1139,7 @@ public:
         view->raytracingContext.rtParameters.lightedIndex = lighted.Get().uav.offset;
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
-        auto cullingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->cullingContext.cullingContext);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
         auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
 
         // Trace rays (+ temporal ReSTIR)
@@ -1137,12 +1147,12 @@ public:
         commandBuffer->SetRaytracing(rayDispatch); 
         // global root sig for ray tracing is the same as compute shaders
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, cullingContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
 
         D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
-        drd.Width = view->resolution.x;
-        drd.Height = view->resolution.y;
+        drd.Width = view->renderResolution.x;
+        drd.Height = view->renderResolution.y;
 
         commandBuffer->cmd->DispatchRays(&drd);
 
@@ -1151,9 +1161,9 @@ public:
         Shader& ReSTIRSpacial = *AssetLibrary::instance->Get<Shader>(ReSTIRSpacialShader.Get().id, true);
         commandBuffer->SetCompute(ReSTIRSpacial);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, cullingContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
-        commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->resolution.x), ReSTIRSpacial.DispatchY(view->resolution.y), 1);
+        commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->renderResolution.x), ReSTIRSpacial.DispatchY(view->renderResolution.y), 1);
 
         // Spacial ReSTIR pass 2
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
@@ -1164,7 +1174,7 @@ public:
         view->raytracingContext.rtParameters.passNumber = 1;
         auto raytracingContextAddress2 = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress2);
-        commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->resolution.x), ReSTIRSpacial.DispatchY(view->resolution.y), 1);
+        commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->renderResolution.x), ReSTIRSpacial.DispatchY(view->renderResolution.y), 1);
         //std::swap(view->raytracingContext.rtParameters.giReservoirIndex, view->raytracingContext.rtParameters.previousgiReservoirIndex); // reverse again if somebody need the original latter ?
 
         // Lighting
@@ -1173,9 +1183,9 @@ public:
         Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
         commandBuffer->SetCompute(applyLighting);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, cullingContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
-        commandBuffer->cmd->Dispatch(applyLighting.DispatchX(view->resolution.x), applyLighting.DispatchY(view->resolution.y), 1);
+        commandBuffer->cmd->Dispatch(applyLighting.DispatchX(view->renderResolution.x), applyLighting.DispatchY(view->renderResolution.y), 1);
 
         lighted.Get().Barrier(commandBuffer.Get());
 
@@ -1213,6 +1223,7 @@ public:
 
 class PostProcess : public Pass
 {
+    ViewResource postProcessed;
     ViewResource lighted;
     ViewResource albedo;
     ViewResource normal;
@@ -1227,6 +1238,8 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
+        postProcessed.Register("postProcessed", view);
+        postProcessed.Get().CreateRenderTarget(view->displayResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "postProcessed"); // must be same as backbuffer for a resource copy at end of frame 
         lighted.Register("lighted", view);
         albedo.Register("albedo", view);
         normal.Register("normal", view);
@@ -1257,21 +1270,21 @@ public:
         ZoneScoped;
         Open();
 
-        ppparams.resolution = float4(1.0f * view->resolution.x, 1.0f * view->resolution.y, 1.0f / view->resolution.x, 1.0f / view->resolution.y);
+        ppparams.postProcessedIndex = postProcessed.Get().uav.offset;
         ppparams.lightedIndex = lighted.Get().uav.offset;
         ppparams.backBufferIndex = GPU::instance->backBuffer.Get().uav.offset;
 
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
-        auto cullingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->cullingContext.cullingContext);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
         auto postProcessParametersAddress = ConstantBuffer::instance->PushConstantBuffer(&ppparams);
 
         Shader& postProcess = *AssetLibrary::instance->Get<Shader>(postProcessShader.Get().id, true);
         commandBuffer->SetCompute(postProcess);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, cullingContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, postProcessParametersAddress);
-        commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->resolution.x), postProcess.DispatchY(view->resolution.y), 1);
+        commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->displayResolution.x), postProcess.DispatchY(view->displayResolution.y), 1);
 
         Close();
     }
@@ -1279,14 +1292,14 @@ public:
 
 class Present : public Pass
 {
-    ViewResource albedo;
+    ViewResource postProcessed;
     ViewResource depth;
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        albedo.Register("albedo", view);
+        postProcessed.Register("postProcessed", view);
         depth.Register("depth", view);
     }
     void Setup(View* view) override
@@ -1298,7 +1311,7 @@ public:
         ZoneScoped;
         Open();
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
-        commandBuffer->cmd->CopyResource(GPU::instance->backBuffer.Get().GetResource(), albedo.Get().GetResource());
+        commandBuffer->cmd->CopyResource(GPU::instance->backBuffer.Get().GetResource(), postProcessed.Get().GetResource());
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET); // transition to present in the editor cmb
         Close();
     }
@@ -1331,9 +1344,9 @@ public:
     Present present;
 
 
-    void On(IOs::WindowInformation& window) override
+    void On(uint2 displayResolution, uint2 renderResolution) override
     {
-        View::On(window);
+        View::On(displayResolution, renderResolution);
 
         hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr, nullptr);
         skinning.On(this, GPU::instance->computeQueue, "skinning", &AssetLibrary::instance->commandBuffer, nullptr);
@@ -1694,7 +1707,7 @@ public:
                     float4x4 previousMat = mat.matrix;
                     mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
 
-                    float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip, HLSL::reverseZ);
+                    float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->renderResolution.x) / float(this->renderResolution.y), cam.nearClip, cam.farClip, HLSL::reverseZ);
                     float4x4 viewProj = mul(inverse(mat.matrix), proj);
                     float4 worldPos = float4(mat.matrix[3].xyz, 1);
                     float4x4 previousViewProj = mul(inverse(previousMat), proj);
@@ -1702,10 +1715,9 @@ public:
 
                     float4 planes[6];
                     float3 worldCorners[8];
-                    //float sizeCulling;
 
                     // compute planes
-                    float4x4 matProj = mul(inverse(MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->resolution.x) / float(this->resolution.y), cam.nearClip, cam.farClip, false)), mat.matrix);
+                    float4x4 matProj = mul(inverse(MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->renderResolution.x) / float(this->renderResolution.y), cam.nearClip, cam.farClip, false)), mat.matrix);
 
                     //create the 8 points of a cube in unit-space
                     float4 cube[8];
@@ -1778,10 +1790,10 @@ public:
                 this->viewWorld->instances.Upload();
                 this->viewWorld->materials.Upload();
                 this->raytracingContext.instancesRayTracing->Upload();
-                this->cullingContext.instancesInView.Resize(this->viewWorld->instances.Size());
-                this->cullingContext.meshletsInView.Resize(this->viewWorld->meshletsCount);
+                this->viewContext.instancesInView.Resize(this->viewWorld->instances.Size());
+                this->viewContext.meshletsInView.Resize(this->viewWorld->meshletsCount);
                 this->viewWorld->commonResourcesIndices = SetupViewParams();
-                this->cullingContext.cullingContext = SetupCullingContextParams();
+                this->viewContext.viewContext = SetupviewContextParams();
                 this->raytracingContext.rtParameters = SetupRayTracingContextParams();
             }
         ).name("upload instances buffer");
@@ -1818,9 +1830,12 @@ class EditorView : View
 public:
     Editor editor;
 
-    void On(IOs::WindowInformation& window) override
+    void On(uint2 _displayResolution, uint2 _renderResolution) override
     {
-        resolution = window.windowResolution;
+        // avoid creating rt and context buffers for this view
+        //View::On(_displayResolution, _renderResolution);
+        renderResolution = _renderResolution;
+        displayResolution = _displayResolution;
 
         editor.On(this, GPU::instance->graphicQueue, "editor", nullptr, nullptr);
     }
@@ -1856,13 +1871,21 @@ public:
     MainView mainView;
     EditorView editorView;
 
-    void On(IOs::WindowInformation& window)
+    NVSDK_NGX_Parameter* ngx_parameters = nullptr;
+    NVSDK_NGX_PerfQuality_Value ngx_perfQuality = NVSDK_NGX_PerfQuality_Value_Balanced;
+    uint2 renderResolution;
+    uint2 displayResolution;
+
+    void On(uint2 _displayResolution)
     {
         instance = this;
+        displayResolution = _displayResolution;
+        CreateDLSS();
+
         constantBuffer.On();
         meshStorage.On();
-        mainView.On(window);
-        editorView.On(window);
+        mainView.On(displayResolution, renderResolution);
+        editorView.On(displayResolution, renderResolution);
 
         endOfLastFrame = &editorView.editor.commandBuffer;
     }
@@ -1875,6 +1898,74 @@ public:
         constantBuffer.Off();
         instance = nullptr;
     }
+
+    void CreateDLSS()
+    {
+        // cant find _nvngx.dll or nvmgx.dll ... copied from some driver repo in the OS (do a global search)
+        // in faact its not needed it is working fine on the laptop .... why not on the descktop ?
+
+        static const wchar_t* dll_paths[] =
+        {
+            //SOLUTION_DIR L"\\External\\DLSS\\lib\\dev",
+            //SOLUTION_DIR L"\\External\\DLSS\\lib\\rel",
+                L".",
+        };
+
+        NVSDK_NGX_FeatureCommonInfo feature_common_info{};
+        feature_common_info.LoggingInfo.LoggingCallback = [](const char* msg, NVSDK_NGX_Logging_Level level, NVSDK_NGX_Feature source) {
+            IOs::Log("NGX: {}", msg);
+            };
+        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+        feature_common_info.LoggingInfo.DisableOtherLoggingSinks = true;
+        feature_common_info.PathListInfo.Path = dll_paths;
+        feature_common_info.PathListInfo.Length = NVSDK_NGX_ARRAY_LEN(dll_paths);
+
+        static constexpr char const* project_guid = "b0f87b54-1daf-4964-90ae-c4035a19df34";
+        NVSDK_NGX_Result result = NVSDK_NGX_D3D12_Init_with_ProjectID(
+            project_guid,
+            NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+            "1.0",
+            L".",
+            GPU::instance->device, &feature_common_info);
+
+        result = NVSDK_NGX_D3D12_GetCapabilityParameters(&ngx_parameters);
+        if (NVSDK_NGX_FAILED(result)) return;
+
+        int needs_updated_driver = 0;
+        uint min_driver_version_major = 0;
+        uint min_driver_version_minor = 0;
+        NVSDK_NGX_Result result_updated_driver = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &needs_updated_driver);
+        NVSDK_NGX_Result result_min_driver_version_major = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMajor, &min_driver_version_major);
+        NVSDK_NGX_Result result_min_driver_version_minor = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMinor, &min_driver_version_minor);
+        if (NVSDK_NGX_SUCCEED(result_updated_driver))
+        {
+            if (needs_updated_driver)
+            {
+                if (NVSDK_NGX_SUCCEED(result_min_driver_version_major) &&
+                    NVSDK_NGX_SUCCEED(result_min_driver_version_minor))
+                {
+                    IOs::Log("Nvidia DLSS cannot be loaded due to outdated driver, min driver version: %ul.%ul", min_driver_version_major, min_driver_version_minor);
+                    return;
+                }
+                IOs::Log("Nvidia DLSS cannot be loaded due to outdated driver");
+            }
+        }
+
+        int dlss_available = 0;
+        result = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &dlss_available);
+        if (NVSDK_NGX_FAILED(result) || !dlss_available) return;
+
+        uint renderWidth, renderHeight;
+        uint renderMaxWidth, renderMaxHeight;
+        uint renderMinWidth, renderMinHeight;
+        float sharpness;
+        NGX_DLSS_GET_OPTIMAL_SETTINGS(ngx_parameters, displayResolution.x, displayResolution.y, ngx_perfQuality, &renderWidth, &renderHeight, &renderMaxWidth, &renderMaxHeight, &renderMinWidth, &renderMinHeight, &sharpness);
+
+        renderResolution.x = renderWidth;
+        renderResolution.y = renderHeight;
+
+    }
+
 
     void Schedule(World& world, tf::Subflow& subflow)
     {

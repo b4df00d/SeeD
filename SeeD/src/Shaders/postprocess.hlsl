@@ -88,30 +88,36 @@ float3 ACESFilm(float3 x)
 [numthreads(16, 16, 1)]
 void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
-    if (dtid.x > ppParameters.resolution.x || dtid.y > ppParameters.resolution.y)
+    if (dtid.x > viewContext.displayResolution.x || dtid.y > viewContext.displayResolution.y)
         return;
     
-    GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
+    uint2 renderPixel = dtid.xy * viewContext.displayResolution.zw * viewContext.renderResolution.xy;
+    
+    GBufferCameraData cd = GetGBufferCameraData(renderPixel.xy);
+    
     
     Texture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
-    RWTexture2D<float4> albedo = ResourceDescriptorHeap[cullingContext.albedoIndex];
-    
-    float4 HDR = lighted[dtid.xy] * HLSL::brightnessClippingAdjust;
+    float4 HDR = lighted[renderPixel.xy] * HLSL::brightnessClippingAdjust;
     HDR -= ppParameters.expoAdd;
     HDR *= ppParameters.expoMul;
     HDR += ppParameters.expoAdd;
     
+#if 0
     float r = GranTurismoTonemapper(HDR.r);
     float g = GranTurismoTonemapper(HDR.g);
     float b = GranTurismoTonemapper(HDR.b);
     float4 SDR = float4(r, g, b, HDR.a);
+#else
+    float4 SDR = float4(ACESFilm(HDR.xyz), HDR.w);
+#endif
     
     //if(any(HDR.xyz>=2.0)) SDR = float4(1, 0, 0, 0);
     
-    albedo[dtid.xy] = SDR; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
+    RWTexture2D<float4> postProcessed = ResourceDescriptorHeap[ppParameters.postProcessedIndex];
+    postProcessed[dtid.xy] = SDR; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
     
     /*
-    Texture2D<float2> motionT = ResourceDescriptorHeap[cullingContext.motionIndex];
+    Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];
     float2 motion = motionT[dtid.xy];
     motion *= 0.1;
     albedo[dtid.xy].xy += abs(motion.xy);

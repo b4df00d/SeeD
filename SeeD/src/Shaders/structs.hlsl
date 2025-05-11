@@ -57,10 +57,10 @@ namespace HLSL
         uint instanceGPUCount;
     };
     
-    struct CullingContext
+    struct viewContext
     {
-        float4 resolution; //x, y, 1/x, 1/y
-        uint reverseZ;
+        float4 renderResolution; //x, y, 1/x, 1/y
+        float4 displayResolution; //x, y, 1/x, 1/y
         uint frameNumber;
         uint frameTime;
         uint cameraIndex;
@@ -75,6 +75,7 @@ namespace HLSL
         uint normalIndex;
         uint motionIndex;
         uint depthIndex;
+        uint reverseZ;
         uint HZB;
         uint HZBMipCount;
     };
@@ -120,12 +121,12 @@ namespace HLSL
         uint pad2;
     };
     
-    static const uint MaterialTextureCount = 16;
-    static const uint MaterialParametersCount = 15;
+    static const uint MaterialTextureCount = 7;
+    static const uint MaterialParametersCount = 24;
     struct Material
     {
-        uint textures[MaterialTextureCount];
         float parameters[MaterialParametersCount];
+        uint textures[MaterialTextureCount];
         uint shaderIndex;
     };
     
@@ -235,8 +236,9 @@ namespace HLSL
     
     struct PostProcessParameters
     {
-        float4 resolution; //x, y, 1/x, 1/y
+        //float4 resolution; //x, y, 1/x, 1/y
         uint lightedIndex;
+        uint postProcessedIndex;
         uint backBufferIndex;
         //tonemap
         float P;
@@ -272,9 +274,9 @@ namespace HLSL
     static const uint maxRTDepth = 2;
     struct RTParameters
     {
-        float4 resolution; //x, y, 1/x, 1/y
+        //float4 resolution; //x, y, 1/x, 1/y
         
-        uint frame;
+        //uint frame;
         
         uint BVH;
         uint giIndex;

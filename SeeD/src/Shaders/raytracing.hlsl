@@ -115,7 +115,7 @@ void RayGen()
     
     float3 offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.0025) + (cd.worldNorm * cd.viewDist * 0.0005);
     
-    uint seed = initRand(launchIndex.x + cullingContext.frameTime % 234 * 1.621f, launchIndex.y + cullingContext.frameTime % 431 * 1.432f, 4);
+    uint seed = initRand(launchIndex.x + viewContext.frameTime % 234 * 1.621f, launchIndex.y + viewContext.frameTime % 431 * 1.432f, 4);
     
     float shadow = 0;
     {
@@ -160,7 +160,7 @@ void RayGen()
         
         // ReSTIR
         RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
-        HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * rtParameters.resolution.x]);
+        HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
         
         float blend = max(cd.viewDistDiff-0.04, 0) * 10;
         uint frameFilteringCount = max(1, saturate(1 - blend) * maxFrameFilteringCount);
@@ -172,7 +172,7 @@ void RayGen()
         newR.pos_Wsum = float4(offsetedWorldPos, W);
         
         // if not first time fill with previous frame reservoir
-        if (rtParameters.frame == 0)
+        if (viewContext.frameNumber == 0)
         {
             r.color_W = 0;
             r.dir_Wcount = 0;
@@ -183,7 +183,7 @@ void RayGen()
         ScaleGIReservoir(r, frameFilteringCount);
         
         RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-        giReservoir[launchIndex.x + launchIndex.y * rtParameters.resolution.x] = PackGIReservoir(r);
+        giReservoir[launchIndex.x + launchIndex.y * viewContext.renderResolution.x] = PackGIReservoir(r);
         
         bounceLight = r.color_W.xyz * (r.pos_Wsum.w / r.dir_Wcount.w);
         // end ReSTIR

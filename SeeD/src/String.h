@@ -1,5 +1,6 @@
 #pragma once
 #include <iostream>
+#include <algorithm>
 
 std::wstring CharToWString(const char* ptr)
 {
@@ -53,6 +54,13 @@ public:
 			result.emplace_back(std::string(begin() + startIndex, end()));
 
 		return result;
+	}
+
+	String ToLower()
+	{
+		String low(*this);
+		std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+		return low;
 	}
 
 	inline const std::wstring ToWString() const

@@ -516,8 +516,8 @@ bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
     float4 clipSphere = mul(camera.proj, float4(sphereClosestPointToCamera.xyz, 1));
     float fBoundSphereDepth = saturate(clipSphere.z / clipSphere.w + (HLSL::reverseZ ? 0.00005 : - 0.001));
     
-    float3 vHZB = float3(cullingContext.resolution.x, cullingContext.resolution.y, cullingContext.HZBMipCount);
-    Texture2D<float> tHZB = ResourceDescriptorHeap[cullingContext.HZB];
+    float3 vHZB = float3(viewContext.renderResolution.x, viewContext.renderResolution.y, viewContext.HZBMipCount);
+    Texture2D<float> tHZB = ResourceDescriptorHeap[viewContext.HZB];
     float4 vLBRT = ScreenSpaceBB(camera, viewSphere);
     
     float4 vToUV = float4(0.5f, -0.5f, 0.5f, -0.5f);
@@ -849,14 +849,14 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     GBufferCameraData cd;
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    cd.camera = cameras[0]; //cullingContext.cameraIndex];
+    cd.camera = cameras[0]; //viewContext.cameraIndex];
     
-    Texture2D<float3> normalT = ResourceDescriptorHeap[cullingContext.normalIndex];
+    Texture2D<float3> normalT = ResourceDescriptorHeap[viewContext.normalIndex];
     cd.worldNorm = ReadR11G11B10Normal(normalT[pixel]);
     
     // inverse y depth depth[uint2(launchIndex.x, rtParameters.resolution.y - launchIndex.y)]
-    Texture2D<float> depth = ResourceDescriptorHeap[cullingContext.depthIndex];
-    float3 clipSpace = float3(pixel * cullingContext.resolution.zw * 2 - 1, depth[pixel]);
+    Texture2D<float> depth = ResourceDescriptorHeap[viewContext.depthIndex];
+    float3 clipSpace = float3(pixel * viewContext.renderResolution.zw * 2 - 1, depth[pixel]);
     float4 worldSpace = mul(cd.camera.viewProj_inv, float4(clipSpace.x, -clipSpace.y, clipSpace.z, 1));
     worldSpace.xyz /= worldSpace.w;
     
@@ -864,13 +864,13 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     float rayLength = length(rayDir);
     rayDir /= rayLength;
     
-    Texture2D<float2> motionT = ResourceDescriptorHeap[cullingContext.motionIndex];
+    Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];
     float2 motion = motionT[pixel.xy];
-    uint2 previousPixel = min(max(pixel.xy + int2(motion), 1), (cullingContext.resolution.xy-1));
+    uint2 previousPixel = min(max(pixel.xy + int2(motion), 1), (viewContext.renderResolution.xy-1));
     cd.previousPixel = previousPixel;
     
-    Texture2D<float> previousDepth = ResourceDescriptorHeap[cullingContext.HZB];
-    float3 previousClipSpace = float3(previousPixel * cullingContext.resolution.zw * 2 - 1, previousDepth[previousPixel]);
+    Texture2D<float> previousDepth = ResourceDescriptorHeap[viewContext.HZB];
+    float3 previousClipSpace = float3(previousPixel * viewContext.renderResolution.zw * 2 - 1, previousDepth[previousPixel]);
     float4 previousWorldSpace = mul(cd.camera.previousViewProj_inv, float4(previousClipSpace.x, -previousClipSpace.y, previousClipSpace.z, 1));
     previousWorldSpace.xyz /= previousWorldSpace.w;
     
@@ -958,10 +958,10 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
 
 SurfaceData GetSurfaceData(uint2 pixel)
 {
-    Texture2D<float4> albedo = ResourceDescriptorHeap[cullingContext.albedoIndex];
-    Texture2D<float> metalness = ResourceDescriptorHeap[cullingContext.metalnessIndex];
-    Texture2D<float> roughness = ResourceDescriptorHeap[cullingContext.roughnessIndex];
-    Texture2D<float3> normal = ResourceDescriptorHeap[cullingContext.normalIndex];
+    Texture2D<float4> albedo = ResourceDescriptorHeap[viewContext.albedoIndex];
+    Texture2D<float> metalness = ResourceDescriptorHeap[viewContext.metalnessIndex];
+    Texture2D<float> roughness = ResourceDescriptorHeap[viewContext.roughnessIndex];
+    Texture2D<float3> normal = ResourceDescriptorHeap[viewContext.normalIndex];
     
     SurfaceData s;
     

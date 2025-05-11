@@ -49,7 +49,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
     HLSL::Mesh mesh = meshes[instance.meshIndex];
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
+    HLSL::Camera camera = cameras[viewContext.cameraIndex];
     
     uint meshletCount = min(512, mesh.meshletCount);
     
@@ -94,7 +94,7 @@ void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThre
 void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])
 {
     StructuredBuffer<HLSL:: Camera > cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[0]; //cullingContext.cameraIndex];
+    HLSL::Camera camera = cameras[0]; //viewContext.cameraIndex];
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
@@ -174,7 +174,7 @@ PS_OUTPUT PixelForward(MSVert inVerts)
     float2 currScreenPos = inVerts.pos.xy;
     float2 prevScreenPos = (inVerts.previousPos.xy / inVerts.previousPos.w) * 0.5 + 0.5;
     prevScreenPos.y = 1 - prevScreenPos.y;
-    prevScreenPos *= cullingContext.resolution.xy;
+    prevScreenPos *= viewContext.renderResolution.xy;
     o.motion = (currScreenPos - prevScreenPos) * 0.1;
     
     //o.entityID = 1;
@@ -202,7 +202,7 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     float4 previousPos = inVerts.previousPos;
     previousPos.y = -previousPos.y;
     float2 prevScreenPos = (previousPos.xy / previousPos.w) * 0.5 + 0.5;
-    prevScreenPos *= cullingContext.resolution.xy;
+    prevScreenPos *= viewContext.renderResolution.xy;
     o.motion = (prevScreenPos - currScreenPos);
     
     //o.entityID = 1;

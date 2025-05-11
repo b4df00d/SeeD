@@ -105,7 +105,7 @@ public:
         gpu.On(&ios.window);
         assetLibrary.On();
         profiler.On();
-        renderer.On(ios.window);
+        renderer.On(uint2(gpu.backBuffer.Get().GetResource()->GetDesc().Width, gpu.backBuffer.Get().GetResource()->GetDesc().Height));
         ui.On(&ios.window, gpu.device, gpu.swapChain);
         meshLoader.On();
         sceneLoader.On();
@@ -249,16 +249,15 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 #endif
     window.fullScreen = false;
     window.windowInstance = hInstance;
-    window.windowResolution = uint2(float2(1600.0f, 900.0f) * 1.5f);
-    //window.windowResolution *= 2.f;
+    window.windowResolution = uint2(float2(1600.0f, 900.0f) * 1.f);
 
     Engine engine;
     engine.On(window);
-    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\5v5GameMap.fbx"); 
+    engine.assetLibrary.importPath = "C:\\Users\\ponso\\Documents\\Dev\\EngineAssets\\";
+    engine.sceneLoader.Load("C:\\Users\\ponso\\Documents\\Dev\\EngineAssets\\RainbowRoad\\Rainbow Road.obj"); 
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Human\\the-queen-of-swords\\the queen of swords.fbx");
-    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\_Environment.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\_Environment.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\toko.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Blokcing_obj.obj");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\GTA.fbx");

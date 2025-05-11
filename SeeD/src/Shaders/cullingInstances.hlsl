@@ -13,7 +13,7 @@ void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
         return;
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[cullingContext.cameraIndex];
+    HLSL::Camera camera = cameras[viewContext.cameraIndex];
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
@@ -21,8 +21,8 @@ void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
     
-    RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[cullingContext.instancesCounterIndex];
-    RWStructuredBuffer<HLSL::InstanceCullingDispatch> instancesInView = ResourceDescriptorHeap[cullingContext.culledInstanceIndex];
+    RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[viewContext.instancesCounterIndex];
+    RWStructuredBuffer<HLSL::InstanceCullingDispatch> instancesInView = ResourceDescriptorHeap[viewContext.culledInstanceIndex];
     
     float4x4 worldMatrix = instance.unpack(instance.current);
     float3 center = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;

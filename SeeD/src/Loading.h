@@ -266,6 +266,7 @@ public:
         size_t last = name.find_last_of("\\");
         if (last != -1)
             name = name.substr(last + 1);
+        name = name.ToLower();
 
 
         if (allAssetsInImportPath.size() == 0)
@@ -276,7 +277,7 @@ public:
                 {
                     String pName = p.path().filename().string();
                     assetID id;
-                    id.hash = std::hash<std::string>{}(pName);
+                    id.hash = std::hash<std::string>{}(pName.ToLower());
                     allAssetsInImportPath[id] = p.path().string();
                 }
             }

@@ -32,7 +32,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     float3 indirect = GI[dtid.xy].xyz;
 #else
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];   
-    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * rtParameters.resolution.x]);
+    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     float3 indirect = BRDF(s, cd.viewDir, r.dir_Wcount.xyz, r.color_W.xyz * (r.pos_Wsum.w / r.dir_Wcount.w) * 1, 0.2);
     //indirect = r.color_W.xyz * (r.pos_Wsum.w / r.dir_Wcount.w);
     //indirect = r.dir_Wcount.xyz;

@@ -21,7 +21,7 @@ void CullingMeshlet(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThrea
         mesh = meshes[instance.meshIndex];
         
         StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-        camera = cameras[cullingContext.cameraIndex];
+        camera = cameras[viewContext.cameraIndex];
     }
     GroupMemoryBarrierWithGroupSync();
     
@@ -45,8 +45,8 @@ void CullingMeshlet(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThrea
     
     if (!culled)
     {
-        RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[cullingContext.meshletsCounterIndex];
-        RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsInView = ResourceDescriptorHeap[cullingContext.culledMeshletsIndex];
+        RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
+        RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsInView = ResourceDescriptorHeap[viewContext.culledMeshletsIndex];
         uint index = 0;
         InterlockedAdd(counter[0], 1, index);
         HLSL::MeshletDrawCall mdc = (HLSL::MeshletDrawCall) 0;

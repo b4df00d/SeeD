@@ -84,9 +84,9 @@ cbuffer ViewParams : register(b0)
     HLSL::CommonResourcesIndices commonResourcesIndices;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer CullingContext : register(b1)
+cbuffer viewContext : register(b1)
 {
-    HLSL::CullingContext cullingContext;
+    HLSL::viewContext viewContext;
 };
 //---------------------------------------------------------------------------------------------
 #ifndef CUSTOM_ROOT_BUFFER_1 //defined by shaders to have 'personalized' data
