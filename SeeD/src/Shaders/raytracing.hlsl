@@ -101,24 +101,48 @@ RaytracingPipelineConfig MyPipelineConfig =
     );
 */
 
+void DebugSurfaceData(float3 pos, float3 dir)
+{
+    uint2 launchIndex = DispatchRaysIndex().xy;
+    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
+    HLSL::HitInfo payload;
+    payload.color = float3(0.0, 0.0, 0.0);
+    payload.rayDepth = 1;
+    payload.rndseed = 0;
+    
+    RayDesc ray;
+    ray.Origin = pos;
+    ray.Direction = dir;
+    ray.TMin = 0;
+    ray.TMax = 100000;
+    
+    TraceRay( BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+    
+    RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+    GI[launchIndex] = payload.color;
+}
+
 [shader("raygeneration")]
 void RayGen()
 {
     uint2 launchIndex = DispatchRaysIndex().xy;
     
-    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
+    if (launchIndex.x > viewContext.renderResolution.x || launchIndex.y > viewContext.renderResolution.y)
+        return;
     
-    StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
-    HLSL::Light light = lights[0];
+    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
     
     GBufferCameraData cd = GetGBufferCameraData(launchIndex);
     
-    float3 offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.0025) + (cd.worldNorm * cd.viewDist * 0.0005);
-    
     uint seed = initRand(launchIndex.x + viewContext.frameTime % 234 * 1.621f, launchIndex.y + viewContext.frameTime % 431 * 1.432f, 4);
+    
+    float3 offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.005) + (cd.worldNorm * cd.viewDist * 0.002);
     
     float shadow = 0;
     {
+        StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
+        HLSL::Light light = lights[0];
+        
         HLSL::HitInfo shadowload;
         shadowload.color = float3(0.0, 0.0, 0.0);
         shadowload.rayDepth = 11111;
@@ -138,7 +162,6 @@ void RayGen()
         shadow = shadowload.hitDistance >= ray.TMax ? 1 : 0;
     }
     
-    float precisionAdjust = 1;
     float3 bounceLight = 0;
     float3 bounceLightDir = 0;
     {
@@ -162,11 +185,11 @@ void RayGen()
         RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
         HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
         
-        float blend = max(cd.viewDistDiff-0.04, 0) * 10;
-        uint frameFilteringCount = max(1, saturate(1 - blend) * maxFrameFilteringCount);
+        float blend = 1-saturate(max(cd.viewDistDiff-(0.01 * cd.viewDist), 0) * 10);
+        uint frameFilteringCount = max(1, blend * maxFrameFilteringCount);
     
         HLSL::GIReservoir newR;
-        float W = length(bounceLight); 
+        float W = length(bounceLight);
         newR.color_W = float4(bounceLight, W);
         newR.dir_Wcount = float4(bounceLightDir, 1);
         newR.pos_Wsum = float4(offsetedWorldPos, W);
@@ -180,21 +203,23 @@ void RayGen()
         }
         
         UpdateGIReservoir(r, newR);
-        ScaleGIReservoir(r, frameFilteringCount);
+        ScaleGIReservoir(r, frameFilteringCount, blend);
         
         RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
         giReservoir[launchIndex.x + launchIndex.y * viewContext.renderResolution.x] = PackGIReservoir(r);
         
-        bounceLight = r.color_W.xyz * (r.pos_Wsum.w / r.dir_Wcount.w);
+        //bounceLight = r.color_W.xyz * (r.pos_Wsum.w / r.dir_Wcount.w);
         // end ReSTIR
+        
+        RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+        //GI[launchIndex] = float3(blend, r.dir_Wcount.w / maxFrameFilteringCount, 0);
+        //GI[launchIndex] = bounceLight;
     }
     
-    
-    RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    //GI[launchIndex] = bounceLight;
     RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     shadows[launchIndex] = shadow;
-
+    
+    //DebugSurfaceData(cd.camera.worldPos.xyz, cd.viewDir);
 }
 
 [shader("miss")]
@@ -217,6 +242,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     HLSL::Light light = lights[0];
     
     SurfaceData s = GetRTSurfaceData(attrib);
+    //payload.color = s.albedo.xyz; return;
     if(dot(s.normal, WorldRayDirection()) > 0) s.normal = -s.normal; // if we touch the backface, invert the normal ?
     
     float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() * 0.999f) + s.normal * 0.001f;
@@ -248,37 +274,9 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     //payload.color = BRDF(s, WorldRayDirection(), -light.dir.xyz, sun) * 10;
     payload.color = saturate(dot(s.normal, -light.dir.xyz)) * sun;
     
-#if false
-    float3 bounceLight = 0;
-    float3 bounceLightDir = 0;
-    float hitDistance = 100000;
-    if (payload.rayDepth < HLSL::maxRTDepth-1)
-    {
-        bounceLightDir = lerp(s.normal, getCosHemisphereSample(payload.rndseed, s.normal), 0.9);
-        
-        HLSL::HitInfo nextRay;
-        nextRay.color = float3(0.0, 0.0, 0.0);
-        nextRay.rayDepth = payload.rayDepth + 1;
-        nextRay.rndseed = payload.rndseed;
-    
-        RayDesc ray;
-        ray.Origin = hitLocation;
-        ray.Direction = bounceLightDir;
-        ray.TMin = 0;
-        ray.TMax = hitDistance;
-        
-        TraceRay(BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, nextRay);
-        
-        bounceLight = nextRay.color;
-    }
-    //payload.color += BRDF(s, WorldRayDirection(), bounceLightDir, bounceLight);
-    payload.color += bounceLight * s.albedo;
-#else
     float3 bounceLight = SampleProbes(rtParameters, hitLocation, s.normal, true);
-    //payload.color += BRDF(s, WorldRayDirection(), bounceLightDir, bounceLight);
     payload.color += bounceLight;
     
-#endif
     if (payload.rayDepth > 0)
         payload.color *= saturate(s.albedo.xyz * 1); // fake lighting equation
 }

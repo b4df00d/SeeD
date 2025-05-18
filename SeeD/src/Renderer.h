@@ -1108,6 +1108,7 @@ class Lighting : public Pass
     ViewResource normal;
     Components::Handle<Components::Shader> rayDispatchShader;
     Components::Handle<Components::Shader> ReSTIRSpacialShader;
+    Components::Handle<Components::Shader> rayValidateDispatchShader;
     Components::Handle<Components::Shader> applyLightingShader;
 
 public:
@@ -1122,6 +1123,7 @@ public:
         normal.Register("normal", view);
         rayDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracing.hlsl");
         ReSTIRSpacialShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\ReSTIRSpacial.hlsl");
+        rayValidateDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracingValidate.hlsl");
         applyLightingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\lighting.hlsl");
     }
     void Setup(View* view) override
@@ -1167,18 +1169,28 @@ public:
 
         // Spacial ReSTIR pass 2
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
-        uint tmp = view->raytracingContext.rtParameters.giReservoirIndex;
-        view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.rtParameters.previousgiReservoirIndex;
-        view->raytracingContext.rtParameters.previousgiReservoirIndex = tmp;
-        //std::swap(view->raytracingContext.rtParameters.giReservoirIndex, view->raytracingContext.rtParameters.previousgiReservoirIndex);
+        std::swap(view->raytracingContext.rtParameters.giReservoirIndex, view->raytracingContext.rtParameters.previousgiReservoirIndex);
         view->raytracingContext.rtParameters.passNumber = 1;
         auto raytracingContextAddress2 = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress2);
         commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->renderResolution.x), ReSTIRSpacial.DispatchY(view->renderResolution.y), 1);
-        //std::swap(view->raytracingContext.rtParameters.giReservoirIndex, view->raytracingContext.rtParameters.previousgiReservoirIndex); // reverse again if somebody need the original latter ?
+        std::swap(view->raytracingContext.rtParameters.giReservoirIndex, view->raytracingContext.rtParameters.previousgiReservoirIndex); // reverse again if somebody need the original latter ?
+
+        // Validating reservoirs
+        view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
+        Shader& rayValidateDispatch = *AssetLibrary::instance->Get<Shader>(rayValidateDispatchShader.Get().id, true);
+        commandBuffer->SetRaytracing(rayValidateDispatch);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
+        drd = rayValidateDispatch.GetRTDesc();
+        drd.Width = view->renderResolution.x;
+        drd.Height = view->renderResolution.y;
+        commandBuffer->cmd->DispatchRays(&drd);
 
         // Lighting
         view->raytracingContext.GI.Barrier(commandBuffer.Get());
+        view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
 
         Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
         commandBuffer->SetCompute(applyLighting);
@@ -1188,7 +1200,6 @@ public:
         commandBuffer->cmd->Dispatch(applyLighting.DispatchX(view->renderResolution.x), applyLighting.DispatchY(view->renderResolution.y), 1);
 
         lighted.Get().Barrier(commandBuffer.Get());
-
 
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
@@ -1860,6 +1871,10 @@ public:
 };
 
 
+// https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf
+#include "nvsdk_ngx.h"
+#include "nvsdk_ngx_helpers.h"
+
 // https://www.youtube.com/watch?v=cGB3wT0U5Ao&ab_channel=CppCon
 // use DAG
 class Renderer
@@ -1902,14 +1917,14 @@ public:
 
     void CreateDLSS()
     {
+        return;
+
         // cant find _nvngx.dll or nvmgx.dll ... copied from some driver repo in the OS (do a global search)
         // in faact its not needed it is working fine on the laptop .... why not on the descktop ?
         // why does it work on the laptop 4050 ?!
 
         static const wchar_t* dll_paths[] =
         {
-            //SOLUTION_DIR L"\\External\\DLSS\\lib\\dev",
-            //SOLUTION_DIR L"\\External\\DLSS\\lib\\rel",
                 L".",
         };
 
@@ -1917,7 +1932,7 @@ public:
         feature_common_info.LoggingInfo.LoggingCallback = [](const char* msg, NVSDK_NGX_Logging_Level level, NVSDK_NGX_Feature source) {
             IOs::Log("NGX: {}", msg);
             };
-        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_ON;
+        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
         feature_common_info.LoggingInfo.DisableOtherLoggingSinks = true;
         feature_common_info.PathListInfo.Path = dll_paths;
         feature_common_info.PathListInfo.Length = NVSDK_NGX_ARRAY_LEN(dll_paths);
@@ -1929,6 +1944,7 @@ public:
             "1.0",
             L".",
             GPU::instance->device, &feature_common_info);
+        if (NVSDK_NGX_FAILED(result)) return;
 
         result = NVSDK_NGX_D3D12_GetCapabilityParameters(&ngx_parameters);
         if (NVSDK_NGX_FAILED(result)) return;
@@ -1967,7 +1983,6 @@ public:
         renderResolution.y = renderHeight;
 
     }
-
 
     void Schedule(World& world, tf::Subflow& subflow)
     {

@@ -1106,16 +1106,16 @@ float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor, float specMul = 1)
 
 SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
 {
-    StructuredBuffer<HLSL:: Instance > instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[InstanceID()];
     
-    StructuredBuffer<HLSL:: Material > materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
+    StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
     HLSL::Material material = materials[instance.materialIndex];
     
-    StructuredBuffer<HLSL:: Mesh > meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
+    StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
     
-    StructuredBuffer<HLSL:: Vertex > verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
+    StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
     
     StructuredBuffer<uint> indicesData = ResourceDescriptorHeap[commonResourcesIndices.indicesHeapIndex];
 
@@ -1162,29 +1162,31 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     normal = normalize(normal);
     float4x4 worldMatrix = instance.unpack(instance.current);
     float3 worldNormal = mul((float3x3) worldMatrix, normal);
+    worldNormal = normalize(worldNormal);
+    //s.normal = worldNormal;
     s.normal = normal;
     
     return s;
 }
 
-static uint maxFrameFilteringCount = 20;
+static uint maxFrameFilteringCount = 12;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current)
 {
-    previous.pos_Wsum.w += current.pos_Wsum.w;
-    previous.dir_Wcount.w += current.dir_Wcount.w;
     if(previous.color_W.w < current.color_W.w)
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.pos_Wsum.xyz = current.pos_Wsum.xyz;
         previous.dir_Wcount.xyz = current.dir_Wcount.xyz;
     }
+    previous.pos_Wsum.w += current.pos_Wsum.w;
+    previous.dir_Wcount.w += current.dir_Wcount.w;
 }
-void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
+void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount, float reprojection)
 {
+    r.color_W.w = max(0, r.color_W.w * reprojection * 0.9999);
     if (r.dir_Wcount.w >= frameFilteringCount)
     {
         float factor = max(0, float(frameFilteringCount) / max(r.dir_Wcount.w, 1.0f));
-        r.color_W.w = max(0, r.color_W.w * lerp(factor, 1, 0.33));
         r.pos_Wsum.w *= factor;
         r.dir_Wcount.w *= factor;
     }

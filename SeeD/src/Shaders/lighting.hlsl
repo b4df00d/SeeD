@@ -15,6 +15,9 @@ cbuffer CustomRT : register(b2)
 [numthreads(16, 16, 1)]
 void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
+    if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y)
+        return;
+    
     Texture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     
@@ -27,7 +30,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     
     float3 direct = BRDF(s, cd.viewDir, light.dir.xyz, shadows[dtid.xy] * light.color.xyz);
     
-#if lighted
+#if 0
     Texture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     float3 indirect = GI[dtid.xy].xyz;
 #else

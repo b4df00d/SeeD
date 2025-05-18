@@ -266,6 +266,9 @@ public:
         size_t last = name.find_last_of("\\");
         if (last != -1)
             name = name.substr(last + 1);
+        last = name.find_last_of("/");
+        if (last != -1)
+            name = name.substr(last + 1);
         name = name.ToLower();
 
 

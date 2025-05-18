@@ -31,6 +31,9 @@ static int2 patternB[4] =
 [numthreads(16, 16, 1)]
 void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
+    if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y)
+        return;
+    
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];   
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
  
@@ -43,25 +46,32 @@ void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThread
     uint seed = initRand(gtid.x + viewContext.frameTime % 234 * 1.621f, gtid.y + viewContext.frameTime % 431 * 1.432f, 4);
     
     uint pattern = (dtid.x + dtid.y + rtParameters.passNumber + viewContext.frameNumber) % 2;
+    float radius = 6 * (rtParameters.passNumber+1) * lerp(nextRand(seed), 1, 0.125);
+    uint spacialReuse = 0;
     for (uint i = 0; i < 4; i++)
     {
-        float radius = 12;
-        int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] * 2 * radius : patternB[i] * radius) * lerp(nextRand(seed), 1, 0.125);
-        if (!(any(pixel < 0) || any(pixel > viewContext.renderResolution.xy)))
+        int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] : patternB[i]) * radius;
+        if (pixel.x < 0 || pixel.y < 0) continue;
+        if (pixel.x >= viewContext.renderResolution.x || pixel.y >= viewContext.renderResolution.y) continue;
         {
             float3 worldNormNeightbor = ReadR11G11B10Normal(normalT[pixel.xy]);
             float depthNeightbor = depthT[pixel.xy];
             if(abs(depth - depthNeightbor) > 0.002)
                 continue;
-            if(dot(worldNorm, worldNormNeightbor) < 0.9)
+            if(dot(worldNorm, worldNormNeightbor) < 0.5)
                 continue;
+            
             HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
             UpdateGIReservoir(r, rNeightbor);
+            spacialReuse++;
         }
     }
     
-    ScaleGIReservoir(r, maxFrameFilteringCount);
+    ScaleGIReservoir(r, maxFrameFilteringCount, 0.99);
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
     previousgiReservoir[dtid.x + dtid.y * viewContext.renderResolution.x] = PackGIReservoir(r);
+    
+    RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+    //GI[dtid.xy] = float3(GI[dtid.xy].x, GI[dtid.xy].y, spacialReuse / 4.0f);
 }
