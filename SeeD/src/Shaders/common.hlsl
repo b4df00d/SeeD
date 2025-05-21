@@ -190,6 +190,13 @@ uint initRand(uint val0, uint val1, uint backoff = 16)
     }
     return v0;
 }
+// Generates a seed for a random number generator from 2 inputs plus a backoff
+uint initRand(uint2 pixel)
+{
+    //pixel *= 38742.6612f;
+    //return initRand(pixel.x + (uint(viewContext.frameTime) % 123) * 2.621f, pixel.y + (uint(viewContext.frameTime) % 431) * 9.432f, 3);
+    return initRand(pixel.x + viewContext.frameTime, pixel.y + viewContext.frameTime, 3);
+}
 
 // Takes our seed, updates it, and returns a pseudorandom float in [0..1]
 float nextRand(inout uint s)
@@ -914,7 +921,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     {
         Texture2D<float4> albedo = ResourceDescriptorHeap[textureIndex];
         s.albedo *= albedo.Sample(samplerLinear, uv);
-        s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
+        //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
         if(length(s.albedo.xyz) < 0.1) s.albedo.xyz = 1;
     }
     
@@ -1104,6 +1111,12 @@ float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor, float specMul = 1)
     return result;
 }
 
+float3 Sky(float3 direction)
+{
+    float dotUp = saturate(pow(dot(direction, float3(0, 1, 0)), 0.25));
+    return lerp(float3(1, 0.66, 0.66), float3(0.15, 0.25, 1), dotUp) * 2;
+}
+
 SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
 {
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
@@ -1175,19 +1188,20 @@ void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir curre
     if(previous.color_W.w < current.color_W.w)
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
-        previous.pos_Wsum.xyz = current.pos_Wsum.xyz;
+        previous.hit_Wsum.xyz = current.hit_Wsum.xyz;
         previous.dir_Wcount.xyz = current.dir_Wcount.xyz;
     }
-    previous.pos_Wsum.w += current.pos_Wsum.w;
+    previous.hit_Wsum.w += current.hit_Wsum.w;
     previous.dir_Wcount.w += current.dir_Wcount.w;
 }
 void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount, float reprojection)
 {
-    r.color_W.w = max(0, r.color_W.w * reprojection * 0.9999);
+    r.color_W.w *= reprojection;
     if (r.dir_Wcount.w >= frameFilteringCount)
     {
         float factor = max(0, float(frameFilteringCount) / max(r.dir_Wcount.w, 1.0f));
-        r.pos_Wsum.w *= factor;
+        //r.color_W.w *= factor;
+        r.hit_Wsum.w *= factor;
         r.dir_Wcount.w *= factor;
     }
 }
@@ -1198,7 +1212,7 @@ HLSL::GIReservoirCompressed PackGIReservoir(HLSL::GIReservoir r)
     result.color = PackRGBE_sqrt(r.color_W.xyz);
     result.Wcount_W = (asuint(f32tof16(r.dir_Wcount.w)) << 16) + asuint(f32tof16(r.color_W.w));
     result.dir = Pack_R11G11B10_FLOAT(normalize(r.dir_Wcount.xyz) * 0.5 + 0.5);
-    result.pos_Wsum = r.pos_Wsum;
+    result.hit_Wsum = r.hit_Wsum;
     return result;
 }
 HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
@@ -1208,7 +1222,7 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
     result.color_W.w = f16tof32(r.Wcount_W & 0xffff);
     result.dir_Wcount.w = f16tof32(r.Wcount_W >> 16u);
     result.dir_Wcount.xyz = normalize(Unpack_R11G11B10_FLOAT(r.dir) * 2 - 1);
-    result.pos_Wsum = r.pos_Wsum;
+    result.hit_Wsum = r.hit_Wsum;
     return result;
 }
 
@@ -1241,6 +1255,7 @@ float3 getCosHemisphereSample(inout uint randSeed, float3 hitNorm)
 
 float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, float3 worldNorm, bool writeWorldPosAsOffset = false)
 {
+    worldPos += worldNorm * 0.5;
     uint probeGridIndex = 0;
     HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
     while(probeGridIndex < 3 && (any(worldPos.xyz < probes.probesBBMin.xyz) || any(worldPos.xyz > probes.probesBBMax.xyz)))
@@ -1265,10 +1280,10 @@ float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, float3 wor
     }
     
     //with jitter for sampling
-    float3 jitteredPos = worldPos + worldNorm * cellSize;
+    float3 jitteredPos = worldPos + worldNorm * cellSize * 0.5;
     jitteredPos.x += sin(worldPos.z * 25) * cellSize.x * 0.125;
     jitteredPos.z += sin(worldPos.x * 25) * cellSize.z * 0.125;
-    jitteredPos.y += sin(worldPos.x * 25) * cellSize.y * 0.125;
+    jitteredPos.y += sin(worldPos.y * 25) * cellSize.y * 0.125;
     int3 launchIndex = (jitteredPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz) * probes.probesResolution.xyz;
     uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
     uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);

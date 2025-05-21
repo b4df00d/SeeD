@@ -134,7 +134,9 @@ void RayGen()
     
     GBufferCameraData cd = GetGBufferCameraData(launchIndex);
     
-    uint seed = initRand(launchIndex.x + viewContext.frameTime % 234 * 1.621f, launchIndex.y + viewContext.frameTime % 431 * 1.432f, 4);
+    if(cd.viewDist > 5000) return;
+    
+    uint seed = initRand(launchIndex.xy);
     
     float3 offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.005) + (cd.worldNorm * cd.viewDist * 0.002);
     
@@ -145,6 +147,8 @@ void RayGen()
         
         HLSL::HitInfo shadowload;
         shadowload.color = float3(0.0, 0.0, 0.0);
+        shadowload.hitPos = 0;
+        shadowload.hitDistance = 0;
         shadowload.rayDepth = 11111;
         shadowload.rndseed = seed;
     
@@ -167,10 +171,12 @@ void RayGen()
     {
         HLSL::HitInfo payload;
         payload.color = float3(0.0, 0.0, 0.0);
+        payload.hitPos = 0;
+        payload.hitDistance = 0;
         payload.rayDepth = 1;
         payload.rndseed = seed;
     
-        bounceLightDir = lerp(cd.worldNorm, getCosHemisphereSample(payload.rndseed, cd.worldNorm), 0.9);
+        bounceLightDir = normalize(lerp(cd.worldNorm, getCosHemisphereSample(payload.rndseed, cd.worldNorm), 0.9));
         RayDesc ray;
         ray.Origin = offsetedWorldPos;
         ray.Direction = bounceLightDir;
@@ -185,21 +191,21 @@ void RayGen()
         RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
         HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
         
-        float blend = 1-saturate(max(cd.viewDistDiff-(0.01 * cd.viewDist), 0) * 10);
+        float blend = 1-saturate(max(cd.viewDistDiff-(0.01 * cd.viewDist), 0));
         uint frameFilteringCount = max(1, blend * maxFrameFilteringCount);
     
         HLSL::GIReservoir newR;
         float W = length(bounceLight);
         newR.color_W = float4(bounceLight, W);
         newR.dir_Wcount = float4(bounceLightDir, 1);
-        newR.pos_Wsum = float4(offsetedWorldPos, W);
+        newR.hit_Wsum = float4(payload.hitPos, W);
         
         // if not first time fill with previous frame reservoir
         if (viewContext.frameNumber == 0)
         {
             r.color_W = 0;
             r.dir_Wcount = 0;
-            r.pos_Wsum = 0;
+            r.hit_Wsum = 0;
         }
         
         UpdateGIReservoir(r, newR);
@@ -208,11 +214,11 @@ void RayGen()
         RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
         giReservoir[launchIndex.x + launchIndex.y * viewContext.renderResolution.x] = PackGIReservoir(r);
         
-        //bounceLight = r.color_W.xyz * (r.pos_Wsum.w / r.dir_Wcount.w);
+        //bounceLight = r.color_W.xyz * (r.hit_Wsum.w / r.dir_Wcount.w);
         // end ReSTIR
         
         RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-        //GI[launchIndex] = float3(blend, r.dir_Wcount.w / maxFrameFilteringCount, 0);
+        GI[launchIndex] = float3(blend, r.dir_Wcount.w / maxFrameFilteringCount, 0);
         //GI[launchIndex] = bounceLight;
     }
     
@@ -226,7 +232,9 @@ void RayGen()
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
     payload.hitDistance = RayTCurrent();
-    payload.color = float3(0.66, 0.75, 0.99) * saturate(pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 1.5));
+    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * 10000;
+    payload.hitPos = hitLocation;
+    payload.color = Sky(WorldRayDirection());
 }
 
 [shader("closesthit")]
@@ -234,6 +242,8 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
 {
     //payload.color = 0; return;
     payload.hitDistance = RayTCurrent();
+    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() * 0.999f);
+    payload.hitPos = hitLocation;
     if (payload.rayDepth >= HLSL::maxRTDepth) return;
     
     RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
@@ -243,18 +253,20 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     
     SurfaceData s = GetRTSurfaceData(attrib);
     //payload.color = s.albedo.xyz; return;
+    hitLocation += s.normal * 0.001f;
+    
     if(dot(s.normal, WorldRayDirection()) > 0) s.normal = -s.normal; // if we touch the backface, invert the normal ?
     
-    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() * 0.999f) + s.normal * 0.001f;
     float3 sun = 0;
     if (payload.rayDepth < HLSL::maxRTDepth)
     {
         // shadow
         HLSL::HitInfo shadowload;
         shadowload.color = float3(0.0, 0.0, 0.0);
+        shadowload.hitPos = 0;
+        shadowload.hitDistance = 10000;
         shadowload.rayDepth = 1000000;
         shadowload.rndseed = payload.rndseed;
-        shadowload.hitDistance = 10000;
     
         RayDesc ray;
         ray.Origin = hitLocation;

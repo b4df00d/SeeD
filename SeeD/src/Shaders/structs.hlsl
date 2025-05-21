@@ -298,6 +298,7 @@ namespace HLSL
     struct HitInfo
     {
         float3 color;
+        float3 hitPos;
         float hitDistance;
         uint rayDepth; //pack depth and seed in 1 uint
         uint rndseed;
@@ -314,12 +315,12 @@ namespace HLSL
     {
         float4 color_W;
         float4 dir_Wcount;
-        float4 pos_Wsum;
+        float4 hit_Wsum;
     };
     
     struct GIReservoirCompressed
     {
-        float4 pos_Wsum;
+        float4 hit_Wsum;
         uint dir;
         uint color;
         uint Wcount_W;
@@ -330,7 +331,7 @@ not packed 220fps
 packed color only = 270fps
 
 packed : 
-        float4 pos_Wsum;
+        float4 hit_Wsum;
         uint dir;
         uint color;
         uint Wcount_W;
