@@ -1,5 +1,3 @@
-#define RT_SHADER
-
 #include "structs.hlsl"
 
 cbuffer CustomRT : register(b2)
@@ -17,89 +15,6 @@ GlobalRootSignature SeeDRootSignatureRT =
 {
     SeeDRootSignature
 };
-
-/* 
-// NEED TO USE THOSE !!
-
-LocalRootSignature MyLocalRootSignature =
-{
-    "RootConstants( num32BitConstants = 4, b4 )"           // Cube constants        
-};
-
-TriangleHitGroup MyHitGroup =
-{
-    "", // AnyHit
-    "ClosestHit", // ClosestHit
-};
-
-SubobjectToExportsAssociation MyLocalRootSignatureAssociation =
-{
-    "MyLocalRootSignature", // subobject name
-    "MyHitGroup"             // export association 
-};
-
-RaytracingShaderConfig MyShaderConfig =
-{
-    16, // max payload size
-    8 // max attribute size
-};
-
-RaytracingPipelineConfig MyPipelineConfig =
-{
-    1 // max trace recursion depth
-};
-*/
-
-/*
-
-    // Define a ray, consisting of origin, direction, and the min-max distance values
-    RayDesc ray;
-    ray.Origin = camera.worldPos.xyz;
-    ray.Direction = rayDir;
-    ray.TMin = 0;
-    ray.TMax = 100000;
-
-    // Trace the ray
-    TraceRay(
-        // Parameter name: AccelerationStructure 
-        // Acceleration structure 
-        BVH,
-        // Parameter name: RayFlags 
-        // Flags can be used to specify the behavior upon hitting a surface 
-        RAY_FLAG_NONE,
-        // Parameter name: InstanceInclusionMask 
-        // Instance inclusion mask, which can be used to mask out some geometry to this ray by 
-        // and-ing the mask with a geometry mask. The 0xFF flag then indicates no geometry will be 
-        // masked 
-        0xFF,
-        // Parameter name: RayContributionToHitGroupIndex 
-        // Depending on the type of ray, a given object can have several hit groups attached 
-        // (ie. what to do when hitting to compute regular shading, and what to do when hitting 
-        // to compute shadows). Those hit groups are specified sequentially in the SBT, so the value 
-        // below indicates which offset (on 4 bits) to apply to the hit groups for this ray.
-        0,
-        // Parameter name: MultiplierForGeometryContributionToHitGroupIndex 
-        // The offsets in the SBT can be computed from the object ID, its instance ID, but also simply 
-        // by the order the objects have been pushed in the acceleration structure. This allows the 
-        // application to group shaders in the SBT in the same order as they are added in the AS, in 
-        // which case the value below represents the stride (4 bits representing the number of hit 
-        // groups) between two consecutive objects. 
-        0,
-        // Parameter name: MissShaderIndex 
-        // Index of the miss shader to use in case several consecutive miss shaders are present in the 
-        // SBT. This allows to change the behavior of the program when no geometry have been hit, for 
-        // example one to return a sky color for regular rendering, and another returning a full 
-        // visibility value for shadow rays. This sample has only one miss shader, hence an index 0 
-        0,
-        // Parameter name: Ray 
-        // Ray information to trace 
-        ray,
-        // Parameter name: Payload 
-        // Payload associated to the ray, which will be used to communicate between the hit/miss 
-        // shaders and the raygen 
-        payload
-    );
-*/
 
 void DebugSurfaceData(float3 pos, float3 dir)
 {
@@ -122,6 +37,14 @@ void DebugSurfaceData(float3 pos, float3 dir)
     GI[launchIndex] = payload.color;
 }
 
+static int2 patternA[4] =
+{
+    int2(-1, 0),
+    int2(1, 0),
+    int2(0, -1),
+    int2(0, 1)
+};
+
 [shader("raygeneration")]
 void RayGen()
 {
@@ -130,15 +53,10 @@ void RayGen()
     if (launchIndex.x > viewContext.renderResolution.x || launchIndex.y > viewContext.renderResolution.y)
         return;
     
-    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
-    
-    GBufferCameraData cd = GetGBufferCameraData(launchIndex);
-    
+    GBufferCameraData cd = GetGBufferCameraData(launchIndex); 
     if(cd.viewDist > 5000) return;
     
     uint seed = initRand(launchIndex.xy);
-    
-    float3 offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.005) + (cd.worldNorm * cd.viewDist * 0.002);
     
     float shadow = 0;
     {
@@ -153,14 +71,14 @@ void RayGen()
         shadowload.rndseed = seed;
     
         RayDesc ray;
-        ray.Origin = offsetedWorldPos;
+        ray.Origin = cd.offsetedWorldPos;
         ray.Direction = -light.dir.xyz;
         ray.TMin = 0;
         ray.TMax = 100000;
 
         if (dot(cd.worldNorm, ray.Direction) > 0)
         {
-            TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, shadowload);
+            TraceRayCommon(rtParameters, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, shadowload);
         }
         
         shadow = shadowload.hitDistance >= ray.TMax ? 1 : 0;
@@ -178,12 +96,12 @@ void RayGen()
     
         bounceLightDir = normalize(lerp(cd.worldNorm, getCosHemisphereSample(payload.rndseed, cd.worldNorm), 0.9));
         RayDesc ray;
-        ray.Origin = offsetedWorldPos;
+        ray.Origin = cd.offsetedWorldPos;
         ray.Direction = bounceLightDir;
         ray.TMin = 0;
         ray.TMax = 100000;
         
-        TraceRay( BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+        TraceRayCommon(rtParameters, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
         
         bounceLight = payload.color;// * saturate(dot(cd.worldNorm, bounceLightDir)); // BRDF here ?
         
@@ -191,8 +109,24 @@ void RayGen()
         RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
         HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
         
-        float blend = 1-saturate(max(cd.viewDistDiff-(0.01 * cd.viewDist), 0));
+        #ifdef JITTER
+        for(uint i = 0; i < 4; i++)
+        {
+            uint2 jitterPixel = cd.previousPixel + patternA[i];
+            
+            if (jitterPixel.x < 0 || jitterPixel.y < 0) continue;
+            if (jitterPixel.x >= viewContext.renderResolution.x || jitterPixel.y >= viewContext.renderResolution.y) continue;
+            
+            HLSL::GIReservoir r2 = UnpackGIReservoir(previousgiReservoir[jitterPixel.x + jitterPixel.y * viewContext.renderResolution.x]);
+            //ScaleGIReservoir(r2, maxFrameFilteringCount * 2, 0.75);
+            UpdateGIReservoir(r, r2);
+        }
+        ScaleGIReservoir(r, maxFrameFilteringCount, 1); 
+        #endif
+        
+        float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.5 - 0.2);
         uint frameFilteringCount = max(1, blend * maxFrameFilteringCount);
+        //blend = min(0.999, blend);
     
         HLSL::GIReservoir newR;
         float W = length(bounceLight);
@@ -214,88 +148,36 @@ void RayGen()
         RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
         giReservoir[launchIndex.x + launchIndex.y * viewContext.renderResolution.x] = PackGIReservoir(r);
         
-        //bounceLight = r.color_W.xyz * (r.hit_Wsum.w / r.dir_Wcount.w);
         // end ReSTIR
         
         RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-        GI[launchIndex] = float3(blend, r.dir_Wcount.w / maxFrameFilteringCount, 0);
+        GI[launchIndex] = float3(1-blend, 1 - saturate(r.dir_Wcount.w / float(maxFrameFilteringCount)), 0);
+        bounceLight = r.color_W.xyz * (r.hit_Wsum.w / r.dir_Wcount.w);
         //GI[launchIndex] = bounceLight;
+        //GI[launchIndex] = r.color_W.xyz;
     }
     
     RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     shadows[launchIndex] = shadow;
     
-    //DebugSurfaceData(cd.camera.worldPos.xyz, cd.viewDir);
+    //DebugSurfaceData(cd.camera.worldPos.xyz, cd.viewDir); 
 }
 
 [shader("miss")]
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
-    payload.hitDistance = RayTCurrent();
-    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * 10000;
-    payload.hitPos = hitLocation;
-    payload.color = Sky(WorldRayDirection());
+    MyMissColorCalculation(WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), payload);
 }
 
 [shader("closesthit")]
 void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
-    //payload.color = 0; return;
-    payload.hitDistance = RayTCurrent();
-    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() * 0.999f);
-    payload.hitPos = hitLocation;
     if (payload.rayDepth >= HLSL::maxRTDepth) return;
-    
-    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
-    
-    StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
-    HLSL::Light light = lights[0];
-    
-    SurfaceData s = GetRTSurfaceData(attrib);
-    //payload.color = s.albedo.xyz; return;
-    hitLocation += s.normal * 0.001f;
-    
-    if(dot(s.normal, WorldRayDirection()) > 0) s.normal = -s.normal; // if we touch the backface, invert the normal ?
-    
-    float3 sun = 0;
-    if (payload.rayDepth < HLSL::maxRTDepth)
-    {
-        // shadow
-        HLSL::HitInfo shadowload;
-        shadowload.color = float3(0.0, 0.0, 0.0);
-        shadowload.hitPos = 0;
-        shadowload.hitDistance = 10000;
-        shadowload.rayDepth = 1000000;
-        shadowload.rndseed = payload.rndseed;
-    
-        RayDesc ray;
-        ray.Origin = hitLocation;
-        ray.Direction = -light.dir.xyz;
-        ray.TMin = 0;
-        ray.TMax = shadowload.hitDistance;
-        
-        shadowload.hitDistance = 0;
-        if (dot(s.normal, ray.Direction) > 0)
-        {
-            //TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, shadowload);
-            TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, shadowload);
-        }
-        
-        sun = shadowload.hitDistance >= ray.TMax ? light.color.xyz : 0;
-    }
-    //payload.color = BRDF(s, WorldRayDirection(), -light.dir.xyz, sun) * 10;
-    payload.color = saturate(dot(s.normal, -light.dir.xyz)) * sun;
-    
-    float3 bounceLight = SampleProbes(rtParameters, hitLocation, s.normal, true);
-    payload.color += bounceLight;
-    
-    if (payload.rayDepth > 0)
-        payload.color *= saturate(s.albedo.xyz * 1); // fake lighting equation
+    ShadeMyTriangleHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload);
 }
 
 [shader("anyhit")]
 void AnyHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
     payload.hitDistance = RayTCurrent();
-    //payload.color = 0;
 }

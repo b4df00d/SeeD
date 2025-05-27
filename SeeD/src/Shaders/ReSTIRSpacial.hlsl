@@ -9,9 +9,6 @@ cbuffer CustomRT : register(b2)
 #include "binding.hlsl"
 #include "common.hlsl"
 
-#pragma compute ReSTIRSpacial
-
-
 static int2 patternA[4] =
 {
     int2(-1, 0),
@@ -27,10 +24,19 @@ static int2 patternB[4] =
     int2(-1, 1)
 };
 
-[RootSignature(SeeDRootSignature)]
-[numthreads(16, 16, 1)]
-void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
+
+#pragma raytracing 
+
+GlobalRootSignature SeeDRootSignatureRT =
 {
+    SeeDRootSignature
+};
+
+
+[shader("raygeneration")]
+void RayGen()
+{
+    uint2 dtid = DispatchRaysIndex().xy;
     if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y)
         return;
     
@@ -40,15 +46,16 @@ void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThread
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];   
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
+    HLSL::GIReservoir og = r;
     
     uint seed = initRand(dtid.xy);
     
     uint pattern = (dtid.x + dtid.y + rtParameters.passNumber + viewContext.frameNumber) % 2;
-    float radius = 64 * (2-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.015);
+    float radius = 6 * (2-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.015);
     uint spacialReuse = 0;
     for (uint i = 0; i < 4; i++)
     {
-        int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] : patternB[i]) * radius;
+        int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] : patternB[i]) * radius + 0.5;
         if (pixel.x < 0 || pixel.y < 0) continue;
         if (pixel.x >= viewContext.renderResolution.x || pixel.y >= viewContext.renderResolution.y) continue;
         {
@@ -57,13 +64,12 @@ void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThread
             if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.8) continue;
             
             HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
-            rNeightbor.color_W.w *= 1.0/(radius * 100);
+            //rNeightbor.color_W.w *= 1.0/(1 + radius * 0.91);
             UpdateGIReservoir(r, rNeightbor);
             spacialReuse++;
         }
     }
-    
-    ScaleGIReservoir(r, maxFrameFilteringCount, 1);
+    r = Validate(rtParameters, seed, cd.offsetedWorldPos, r, og);
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
     previousgiReservoir[dtid.x + dtid.y * viewContext.renderResolution.x] = PackGIReservoir(r);
@@ -72,4 +78,23 @@ void ReSTIRSpacial(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThread
     float3 gi = GI[dtid.xy];
     gi = spacialReuse / 4.0f;
     //GI[dtid.xy] = gi;
+}
+
+[shader("miss")]
+void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
+{
+    MyMissColorCalculation(WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), payload);
+}
+
+[shader("closesthit")]
+void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
+{
+    if (payload.rayDepth >= HLSL::maxRTDepth) return;
+    ShadeMyTriangleHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload);
+}
+
+[shader("anyhit")]
+void AnyHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
+{
+    payload.hitDistance = RayTCurrent();
 }

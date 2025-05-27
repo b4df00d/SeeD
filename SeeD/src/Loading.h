@@ -1368,6 +1368,11 @@ public :
         vArgs.push_back(L"SeeDRootSignature");
         //vArgs.push_back(DXC_ARG_ALL_RESOURCES_BOUND);
         //vArgs.push_back(L"-no-warnings");
+        if (shader != nullptr && shader->type == Shader::Type::Raytracing)
+        {
+            vArgs.push_back(L"-D");
+            vArgs.push_back(L"RAY_DISPATCH");
+        }
 #ifdef _DEBUG
         vArgs.push_back(L"-Zi");
         vArgs.push_back(L"-Zss");

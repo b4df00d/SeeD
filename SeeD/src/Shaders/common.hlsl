@@ -845,6 +845,7 @@ struct GBufferCameraData
 {
     HLSL::Camera camera;
     float3 worldPos;
+    float3 offsetedWorldPos;
     float3 worldNorm;
     float3 viewDir;
     float viewDist;
@@ -889,6 +890,8 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     cd.viewDist = rayLength;
     cd.worldPos = worldSpace.xyz;
     cd.viewDistDiff = abs(rayLength - previousRayLength);
+    
+    cd.offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.005) + (cd.worldNorm * cd.viewDist * 0.002);
     
     return cd;
 }
@@ -1004,7 +1007,7 @@ float sqr(float x) { return x*x; }
 
 float SchlickFresnel(float u)
 {
-    float m = clamp(1-u, 0, 1);
+    float m = saturate(1.0-u);
     float m2 = m*m;
     return m2*m2*m; // pow(m,5)
 }
@@ -1048,7 +1051,8 @@ float3 mon2lin(float3 x)
 
 float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor, float specMul = 1)
 {
-    s.roughness = 0.9;
+    s.subsurface = 0.0;
+    s.roughness = 0.5;
     s.metalness = 0.0;
     s._specular = 0.0;
     s.normal = normalize(s.normal);
@@ -1058,6 +1062,7 @@ float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor, float specMul = 1)
     
     float NdotL = max(dot(s.normal,L),0.0);
     float NdotV = max(dot(s.normal,V),0.0);
+    
 
     float3 H = normalize(L+V);
     float NdotH = max(dot(s.normal,H),0.0);
@@ -1072,7 +1077,8 @@ float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor, float specMul = 1)
 
     // Diffuse fresnel - go from 1 at normal incidence to .5 at grazing
     // and lerp in diffuse retro-reflection based on roughness
-    float FL = SchlickFresnel(NdotL), FV = SchlickFresnel(NdotV);
+    float FL = SchlickFresnel(NdotL);
+    float FV = SchlickFresnel(NdotV);
     float Fd90 = 0.5 + 2 * LdotH*LdotH*s.roughness;
     float Fd = lerp(1.0, Fd90, FL) * lerp(1.0, Fd90, FV);
 
@@ -1108,16 +1114,17 @@ float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor, float specMul = 1)
 
     float3 result = ((1/PI) * lerp(Fd, ss, s.subsurface)*Cdlin + Fsheen) * (1-s.metalness) + Gs*Fs*Ds + .25*s.clearcoat*Gr*Fr*Dr;
     result *= LColor;
+    result *= NdotL;
     return result;
 }
 
 float3 Sky(float3 direction)
 {
-    float dotUp = saturate(pow(dot(direction, float3(0, 1, 0)), 0.25));
-    return lerp(float3(1, 0.66, 0.66), float3(0.15, 0.25, 1), dotUp) * 2;
+    float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))) + 0.01, 0.5));
+    return normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
 }
 
-SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
+SurfaceData GetRTSurfaceData(float2 bary)
 {
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[InstanceID()];
@@ -1131,7 +1138,7 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
     
     StructuredBuffer<uint> indicesData = ResourceDescriptorHeap[commonResourcesIndices.indicesHeapIndex];
-
+    
     uint iBase = PrimitiveIndex() * 3 + mesh.indexOffset;
     uint i1 = indicesData[iBase + 0];
     uint i2 = indicesData[iBase + 1];
@@ -1141,7 +1148,7 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     float2 uv2 = verticesData[i2].uv;
     float2 uv3 = verticesData[i3].uv;
 
-    float2 uv = ((1 - attrib.bary.x - attrib.bary.y) * uv1 + attrib.bary.x * uv2 + attrib.bary.y * uv3);
+    float2 uv = ((1 - bary.x - bary.y) * uv1 + bary.x * uv2 + bary.y * uv3);
 
     SurfaceData s;
     if (material.textures[0] != ~0)
@@ -1171,7 +1178,7 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     float3 nrm2 = verticesData[i2].normal;
     float3 nrm3 = verticesData[i3].normal;
 
-    float3 normal = ((1 - attrib.bary.x - attrib.bary.y) * nrm1 + attrib.bary.x * nrm2 + attrib.bary.y * nrm3);
+    float3 normal = ((1 - bary.x - bary.y) * nrm1 + bary.x * nrm2 + bary.y * nrm3);
     normal = normalize(normal);
     float4x4 worldMatrix = instance.unpack(instance.current);
     float3 worldNormal = mul((float3x3) worldMatrix, normal);
@@ -1182,7 +1189,7 @@ SurfaceData GetRTSurfaceData(HLSL::Attributes attrib)
     return s;
 }
 
-static uint maxFrameFilteringCount = 12;
+static uint maxFrameFilteringCount = 20;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current)
 {
     if(previous.color_W.w < current.color_W.w)
@@ -1200,7 +1207,7 @@ void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount, float
     if (r.dir_Wcount.w >= frameFilteringCount)
     {
         float factor = max(0, float(frameFilteringCount) / max(r.dir_Wcount.w, 1.0f));
-        //r.color_W.w *= factor;
+        r.color_W.w *= factor;
         r.hit_Wsum.w *= factor;
         r.dir_Wcount.w *= factor;
     }
@@ -1292,25 +1299,275 @@ float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, float3 wor
     return max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, worldNorm)); // A "max" is usually recomended to avoid negative values (can happen with SH)
 }
 
-  /*
-    float3 samplePos = hitLocation + s.normal;// + sin(hitLocation * 50);
+void TraceRayCommon(HLSL::RTParameters rtParameters,
+    uint RayFlags,
+    uint InstanceInclusionMask,
+    uint RayContributionToHitGroupIndex,
+    uint MultiplierForGeometryContributionToHitGroupIndex,
+    uint MissShaderIndex,
+    RayDesc Ray,
+    inout HLSL::HitInfo Payload);
+struct MyCustomIntersectionAttributes { float4 a; float3 b; };
+bool MyProceduralIntersectionEnumerator(float tHit, MyCustomIntersectionAttributes candidateAttribs, uint candidateInstanceIndex, uint candidatePrimitiveIndex, uint candidateGeometryIndex)
+{
+    return false;
+}
+bool MyProceduralAlphaTestLogic(float tHit, MyCustomIntersectionAttributes candidateAttribs, uint candidateInstanceIndex, uint candidatePrimitiveIndex, uint candidateGeometryIndex)
+{
+    return false;
+}
+bool MyAlphaTestLogic(uint candidateInstanceIndex, uint candidatePrimitiveIndex, uint candidateGeometryIndex, uint candidateTriangleRayT, float2 candidateTriangleBarycentrics, bool candidateTriangleFrontFace)
+{
+    return false;
+}
+bool MyLogicSaysStopSearchingForSomeReason()
+{
+    return false;
+}
+void ShadeMyTriangleHit(HLSL::RTParameters rtParameters, 
+uint committedInstanceIndex,
+uint committedPrimitiveIndex,
+uint committedGeometryIndex,
+float2 committedTriangleBarycentrics,
+float3 WorldRayOrigin,
+float3 WorldRayDirection,
+float RayTCurrent,
+bool committedTriangleFrontFace,
+inout HLSL::HitInfo Payload)
+{
+    SurfaceData s = GetRTSurfaceData(committedTriangleBarycentrics);
     
-    uint probeGridIndex = 0;
-    HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
-    while(probeGridIndex < 3 && (any(samplePos.xyz < probes.probesBBMin.xyz) || any(samplePos.xyz > probes.probesBBMax.xyz)))
+    Payload.hitPos = WorldRayOrigin + WorldRayDirection * (RayTCurrent * 0.999f);
+    Payload.hitDistance = RayTCurrent;
+    float3 hitLocation = Payload.hitPos + s.normal * 0.001f;
+    if(dot(s.normal, WorldRayDirection) > 0) s.normal = -s.normal; // if we touch the backface, invert the normal ?
+    
+    if (Payload.rayDepth < HLSL::maxRTDepth)
     {
-        probeGridIndex++;
-        probes = rtParameters.probes[probeGridIndex];
-    }
-    float3 cellSize = float3(probes.probesBBMax.xyz - probes.probesBBMin.xyz) / float3(probes.probesResolution.xyz);
-    int3 launchIndex = (samplePos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz) * probes.probesResolution.xyz;
-    uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
-    uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
-    RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
-    HLSL::ProbeData probe = probesBuffer[probeIndex];
-    float3 bounceLight = max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
+        // shadow
+        HLSL::HitInfo shadowload;
+        shadowload.color = float3(0.0, 0.0, 0.0);
+        shadowload.hitPos = 0;
+        shadowload.hitDistance = 10000;
+        shadowload.rayDepth = 1000000;
+        shadowload.rndseed = Payload.rndseed;
     
-    float3 probeCenter = launchIndex * cellSize + probes.probesBBMin.xyz;
-    float3 probeOffset = samplePos - probeCenter;
-    if(length(probeOffset) < length(probe.position.xyz)) probesBuffer[probeIndex].position = float4(-probeOffset, 0);
-*/
+        StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
+        HLSL::Light light = lights[0];
+        RayDesc ray;
+        ray.Origin = hitLocation;
+        ray.Direction = -light.dir.xyz;
+        ray.TMin = 0;
+        ray.TMax = shadowload.hitDistance;
+        
+        shadowload.hitDistance = 0;
+        if (dot(s.normal, ray.Direction) > 0)
+        {
+            //RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+            TraceRayCommon(rtParameters, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, shadowload);
+        }
+        
+        float3 sun = shadowload.hitDistance >= ray.TMax ? light.color.xyz : 0;
+        Payload.color = saturate(dot(s.normal, -light.dir.xyz)) * sun * s.albedo.xyz;
+    }
+    float3 probeLight = SampleProbes(rtParameters, hitLocation, s.normal, true);
+    Payload.color += probeLight * s.albedo.xyz;
+}
+void ShadeMyProceduralPrimitiveHit(MyCustomIntersectionAttributes committedCustomAttribs, uint committedInstanceIndex, uint committedPrimitiveIndex, uint committedGeometryIndex, float committedRayT)
+{
+    
+}
+void MyMissColorCalculation(float3 WorldRayOrigin, float3 WorldRayDirection, float RayTCurrent, inout HLSL::HitInfo Payload)
+{
+    Payload.hitDistance = RayTCurrent;
+    float3 hitLocation = WorldRayOrigin + WorldRayDirection * 10000;
+    Payload.hitPos = hitLocation;
+    Payload.color = Sky(WorldRayDirection);
+}
+
+void TraceRayCommon(HLSL::RTParameters rtParameters,
+    uint RayFlags,
+    uint InstanceInclusionMask,
+    uint RayContributionToHitGroupIndex,
+    uint MultiplierForGeometryContributionToHitGroupIndex,
+    uint MissShaderIndex,
+    RayDesc Ray,
+    inout HLSL::HitInfo Payload)
+{
+    RaytracingAccelerationStructure AccelerationStructure = ResourceDescriptorHeap[rtParameters.BVH];
+#ifdef RAY_DISPATCH
+    TraceRay(AccelerationStructure, RayFlags, InstanceInclusionMask, RayContributionToHitGroupIndex, MultiplierForGeometryContributionToHitGroupIndex, MissShaderIndex, Ray, Payload);
+#else
+    // Instantiate ray query object.
+    // Template parameter allows driver to generate a specialized
+    // implemenation.  No specialization in this example.
+    RayQuery<RAY_FLAG_NONE> q;
+
+    // Set up a trace
+    q.TraceRayInline(AccelerationStructure, q.RayFlags(), InstanceInclusionMask, Ray);
+
+    // Storage for procedural primitive hit attributes
+    MyCustomIntersectionAttributes committedCustomAttribs;
+
+    // Proceed() is where behind-the-scenes traversal happens,
+    // including the heaviest of any driver inlined code.
+    // Returns TRUE if there's a task for the shader to perform
+    // as part of traversal
+    while(q.Proceed())
+    {
+        switch(q.CandidateType())
+        {
+            case CANDIDATE_PROCEDURAL_PRIMITIVE:
+            {
+                float tHit;
+                MyCustomIntersectionAttributes candidateAttribs;
+
+                // For procedural primitives, opacity is handled manually -
+                // if an intersection is determined to not be opaque, just don't consider it
+                // as a candidate.
+                while(MyProceduralIntersectionEnumerator(
+                    tHit,
+                    candidateAttribs,
+                    q.CandidateInstanceIndex(),
+                    q.CandidatePrimitiveIndex(),
+                    q.CandidateGeometryIndex()))
+                {
+                    if( (q.RayTMin() <= tHit) && (tHit <= q.CommittedRayT()) )
+                    {
+                        if(q.CandidateProceduralPrimitiveNonOpaque() &&
+                            !MyProceduralAlphaTestLogic(
+                                tHit,
+                                candidateAttribs,
+                                q.CandidateInstanceIndex(),
+                                q.CandidatePrimitiveIndex(),
+                                q.CandidateGeometryIndex()))
+                        {
+                            continue; // non opaque
+                        }
+
+                        q.CommitProceduralPrimitiveHit(tHit);
+                        committedCustomAttribs = candidateAttribs;
+                    }
+                }
+                break;
+            }
+            case CANDIDATE_NON_OPAQUE_TRIANGLE:
+            {
+                if( MyAlphaTestLogic(
+                    q.CandidateInstanceIndex(),
+                    q.CandidatePrimitiveIndex(),
+                    q.CandidateGeometryIndex(),
+                    q.CandidateTriangleRayT(),
+                    q.CandidateTriangleBarycentrics(),
+                    q.CandidateTriangleFrontFace()))
+                {
+                    q.CommitNonOpaqueTriangleHit();
+                }
+                if(MyLogicSaysStopSearchingForSomeReason()) // not typically applicable
+                {
+                    q.Abort(); // Stop traversing and next call to Proceed()
+                               // will return FALSE.
+                               // Post-traversal results will just be based
+                               // on what has been encountered so far.
+                }
+                break;
+            }
+        }
+    }
+    switch(q.CommittedStatus())
+    {
+        case COMMITTED_TRIANGLE_HIT:
+        {
+            // Do hit shading
+            ShadeMyTriangleHit(rtParameters, 
+                q.CommittedInstanceIndex(),
+                q.CommittedPrimitiveIndex(),
+                q.CommittedGeometryIndex(),
+                q.CommittedTriangleBarycentrics(),
+                q.WorldRayOrigin(),
+                q.WorldRayDirection(),
+                q.CommittedRayT(),
+                q.CandidateTriangleFrontFace(),
+                Payload);
+            break;
+        }
+        case COMMITTED_PROCEDURAL_PRIMITIVE_HIT:
+        {
+            // Do hit shading for procedural hit,
+            // using manually saved hit attributes (customAttribs)
+            ShadeMyProceduralPrimitiveHit(
+                committedCustomAttribs,
+                q.CommittedInstanceIndex(),
+                q.CommittedPrimitiveIndex(),
+                q.CommittedGeometryIndex(),
+                q.CommittedRayT());
+            break;
+        }
+        case COMMITTED_NOTHING:
+        {
+            // Do miss shading
+            MyMissColorCalculation(
+                q.WorldRayOrigin(),
+                q.WorldRayDirection(),
+                q.CommittedRayT(),
+                Payload);
+            break;
+        }
+    }
+#endif
+}
+
+HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, uint seed, float3 origin, HLSL::GIReservoir r, HLSL::GIReservoir og)
+{
+    float3 bounceLight = 0;
+    float3 bounceLightDir = normalize(r.hit_Wsum.xyz - origin);
+    
+    HLSL::HitInfo payload;
+    payload.color = float3(0.0, 0.0, 0.0);
+    payload.hitPos = 0;
+    payload.hitDistance = 0;
+    payload.rayDepth = 1;
+    payload.rndseed = seed;
+    
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = bounceLightDir;
+    ray.TMin = 0;
+    ray.TMax = 100000;
+    
+    TraceRayCommon(rtParameters, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+    bounceLight = payload.color;
+    //bounceLight = bounceLight * (r.hit_Wsum.w / r.dir_Wcount.w);
+    float W = length(bounceLight);
+    
+    //compression of r.hit_Wsum.xy will result in some paths never being validated even is no spacial reuse and cam movement :?
+    // euh nop it´s not compressed !??!?
+    //float distDiff = 1-saturate(abs(length(payload.hitPos - cd.offsetedWorldPos) - length(r.hit_Wsum.xyz - cd.offsetedWorldPos)) * 100000);
+    float distDiff = saturate(abs(length(payload.hitPos - r.hit_Wsum.xyz)));
+    float wDiff = saturate(abs(W - r.color_W.w));
+    float likeness = 1-saturate(distDiff + wDiff);
+    likeness = 0.1;
+    
+    float fail = likeness < 0.01 ? 1 : 0;
+    if(fail)
+    {
+        r = og;
+        
+        HLSL::GIReservoir newR;
+        float W = length(bounceLight);
+        newR.color_W = float4(bounceLight, W);
+        newR.dir_Wcount = float4(bounceLightDir, 1);
+        newR.hit_Wsum = float4(payload.hitPos, W);
+        
+        //UpdateGIReservoir(r, newR);
+    }
+    else
+    {
+        float frameFilteringCount = maxFrameFilteringCount * lerp(0., 1, likeness);
+        ScaleGIReservoir(r, frameFilteringCount, 1);
+    }
+    
+    ScaleGIReservoir(r, maxFrameFilteringCount, 1);
+    
+    return r;
+}

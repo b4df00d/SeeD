@@ -22,7 +22,7 @@ GlobalRootSignature SeeDRootSignatureRT =
 [shader("raygeneration")]
 void RayGen()
 {
-    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
+    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH]; 
     
     uint3 launchIndex = DispatchRaysIndex().xyz;
     
@@ -88,7 +88,7 @@ void RayGen()
     
     probeData.sh = probe;
     probeData.position = 0;
-    probesBuffer[probeIndex] = probeData;
+    //probesBuffer[probeIndex] = probeData;
 }
 
 [shader("miss")]
@@ -102,47 +102,9 @@ void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 [shader("closesthit")]
 void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
-    //payload.color = float3(1, 0, 0); return;
-    payload.hitDistance = RayTCurrent();
     if (payload.rayDepth >= HLSL::maxRTDepth) return;
     
-    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
-    
-    StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
-    HLSL::Light light = lights[0];
-    
-    SurfaceData s = GetRTSurfaceData(attrib);
-    
-    float3 hitLocation = WorldRayOrigin() + WorldRayDirection() * (RayTCurrent() * 0.99f) + s.normal * 0.01f;
-    
-    float3 sun = 0;
-    if (payload.rayDepth < HLSL::maxRTDepth)
-    {
-        // shadow
-        HLSL::HitInfo shadowload;
-        shadowload.color = float3(0.0, 0.0, 0.0);
-        shadowload.rayDepth = 1000000;
-        shadowload.rndseed = payload.rndseed;
-        shadowload.hitDistance = 10000;
-    
-        RayDesc ray;
-        ray.Origin = hitLocation;
-        ray.Direction = -light.dir.xyz;
-        ray.TMin = 0;
-        ray.TMax = shadowload.hitDistance;
-        
-        shadowload.hitDistance = 0;
-        //if (dot(s.normal, ray.Direction) > 0)
-        {
-            //TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 0, 0, ray, shadowload);
-            TraceRay(BVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, shadowload);
-        }
-        
-        sun = shadowload.hitDistance >= ray.TMax ? light.color.xyz : 0;
-    }
-    //payload.color = BRDF(s, WorldRayDirection(), -light.dir.xyz, sun);
-    payload.color = saturate(dot(s.normal, -light.dir.xyz)) * sun;
-    payload.color *= saturate(s.albedo.xyz * 1);
+    ShadeMyTriangleHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload);
 }
 
 [shader("anyhit")]

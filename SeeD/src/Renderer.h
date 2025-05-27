@@ -1125,6 +1125,11 @@ public:
         ReSTIRSpacialShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\ReSTIRSpacial.hlsl");
         rayValidateDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracingValidate.hlsl");
         applyLightingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\lighting.hlsl");
+
+        Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
+        Shader& ReSTIRSpacial = *AssetLibrary::instance->Get<Shader>(ReSTIRSpacialShader.Get().id, true);
+        Shader& rayValidateDispatch = *AssetLibrary::instance->Get<Shader>(rayValidateDispatchShader.Get().id, true);
+        Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
     }
     void Setup(View* view) override
     {
@@ -1161,11 +1166,15 @@ public:
         // Spacial ReSTIR pass 1
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
         Shader& ReSTIRSpacial = *AssetLibrary::instance->Get<Shader>(ReSTIRSpacialShader.Get().id, true);
-        commandBuffer->SetCompute(ReSTIRSpacial);
+        commandBuffer->SetRaytracing(ReSTIRSpacial);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
-        commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->renderResolution.x), ReSTIRSpacial.DispatchY(view->renderResolution.y), 1);
+        drd = ReSTIRSpacial.GetRTDesc();
+        drd.Width = view->renderResolution.x;
+        drd.Height = view->renderResolution.y;
+        commandBuffer->cmd->DispatchRays(&drd);
+        //commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->renderResolution.x), ReSTIRSpacial.DispatchY(view->renderResolution.y), 1);
 
         // Spacial ReSTIR pass 2
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
@@ -1173,7 +1182,11 @@ public:
         view->raytracingContext.rtParameters.passNumber = 1;
         auto raytracingContextAddress2 = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
         commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress2);
-        commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->renderResolution.x), ReSTIRSpacial.DispatchY(view->renderResolution.y), 1);
+        //commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->renderResolution.x), ReSTIRSpacial.DispatchY(view->renderResolution.y), 1);
+        drd = ReSTIRSpacial.GetRTDesc();
+        drd.Width = view->renderResolution.x;
+        drd.Height = view->renderResolution.y;
+        commandBuffer->cmd->DispatchRays(&drd);
         std::swap(view->raytracingContext.rtParameters.giReservoirIndex, view->raytracingContext.rtParameters.previousgiReservoirIndex); // reverse again if somebody need the original latter ?
 
         // Validating reservoirs
@@ -1186,7 +1199,7 @@ public:
         drd = rayValidateDispatch.GetRTDesc();
         drd.Width = view->renderResolution.x;
         drd.Height = view->renderResolution.y;
-        commandBuffer->cmd->DispatchRays(&drd);
+        //commandBuffer->cmd->DispatchRays(&drd);
 
         // Lighting
         view->raytracingContext.GI.Barrier(commandBuffer.Get());
