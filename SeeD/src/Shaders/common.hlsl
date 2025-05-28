@@ -1120,8 +1120,12 @@ float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor, float specMul = 1)
 
 float3 Sky(float3 direction)
 {
-    float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))) + 0.01, 0.5));
-    return normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
+    float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))), 0.5));
+    float3 sky = normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
+    #ifdef RAY_DISPATCH
+    sky *= 3;
+    #endif
+    return sky;
 }
 
 SurfaceData GetRTSurfaceData(float2 bary)
@@ -1183,16 +1187,16 @@ SurfaceData GetRTSurfaceData(float2 bary)
     float4x4 worldMatrix = instance.unpack(instance.current);
     float3 worldNormal = mul((float3x3) worldMatrix, normal);
     worldNormal = normalize(worldNormal);
-    //s.normal = worldNormal;
-    s.normal = normal;
+    s.normal = worldNormal;
+    //s.normal = normal;
     
     return s;
 }
 
-static uint maxFrameFilteringCount = 20;
+static uint maxFrameFilteringCount = 12;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current)
 {
-    if(previous.color_W.w < current.color_W.w)
+    if(previous.color_W.w / previous.hit_Wsum.w < current.color_W.w / current.hit_Wsum.w)
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.hit_Wsum.xyz = current.hit_Wsum.xyz;
@@ -1548,7 +1552,7 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, uint seed, float3 or
     float likeness = 1-saturate(distDiff + wDiff);
     likeness = 0.1;
     
-    float fail = likeness < 0.01 ? 1 : 0;
+    float fail = likeness < 1 ? 1 : 0;
     if(fail)
     {
         r = og;

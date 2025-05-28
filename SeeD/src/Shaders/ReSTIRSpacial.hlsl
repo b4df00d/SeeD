@@ -51,7 +51,7 @@ void RayGen()
     uint seed = initRand(dtid.xy);
     
     uint pattern = (dtid.x + dtid.y + rtParameters.passNumber + viewContext.frameNumber) % 2;
-    float radius = 6 * (2-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.015);
+    float radius = 16 * (2-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.015);
     uint spacialReuse = 0;
     for (uint i = 0; i < 4; i++)
     {
