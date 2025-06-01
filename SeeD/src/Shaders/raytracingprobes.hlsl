@@ -38,7 +38,7 @@ void RayGen()
   
     RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
     
-    uint seed = initRand(launchIndex.x + viewContext.frameTime % 234 * 1.621f, launchIndex.y + viewContext.frameTime % 431 * 1.432f, 4);
+    uint seed = initRand(launchIndex.xy);
     
     
     HLSL::ProbeData probeData = probesBuffer[probeIndex];
@@ -56,19 +56,20 @@ void RayGen()
     	{
             float3 rayDir = shGetUniformSphereSample(az / probes.probesSamplesPerFrame, ze / probes.probesSamplesPerFrame);
             
-            HLSL::HitInfo payload;
-            payload.color = float3(0.0, 0.0, 0.0);
-            payload.rayDepth = 1;
-            payload.rndseed = seed;
-    
             RayDesc ray;
             float3 randVal = (float3(nextRand(seed), nextRand(seed), nextRand(seed)) * 2.f - 1.f) * cellSize * 0.125f;
             ray.Origin = probeWorldPos + probeData.position.xyz;//  + randVal;
             ray.Direction = rayDir;
             ray.TMin = 0;
             ray.TMax = 100000;
+    
+            HLSL::HitInfo payload;
+            payload.color = float3(0.0, 0.0, 0.0);
+            payload.type = 1; //indirect
+            payload.depth = 0;
+            payload.seed = seed;
         
-            TraceRay(BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+            TraceRayCommon(rtParameters, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
             
             float3 color = payload.color;
     
@@ -81,35 +82,30 @@ void RayGen()
     
     // integrating over a sphere so each sample has a weight of 4*PI/samplecount (uniform solid angle, for each sample)
     // and take in consideration the previous samples too ? (if we do not reset to zero above)
-    float shFactor = 4.0 * shPI / ((probes.probesSamplesPerFrame * probes.probesSamplesPerFrame) * 1);
+    float shFactor = 4.0 * shPI / ((probes.probesSamplesPerFrame * probes.probesSamplesPerFrame) * 1) * 0.1;
     probe.R = shScale(probe.R, shFactor);
     probe.G = shScale(probe.G, shFactor);
     probe.B = shScale(probe.B, shFactor);
     
     probeData.sh = probe;
     probeData.position = 0;
-    //probesBuffer[probeIndex] = probeData;
+    probesBuffer[probeIndex] = probeData;
 }
 
 [shader("miss")]
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
-    //payload.color = float3(0, 0, 1); return;
-    payload.hitDistance = RayTCurrent();
-    payload.color = float3(0.66, 0.75, 0.99) * pow(dot(WorldRayDirection(), float3(0, 1, 0)) * 0.5 + 0.5, 2);
+    CommonMiss(WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), payload);
 }
 
 [shader("closesthit")]
 void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
-    if (payload.rayDepth >= HLSL::maxRTDepth) return;
-    
-    ShadeMyTriangleHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload);
+    CommonHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload);
 }
 
 [shader("anyhit")]
 void AnyHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
     payload.hitDistance = RayTCurrent();
-    //payload.color = 0;
 }

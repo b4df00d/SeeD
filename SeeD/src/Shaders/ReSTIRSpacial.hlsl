@@ -36,7 +36,8 @@ GlobalRootSignature SeeDRootSignatureRT =
 [shader("raygeneration")]
 void RayGen()
 {
-    uint2 dtid = DispatchRaysIndex().xy;
+    return;
+    int2 dtid = DispatchRaysIndex().xy;
     if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y)
         return;
     
@@ -50,12 +51,12 @@ void RayGen()
     
     uint seed = initRand(dtid.xy);
     
-    uint pattern = (dtid.x + dtid.y + rtParameters.passNumber + viewContext.frameNumber) % 2;
-    float radius = 16 * (2-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.015);
+    int pattern = (dtid.x + dtid.y + rtParameters.passNumber + viewContext.frameNumber) % 2;
+    float2 radius = 11 * (2-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.1);
     uint spacialReuse = 0;
     for (uint i = 0; i < 4; i++)
     {
-        int2 pixel = dtid.xy + (pattern == 0 ? patternA[i] : patternB[i]) * radius + 0.5;
+        float2 pixel = dtid.xy + (pattern == 0 ? patternA[i] : patternB[i]) * radius; // pourquoi avec un int2 pixel ca deconne un max ?
         if (pixel.x < 0 || pixel.y < 0) continue;
         if (pixel.x >= viewContext.renderResolution.x || pixel.y >= viewContext.renderResolution.y) continue;
         {
@@ -64,8 +65,8 @@ void RayGen()
             if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.8) continue;
             
             HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
-            //rNeightbor.color_W.w *= 1.0/(1 + radius * 0.91);
-            UpdateGIReservoir(r, rNeightbor);
+            //ScaleGIReservoir(rNeightbor, maxFrameFilteringCount/(1 + radius), 1);
+            MergeGIReservoir(r, rNeightbor);
             spacialReuse++;
         }
     }
@@ -83,14 +84,13 @@ void RayGen()
 [shader("miss")]
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
-    MyMissColorCalculation(WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), payload);
+    CommonMiss(WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), payload);
 }
 
 [shader("closesthit")]
 void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
-    if (payload.rayDepth >= HLSL::maxRTDepth) return;
-    ShadeMyTriangleHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload);
+    CommonHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload);
 }
 
 [shader("anyhit")]

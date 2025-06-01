@@ -16,28 +16,6 @@ GlobalRootSignature SeeDRootSignatureRT =
     SeeDRootSignature
 };
 
-
-void DebugSurfaceData(float3 pos, float3 dir)
-{
-    uint2 launchIndex = DispatchRaysIndex().xy;
-    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
-    HLSL::HitInfo payload;
-    payload.color = float3(0.0, 0.0, 0.0);
-    payload.rayDepth = 1;
-    payload.rndseed = 0;
-    
-    RayDesc ray;
-    ray.Origin = pos;
-    ray.Direction = dir;
-    ray.TMin = 0;
-    ray.TMax = 100000;
-    
-    TraceRay( BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
-    
-    RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    GI[launchIndex] = payload.color;
-}
-
 [shader("raygeneration")]
 void RayGen()
 {
@@ -73,15 +51,13 @@ void RayGen()
 [shader("miss")]
 void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
 {
-    MyMissColorCalculation(WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), payload);
+    CommonMiss(WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), payload);
 }
 
 [shader("closesthit")]
 void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
 {
-    if (payload.rayDepth >= HLSL::maxRTDepth) return;
-    
-    ShadeMyTriangleHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload);
+    CommonHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload);
 }
 
 [shader("anyhit")]

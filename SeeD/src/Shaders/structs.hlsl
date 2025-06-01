@@ -230,7 +230,7 @@ namespace HLSL
         float4 color;
         float range;
         float angle;
-        uint pad1;
+        uint type;
         uint pad2;
     };
     
@@ -250,7 +250,7 @@ namespace HLSL
         float expoAdd;
         float expoMul;
     };
-    static const float brightnessClippingAdjust = 4;
+    static const float brightnessClippingAdjust = 1;
     
     struct ProbeData
     {
@@ -271,7 +271,7 @@ namespace HLSL
     };
     
     // ----------------- RT stuff ------------------
-    static const uint maxRTDepth = 2;
+    static const uint maxRTDepth = 3;
     struct RTParameters
     {
         //float4 resolution; //x, y, 1/x, 1/y
@@ -301,8 +301,9 @@ namespace HLSL
         float3 color;
         float3 hitPos;
         float hitDistance;
-        uint rayDepth; //pack depth and seed in 1 uint
-        uint rndseed;
+        uint type : 4;
+        uint depth : 4;
+        uint seed : 24;
     };
     
     // Attributes output by the raytracing when hitting a surface,
@@ -322,8 +323,8 @@ namespace HLSL
     struct GIReservoirCompressed
     {
         float4 hit_Wsum;
-        uint dir;
-        uint color;
+        float3 dir;
+        float3 color;
         uint Wcount_W;
     };
  /*
