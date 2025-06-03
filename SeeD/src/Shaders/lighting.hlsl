@@ -34,7 +34,8 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     HLSL::Light indirectLight;
     indirectLight.pos = float4(r.hit_Wsum.xyz, 0);
-    indirectLight.dir = float4(-r.dir_Wcount.xyz, 0);
+    indirectLight.dir = float4(normalize(cd.worldPos - r.hit_Wsum.xyz), 0);
+    //indirectLight.dir = float4(-r.dir_Wcount.xyz, 0);
     indirectLight.color.xyz = r.color_W.xyz / r.color_W.w * (r.hit_Wsum.w / r.dir_Wcount.w);
     indirectLight.range = 1;
     indirectLight.angle = 1;
@@ -43,9 +44,12 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     float3 result = direct + indirect;
     //result = direct;
     //result = indirect;
-    
-    if(cd.viewDist > 5000)
-        result = Sky(cd.viewDir);
+    //result = indirectLight.color.xyz;
+    //result = r.color_W.xyz * 0.01;
+    //result = r.color_W.w * 0.001;
+    //result = r.hit_Wsum.w * 0.0001;
+    //result = r.dir_Wcount.w * 0.001;
+    //result = r.dir_Wcount.xyz;
     
     lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
     //lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s), 0) * 0.01;
@@ -56,6 +60,10 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         float3 ref = GI[dtid.xy] / HLSL::brightnessClippingAdjust;
         //ref /= r.dir_Wcount.w;
         lighted[dtid.xy] = float4(ref, 1);
+        //lighted[dtid.xy] = float4(s.normal, 1);
     }
 #endif
+    
+    if(cd.viewDist > 5000)
+        lighted[dtid.xy] = float4(Sky(cd.viewDir), 1);
 }

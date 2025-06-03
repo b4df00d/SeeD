@@ -1129,9 +1129,6 @@ float3 Sky(float3 direction)
 {
     float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))), 0.5));
     float3 sky = normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
-    #ifdef RAY_DISPATCH
-    //sky *= 30;
-    #endif
     return sky;
 }
 
@@ -1207,7 +1204,6 @@ float2 bary)
 static uint maxFrameFilteringCount = 24;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    //if(previous.color_W.w < current.color_W.w)
     if(rand < (current.color_W.w / (previous.color_W.w + current.color_W.w)))
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
@@ -1228,13 +1224,11 @@ void MergeGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir curren
     previous.hit_Wsum.w += current.hit_Wsum.w;
     previous.dir_Wcount.w += current.dir_Wcount.w;
 }
-void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount, float reprojection)
+void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
 {
-    //r.color_W.w *= reprojection;
     if (r.dir_Wcount.w >= frameFilteringCount)
     {
         float factor = max(0, float(frameFilteringCount) / max(r.dir_Wcount.w, 1.0f));
-        //r.color_W.w *= factor;
         r.hit_Wsum.w *= factor;
         r.dir_Wcount.w *= factor;
     }
@@ -1397,7 +1391,7 @@ float4 DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos
 }
 
 //return color + distance cosine weighted on surface normal
-float4 IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, uint depth, uint seed, out float3 bounceDir, out float3 bounceHit)
+float4 IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, uint depth, uint seed, out float3 bounceNorm, out float3 bounceHit)
 {
     float3 lightDir = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 1));
     
@@ -1424,7 +1418,7 @@ float4 IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitP
         color = color * saturate(dot(s.normal, lightDir)) * s.albedo.xyz;
     }
         
-    bounceDir = lightDir;
+    bounceNorm = newPayload.hitNorm;
     bounceHit = newPayload.hitPos;
     return float4(color, newPayload.hitDistance);
 }
@@ -1441,9 +1435,9 @@ float4 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
     #if 1
     if (depth + 1 < HLSL::maxRTDepth)
     {
-        float3 bounceDir;
+        float3 bounceNorm;
         float3 bounceHit;
-        color.xyz += IndirectLight(rtParameters, s, hitPos, depth, seed, bounceDir, bounceHit).xyz;
+        color.xyz += IndirectLight(rtParameters, s, hitPos, depth, seed, bounceNorm, bounceHit).xyz;
     }
     #else
     color.xyz += SampleProbes(rtParameters, hitPos, s, true).xyz;
@@ -1475,6 +1469,7 @@ inout HLSL::HitInfo payload)
     float3 position = WorldRayOrigin + WorldRayDirection * (RayTCurrent * 0.999f); 
     position = position + s.normal * (RayTCurrent * 0.0001f);
     payload.hitPos = position;
+    payload.hitNorm = s.normal;
    
     float4 color = PathTrace(rtParameters, s, payload.hitPos, payload.depth + 1, payload.seed);
     
@@ -1660,7 +1655,7 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, uint seed, float3 or
     //likeness = 1;
     
     float frameFilteringCount = lerp(maxFrameFilteringCount * 0.1, maxFrameFilteringCount, likeness);
-    ScaleGIReservoir(r, frameFilteringCount, 1);
+    ScaleGIReservoir(r, frameFilteringCount);
     
     float fail = likeness < 0.5 ? 1 : 0;
     if(fail)

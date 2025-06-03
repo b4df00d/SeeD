@@ -300,6 +300,7 @@ namespace HLSL
     {
         float3 color;
         float3 hitPos;
+        float3 hitNorm;
         float hitDistance;
         uint type : 4;
         uint depth : 4;

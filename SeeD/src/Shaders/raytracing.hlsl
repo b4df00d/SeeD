@@ -44,9 +44,9 @@ void RayGen()
     RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     shadows[launchIndex] = shadow;
     
-    float3 bounceDir;
+    float3 bounceNorm;
     float3 bounceHit;
-    float4 bounceLight = IndirectLight(rtParameters, s, cd.offsetedWorldPos, 0, seed, bounceDir, bounceHit);
+    float4 bounceLight = IndirectLight(rtParameters, s, cd.offsetedWorldPos, 0, seed, bounceNorm, bounceHit);
         
     // ReSTIR
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
@@ -56,13 +56,13 @@ void RayGen()
     uint frameFilteringCount = max(1, blend * maxFrameFilteringCount);
     
     HLSL::GIReservoir newR;
-    float W = length(bounceLight);
+    float W = dot(bounceLight.xyz, float3(0.3, 0.59, 0.11));
     newR.color_W = float4(bounceLight.xyz, W);
-    newR.dir_Wcount = float4(bounceDir, 1);
+    newR.dir_Wcount = float4(bounceNorm, 1);
     newR.hit_Wsum = float4(bounceHit, W);
         
     UpdateGIReservoir(r, newR, nextRand(seed));
-    ScaleGIReservoir(r, frameFilteringCount, blend);
+    ScaleGIReservoir(r, frameFilteringCount);
         
     // if not first time fill with previous frame reservoir
     if (viewContext.frameNumber == 0)
@@ -85,15 +85,16 @@ void RayGen()
     float3 direct = ComputeLight(light, shadow, s, cd.viewDir);
     HLSL::Light indirectLight;
     indirectLight.pos = float4(0,0,0, 0);
-    indirectLight.dir = float4(-bounceDir, 0);
+    indirectLight.dir = float4(normalize(cd.worldPos - r.hit_Wsum.xyz), 0);
     indirectLight.color.xyz = bounceLight.xyz;
     indirectLight.range = 1;
     indirectLight.angle = 1;
     float3 indirect = ComputeLight(indirectLight, 1, s, cd.viewDir);
     float3 result = direct + indirect;
+    //result *= 10;
         
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    if (viewContext.frameNumber == 0) GI[launchIndex] = 0;
+    if (viewContext.frameNumber == 0) GI[launchIndex] = result;
     GI[launchIndex] = (GI[launchIndex] * (r.dir_Wcount.w-1) + result) / r.dir_Wcount.w;
 #endif
 }

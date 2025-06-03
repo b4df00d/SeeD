@@ -96,7 +96,7 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     GBufferCameraData cd = GetGBufferCameraData(renderPixel.xy);
     
     Texture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
-    float4 HDR = lighted[renderPixel.xy] * HLSL::brightnessClippingAdjust * 100;
+    float4 HDR = lighted[renderPixel.xy] * HLSL::brightnessClippingAdjust * 10;
     HDR -= ppParameters.expoAdd;
     HDR *= ppParameters.expoMul;
     HDR += ppParameters.expoAdd;

@@ -65,7 +65,7 @@ void RayGen()
             if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.8) continue;
             
             HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
-            //ScaleGIReservoir(rNeightbor, maxFrameFilteringCount/(1 + radius), 1);
+            //ScaleGIReservoir(rNeightbor, maxFrameFilteringCount/(1 + radius));
             MergeGIReservoir(r, rNeightbor);
             spacialReuse++;
         }
