@@ -481,8 +481,8 @@ public:
         rayTracingContextParams.BVH = raytracingContext.TLAS.srv.offset;
         rayTracingContextParams.giIndex = raytracingContext.GI.uav.offset;
         rayTracingContextParams.shadowsIndex = raytracingContext.shadows.uav.offset;
-        rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get(0).uav.offset;
-        rayTracingContextParams.previousgiReservoirIndex = raytracingContext.giReservoir.Get(1).uav.offset;
+        rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get().uav.offset;
+        rayTracingContextParams.previousgiReservoirIndex = raytracingContext.giReservoir.GetPrevious().uav.offset;
         rayTracingContextParams.passNumber = 0;
         //rayTracingContextParams.lightedIndex = lighted.Get().uav.offset;
 

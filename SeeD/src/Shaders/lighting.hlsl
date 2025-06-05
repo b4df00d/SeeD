@@ -52,7 +52,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     //result = r.dir_Wcount.xyz;
     
     lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
-    //lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s), 0) * 0.01;
+    //lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s), 0);
 #if 1
     if(dtid.x > viewContext.renderResolution.x * 0.5)
     {

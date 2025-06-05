@@ -49,7 +49,7 @@ void RayGen()
     float4 bounceLight = IndirectLight(rtParameters, s, cd.offsetedWorldPos, 0, seed, bounceNorm, bounceHit);
         
     // ReSTIR
-    RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
+    RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
         
     float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.5 - 0.2);

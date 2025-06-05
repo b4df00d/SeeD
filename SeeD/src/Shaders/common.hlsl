@@ -1321,7 +1321,8 @@ float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, SurfaceDat
     uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
     StructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
     HLSL::ProbeData probe = probesBuffer[probeIndex];
-    return max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
+    float3 result = max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
+    return result * 0.33; // TODO : why probe too bright ?!
 }
 
 void TraceRayCommon(HLSL::RTParameters rtParameters,
