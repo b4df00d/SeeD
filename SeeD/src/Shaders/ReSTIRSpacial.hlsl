@@ -36,23 +36,34 @@ GlobalRootSignature SeeDRootSignatureRT =
 [shader("raygeneration")]
 void RayGen()
 {
-    return;
-    int2 dtid = DispatchRaysIndex().xy;
-    if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y)
-        return;
+    uint2 dtid = DispatchRaysIndex().xy;
+    //if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y) return;
     
-    GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
-    
+    GBufferCameraData cd = GetGBufferCameraData(dtid);
     if(cd.viewDist > 5000) return;
+    
+    SurfaceData s = GetSurfaceData(dtid.xy);
+    
+    uint seed = initRand(dtid.xy);
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];   
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     HLSL::GIReservoir og = r;
     
-    uint seed = initRand(dtid.xy);
+    /*
+    float3 bounceLightDir = normalize(r.hit_Wsum.xyz - cd.offsetedWorldPos);
+    float3 bounceNorm;
+    float3 bounceHit;
+    float4 bounceLight = IndirectLight(rtParameters, s, bounceLightDir, cd.offsetedWorldPos, 0, seed, bounceNorm, bounceHit);
+    float distDiff = saturate(abs(length(r.hit_Wsum.xyz - bounceHit)));
+    
+    RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+    GI[dtid.xy] = smoothstep(0, 0.01, distDiff);
+    return;
+    */
     
     int pattern = (dtid.x + dtid.y + rtParameters.passNumber + viewContext.frameNumber) % 2;
-    float2 radius = 11 * (2-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.1);
+    float2 radius = 22 * (2-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.1);
     uint spacialReuse = 0;
     for (uint i = 0; i < 4; i++)
     {
@@ -61,16 +72,20 @@ void RayGen()
         if (pixel.x >= viewContext.renderResolution.x || pixel.y >= viewContext.renderResolution.y) continue;
         {
             GBufferCameraData cdNeightbor = GetGBufferCameraData(pixel.xy);
-            if(abs(cd.viewDist - cdNeightbor.viewDist) > (0.5)) continue;
-            if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.8) continue;
+            
+            if(abs(cd.viewDist - cdNeightbor.viewDist) > (0.2)) continue;
+            if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.9) continue;
             
             HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
-            //ScaleGIReservoir(rNeightbor, maxFrameFilteringCount/(1 + radius));
-            MergeGIReservoir(r, rNeightbor);
+            
+            //ScaleGIReservoir(rNeightbor, maxFrameFilteringCount/(1 + radius.x));
+            MergeGIReservoir(r, rNeightbor, nextRand(seed));
+            
             spacialReuse++;
         }
     }
-    r = Validate(rtParameters, seed, cd.offsetedWorldPos, r, og);
+    r = Validate(rtParameters, s, seed, cd.offsetedWorldPos, r, og, dtid);
+    //r = og;
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
     previousgiReservoir[dtid.x + dtid.y * viewContext.renderResolution.x] = PackGIReservoir(r);
@@ -78,6 +93,7 @@ void RayGen()
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     float3 gi = GI[dtid.xy];
     gi = spacialReuse / 4.0f;
+    //gi = s.albedo.xyz;
     //GI[dtid.xy] = gi;
 }
 

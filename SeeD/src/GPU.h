@@ -206,13 +206,15 @@ struct Shader
     enum class Type
     {
         Graphic,
+        Mesh,
         Compute,
         Raytracing
     } type;
 
-    ID3D12CommandSignature* commandSignature;
-    ID3D12RootSignature* rootSignature;
-    ID3D12PipelineState* pso;
+    ID3D12CommandSignature* commandSignature = 0;
+    ID3D12RootSignature* rootSignature = 0;
+    ID3D12PipelineState* pso = 0;
+    D3D12_PRIMITIVE_TOPOLOGY primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 
     // read those from shader reflection
     uint3 numthreads;
@@ -1590,6 +1592,7 @@ void CommandBuffer::SetGraphic(Shader& shader)
     cmd->SetDescriptorHeaps(1, &GPU::instance->descriptorHeap.globalDescriptorHeap);
     cmd->SetGraphicsRootSignature(shader.rootSignature);
     cmd->SetPipelineState(shader.pso);
+    cmd->IASetPrimitiveTopology(shader.primitiveTopology);
     //cmd->SetGraphicsRootDescriptorTable();
 }
 void CommandBuffer::On(ID3D12CommandQueue* _queue, String name)

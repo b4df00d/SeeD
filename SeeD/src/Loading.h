@@ -1487,27 +1487,73 @@ public :
     {
         // Create the command signature used for indirect drawing.
         // Each command consists of a CBV update and a DrawInstanced call.
-        D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
-        argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-        argumentDescs[0].Constant.RootParameterIndex = 4;
-        argumentDescs[0].Constant.Num32BitValuesToSet = 1;
-        argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
-        argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-        argumentDescs[1].Constant.RootParameterIndex = 5;
-        argumentDescs[1].Constant.Num32BitValuesToSet = 1;
-        argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
+        D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
+
         if (shader->type == Shader::Type::Graphic)
+        {
+            D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[2] = {};
+            argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+            argumentDescs[0].Constant.RootParameterIndex = 4;
+            argumentDescs[0].Constant.Num32BitValuesToSet = 1;
+            argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
+            argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+
+            commandSignatureDesc.pArgumentDescs = argumentDescs;
+            commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+        }
+        else if (shader->type == Shader::Type::Mesh)
+        {
+            D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
+            argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+            argumentDescs[0].Constant.RootParameterIndex = 4;
+            argumentDescs[0].Constant.Num32BitValuesToSet = 1;
+            argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
+            argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+            argumentDescs[1].Constant.RootParameterIndex = 5;
+            argumentDescs[1].Constant.Num32BitValuesToSet = 1;
+            argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
             argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+
+            commandSignatureDesc.pArgumentDescs = argumentDescs;
+            commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+        }
         else if (shader->type == Shader::Type::Compute)
+        {
+            D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
+            argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+            argumentDescs[0].Constant.RootParameterIndex = 4;
+            argumentDescs[0].Constant.Num32BitValuesToSet = 1;
+            argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
+            argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+            argumentDescs[1].Constant.RootParameterIndex = 5;
+            argumentDescs[1].Constant.Num32BitValuesToSet = 1;
+            argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
             argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+
+            commandSignatureDesc.pArgumentDescs = argumentDescs;
+            commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+        }
         else if (shader->type == Shader::Type::Raytracing)
+        {
+            D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
+            argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+            argumentDescs[0].Constant.RootParameterIndex = 4;
+            argumentDescs[0].Constant.Num32BitValuesToSet = 1;
+            argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
+            argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+            argumentDescs[1].Constant.RootParameterIndex = 5;
+            argumentDescs[1].Constant.Num32BitValuesToSet = 1;
+            argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
             argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS;
 
+            commandSignatureDesc.pArgumentDescs = argumentDescs;
+            commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+        }
 
-        D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
-        commandSignatureDesc.pArgumentDescs = argumentDescs;
-        commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+
         if (shader->type == Shader::Type::Graphic)
+            commandSignatureDesc.ByteStride = sizeof(HLSL::IndirectCommand);
+        else if (shader->type == Shader::Type::Mesh)
             commandSignatureDesc.ByteStride = sizeof(HLSL::MeshletDrawCall);
         else if (shader->type == Shader::Type::Compute)
             commandSignatureDesc.ByteStride = sizeof(HLSL::InstanceCullingDispatch);
@@ -1953,7 +1999,7 @@ public :
 
 					if (tokens[1] == "gBuffer")
 					{
-                        shader.type = Shader::Type::Graphic;
+                        shader.type = Shader::Type::Mesh;
                         //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6");
                         D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader);
@@ -1989,7 +2035,7 @@ public :
 					}
 					else if (tokens[1] == "zPrepass")
 					{
-                        shader.type = Shader::Type::Graphic;
+                        shader.type = Shader::Type::Mesh;
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader);
                         PipelineStateStream stream{};
                         stream.MS = meshShaderBytecode;
@@ -1998,7 +2044,7 @@ public :
 					}
                     else if (tokens[1] == "forward")
                     {
-                        shader.type = Shader::Type::Graphic;
+                        shader.type = Shader::Type::Mesh;
                         //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
                         D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6");
                         D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader);
@@ -2017,8 +2063,20 @@ public :
                         //stream.AS = amplificationShaderBytecode;
                         stream.MS = meshShaderBytecode;
                         stream.PS = forwardShaderBytecode;
-
                         shader.pso = CreatePSO(stream);
+                        compiled = shader.pso != nullptr;
+                    }
+                    else if (tokens[1] == "debug")
+                    {
+                        shader.type = Shader::Type::Graphic;
+                        D3D12_SHADER_BYTECODE vertexShaderBytecode = Compile(file, tokens[2], "vs_6_6");
+                        D3D12_SHADER_BYTECODE pixelShaderBytecode = Compile(file, tokens[3], "ps_6_6", &shader);
+                        PipelineStateStream stream{};
+                        stream.VS = vertexShaderBytecode;
+                        stream.PS = pixelShaderBytecode;
+                        stream.PrimitiveTopology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+                        shader.pso = CreatePSO(stream);
+                        shader.primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
                         compiled = shader.pso != nullptr;
                     }
                     else if (tokens[1] == "compute")

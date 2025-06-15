@@ -190,20 +190,43 @@ uint initRand(uint val0, uint val1, uint backoff = 16)
     }
     return v0;
 }
+uint xxhash(in uint p)
+{
+    const uint PRIME32_2 = 2246822519U, PRIME32_3 = 3266489917U;
+    const uint PRIME32_4 = 668265263U,  PRIME32_5 = 374761393U;
+
+    uint h32 = p + PRIME32_5;
+    h32 = PRIME32_4 * ((h32 << 17) | (h32 >> (32 - 17)));
+    h32 = PRIME32_2 * (h32 ^ (h32 >> 15));
+    h32 = PRIME32_3 * (h32 ^ (h32 >> 13));
+
+    return h32 ^ (h32 >> 16);
+}
+
+uint xxhash(in uint2 pixel)
+{
+    //uint p = viewContext.frameTime << 26 | pixel.x << 13 | pixel.y;
+    uint p = 0 << 26 | pixel.x << 13 | pixel.y;
+    return xxhash(p);
+}
 // Generates a seed for a random number generator from 2 inputs plus a backoff
 uint initRand(uint2 pixel)
 {
+    return xxhash(pixel);
     //pixel *= 38742.6612f;
     //return initRand(pixel.x + (uint(viewContext.frameTime) % 123) * 2.621f, pixel.y + (uint(viewContext.frameTime) % 431) * 9.432f, 3);
-    return initRand(pixel.x + viewContext.frameTime, pixel.y + viewContext.frameTime, 3);
+    //return initRand(pixel.x + viewContext.frameTime, pixel.y + viewContext.frameTime, 3);
+    return initRand(pixel.x, pixel.y, 3);
 }
 
 // Takes our seed, updates it, and returns a pseudorandom float in [0..1]
 float nextRand(inout uint s)
 {
     s = (1664525u * s + 1013904223u);
+    //s = xxhash(s);
     return float(s & 0x00FFFFFF) / float(0x01000000);
 }
+
 
 // ------------------ DEPTH ----------------------------------
 /*
@@ -1201,7 +1224,7 @@ float2 bary)
     return s;
 }
 
-static uint maxFrameFilteringCount = 24;
+static uint maxFrameFilteringCount = 12;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
     if(rand < (current.color_W.w / (previous.color_W.w + current.color_W.w)))
@@ -1213,9 +1236,12 @@ void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir curre
     previous.hit_Wsum.w += current.color_W.w;
     previous.dir_Wcount.w += 1;
 }
-void MergeGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current)
+void MergeGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    if(previous.color_W.w / previous.hit_Wsum.w < current.color_W.w / current.hit_Wsum.w)
+    //if(previous.color_W.w / previous.hit_Wsum.w < current.color_W.w / current.hit_Wsum.w)
+    //if(previous.color_W.w < current.color_W.w)
+    //if(rand > 0.5)
+    if(rand < (current.color_W.w / (previous.color_W.w + current.color_W.w)))
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.hit_Wsum.xyz = current.hit_Wsum.xyz;
@@ -1229,6 +1255,7 @@ void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
     if (r.dir_Wcount.w >= frameFilteringCount)
     {
         float factor = max(0, float(frameFilteringCount) / max(r.dir_Wcount.w, 1.0f));
+        //r.color_W.w *= factor;
         r.hit_Wsum.w *= factor;
         r.dir_Wcount.w *= factor;
     }
@@ -1282,7 +1309,12 @@ float3 getCosHemisphereSample(inout uint randSeed, float3 hitNorm)
     float phi = 2.0f * 3.14159265f * randVal.y;
 
     // Get our cosine-weighted hemisphere lobe sample direction
-    return normalize(tangent * (r * cos(phi).x) + bitangent * (r * sin(phi)) + hitNorm.xyz * sqrt(1 - randVal.x));
+    float3 dir = normalize(tangent * (r * cos(phi).x) + bitangent * (r * sin(phi)) + hitNorm.xyz * sqrt(1 - randVal.x));
+    
+    int3 dirInt = dir * 128;
+    dir = normalize(float3(dirInt));
+    
+    return dir;
 }
 
 float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, SurfaceData s, bool writeWorldPosAsOffset = false)
@@ -1352,7 +1384,7 @@ bool MyLogicSaysStopSearchingForSomeReason()
 }
 
 //return color + distance cosine weighted on surface normal
-float4 DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, uint depth, uint seed)
+float4 DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, uint depth, inout uint seed)
 {
     StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
     HLSL::Light light = lights[0]; // need to random select a light or thing like this
@@ -1377,14 +1409,14 @@ float4 DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos
     newPayload.hitPos = 0;
     newPayload.hitDistance = 0;
     newPayload.type = 0; //direct / visibility / shadow
-    newPayload.depth = depth + 1;
+    newPayload.depth = depth;
     newPayload.seed = seed;
     
     TraceRayCommon(rtParameters, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, newPayload);
     
     // did we hit something ? by knowing if the hit is before or after the light
     float visible = newPayload.hitDistance >= (length(light.pos.xyz - ray.Origin) * 0.999f) ? 1 : 0;
-    float3 color = light.color.xyz * visible;
+    float3 color = light.color.xyz * visible * 5;
     
     color = color * saturate(dot(s.normal, lightDir)) * s.albedo.xyz;
     
@@ -1392,10 +1424,8 @@ float4 DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos
 }
 
 //return color + distance cosine weighted on surface normal
-float4 IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, uint depth, uint seed, out float3 bounceNorm, out float3 bounceHit)
+float4 IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 lightDir, float3 hitPos, uint depth, inout uint seed, out float3 bounceNorm, out float3 bounceHit)
 {
-    float3 lightDir = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 1));
-    
     RayDesc ray;
     ray.Origin = hitPos;
     ray.Direction = lightDir;
@@ -1424,7 +1454,14 @@ float4 IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitP
     return float4(color, newPayload.hitDistance);
 }
 
-float4 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, uint depth, uint seed)
+float4 IndirectLightR(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, uint depth, inout uint seed, out float3 lightDir, out float3 bounceNorm, out float3 bounceHit)
+{
+    lightDir = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 1));
+    return IndirectLight(rtParameters, s, lightDir, hitPos, depth, seed, bounceNorm, bounceHit);
+}
+
+
+float4 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, uint depth, inout uint seed)
 {
     float4 color = 0;
     
@@ -1436,9 +1473,10 @@ float4 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
     #if 1
     if (depth + 1 < HLSL::maxRTDepth)
     {
+        float3 bounceDir;
         float3 bounceNorm;
         float3 bounceHit;
-        color.xyz += IndirectLight(rtParameters, s, hitPos, depth, seed, bounceNorm, bounceHit).xyz;
+        color.xyz += IndirectLightR(rtParameters, s, hitPos, depth, seed, bounceDir, bounceNorm, bounceHit).xyz;
     }
     #else
     color.xyz += SampleProbes(rtParameters, hitPos, s, true).xyz;
@@ -1467,10 +1505,11 @@ inout HLSL::HitInfo payload)
     
     SurfaceData s = GetRTSurfaceData(committedInstanceIndex, committedPrimitiveIndex, committedGeometryIndex, committedTriangleBarycentrics);
     if(dot(s.normal, WorldRayDirection) > 0) s.normal = -s.normal; // if we touch the backface, invert the normal ?
-    float3 position = WorldRayOrigin + WorldRayDirection * (RayTCurrent * 0.999f); 
+    float3 position = WorldRayOrigin + WorldRayDirection * (RayTCurrent * 0.9999f); 
     position = position + s.normal * (RayTCurrent * 0.0001f);
     payload.hitPos = position;
     payload.hitNorm = s.normal;
+    payload.hitDistance = RayTCurrent;
    
     float4 color = PathTrace(rtParameters, s, payload.hitPos, payload.depth + 1, payload.seed);
     
@@ -1619,58 +1658,50 @@ void TraceRayCommon(HLSL::RTParameters rtParameters,
 #endif
 }
 
-HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, uint seed, float3 origin, HLSL::GIReservoir r, HLSL::GIReservoir og)
+HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint seed, float3 origin, HLSL::GIReservoir r, in HLSL::GIReservoir og, uint2 dtid)
 {
-    float3 bounceLight = 0;
     float3 bounceLightDir = normalize(r.hit_Wsum.xyz - origin);
+    //bounceLightDir = r.dir_Wcount.xyz;
     
-    uint type = 1;
-    uint depth = 0;
-    seed =  seed >> 8;
+    float3 bounceDir;
+    float3 bounceNorm;
+    float3 bounceHit;
+    float4 bounceLight = IndirectLight(rtParameters, s, bounceLightDir, origin, 0, seed, bounceNorm, bounceHit);
+    //bounceLight = IndirectLightR(rtParameters, s, origin, 0, seed, bounceDir, bounceNorm, bounceHit);
     
-    HLSL::HitInfo payload;
-    payload.color = float3(0.0, 0.0, 0.0);
-    payload.hitPos = 0;
-    payload.hitDistance = 0;
-    payload.type = 1; //indirect
-    payload.depth = 0;
-    payload.seed = seed;
-    
-    RayDesc ray;
-    ray.Origin = origin;
-    ray.Direction = bounceLightDir;
-    ray.TMin = 0;
-    ray.TMax = 100000;
-    
-    TraceRayCommon(rtParameters, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
-    bounceLight = payload.color;
-    //bounceLight = bounceLight * (r.hit_Wsum.w / r.dir_Wcount.w);
-    float W = length(bounceLight);
+    float W = dot(bounceLight.xyz, float3(0.3, 0.59, 0.11));
     
     //compression of r.hit_Wsum.xy will result in some paths never being validated even is no spacial reuse and cam movement :?
     // euh nop it´s not compressed !??!?
-    //float distDiff = 1-saturate(abs(length(payload.hitPos - cd.offsetedWorldPos) - length(r.hit_Wsum.xyz - cd.offsetedWorldPos)) * 100000);
-    float distDiff = saturate(abs(length(payload.hitPos - r.hit_Wsum.xyz)));
-    float wDiff = saturate(abs(W - r.color_W.w));
-    float likeness = 1-saturate(distDiff + wDiff);
-    //likeness = 1;
+    float distDiff = saturate((abs(length(r.hit_Wsum.xyz - bounceHit)) - 0)*1);
+    float wDiff = 0;//saturate(abs(W - r.color_W.w));
+    float likeness = 1.0f-saturate(distDiff + wDiff);
+    //likeness = 0.1;
     
-    float frameFilteringCount = lerp(maxFrameFilteringCount * 0.1, maxFrameFilteringCount, likeness);
-    ScaleGIReservoir(r, frameFilteringCount);
-    
-    float fail = likeness < 0.5 ? 1 : 0;
+    float fail = likeness < 0.11 ? 1 : 0;
     if(fail)
     {
         r = og;
         
         HLSL::GIReservoir newR;
-        newR.color_W = float4(bounceLight, W);
-        newR.dir_Wcount = float4(bounceLightDir, r.dir_Wcount.w);
-        newR.hit_Wsum = float4(payload.hitPos, r.hit_Wsum.w);
+        newR.color_W = float4(bounceLight.xyz, W);
+        newR.dir_Wcount = float4(bounceNorm, r.dir_Wcount.w);
+        newR.hit_Wsum = float4(bounceHit, r.hit_Wsum.w);
+        //newR.dir_Wcount = float4(bounceNorm, 1);
+        //newR.hit_Wsum = float4(bounceHit, W);
         
-        UpdateGIReservoir(r, newR, nextRand(seed));
+        //UpdateGIReservoir(r, newR, nextRand(seed));
     }
     
+    float frameFilteringCount = lerp(1, maxFrameFilteringCount, likeness);
+    //ScaleGIReservoir(r, frameFilteringCount);
+    
+    RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+    float3 gi = GI[dtid.xy];
+    //gi = wDiff;
+    gi = distDiff;
+    //gi = likeness;
+    //GI[dtid.xy] = gi;
     
     return r;
 }
@@ -1702,3 +1733,50 @@ void DebugSurfaceData(float3 pos, float3 dir)
     GI[launchIndex] = payload.color;
 }
 #endif
+
+
+// ----------------------------- DEBUG ----------------------------------
+
+// world space positions
+float3 DrawLine(float3 begin, float3 end)
+{
+    RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[commonResourcesIndices.debugVerticesCountHeapIndex];
+    uint index = 0;
+    counter[0] = 1;
+    InterlockedAdd(counter[1], 2, index);
+    
+    RWStructuredBuffer<HLSL::Vertex> debugVertices = ResourceDescriptorHeap[commonResourcesIndices.debugVerticesHeapIndex];
+    HLSL::Vertex vertex1;
+    HLSL::Vertex vertex2;
+    
+    vertex1.pos = begin;
+    vertex1.normal = 0;
+    vertex1.uv = 0;
+    
+    vertex2.pos = end;
+    vertex2.normal = 0;
+    vertex2.uv = 0;
+    
+    debugVertices[index] = vertex1;
+    debugVertices[index+1] = vertex2;
+    
+    RWStructuredBuffer<HLSL::IndirectCommand> debugIndirects = ResourceDescriptorHeap[commonResourcesIndices.debugBufferHeapIndex];
+    HLSL::IndirectCommand di = debugIndirects[counter[0]-1];
+    
+	//di.cbv = debugParameters.cbv;
+	//di.index = 0;
+    //di.stuff = 0;
+	di.drawArguments.InstanceCount = 1;
+    di.drawArguments.VertexCountPerInstance = index+2;
+	//di.drawArguments.IndexCountPerInstance = index+2;
+	//di.drawArguments.StartIndexLocation = 0;
+	//di.drawArguments.BaseVertexLocation = 0;
+	//di.drawArguments.StartInstanceLocation = 0;
+    
+    debugIndirects[counter[0]-1] = di;
+    
+    float3 debugRet = float3(1, 0, 0);
+    if(counter[0] > 0)
+        debugRet = float3(0, 1, 0);
+    return debugRet;
+}

@@ -96,7 +96,7 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     GBufferCameraData cd = GetGBufferCameraData(renderPixel.xy);
     
     Texture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
-    float4 HDR = lighted[renderPixel.xy] * HLSL::brightnessClippingAdjust * 10;
+    float4 HDR = lighted[renderPixel.xy] * HLSL::brightnessClippingAdjust;
     HDR -= ppParameters.expoAdd;
     HDR *= ppParameters.expoMul;
     HDR += ppParameters.expoAdd;
@@ -115,7 +115,11 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     RWTexture2D<float4> postProcessed = ResourceDescriptorHeap[ppParameters.postProcessedIndex];
     postProcessed[dtid.xy] = SDR; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
     
-    //postProcessed[dtid.xy] = lighted[renderPixel.xy]; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
+    if(dtid.x > viewContext.displayResolution.x * 0.5)
+    {
+        //postProcessed[dtid.xy] = lighted[renderPixel.xy]; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
+        return;
+    }
     
     /*
     Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];

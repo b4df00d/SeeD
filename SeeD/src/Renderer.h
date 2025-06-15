@@ -264,9 +264,9 @@ struct ViewWorld
 };
 
 // life time : view (only updated on GPU)
-struct viewContext
+struct ViewContext
 {
-    HLSL::viewContext viewContext; // to bind to rootSig
+    HLSL::ViewContext viewContext; // to bind to rootSig
 
     StructuredBuffer<HLSL::Camera> camera;
     StructuredBuffer<HLSL::Light> lights;
@@ -277,10 +277,10 @@ struct viewContext
 
     void On()
     {
-        instancesInView.CreateBuffer(100, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        meshletsInView.CreateBuffer(1000, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        instancesCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        instancesInView.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
+        meshletsInView.CreateBuffer(1000, D3D12_RESOURCE_STATE_COMMON);
+        instancesCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
+        meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
     }
 
     void Off()
@@ -291,6 +291,30 @@ struct viewContext
         meshletsInView.Release();
         instancesCounter.Release();
         meshletsCounter.Release();
+    }
+};
+
+struct DebugContext
+{
+    // create a indirect buffer to store line to be drawn buy this debug shader 
+    HLSL::DebugParameters debugParameters;
+
+    StructuredBuffer<HLSL::IndirectCommand> indirectDebugBuffer;
+    StructuredBuffer<HLSL::Vertex> indirectDebugVertices;
+    StructuredBuffer<uint> indirectDebugVerticesCount; // draw count, vertex index count
+
+    void On()
+    {
+        indirectDebugBuffer.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
+        indirectDebugVertices.CreateBuffer(1000000, D3D12_RESOURCE_STATE_COMMON);
+        indirectDebugVerticesCount.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
+    }
+
+    void Off()
+    {
+        indirectDebugBuffer.Release();
+        indirectDebugVertices.Release();
+        indirectDebugVerticesCount.Release();
     }
 };
 
@@ -377,7 +401,8 @@ public:
     uint2 displayResolution;
     PerFrame<ViewWorld> viewWorld;
     RayTracingContext raytracingContext;
-    viewContext viewContext;
+    ViewContext viewContext;
+    DebugContext debugContext;
     std::map<UINT64, Resource> resources;
 
     virtual void On(uint2 _displayResolution, uint2 _renderResolution)
@@ -387,6 +412,7 @@ public:
         frame = 0;
         raytracingContext.On(renderResolution);
         viewContext.On();
+        debugContext.On();
     }
     virtual void Off()
     {
@@ -396,6 +422,7 @@ public:
         }
         raytracingContext.Off();
         viewContext.Off();
+        debugContext.Off();
 
         for (auto& item : resources)
         {
@@ -412,7 +439,7 @@ public:
         return res;
     }
     
-    HLSL::CommonResourcesIndices SetupViewParams()
+    HLSL::CommonResourcesIndices SetupCommonResourcesParams()
     {
         HLSL::CommonResourcesIndices commonResourcesIndices;
 
@@ -439,12 +466,16 @@ public:
         commonResourcesIndices.instancesGPUHeapIndex = viewWorld->instancesGPU.gpuData.srv.offset;
         commonResourcesIndices.instanceGPUCount = viewWorld->instancesGPU.Size();
 
+        commonResourcesIndices.debugBufferHeapIndex = debugContext.indirectDebugBuffer.GetResource().uav.offset;
+        commonResourcesIndices.debugVerticesHeapIndex = debugContext.indirectDebugVertices.GetResource().uav.offset;
+        commonResourcesIndices.debugVerticesCountHeapIndex = debugContext.indirectDebugVerticesCount.GetResource().uav.offset;
+
         return commonResourcesIndices;
     }
     
-    HLSL::viewContext SetupviewContextParams()
+    HLSL::ViewContext SetupViewContextParams()
     {
-        HLSL::viewContext viewContextParams;
+        HLSL::ViewContext viewContextParams;
 
         viewContextParams.renderResolution = float4(float(renderResolution.x), float(renderResolution.y), 1.0f / renderResolution.x, 1.0f / renderResolution.y);
         viewContextParams.displayResolution = float4(float(displayResolution.x), float(displayResolution.y), 1.0f / displayResolution.x, 1.0f / displayResolution.y);
@@ -467,7 +498,10 @@ public:
         viewContextParams.reverseZ = true;
         viewContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
         viewContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
+        viewContextParams.mousePixel = int4(IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1], IOs::instance->mouse.mousePos[2], IOs::instance->mouse.mousePos[3]);
 
+        //IOs::Log("{} {}", IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1]);
+        
         return viewContextParams;
     }
 
@@ -502,6 +536,14 @@ public:
 
         return rayTracingContextParams;
     }
+
+    HLSL::DebugParameters SetupDebugParams()
+    {
+        HLSL::DebugParameters debugContextParams;
+
+        return debugContextParams;
+    }
+
 };
 
 class ViewResource
@@ -660,7 +702,8 @@ public:
         for (uint i = 0; i < RTCount; i++)
         {
             RTs[i] = RT[i].rtv.handle;
-            commandBuffer->cmd->ClearRenderTargetView(RTs[i], clearColor.f32, 1, &rect);
+            if(clearRT)
+                commandBuffer->cmd->ClearRenderTargetView(RTs[i], clearColor.f32, 1, &rect);
         }
 
         commandBuffer->cmd->OMSetRenderTargets(RTCount, RTs, true, depth ? &depth->dsv.handle : nullptr);
@@ -670,7 +713,8 @@ public:
             float clearDepthValue(1.0f);
             if (HLSL::reverseZ) clearDepthValue = 0;
             UINT8 clearStencilValue(0);
-            commandBuffer->cmd->ClearDepthStencilView(depth->dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepthValue, clearStencilValue, 1, &rect);
+            if(clearDepth)
+                commandBuffer->cmd->ClearDepthStencilView(depth->dsv.handle, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, clearDepthValue, clearStencilValue, 1, &rect);
         }
     }
 
@@ -1220,6 +1264,89 @@ public:
     }
 };
 
+class GPUDebugInit : public Pass
+{
+    Components::Handle<Components::Shader> indirectDebugInitShader;
+
+public:
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        indirectDebugInitShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\debugInit.hlsl");
+    }
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        auto debugParameterAddress = ConstantBuffer::instance->PushConstantBuffer(&view->debugContext.debugParameters);
+
+        Shader& debugInit = *AssetLibrary::instance->Get<Shader>(indirectDebugInitShader.Get().id, true);
+        commandBuffer->SetCompute(debugInit);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, debugParameterAddress);
+        commandBuffer->cmd->Dispatch(1, 1, 1);
+
+        Close();
+    }
+};
+
+class GPUDebug : public Pass
+{
+    ViewResource albedo;
+    ViewResource depth;
+    Components::Handle<Components::Shader> indirectDebugShader;
+
+public:
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        albedo.Register("albedo", view);
+        depth.Register("depth", view);
+        indirectDebugShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\debug.hlsl");
+    }
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        auto debugParameterAddress = ConstantBuffer::instance->PushConstantBuffer(&view->debugContext.debugParameters);
+
+        albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+        Resource rts[] = { albedo.Get() };
+        SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, true);
+
+        Shader& indirectDebug = *AssetLibrary::instance->Get<Shader>(indirectDebugShader.Get().id, true);
+        commandBuffer->SetGraphic(indirectDebug);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(2, debugParameterAddress);
+
+        uint maxDraw = 2;
+        commandBuffer->cmd->ExecuteIndirect(indirectDebug.commandSignature, maxDraw, view->debugContext.indirectDebugBuffer.GetResourcePtr(), 0, view->debugContext.indirectDebugVerticesCount.GetResourcePtr(), 0);
+
+        albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+
+        Close();
+    }
+};
+
 class Forward : public Pass
 {
     ViewResource depth;
@@ -1365,6 +1492,8 @@ public:
     Lighting lighting;
     Forward forward;
     PostProcess postProcess;
+    GPUDebugInit gpuDebugInit;
+    GPUDebug gpuDebug;
     Present present;
 
 
@@ -1377,6 +1506,7 @@ public:
         particles.On(this, GPU::instance->computeQueue, "particles", &AssetLibrary::instance->commandBuffer, nullptr);
         spawning.On(this, GPU::instance->computeQueue, "spawning", &AssetLibrary::instance->commandBuffer, nullptr);
         accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &AssetLibrary::instance->commandBuffer, nullptr);
+        gpuDebugInit.On(this, GPU::instance->graphicQueue, "gpuDebugInit", &hzb.commandBuffer, nullptr);
         culling.On(this, GPU::instance->graphicQueue, "culling", &hzb.commandBuffer, nullptr);
         zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer, nullptr);
         gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
@@ -1384,7 +1514,8 @@ public:
         lighting.On(this, GPU::instance->graphicQueue, "lighting", &accelerationStructure.commandBuffer, &lightingProbes.commandBuffer);
         forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer, nullptr);
         postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &forward.commandBuffer, nullptr);
-        present.On(this, GPU::instance->graphicQueue, "present", &postProcess.commandBuffer, nullptr);
+        gpuDebug.On(this, GPU::instance->graphicQueue, "gpuDebug", &postProcess.commandBuffer, nullptr);
+        present.On(this, GPU::instance->graphicQueue, "present", &gpuDebugInit.commandBuffer, nullptr);
     }
 
     void Off() override
@@ -1401,6 +1532,8 @@ public:
         lighting.Off();
         forward.Off();
         postProcess.Off();
+        gpuDebugInit.Off();
+        gpuDebug.Off();
         present.Off();
 
         View::Off();
@@ -1418,6 +1551,7 @@ public:
 
         tf::Task uploadAndSetup = UploadAndSetup(world, subflow);
 
+        SUBTASKVIEWPASS(gpuDebugInit);
         SUBTASKVIEWPASS(hzb);
         SUBTASKVIEWPASS(skinning);
         SUBTASKVIEWPASS(particles);
@@ -1430,6 +1564,7 @@ public:
         SUBTASKVIEWPASS(lighting);
         SUBTASKVIEWPASS(forward);
         SUBTASKVIEWPASS(postProcess);
+        SUBTASKVIEWPASS(gpuDebug);
         SUBTASKVIEWPASS(present);
 
         reset.precede(updateInstances, updateMaterials, updateLights, updateCameras); // should precede all, user need to check that
@@ -1440,7 +1575,7 @@ public:
         updateLights.precede(uploadAndSetup);
         uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask);
 
-        presentTask.succeed(uploadAndSetup, hzbTask, skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask);
+        presentTask.succeed(uploadAndSetup, hzbTask, skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask, gpuDebugInitTask, gpuDebugTask);
 
         return presentTask;
     }
@@ -1449,6 +1584,7 @@ public:
     {
         ZoneScoped;
         hzb.Execute();
+        gpuDebugInit.Execute();
         skinning.Execute();
         particles.Execute();
         spawning.Execute();
@@ -1460,6 +1596,7 @@ public:
         lighting.Execute();
         forward.Execute();
         postProcess.Execute();
+        gpuDebug.Execute();
         present.Execute();
     }
 
@@ -1805,7 +1942,6 @@ public:
 
     tf::Task UploadAndSetup(World& world, tf::Subflow& subflow)
     {
-
         tf::Task task = subflow.emplace(
             [this]()
             {
@@ -1816,9 +1952,10 @@ public:
                 this->raytracingContext.instancesRayTracing->Upload();
                 this->viewContext.instancesInView.Resize(this->viewWorld->instances.Size());
                 this->viewContext.meshletsInView.Resize(this->viewWorld->meshletsCount);
-                this->viewWorld->commonResourcesIndices = SetupViewParams();
-                this->viewContext.viewContext = SetupviewContextParams();
+                this->viewWorld->commonResourcesIndices = SetupCommonResourcesParams();
+                this->viewContext.viewContext = SetupViewContextParams();
                 this->raytracingContext.rtParameters = SetupRayTracingContextParams();
+                this->debugContext.debugParameters = SetupDebugParams();
             }
         ).name("upload instances buffer");
 

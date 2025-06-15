@@ -55,12 +55,17 @@ namespace HLSL
         uint instanceCount;
         uint instancesGPUHeapIndex; // only for instances created on GPU
         uint instanceGPUCount;
+        
+        uint debugBufferHeapIndex;
+        uint debugVerticesHeapIndex;
+        uint debugVerticesCountHeapIndex;
     };
     
-    struct viewContext
+    struct ViewContext
     {
         float4 renderResolution; //x, y, 1/x, 1/y
         float4 displayResolution; //x, y, 1/x, 1/y
+        int4 mousePixel;
         uint frameNumber;
         uint frameTime;
         uint cameraIndex;
@@ -150,6 +155,56 @@ namespace HLSL
         }
     };
     
+    // Data structure to match the command signature used for ExecuteIndirect.
+    #ifdef __cplusplus // bah c´est surtout pour par avoir ca dans le HLSL
+    #else
+    typedef uint2 D3D12_GPU_VIRTUAL_ADDRESS;
+    struct D3D12_DRAW_ARGUMENTS 
+    {
+      uint VertexCountPerInstance;
+      uint InstanceCount;
+      uint StartVertexLocation;
+      uint StartInstanceLocation;
+    };
+    struct D3D12_DRAW_INDEXED_ARGUMENTS
+    {
+	    uint IndexCountPerInstance;
+	    uint InstanceCount;
+	    uint StartIndexLocation;
+	    int BaseVertexLocation;
+	    uint StartInstanceLocation;
+    };
+    struct D3D12_GPU_VIRTUAL_ADDRESS_RANGE
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS StartAddress;
+        uint64_t SizeInBytes;
+    };
+    struct D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS StartAddress;
+        uint64_t SizeInBytes;
+        uint64_t StrideInBytes;
+    };
+    struct D3D12_DISPATCH_RAYS_DESC
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE RayGenerationShaderRecord;
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE MissShaderTable;
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE HitGroupTable;
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE CallableShaderTable;
+        uint Width;
+        uint Height;
+        uint Depth;
+    };
+    #endif
+
+    struct IndirectCommand
+    {
+	    uint index;
+        //uint stuff;
+	    //D3D12_GPU_VIRTUAL_ADDRESS cbv;
+	    D3D12_DRAW_ARGUMENTS drawArguments;
+    };
+    
     static const uint cullMeshletThreadCount = 32;
     struct InstanceCullingDispatch
     {
@@ -172,31 +227,6 @@ namespace HLSL
         uint ThreadGroupCountY;
         uint ThreadGroupCountZ;
     };
-    
-#ifndef __cplusplus
-    typedef uint64_t D3D12_GPU_VIRTUAL_ADDRESS;
-    struct D3D12_GPU_VIRTUAL_ADDRESS_RANGE
-    {
-        D3D12_GPU_VIRTUAL_ADDRESS StartAddress;
-        uint64_t SizeInBytes;
-    };
-    struct D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE
-    {
-        D3D12_GPU_VIRTUAL_ADDRESS StartAddress;
-        uint64_t SizeInBytes;
-        uint64_t StrideInBytes;
-    };
-    struct D3D12_DISPATCH_RAYS_DESC
-    {
-        D3D12_GPU_VIRTUAL_ADDRESS_RANGE RayGenerationShaderRecord;
-        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE MissShaderTable;
-        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE HitGroupTable;
-        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE CallableShaderTable;
-        uint Width;
-        uint Height;
-        uint Depth;
-    };
-#endif
     
     struct RayDispatch
     {
@@ -274,10 +304,6 @@ namespace HLSL
     static const uint maxRTDepth = 3;
     struct RTParameters
     {
-        //float4 resolution; //x, y, 1/x, 1/y
-        
-        //uint frame;
-        
         uint BVH;
         uint giIndex;
         uint giReservoirIndex;
@@ -341,5 +367,11 @@ packed :
         = 318fps
 */
     // ----------------- End RT stuff ------------------
+    
+    //----------------------- DEBUG -----------------------
+    struct DebugParameters
+    {
+	    D3D12_GPU_VIRTUAL_ADDRESS cbv;
+    };
 }
 #endif // __STRUCTS__

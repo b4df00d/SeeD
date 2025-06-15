@@ -79,14 +79,14 @@
                             "visibility     = SHADER_VISIBILITY_ALL)"
 
 //---------------------------------------------------------------------------------------------
-cbuffer ViewParams : register(b0)
+cbuffer CommonResourcesIndices : register(b0)
 {
     HLSL::CommonResourcesIndices commonResourcesIndices;
 };
 //---------------------------------------------------------------------------------------------
 cbuffer viewContext : register(b1)
 {
-    HLSL::viewContext viewContext;
+    HLSL::ViewContext viewContext;
 };
 //---------------------------------------------------------------------------------------------
 #ifndef CUSTOM_ROOT_BUFFER_1 //defined by shaders to have 'personalized' data

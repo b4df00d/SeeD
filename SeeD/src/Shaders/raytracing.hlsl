@@ -27,43 +27,29 @@ static int2 patternA[4] =
 [shader("raygeneration")]
 void RayGen()
 {
-    uint2 launchIndex = DispatchRaysIndex().xy;
+    uint2 dtid = DispatchRaysIndex().xy;
+    //if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y) return;
     
-    if (launchIndex.x > viewContext.renderResolution.x || launchIndex.y > viewContext.renderResolution.y)
-        return;
-    
-    GBufferCameraData cd = GetGBufferCameraData(launchIndex); 
+    GBufferCameraData cd = GetGBufferCameraData(dtid); 
     if(cd.viewDist > 5000) return;
     
-    SurfaceData s = GetSurfaceData(launchIndex.xy);
+    SurfaceData s = GetSurfaceData(dtid.xy);
     
-    uint seed = initRand(launchIndex.xy);
+    uint seed = initRand(dtid.xy);
+    
+    float3 bounceDir;
+    float3 bounceNorm;
+    float3 bounceHit;
+    float4 bounceLight = IndirectLightR(rtParameters, s, cd.offsetedWorldPos, 0, seed, bounceDir, bounceNorm, bounceHit);
     
     float shadow = DirectLight(rtParameters, s, cd.offsetedWorldPos, 0, seed).x > 0;
         
     RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
-    shadows[launchIndex] = shadow;
-    
-    float3 bounceNorm;
-    float3 bounceHit;
-    float4 bounceLight = IndirectLight(rtParameters, s, cd.offsetedWorldPos, 0, seed, bounceNorm, bounceHit);
+    shadows[dtid] = shadow;
         
     // ReSTIR
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
-        
-    float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.5 - 0.2);
-    uint frameFilteringCount = max(1, blend * maxFrameFilteringCount);
-    
-    HLSL::GIReservoir newR;
-    float W = dot(bounceLight.xyz, float3(0.3, 0.59, 0.11));
-    newR.color_W = float4(bounceLight.xyz, W);
-    newR.dir_Wcount = float4(bounceNorm, 1);
-    newR.hit_Wsum = float4(bounceHit, W);
-        
-    UpdateGIReservoir(r, newR, nextRand(seed));
-    ScaleGIReservoir(r, frameFilteringCount);
-        
     // if not first time fill with previous frame reservoir
     if (viewContext.frameNumber == 0)
     {
@@ -72,11 +58,37 @@ void RayGen()
         r.hit_Wsum = 0;
     }
         
+    float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.0015 - 0.1);
+    uint frameFilteringCount = max(1, blend * maxFrameFilteringCount);
+    
+    HLSL::GIReservoir newR;
+    float W = dot(bounceLight.xyz, float3(0.3, 0.59, 0.11));
+    newR.color_W = float4(bounceLight.xyz, W);
+    newR.dir_Wcount = float4(bounceDir, 1);
+    newR.hit_Wsum = float4(bounceHit, W);
+        
+    UpdateGIReservoir(r, newR, nextRand(seed));
+    ScaleGIReservoir(r, frameFilteringCount);
+        
+        
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-    giReservoir[launchIndex.x + launchIndex.y * viewContext.renderResolution.x] = PackGIReservoir(r);
+    giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x] = PackGIReservoir(r);
         
     // end ReSTIR
     
+    uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
+    float3 debugRet = 0;
+    if(abs(length(debugPixel - dtid)) < 1)
+    {
+        debugRet = DrawLine(cd.offsetedWorldPos, bounceHit);
+    }
+    
+    /*
+    */
+    if((dtid.x + dtid.y)%2)
+    {
+        DrawLine(cd.offsetedWorldPos, bounceHit);
+    }
     
 #define REFERENCE
 #ifdef REFERENCE
@@ -94,8 +106,13 @@ void RayGen()
     //result *= 10;
         
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    if (viewContext.frameNumber == 0) GI[launchIndex] = result;
-    GI[launchIndex] = (GI[launchIndex] * (r.dir_Wcount.w-1) + result) / r.dir_Wcount.w;
+    if (viewContext.frameNumber == 0) GI[dtid] = result;
+    GI[dtid] = (GI[dtid] * (r.dir_Wcount.w-1) + result) / r.dir_Wcount.w;
+    
+    if(abs(length(debugPixel - dtid)) < 3)
+    {
+        GI[dtid] = debugRet;
+    }
 #endif
 }
 

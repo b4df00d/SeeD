@@ -30,13 +30,15 @@ void RayGen()
     
     if(cd.viewDist > 5000) return;
     
+    SurfaceData s = GetSurfaceData(launchIndex.xy);
+    
     uint seed = initRand(launchIndex.xy);
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[launchIndex.x + launchIndex.y * viewContext.renderResolution.x]);
     HLSL::GIReservoir og = r;
     
-    r = Validate(rtParameters, seed, cd.offsetedWorldPos, r, og);
+    r = Validate(rtParameters, s, seed, cd.offsetedWorldPos, r, og, launchIndex);
     
     giReservoir[launchIndex.x + launchIndex.y * viewContext.renderResolution.x] = PackGIReservoir(r);
     
