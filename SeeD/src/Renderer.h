@@ -1301,7 +1301,7 @@ public:
 
 class GPUDebug : public Pass
 {
-    ViewResource albedo;
+    ViewResource lighted;
     ViewResource depth;
     Components::Handle<Components::Shader> indirectDebugShader;
 
@@ -1310,7 +1310,7 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        albedo.Register("albedo", view);
+        lighted.Register("lighted", view);
         depth.Register("depth", view);
         indirectDebugShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\debug.hlsl");
     }
@@ -1327,10 +1327,10 @@ public:
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
         auto debugParameterAddress = ConstantBuffer::instance->PushConstantBuffer(&view->debugContext.debugParameters);
 
-        albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        Resource rts[] = { albedo.Get() };
-        SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, true);
+        Resource rts[] = { lighted.Get() };
+        SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);
 
         Shader& indirectDebug = *AssetLibrary::instance->Get<Shader>(indirectDebugShader.Get().id, true);
         commandBuffer->SetGraphic(indirectDebug);
@@ -1341,7 +1341,7 @@ public:
         uint maxDraw = 2;
         commandBuffer->cmd->ExecuteIndirect(indirectDebug.commandSignature, maxDraw, view->debugContext.indirectDebugBuffer.GetResourcePtr(), 0, view->debugContext.indirectDebugVerticesCount.GetResourcePtr(), 0);
 
-        albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
 
         Close();
     }
@@ -1595,8 +1595,8 @@ public:
         lightingProbes.Execute();
         lighting.Execute();
         forward.Execute();
-        postProcess.Execute();
         gpuDebug.Execute();
+        postProcess.Execute();
         present.Execute();
     }
 

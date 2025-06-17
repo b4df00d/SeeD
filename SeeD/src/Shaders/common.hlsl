@@ -205,8 +205,8 @@ uint xxhash(in uint p)
 
 uint xxhash(in uint2 pixel)
 {
-    //uint p = viewContext.frameTime << 26 | pixel.x << 13 | pixel.y;
-    uint p = 0 << 26 | pixel.x << 13 | pixel.y;
+    uint p = viewContext.frameTime << 26 | pixel.x << 13 | pixel.y;
+    //uint p = 0 << 26 | pixel.x << 13 | pixel.y;
     return xxhash(p);
 }
 // Generates a seed for a random number generator from 2 inputs plus a backoff
@@ -1750,11 +1750,11 @@ float3 DrawLine(float3 begin, float3 end)
     HLSL::Vertex vertex2;
     
     vertex1.pos = begin;
-    vertex1.normal = 0;
+    vertex1.normal = RandUINT(asuint(Rand(begin)));
     vertex1.uv = 0;
     
     vertex2.pos = end;
-    vertex2.normal = 0;
+    vertex2.normal = vertex1.normal;
     vertex2.uv = 0;
     
     debugVertices[index] = vertex1;

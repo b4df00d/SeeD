@@ -19,7 +19,7 @@ struct VS_OUTPUT
 // the comment after the SV_target is important
 struct PS_OUTPUT
 {
-    float4 albedo : SV_Target0; //DXGI_FORMAT_R8G8B8A8_UNORM
+    float4 albedo : SV_Target0; //DXGI_FORMAT_R11G11B10_FLOAT
 };
 
 #pragma debug VertexMain PixelMain

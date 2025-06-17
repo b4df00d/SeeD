@@ -2072,6 +2072,17 @@ public :
                         D3D12_SHADER_BYTECODE vertexShaderBytecode = Compile(file, tokens[2], "vs_6_6");
                         D3D12_SHADER_BYTECODE pixelShaderBytecode = Compile(file, tokens[3], "ps_6_6", &shader);
                         PipelineStateStream stream{};
+                        D3D12_RT_FORMAT_ARRAY RTVFormats = {};
+                        RTVFormats.NumRenderTargets = shader.outputs.size();
+                        for (uint i = 0; i < shader.outputs.size(); i++)
+                        {
+                            RTVFormats.RTFormats[i] = shader.outputs[i];
+                        }
+                        for (uint i = shader.outputs.size(); i < 8; i++)
+                        {
+                            RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
+                        }
+                        stream.RTFormats = RTVFormats;
                         stream.VS = vertexShaderBytecode;
                         stream.PS = pixelShaderBytecode;
                         stream.PrimitiveTopology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;

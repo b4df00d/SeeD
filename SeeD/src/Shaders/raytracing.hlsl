@@ -85,9 +85,12 @@ void RayGen()
     
     /*
     */
-    if((dtid.x + dtid.y)%2)
+    if(dtid.x%10==0 && dtid.y%10==0)
     {
-        DrawLine(cd.offsetedWorldPos, bounceHit);
+        //DrawLine(cd.offsetedWorldPos, bounceHit);
+        if(length(cd.offsetedWorldPos - bounceHit) < 10)
+            DrawLine(cd.offsetedWorldPos, bounceHit);
+        //DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + bounceDir * 0.1);
     }
     
 #define REFERENCE
