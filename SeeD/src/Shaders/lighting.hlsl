@@ -52,7 +52,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     
     lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
     //lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s), 0);
-#if 1
+#if 0
     if(dtid.x > viewContext.renderResolution.x * 0.5)
     {
         Texture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
@@ -65,4 +65,14 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     
     if(cd.viewDist > 5000)
         lighted[dtid.xy] = float4(Sky(cd.viewDir), 1);
+    
+    
+    HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
+    uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
+    if(abs(length(debugPixel - dtid.xy)) < 10)
+    {
+        //DrawLine(cd.offsetedWorldPos, bounceHit);
+        DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + r.dir_Wcount.xyz);
+        //DrawLine(cd.offsetedWorldPos, r.hit_Wsum.xyz);
+    }
 }

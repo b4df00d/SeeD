@@ -76,22 +76,21 @@ void RayGen()
         
     // end ReSTIR
     
+    HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
-    float3 debugRet = 0;
-    if(abs(length(debugPixel - dtid)) < 1)
-    {
-        debugRet = DrawLine(cd.offsetedWorldPos, bounceHit);
-    }
-    
-    /*
-    */
-    if(dtid.x%10==0 && dtid.y%10==0)
+    if(abs(length(debugPixel - dtid)) < 10)
     {
         //DrawLine(cd.offsetedWorldPos, bounceHit);
+        //DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + r.dir_Wcount.xyz);
+        //DrawLine(cd.offsetedWorldPos, r.hit_Wsum.xyz);
+    }
+    /*
+    if(dtid.x%10==0 && dtid.y%10==0)
+    {
         if(length(cd.offsetedWorldPos - bounceHit) < 10)
             DrawLine(cd.offsetedWorldPos, bounceHit);
-        //DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + bounceDir * 0.1);
     }
+    */
     
 #define REFERENCE
 #ifdef REFERENCE
@@ -111,11 +110,6 @@ void RayGen()
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     if (viewContext.frameNumber == 0) GI[dtid] = result;
     GI[dtid] = (GI[dtid] * (r.dir_Wcount.w-1) + result) / r.dir_Wcount.w;
-    
-    if(abs(length(debugPixel - dtid)) < 3)
-    {
-        GI[dtid] = debugRet;
-    }
 #endif
 }
 

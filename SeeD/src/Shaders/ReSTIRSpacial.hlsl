@@ -36,6 +36,7 @@ GlobalRootSignature SeeDRootSignatureRT =
 [shader("raygeneration")]
 void RayGen()
 {
+    //return;
     uint2 dtid = DispatchRaysIndex().xy;
     //if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y) return;
     
@@ -46,7 +47,7 @@ void RayGen()
     
     uint seed = initRand(dtid.xy);
     
-    RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];   
+    RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     HLSL::GIReservoir og = r;
     
@@ -63,7 +64,7 @@ void RayGen()
     */
     
     int pattern = (dtid.x + dtid.y + rtParameters.passNumber + viewContext.frameNumber) % 2;
-    float2 radius = 22 * (2-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.1);
+    float2 radius = 8 * (2-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.1);
     uint spacialReuse = 0;
     for (uint i = 0; i < 4; i++)
     {
@@ -86,6 +87,7 @@ void RayGen()
     }
     r = Validate(rtParameters, s, seed, cd.offsetedWorldPos, r, og, dtid);
     //r = og;
+    //r.color_W.xyz = float3(1, 1, 0);
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
     previousgiReservoir[dtid.x + dtid.y * viewContext.renderResolution.x] = PackGIReservoir(r);
@@ -95,6 +97,12 @@ void RayGen()
     gi = spacialReuse / 4.0f;
     //gi = s.albedo.xyz;
     //GI[dtid.xy] = gi;
+    
+    uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
+    if(abs(length(debugPixel - dtid)) < 3)
+    {
+        //DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + r.dir_Wcount.xyz);
+    }
 }
 
 [shader("miss")]

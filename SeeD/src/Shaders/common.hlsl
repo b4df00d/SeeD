@@ -206,7 +206,7 @@ uint xxhash(in uint p)
 uint xxhash(in uint2 pixel)
 {
     uint p = viewContext.frameTime << 26 | pixel.x << 13 | pixel.y;
-    //uint p = 0 << 26 | pixel.x << 13 | pixel.y;
+    //p = 0 << 26 | pixel.x << 13 | pixel.y;
     return xxhash(p);
 }
 // Generates a seed for a random number generator from 2 inputs plus a backoff
@@ -1227,21 +1227,19 @@ float2 bary)
 static uint maxFrameFilteringCount = 12;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    if(rand < (current.color_W.w / (previous.color_W.w + current.color_W.w)))
+    if(rand <= (current.color_W.w / (max(previous.color_W.w * 8, 0.00001) + current.color_W.w)))
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.hit_Wsum.xyz = current.hit_Wsum.xyz;
         previous.dir_Wcount.xyz = current.dir_Wcount.xyz;
     }
     previous.hit_Wsum.w += current.color_W.w;
-    previous.dir_Wcount.w += 1;
+    previous.dir_Wcount.w += current.dir_Wcount.w;
 }
+// cest le meme que dessus cest totalement normal en fait !?
 void MergeGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    //if(previous.color_W.w / previous.hit_Wsum.w < current.color_W.w / current.hit_Wsum.w)
-    //if(previous.color_W.w < current.color_W.w)
-    //if(rand > 0.5)
-    if(rand < (current.color_W.w / (previous.color_W.w + current.color_W.w)))
+    if(rand <= (current.color_W.w / (max(previous.color_W.w * 8, 0.00001) + current.color_W.w)))
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.hit_Wsum.xyz = current.hit_Wsum.xyz;
@@ -1269,6 +1267,7 @@ HLSL::GIReservoirCompressed PackGIReservoir(HLSL::GIReservoir r)
     result.Wcount_W = (asuint(f32tof16(r.dir_Wcount.w)) << 16) + asuint(f32tof16(r.color_W.w));
     //result.dir = Pack_R11G11B10_FLOAT(normalize(r.dir_Wcount.xyz) * 0.5 + 0.5);
     result.dir = normalize(r.dir_Wcount.xyz) * 0.5 + 0.5;
+    result.dir = r.dir_Wcount.xyz;
     result.hit_Wsum = r.hit_Wsum;
     return result;
 }
@@ -1281,6 +1280,7 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
     result.dir_Wcount.w = f16tof32(r.Wcount_W >> 16u);
     //result.dir_Wcount.xyz = normalize(Unpack_R11G11B10_FLOAT(r.dir) * 2 - 1);
     result.dir_Wcount.xyz = normalize(r.dir * 2 - 1);
+    result.dir_Wcount.xyz = r.dir;
     result.hit_Wsum = r.hit_Wsum;
     return result;
 }
@@ -1673,15 +1673,17 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
     
     //compression of r.hit_Wsum.xy will result in some paths never being validated even is no spacial reuse and cam movement :?
     // euh nop it´s not compressed !??!?
-    float distDiff = saturate((abs(length(r.hit_Wsum.xyz - bounceHit)) - 0)*1);
-    float wDiff = 0;//saturate(abs(W - r.color_W.w));
+    float distDiff = saturate((abs(length(r.hit_Wsum.xyz - bounceHit)) - 0)*0.1);
+    float wDiff = saturate(abs(W - r.color_W.w) * 0.1);
     float likeness = 1.0f-saturate(distDiff + wDiff);
-    //likeness = 0.1;
+    //likeness = 0.9;
     
-    float fail = likeness < 0.11 ? 1 : 0;
+    float fail = likeness < 0.5 ? 1 : 0;
     if(fail)
     {
         r = og;
+        
+        //bounceLight.xyz = float3(1000, 0, 0);
         
         HLSL::GIReservoir newR;
         newR.color_W = float4(bounceLight.xyz, W);
@@ -1690,18 +1692,19 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
         //newR.dir_Wcount = float4(bounceNorm, 1);
         //newR.hit_Wsum = float4(bounceHit, W);
         
-        //UpdateGIReservoir(r, newR, nextRand(seed));
+        UpdateGIReservoir(r, newR, nextRand(seed));
+        //likeness = 0;
     }
     
-    float frameFilteringCount = lerp(1, maxFrameFilteringCount, likeness);
+    float frameFilteringCount = lerp(2, maxFrameFilteringCount, likeness);
     //ScaleGIReservoir(r, frameFilteringCount);
     
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     float3 gi = GI[dtid.xy];
     //gi = wDiff;
-    gi = distDiff;
+    gi = pow(distDiff, 1);
     //gi = likeness;
-    //GI[dtid.xy] = gi;
+    GI[dtid.xy] = gi;
     
     return r;
 }
@@ -1738,7 +1741,7 @@ void DebugSurfaceData(float3 pos, float3 dir)
 // ----------------------------- DEBUG ----------------------------------
 
 // world space positions
-float3 DrawLine(float3 begin, float3 end)
+void DrawLine(float3 begin, float3 end)
 {
     RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[commonResourcesIndices.debugVerticesCountHeapIndex];
     uint index = 0;
@@ -1774,9 +1777,4 @@ float3 DrawLine(float3 begin, float3 end)
 	//di.drawArguments.StartInstanceLocation = 0;
     
     debugIndirects[counter[0]-1] = di;
-    
-    float3 debugRet = float3(1, 0, 0);
-    if(counter[0] > 0)
-        debugRet = float3(0, 1, 0);
-    return debugRet;
 }

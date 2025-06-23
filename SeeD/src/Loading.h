@@ -1490,6 +1490,15 @@ public :
         D3D12_COMMAND_SIGNATURE_DESC commandSignatureDesc = {};
 
         if (shader->type == Shader::Type::Graphic)
+            commandSignatureDesc.ByteStride = sizeof(HLSL::IndirectCommand);
+        else if (shader->type == Shader::Type::Mesh)
+            commandSignatureDesc.ByteStride = sizeof(HLSL::MeshletDrawCall);
+        else if (shader->type == Shader::Type::Compute)
+            commandSignatureDesc.ByteStride = sizeof(HLSL::InstanceCullingDispatch);
+        else if (shader->type == Shader::Type::Raytracing)
+            commandSignatureDesc.ByteStride = sizeof(HLSL::RayDispatch);
+
+        if (shader->type == Shader::Type::Graphic)
         {
             D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[2] = {};
             argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
@@ -1500,6 +1509,12 @@ public :
 
             commandSignatureDesc.pArgumentDescs = argumentDescs;
             commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+            auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, shader->rootSignature, IID_PPV_ARGS(&shader->commandSignature));
+            if (FAILED(hr))
+            {
+                GPU::PrintDeviceRemovedReason(hr);
+                seedAssert(false);
+            }
         }
         else if (shader->type == Shader::Type::Mesh)
         {
@@ -1516,6 +1531,12 @@ public :
 
             commandSignatureDesc.pArgumentDescs = argumentDescs;
             commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+            auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, shader->rootSignature, IID_PPV_ARGS(&shader->commandSignature));
+            if (FAILED(hr))
+            {
+                GPU::PrintDeviceRemovedReason(hr);
+                seedAssert(false);
+            }
         }
         else if (shader->type == Shader::Type::Compute)
         {
@@ -1532,6 +1553,12 @@ public :
 
             commandSignatureDesc.pArgumentDescs = argumentDescs;
             commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+            auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, shader->rootSignature, IID_PPV_ARGS(&shader->commandSignature));
+            if (FAILED(hr))
+            {
+                GPU::PrintDeviceRemovedReason(hr);
+                seedAssert(false);
+            }
         }
         else if (shader->type == Shader::Type::Raytracing)
         {
@@ -1548,24 +1575,15 @@ public :
 
             commandSignatureDesc.pArgumentDescs = argumentDescs;
             commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);
+            auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, shader->rootSignature, IID_PPV_ARGS(&shader->commandSignature));
+            if (FAILED(hr))
+            {
+                GPU::PrintDeviceRemovedReason(hr);
+                seedAssert(false);
+            }
         }
 
 
-        if (shader->type == Shader::Type::Graphic)
-            commandSignatureDesc.ByteStride = sizeof(HLSL::IndirectCommand);
-        else if (shader->type == Shader::Type::Mesh)
-            commandSignatureDesc.ByteStride = sizeof(HLSL::MeshletDrawCall);
-        else if (shader->type == Shader::Type::Compute)
-            commandSignatureDesc.ByteStride = sizeof(HLSL::InstanceCullingDispatch);
-        else if (shader->type == Shader::Type::Raytracing)
-            commandSignatureDesc.ByteStride = sizeof(HLSL::RayDispatch);
-
-        auto hr = GPU::instance->device->CreateCommandSignature(&commandSignatureDesc, shader->rootSignature, IID_PPV_ARGS(&shader->commandSignature));
-        if (FAILED(hr))
-        {
-            GPU::PrintDeviceRemovedReason(hr);
-            seedAssert(false);
-        }
     }
 
     void CreateRTShaderLibrary(Shader* shader, IDxcResult* pResults)

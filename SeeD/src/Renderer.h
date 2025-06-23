@@ -346,6 +346,7 @@ struct RayTracingContext
     Resource GI;
     Resource shadows;
     PerFrame<Resource> giReservoir;
+    PerFrame<Resource> giReservoirSpatial;
     ProbeGrid probes[3];
 
     void On(uint2 resolution)
@@ -358,6 +359,7 @@ struct RayTracingContext
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
             giReservoir.Get(i).CreateBuffer<HLSL::GIReservoirCompressed>(resolution.x * resolution.y, "GIReservoir");
+            giReservoirSpatial.Get(i).CreateBuffer<HLSL::GIReservoirCompressed>(resolution.x * resolution.y, "GIReservoirSpacial");
         }
 
         float multi = 2;
@@ -380,6 +382,7 @@ struct RayTracingContext
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
             giReservoir.Get(i).Release();
+            giReservoirSpatial.Get(i).Release();
         }
 
         probes[0].Off();
@@ -1207,32 +1210,38 @@ public:
 
         commandBuffer->cmd->DispatchRays(&drd);
 
-        // Spacial ReSTIR pass 1
-        view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
+
+        //Spacial
         Shader& ReSTIRSpacial = *AssetLibrary::instance->Get<Shader>(ReSTIRSpacialShader.Get().id, true);
         commandBuffer->SetRaytracing(ReSTIRSpacial);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
-        //commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->renderResolution.x), ReSTIRSpacial.DispatchY(view->renderResolution.y), 1);
-        drd = ReSTIRSpacial.GetRTDesc();
-        drd.Width = view->renderResolution.x;
-        drd.Height = view->renderResolution.y;
-        commandBuffer->cmd->DispatchRays(&drd);
 
-        // Spacial ReSTIR pass 2
-        std::swap(view->raytracingContext.rtParameters.giReservoirIndex, view->raytracingContext.rtParameters.previousgiReservoirIndex);
+        // Spacial ReSTIR pass 1
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
-        view->raytracingContext.rtParameters.passNumber = 1;
-        auto raytracingContextAddress2 = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress2);
-        std::swap(view->raytracingContext.rtParameters.giReservoirIndex, view->raytracingContext.rtParameters.previousgiReservoirIndex); // reverse again if somebody need the original latter ?
-        //commandBuffer->cmd->Dispatch(ReSTIRSpacial.DispatchX(view->renderResolution.x), ReSTIRSpacial.DispatchY(view->renderResolution.y), 1);
+        view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoir.Get().uav.offset;
+        view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
+        view->raytracingContext.rtParameters.passNumber = 0;
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
         drd = ReSTIRSpacial.GetRTDesc();
         drd.Width = view->renderResolution.x;
         drd.Height = view->renderResolution.y;
         commandBuffer->cmd->DispatchRays(&drd);
 
+        /*
+        // Spacial ReSTIR pass 2
+        view->raytracingContext.giReservoirSpatial.Get().Barrier(commandBuffer.Get());
+        view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
+        view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.GetPrevious().uav.offset;
+        view->raytracingContext.rtParameters.passNumber = 1;
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
+        drd = ReSTIRSpacial.GetRTDesc();
+        drd.Width = view->renderResolution.x;
+        drd.Height = view->renderResolution.y;
+        commandBuffer->cmd->DispatchRays(&drd);
+        */
+
+        /*
         // Validating reservoirs
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
         Shader& rayValidateDispatch = *AssetLibrary::instance->Get<Shader>(rayValidateDispatchShader.Get().id, true);
@@ -1243,17 +1252,23 @@ public:
         drd = rayValidateDispatch.GetRTDesc();
         drd.Width = view->renderResolution.x;
         drd.Height = view->renderResolution.y;
-        //commandBuffer->cmd->DispatchRays(&drd);
+        commandBuffer->cmd->DispatchRays(&drd);
+        */
 
         // Lighting
         view->raytracingContext.GI.Barrier(commandBuffer.Get());
-        view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
+        view->raytracingContext.giReservoirSpatial.Get().Barrier(commandBuffer.Get());
 
         Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
         commandBuffer->SetCompute(applyLighting);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
+
+        view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
+        view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
+        view->raytracingContext.rtParameters.passNumber = 1;
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
+
         commandBuffer->cmd->Dispatch(applyLighting.DispatchX(view->renderResolution.x), applyLighting.DispatchY(view->renderResolution.y), 1);
 
         lighted.Get().Barrier(commandBuffer.Get());
@@ -2045,7 +2060,8 @@ public:
     {
         instance = this;
         displayResolution = _displayResolution;
-        renderResolution = displayResolution / 2;
+        //renderResolution = displayResolution;
+        renderResolution = displayResolution / 2.0;
         CreateDLSS();
 
         constantBuffer.On();
