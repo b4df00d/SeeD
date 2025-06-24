@@ -1152,7 +1152,7 @@ float3 Sky(float3 direction)
 {
     float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))), 0.5));
     float3 sky = normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
-    return sky;
+    return sky * 5;
 }
 
 SurfaceData GetRTSurfaceData(
@@ -1227,7 +1227,7 @@ float2 bary)
 static uint maxFrameFilteringCount = 12;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    if(rand <= (current.color_W.w / (max(previous.color_W.w * 8, 0.00001) + current.color_W.w)))
+    if(rand <= (current.color_W.w / (max(previous.color_W.w * 1, 0.00001) + current.color_W.w)))
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.hit_Wsum.xyz = current.hit_Wsum.xyz;
@@ -1236,7 +1236,7 @@ void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir curre
     previous.hit_Wsum.w += current.color_W.w;
     previous.dir_Wcount.w += current.dir_Wcount.w;
 }
-// cest le meme que dessus cest totalement normal en fait !?
+/*
 void MergeGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
     if(rand <= (current.color_W.w / (max(previous.color_W.w * 8, 0.00001) + current.color_W.w)))
@@ -1248,6 +1248,7 @@ void MergeGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir curren
     previous.hit_Wsum.w += current.hit_Wsum.w;
     previous.dir_Wcount.w += current.dir_Wcount.w;
 }
+*/
 void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
 {
     if (r.dir_Wcount.w >= frameFilteringCount)
@@ -1661,50 +1662,40 @@ void TraceRayCommon(HLSL::RTParameters rtParameters,
 HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint seed, float3 origin, HLSL::GIReservoir r, in HLSL::GIReservoir og, uint2 dtid)
 {
     float3 bounceLightDir = normalize(r.hit_Wsum.xyz - origin);
-    //bounceLightDir = r.dir_Wcount.xyz;
     
     float3 bounceDir;
     float3 bounceNorm;
     float3 bounceHit;
     float4 bounceLight = IndirectLight(rtParameters, s, bounceLightDir, origin, 0, seed, bounceNorm, bounceHit);
-    //bounceLight = IndirectLightR(rtParameters, s, origin, 0, seed, bounceDir, bounceNorm, bounceHit);
     
     float W = dot(bounceLight.xyz, float3(0.3, 0.59, 0.11));
     
-    //compression of r.hit_Wsum.xy will result in some paths never being validated even is no spacial reuse and cam movement :?
-    // euh nop it´s not compressed !??!?
-    float distDiff = saturate((abs(length(r.hit_Wsum.xyz - bounceHit)) - 0)*0.1);
-    float wDiff = saturate(abs(W - r.color_W.w) * 0.1);
+    float distDiff = saturate((abs(length(r.hit_Wsum.xyz - bounceHit)) - 0.001) * 10000);
+    float wDiff = 0;//saturate(abs(W - r.color_W.w));
     float likeness = 1.0f-saturate(distDiff + wDiff);
-    //likeness = 0.9;
     
     float fail = likeness < 0.5 ? 1 : 0;
     if(fail)
     {
         r = og;
         
-        //bounceLight.xyz = float3(1000, 0, 0);
-        
         HLSL::GIReservoir newR;
         newR.color_W = float4(bounceLight.xyz, W);
         newR.dir_Wcount = float4(bounceNorm, r.dir_Wcount.w);
         newR.hit_Wsum = float4(bounceHit, r.hit_Wsum.w);
-        //newR.dir_Wcount = float4(bounceNorm, 1);
-        //newR.hit_Wsum = float4(bounceHit, W);
         
         UpdateGIReservoir(r, newR, nextRand(seed));
-        //likeness = 0;
     }
     
-    float frameFilteringCount = lerp(2, maxFrameFilteringCount, likeness);
+    // ca sert a rien de scale le spacial... il est temporaire
+    float frameFilteringCount = lerp(2, maxFrameFilteringCount * 64, likeness);
     //ScaleGIReservoir(r, frameFilteringCount);
     
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     float3 gi = GI[dtid.xy];
-    //gi = wDiff;
     gi = pow(distDiff, 1);
-    //gi = likeness;
-    GI[dtid.xy] = gi;
+    gi = 1-fail;
+    //GI[dtid.xy] = gi;
     
     return r;
 }

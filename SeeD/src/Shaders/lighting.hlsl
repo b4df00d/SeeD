@@ -69,10 +69,12 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     
     HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
-    if(abs(length(debugPixel - dtid.xy)) < 10)
+    if(abs(length(debugPixel - dtid.xy)) < 5)
     {
         //DrawLine(cd.offsetedWorldPos, bounceHit);
-        DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + r.dir_Wcount.xyz);
-        //DrawLine(cd.offsetedWorldPos, r.hit_Wsum.xyz);
+        if(length(cd.offsetedWorldPos - r.hit_Wsum.xyz) > 1)
+            DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + r.dir_Wcount.xyz);
+        else
+            DrawLine(cd.offsetedWorldPos, r.hit_Wsum.xyz);
     }
 }

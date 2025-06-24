@@ -58,7 +58,7 @@ void RayGen()
         r.hit_Wsum = 0;
     }
         
-    float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.0015 - 0.1);
+    float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.15 - 0.1);
     uint frameFilteringCount = max(1, blend * maxFrameFilteringCount);
     
     HLSL::GIReservoir newR;
