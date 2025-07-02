@@ -21,6 +21,7 @@ struct Options
     bool stopBufferUpload;
     bool stepMotion;
     bool shaderReload;
+    bool rayDebug;
 } options;
 
 namespace HLSL
@@ -66,6 +67,7 @@ namespace HLSL
         float4 renderResolution; //x, y, 1/x, 1/y
         float4 displayResolution; //x, y, 1/x, 1/y
         int4 mousePixel;
+        float4 jitter; // current.xy, previous.zw
         uint frameNumber;
         uint frameTime;
         uint cameraIndex;
@@ -264,6 +266,12 @@ namespace HLSL
         uint pad2;
     };
     
+    struct TAAParameters
+    {
+        uint lightedIndex;
+        uint historyIndex;
+    };
+    
     struct PostProcessParameters
     {
         //float4 resolution; //x, y, 1/x, 1/y
@@ -350,9 +358,9 @@ namespace HLSL
     struct GIReservoirCompressed
     {
         float4 hit_Wsum;
-        float3 dir;
         float3 color;
         uint Wcount_W;
+        //uint dir;
     };
  /*
 not packed 220fps

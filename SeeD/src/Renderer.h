@@ -275,12 +275,33 @@ struct ViewContext
     StructuredBuffer<uint> instancesCounter;
     StructuredBuffer<uint> meshletsCounter;
 
+    float2 jitter[16] = {
+        float2(0.500000, 0.333333),
+        float2(0.250000, 0.666667),
+        float2(0.750000, 0.111111),
+        float2(0.125000, 0.444444),
+        float2(0.625000, 0.777778),
+        float2(0.375000, 0.222222),
+        float2(0.875000, 0.555556),
+        float2(0.062500, 0.888889),
+        float2(0.562500, 0.037037),
+        float2(0.312500, 0.370370),
+        float2(0.812500, 0.703704),
+        float2(0.187500, 0.148148),
+        float2(0.687500, 0.481481),
+        float2(0.437500, 0.814815),
+        float2(0.937500, 0.259259),
+        float2(0.031250, 0.592593)
+    };
+    uint jitterIndex;
+
     void On()
     {
         instancesInView.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         meshletsInView.CreateBuffer(1000, D3D12_RESOURCE_STATE_COMMON);
         instancesCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
         meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
+        jitterIndex = 0;
     }
 
     void Off()
@@ -478,11 +499,12 @@ public:
     
     HLSL::ViewContext SetupViewContextParams()
     {
+        frame++;
         HLSL::ViewContext viewContextParams;
 
         viewContextParams.renderResolution = float4(float(renderResolution.x), float(renderResolution.y), 1.0f / renderResolution.x, 1.0f / renderResolution.y);
         viewContextParams.displayResolution = float4(float(displayResolution.x), float(displayResolution.y), 1.0f / displayResolution.x, 1.0f / displayResolution.y);
-        viewContextParams.frameNumber++;
+        viewContextParams.frameNumber = frame;
         if (IOs::instance->keys.pressed[VK_R])
             viewContextParams.frameNumber = 0;
         viewContextParams.frameTime = Time::instance->currentTicks;
@@ -502,7 +524,10 @@ public:
         viewContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
         viewContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
         viewContextParams.mousePixel = int4(IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1], IOs::instance->mouse.mousePos[2], IOs::instance->mouse.mousePos[3]);
-
+        float2 previousJit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy) * float2(2, 2);
+        viewContext.jitterIndex = (viewContextParams.frameNumber) % ARRAYSIZE(viewContext.jitter);
+        float2 jit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy) * float2(2, 2);
+        viewContextParams.jitter = float4(jit.x, jit.y, previousJit.x, previousJit.y);
         //IOs::Log("{} {}", IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1]);
         
         return viewContextParams;
@@ -1338,25 +1363,28 @@ public:
         ZoneScoped;
         Open();
 
-        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
-        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
-        auto debugParameterAddress = ConstantBuffer::instance->PushConstantBuffer(&view->debugContext.debugParameters);
+        if (options.rayDebug)
+        {
+            auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+            auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+            auto debugParameterAddress = ConstantBuffer::instance->PushConstantBuffer(&view->debugContext.debugParameters);
 
-        lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        Resource rts[] = { lighted.Get() };
-        SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);
+            Resource rts[] = { lighted.Get() };
+            SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);
 
-        Shader& indirectDebug = *AssetLibrary::instance->Get<Shader>(indirectDebugShader.Get().id, true);
-        commandBuffer->SetGraphic(indirectDebug);
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, viewContextAddress);
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(2, debugParameterAddress);
+            Shader& indirectDebug = *AssetLibrary::instance->Get<Shader>(indirectDebugShader.Get().id, true);
+            commandBuffer->SetGraphic(indirectDebug);
+            commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, viewContextAddress);
+            commandBuffer->cmd->SetGraphicsRootConstantBufferView(2, debugParameterAddress);
 
-        uint maxDraw = 2;
-        commandBuffer->cmd->ExecuteIndirect(indirectDebug.commandSignature, maxDraw, view->debugContext.indirectDebugBuffer.GetResourcePtr(), 0, view->debugContext.indirectDebugVerticesCount.GetResourcePtr(), 0);
+            uint maxDraw = 2;
+            commandBuffer->cmd->ExecuteIndirect(indirectDebug.commandSignature, maxDraw, view->debugContext.indirectDebugBuffer.GetResourcePtr(), 0, view->debugContext.indirectDebugVerticesCount.GetResourcePtr(), 0);
 
-        lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+            lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        }
 
         Close();
     }
@@ -1395,10 +1423,13 @@ class PostProcess : public Pass
     ViewResource normal;
     ViewResource motion;
     ViewResource depth;
+    ViewResource history;
     Components::Handle<Components::Shader> postProcessShader;
+    Components::Handle<Components::Shader> TAAShader;
 
 public:
     HLSL::PostProcessParameters ppparams;
+    HLSL::TAAParameters taaparams;
 
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
@@ -1406,12 +1437,15 @@ public:
         ZoneScoped;
         postProcessed.Register("postProcessed", view);
         postProcessed.Get().CreateRenderTarget(view->displayResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "postProcessed"); // must be same as backbuffer for a resource copy at end of frame 
+        history.Register("history", view);
+        history.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R11G11B10_FLOAT, "history"); // must be the same as Lighted input
         lighted.Register("lighted", view);
         albedo.Register("albedo", view);
         normal.Register("normal", view);
         motion.Register("motion", view);
         depth.Register("depth", view);
         postProcessShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\PostProcess.hlsl");
+        TAAShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\TAA.hlsl");
 
         ppparams.P = 1;
         ppparams.a = 1;
@@ -1436,20 +1470,33 @@ public:
         ZoneScoped;
         Open();
 
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+
+        taaparams.lightedIndex = lighted.Get().uav.offset;
+        taaparams.historyIndex = history.Get().uav.offset;
+
+        Shader& TAA = *AssetLibrary::instance->Get<Shader>(TAAShader.Get().id, true);
+        commandBuffer->SetCompute(TAA);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ConstantBuffer::instance->PushConstantBuffer(&taaparams));
+        commandBuffer->cmd->Dispatch(TAA.DispatchX(view->renderResolution.x), TAA.DispatchY(view->renderResolution.y), 1);
+
+
+        history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        commandBuffer->cmd->CopyResource(history.Get().GetResource(), lighted.Get().GetResource());
+        history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON); // transition to present in the editor cmb
+
         ppparams.postProcessedIndex = postProcessed.Get().uav.offset;
         ppparams.lightedIndex = lighted.Get().uav.offset;
         ppparams.backBufferIndex = GPU::instance->backBuffer.Get().uav.offset;
-
-
-        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
-        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
-        auto postProcessParametersAddress = ConstantBuffer::instance->PushConstantBuffer(&ppparams);
 
         Shader& postProcess = *AssetLibrary::instance->Get<Shader>(postProcessShader.Get().id, true);
         commandBuffer->SetCompute(postProcess);
         commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, postProcessParametersAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ConstantBuffer::instance->PushConstantBuffer(&ppparams));
         commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->displayResolution.x), postProcess.DispatchY(view->displayResolution.y), 1);
 
         Close();
@@ -2091,25 +2138,30 @@ public:
 
         static const wchar_t* dll_paths[] =
         {
-                L".",
+            //L".",
+            //L"G:\\Work\\Dev\\Adria-master\\External\\DLSS\\lib\\dev",
+            //L"G:\\Work\\Dev\\Adria-master\\External\\DLSS\\lib\\rel",
+            L"G:\\Work\\Dev\\SeeD\\Third\\DLSS-main\\lib\\Windows_x86_64\\dev",
+            L"G:\\Work\\Dev\\SeeD\\Third\\DLSS-main\\lib\\Windows_x86_64\\rel",
         };
 
         NVSDK_NGX_FeatureCommonInfo feature_common_info{};
         feature_common_info.LoggingInfo.LoggingCallback = [](const char* msg, NVSDK_NGX_Logging_Level level, NVSDK_NGX_Feature source) {
-            IOs::Log("NGX: {}", msg);
+            IOs::Log("{}", msg);
             };
-        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
+        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
         feature_common_info.LoggingInfo.DisableOtherLoggingSinks = true;
         feature_common_info.PathListInfo.Path = dll_paths;
         feature_common_info.PathListInfo.Length = NVSDK_NGX_ARRAY_LEN(dll_paths);
 
-        static constexpr char const* project_guid = "b0f87b54-1daf-4964-90ae-c4035a19df34";
+        static constexpr char const* project_guid = "a0f57b54-1daf-4934-90ae-c4035c19df04";
         NVSDK_NGX_Result result = NVSDK_NGX_D3D12_Init_with_ProjectID(
             project_guid,
             NVSDK_NGX_ENGINE_TYPE_CUSTOM,
             "1.0",
             L".",
-            GPU::instance->device, &feature_common_info);
+            GPU::instance->device, 
+            &feature_common_info);
         if (NVSDK_NGX_FAILED(result)) return;
 
         result = NVSDK_NGX_D3D12_GetCapabilityParameters(&ngx_parameters);

@@ -116,11 +116,15 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         
         float4x4 worldMatrix = instance.unpack(instance.current);
         float4 worldPos = mul(worldMatrix, pos);
-        outVerts[groupThreadId.x].pos = mul(camera.viewProj, worldPos);
+        float4 clipPos = mul(camera.viewProj, worldPos);
+        clipPos.xy += viewContext.jitter.xy * clipPos.w;
+        outVerts[groupThreadId.x].pos = clipPos;
         
         float4x4 previousWorldMatrix = instance.unpack(instance.previous);
         float4 previousWorldPos = mul(previousWorldMatrix, pos);
-        outVerts[groupThreadId.x].previousPos = mul(camera.previousViewProj, previousWorldPos);
+        float4 previousClipPos = mul(camera.previousViewProj, previousWorldPos);
+        previousClipPos.xy += viewContext.jitter.zw * previousClipPos.w;
+        outVerts[groupThreadId.x].previousPos = previousClipPos;
         
         float3 normal = verticesData[index].normal.xyz;
         float3 worldNormal = mul((float3x3)worldMatrix, normal);

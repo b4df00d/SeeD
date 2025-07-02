@@ -591,6 +591,7 @@ public:
         ImGui::Checkbox("stopBufferUpload", &options.stopBufferUpload);
         ImGui::Checkbox("stepMotion", &options.stepMotion);
         ImGui::Checkbox("shaderHotReload", &options.shaderReload);
+        ImGui::Checkbox("rayDebug", &options.rayDebug);
 
         ImGui::End();
     }

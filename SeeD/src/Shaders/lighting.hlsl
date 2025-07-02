@@ -64,17 +64,14 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
 #endif
     
     if(cd.viewDist > 5000)
-        lighted[dtid.xy] = float4(Sky(cd.viewDir), 1);
+        lighted[dtid.xy] = float4(Sky(cd.viewDir) * 0.25, 1);
     
     
     HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
     if(abs(length(debugPixel - dtid.xy)) < 5)
     {
-        //DrawLine(cd.offsetedWorldPos, bounceHit);
-        if(length(cd.offsetedWorldPos - r.hit_Wsum.xyz) > 1)
-            DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + r.dir_Wcount.xyz);
-        else
-            DrawLine(cd.offsetedWorldPos, r.hit_Wsum.xyz);
+        float3 endDir = normalize(r.hit_Wsum.xyz - cd.offsetedWorldPos);
+        DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endDir);
     }
 }

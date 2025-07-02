@@ -558,10 +558,10 @@ bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
     float fMipLevel = ceil(log2(max(vExtents.x, vExtents.y)));
     fMipLevel = clamp(fMipLevel, 0.0f, vHZB.z - 1.0f);
     
-    float4 vOcclusionDepth = float4(tHZB.SampleLevel(samplerPointClamp, vUV.xy, fMipLevel),
-                                    tHZB.SampleLevel(samplerPointClamp, vUV.zy, fMipLevel),
-                                    tHZB.SampleLevel(samplerPointClamp, vUV.zw, fMipLevel),
-                                    tHZB.SampleLevel(samplerPointClamp, vUV.xw, fMipLevel));
+    float4 vOcclusionDepth = float4(tHZB.SampleLevel(samplerLinearClamp, vUV.xy, fMipLevel),
+                                    tHZB.SampleLevel(samplerLinearClamp, vUV.zy, fMipLevel),
+                                    tHZB.SampleLevel(samplerLinearClamp, vUV.zw, fMipLevel),
+                                    tHZB.SampleLevel(samplerLinearClamp, vUV.xw, fMipLevel));
     
     float fMaxOcclusionDepth = max(max(max(vOcclusionDepth.x, vOcclusionDepth.y), vOcclusionDepth.z), vOcclusionDepth.w);
     bool bCulled = fMaxOcclusionDepth < fBoundSphereDepth;
@@ -874,6 +874,7 @@ struct GBufferCameraData
     float viewDist;
     float viewDistDiff;
     uint2 previousPixel;
+    float2 previousUV;
 };
 GBufferCameraData GetGBufferCameraData(uint2 pixel)
 {
@@ -897,8 +898,10 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     
     Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];
     float2 motion = motionT[pixel.xy];
-    uint2 previousPixel = min(max(pixel.xy + int2(motion), 1), (viewContext.renderResolution.xy-1));
+    float2 previousPixel = pixel.xy + motion + 0.5;
+    previousPixel = min(max(1, previousPixel), (viewContext.renderResolution.xy-1));
     cd.previousPixel = previousPixel;
+    cd.previousUV = saturate((previousPixel) / viewContext.renderResolution.xy);
     
     Texture2D<float> previousDepth = ResourceDescriptorHeap[viewContext.HZB];
     float3 previousClipSpace = float3(previousPixel * viewContext.renderResolution.zw * 2 - 1, previousDepth[previousPixel]);
@@ -1227,7 +1230,7 @@ float2 bary)
 static uint maxFrameFilteringCount = 12;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    if(rand <= (current.color_W.w / (max(previous.color_W.w * 1, 0.00001) + current.color_W.w)))
+    if(rand <= (current.color_W.w / (previous.color_W.w + current.color_W.w)))
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.hit_Wsum.xyz = current.hit_Wsum.xyz;
@@ -1267,8 +1270,8 @@ HLSL::GIReservoirCompressed PackGIReservoir(HLSL::GIReservoir r)
     result.color = r.color_W.xyz;
     result.Wcount_W = (asuint(f32tof16(r.dir_Wcount.w)) << 16) + asuint(f32tof16(r.color_W.w));
     //result.dir = Pack_R11G11B10_FLOAT(normalize(r.dir_Wcount.xyz) * 0.5 + 0.5);
-    result.dir = normalize(r.dir_Wcount.xyz) * 0.5 + 0.5;
-    result.dir = r.dir_Wcount.xyz;
+    //result.dir = normalize(r.dir_Wcount.xyz) * 0.5 + 0.5;
+    //result.dir = r.dir_Wcount.xyz;
     result.hit_Wsum = r.hit_Wsum;
     return result;
 }
@@ -1280,8 +1283,9 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
     result.color_W.w = f16tof32(r.Wcount_W & 0xffff);
     result.dir_Wcount.w = f16tof32(r.Wcount_W >> 16u);
     //result.dir_Wcount.xyz = normalize(Unpack_R11G11B10_FLOAT(r.dir) * 2 - 1);
-    result.dir_Wcount.xyz = normalize(r.dir * 2 - 1);
-    result.dir_Wcount.xyz = r.dir;
+    result.dir_Wcount.xyz = float3(0,1,0);
+    //result.dir_Wcount.xyz = normalize(r.dir * 2 - 1);
+    //result.dir_Wcount.xyz = r.dir;
     result.hit_Wsum = r.hit_Wsum;
     return result;
 }
@@ -1670,7 +1674,7 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
     
     float W = dot(bounceLight.xyz, float3(0.3, 0.59, 0.11));
     
-    float distDiff = saturate((abs(length(r.hit_Wsum.xyz - bounceHit)) - 0.001) * 10000);
+    float distDiff = length(r.hit_Wsum.xyz - bounceHit) * 10 - 0.001;
     float wDiff = 0;//saturate(abs(W - r.color_W.w));
     float likeness = 1.0f-saturate(distDiff + wDiff);
     
@@ -1678,11 +1682,15 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
     if(fail)
     {
         r = og;
+        //r.hit_Wsum.w /= r.dir_Wcount.w;
+        //r.dir_Wcount.w = 1;
         
         HLSL::GIReservoir newR;
         newR.color_W = float4(bounceLight.xyz, W);
         newR.dir_Wcount = float4(bounceNorm, r.dir_Wcount.w);
         newR.hit_Wsum = float4(bounceHit, r.hit_Wsum.w);
+        //newR.dir_Wcount = float4(bounceNorm, 1);
+        //newR.hit_Wsum = float4(bounceHit, W);
         
         UpdateGIReservoir(r, newR, nextRand(seed));
     }

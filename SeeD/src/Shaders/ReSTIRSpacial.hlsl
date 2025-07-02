@@ -105,6 +105,7 @@ GlobalRootSignature SeeDRootSignatureRT =
 [shader("raygeneration")]
 void RayGen()
 {
+    //return;
     uint2 dtid = DispatchRaysIndex().xy;
     if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y) return;
     
@@ -121,7 +122,7 @@ void RayGen()
     
     int pattern = (dtid.x + dtid.y + rtParameters.passNumber + viewContext.frameNumber) % 2;
     //float2 radius = 12 * (2.0-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.0);
-    float2 radius = 68.0 * lerp(nextRand(seed), 1, 0.66);
+    float2 radius = 18.0;// * lerp(nextRand(seed), 1, 0.66);
     uint spacialReuse = 0;
     for (uint i = 0; i < poissonDiskCount; i++)
     {
@@ -132,12 +133,12 @@ void RayGen()
         {
             GBufferCameraData cdNeightbor = GetGBufferCameraData(pixel.xy);
             
-            if(abs(cd.viewDist - cdNeightbor.viewDist) > (0.2)) continue;
+            if(abs(cd.viewDist - cdNeightbor.viewDist) > (0.1)) continue;
             if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.9) continue;
             
             HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
-            
-            UpdateGIReservoir(r, rNeightbor, nextRand(seed) * 10.1);
+            ScaleGIReservoir(rNeightbor, 1);
+            UpdateGIReservoir(r, rNeightbor, nextRand(seed));
             
             spacialReuse++;
         }
