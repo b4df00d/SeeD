@@ -122,7 +122,7 @@ void RayGen()
     
     int pattern = (dtid.x + dtid.y + rtParameters.passNumber + viewContext.frameNumber) % 2;
     //float2 radius = 12 * (2.0-rtParameters.passNumber) * lerp(nextRand(seed), 1, 0.0);
-    float2 radius = 18.0;// * lerp(nextRand(seed), 1, 0.66);
+    float2 radius = 17.0;// * lerp(nextRand(seed), 1, 0.66);
     uint spacialReuse = 0;
     for (uint i = 0; i < poissonDiskCount; i++)
     {

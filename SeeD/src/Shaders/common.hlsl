@@ -875,6 +875,7 @@ struct GBufferCameraData
     float viewDistDiff;
     uint2 previousPixel;
     float2 previousUV;
+    float previousViewDist;
 };
 GBufferCameraData GetGBufferCameraData(uint2 pixel)
 {
@@ -898,13 +899,13 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     
     Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];
     float2 motion = motionT[pixel.xy];
-    float2 previousPixel = pixel.xy + motion + 0.5;
-    previousPixel = min(max(1, previousPixel), (viewContext.renderResolution.xy-1));
-    cd.previousPixel = previousPixel;
-    cd.previousUV = saturate((previousPixel) / viewContext.renderResolution.xy);
+    cd.previousPixel = min(max(1, pixel.xy + int2(motion * viewContext.renderResolution.xy)), (viewContext.renderResolution.xy-1));
+    float2 previousPixel = ((pixel.xy+0.5)*viewContext.renderResolution.zw) + motion;
+    //previousPixel = min(max(1, previousPixel), (viewContext.renderResolution.xy-1));
+    cd.previousUV = saturate(previousPixel);
     
     Texture2D<float> previousDepth = ResourceDescriptorHeap[viewContext.HZB];
-    float3 previousClipSpace = float3(previousPixel * viewContext.renderResolution.zw * 2 - 1, previousDepth[previousPixel]);
+    float3 previousClipSpace = float3(cd.previousUV * 2 - 1, previousDepth[cd.previousPixel]);
     float4 previousWorldSpace = mul(cd.camera.previousViewProj_inv, float4(previousClipSpace.x, -previousClipSpace.y, previousClipSpace.z, 1));
     previousWorldSpace.xyz /= previousWorldSpace.w;
     
@@ -916,6 +917,7 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     cd.viewDist = rayLength;
     cd.worldPos = worldSpace.xyz;
     cd.viewDistDiff = abs(rayLength - previousRayLength);
+    cd.previousViewDist = previousRayLength;
     
     cd.offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.005) + (cd.worldNorm * cd.viewDist * 0.002);
     
@@ -949,9 +951,13 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     if(textureIndex != ~0)
     {
         Texture2D<float4> albedo = ResourceDescriptorHeap[textureIndex];
+        #ifdef RAY_DISPATCH
+        s.albedo *= albedo.SampleLevel(samplerLinear, uv, 3);
+        #else
         s.albedo *= albedo.Sample(samplerLinear, uv);
-        //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
-        if(length(s.albedo.xyz) < 0.1) s.albedo.xyz = 1;
+        #endif
+        s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
+        if(length(s.albedo.xyz) < 0.01) s.albedo.xyz = 1;
     }
     
     s.roughness = material.parameters[1];
@@ -959,7 +965,11 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     if(textureIndex != ~0)
     {
         Texture2D<float4> roughtness = ResourceDescriptorHeap[textureIndex];
+        #ifdef RAY_DISPATCH
+        s.roughness *= roughtness.SampleLevel(samplerLinear, uv, 3).x;
+        #else
         s.roughness *= roughtness.Sample(samplerLinear, uv).x;
+        #endif
     }
     
     s.metalness = material.parameters[2];
@@ -967,7 +977,11 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     if(textureIndex != ~0)
     {
         Texture2D<float4> metalness = ResourceDescriptorHeap[textureIndex];
-        s.metalness *= metalness.Sample(samplerLinear, uv).x;
+        #ifdef RAY_DISPATCH
+        s.metalness = metalness.SampleLevel(samplerLinear, uv, 3).x;
+        #else
+        s.metalness = metalness.Sample(samplerLinear, uv).x;
+        #endif
     }
     
     s.normal = normal;
@@ -977,11 +991,15 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     if(textureIndex != ~0)
     {
         Texture2D<float4> normals = ResourceDescriptorHeap[textureIndex];
+        #ifdef RAY_DISPATCH
+        s.normal *= normals.SampleLevel(samplerLinear, uv, 3).xyz;
+        #else
         s.normal *= normals.Sample(samplerLinear, uv).xyz;
+        #endif
     }
     
-    s.specularTint = 0;
-    s._specular = 0;
+    s.specularTint = 1;
+    s._specular = 1;
     s.sheen = 0;
     s.sheenTint = 0.5;
     s.anisotropic = 0;
@@ -1077,10 +1095,6 @@ float3 mon2lin(float3 x)
 
 float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor)
 {
-    s.subsurface = 0.0;
-    s.roughness = 0.5;
-    s.metalness = 0.0;
-    s._specular = 0.0;
     s.normal = normalize(s.normal);
     L = normalize(-L);
     V = normalize(-V);
@@ -1187,31 +1201,7 @@ float2 bary)
     float2 uv3 = verticesData[i3].uv;
 
     float2 uv = ((1 - bary.x - bary.y) * uv1 + bary.x * uv2 + bary.y * uv3);
-
-    SurfaceData s;
-    if (material.textures[0] != ~0)
-    {
-        Texture2D<float4> albedo = ResourceDescriptorHeap[material.textures[0]];
-        s.albedo = albedo.SampleLevel(samplerLinear, uv, 0);
-        //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
-        if(length(s.albedo.xyz) < 0.1) s.albedo.xyz = 1;
-    }
-    else
-    {
-        s.albedo = 0.66;
-    }
     
-    if (material.textures[2] != ~0)
-    {
-        Texture2D<float4> roughness = ResourceDescriptorHeap[material.textures[2]];
-        s.roughness = roughness.SampleLevel(samplerLinear, uv, 0).x;
-    }
-    else
-    {
-        s.roughness = 0.99;
-    }
-    s.metalness = 0.1;
-
     float3 nrm1 = verticesData[i1].normal;
     float3 nrm2 = verticesData[i2].normal;
     float3 nrm3 = verticesData[i3].normal;
@@ -1221,13 +1211,13 @@ float2 bary)
     float4x4 worldMatrix = instance.unpack(instance.current);
     float3 worldNormal = mul((float3x3) worldMatrix, normal);
     worldNormal = normalize(worldNormal);
-    s.normal = worldNormal;
-    //s.normal = normal;
+
+    SurfaceData s = GetSurfaceData(material, uv, worldNormal, 0, 0);
     
     return s;
 }
 
-static uint maxFrameFilteringCount = 12;
+static uint maxFrameFilteringCount = 6;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
     if(rand <= (current.color_W.w / (previous.color_W.w + current.color_W.w)))
@@ -1316,8 +1306,8 @@ float3 getCosHemisphereSample(inout uint randSeed, float3 hitNorm)
     // Get our cosine-weighted hemisphere lobe sample direction
     float3 dir = normalize(tangent * (r * cos(phi).x) + bitangent * (r * sin(phi)) + hitNorm.xyz * sqrt(1 - randVal.x));
     
-    int3 dirInt = dir * 128;
-    dir = normalize(float3(dirInt));
+    //int3 dirInt = dir * 128;
+    //dir = normalize(float3(dirInt));
     
     return dir;
 }
@@ -1475,7 +1465,7 @@ float4 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
         color += DirectLight(rtParameters, s, hitPos, depth, seed);
     }
     
-    #if 1
+    #if 0
     if (depth + 1 < HLSL::maxRTDepth)
     {
         float3 bounceDir;
@@ -1483,8 +1473,23 @@ float4 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
         float3 bounceHit;
         color.xyz += IndirectLightR(rtParameters, s, hitPos, depth, seed, bounceDir, bounceNorm, bounceHit).xyz;
     }
-    #else
+    #elif 1
     color.xyz += SampleProbes(rtParameters, hitPos, s, true).xyz;
+    #else
+    if(nextRand(seed) > 0.66)
+    {
+        if (depth + 1 < HLSL::maxRTDepth)
+        {
+            float3 bounceDir;
+            float3 bounceNorm;
+            float3 bounceHit;
+            color.xyz += IndirectLightR(rtParameters, s, hitPos, depth, seed, bounceDir, bounceNorm, bounceHit).xyz;
+        }
+    }
+    else
+    {
+        color.xyz += SampleProbes(rtParameters, hitPos, s, true).xyz;
+    }
     #endif
     
     return color;

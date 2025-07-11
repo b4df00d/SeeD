@@ -13,6 +13,7 @@ public:
     struct Asset
     {
         String path;
+        String originalFilePath;
         AssetLibrary::AssetType type;
         uint indexInVector = ~0;
     };
@@ -156,16 +157,23 @@ public:
         return type;
     }
 
-    assetID Add(String path)
+    assetID Add(String path, String originalFilePath)
     {
         ZoneScoped;
         assetID id;
         id.hash = std::hash<std::string>{}(path);
         lock.lock();
         map[id].path = path;
+        map[id].originalFilePath = originalFilePath;
         map[id].type = GetType(id);
         lock.unlock();
         return id;
+    }
+
+    assetID AddHardCoded(String path)
+    {
+        ZoneScoped;
+        return Add(path, path);
     }
 
     String GetPath(assetID id)
@@ -518,13 +526,12 @@ public:
         assetID id;
         id.hash = std::hash<std::string>{}(name);
         path = std::format("{}{}.tex", AssetLibrary::instance->assetsPath.c_str(), id.hash);
-        id.hash = std::hash<std::string>{}(name);
 
         std::ifstream fin(path, std::ios::binary);
         if (fin.is_open())
         {
             fin.close();
-            return AssetLibrary::instance->Add(path);
+            return AssetLibrary::instance->Add(path, name);
             //return id;
         }
         return assetID::Invalid;
@@ -738,7 +745,7 @@ public:
         CloseHandle(metadataFileHandle);
         CloseHandle(texturedataFileHandle);
 
-        return AssetLibrary::instance->Add(path);
+        return AssetLibrary::instance->Add(path, name);
     }
 };
 TextureLoader* TextureLoader::instance = nullptr;
@@ -810,7 +817,7 @@ public:
             fout.close();
         }
 
-        return AssetLibrary::instance->Add(path);
+        return AssetLibrary::instance->Add(path, name);
     }
 
     // also DirectXMesh can do meshlets https://github.com/microsoft/DirectXMesh
@@ -1209,7 +1216,7 @@ public:
 
         World::Entity shader;
         shader.Make(Components::Shader::mask);
-        shader.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
+        shader.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl", "src\\Shaders\\mesh.hlsl");
 
         IOs::Log("  materials : {}", _scene->mNumMaterials);
         for (unsigned int i = 0; i < _scene->mNumMaterials; i++)
@@ -1255,6 +1262,10 @@ public:
             {
                 newMat.prameters[j] = { 1 };
             }
+            newMat.prameters[0] = { 1 }; // albedo
+            newMat.prameters[1] = { 1 }; // roughness
+            newMat.prameters[2] = { 0 }; // metalness
+            newMat.prameters[3] = { 1 }; // normal
 
             matIndexToEntity.push_back(ent);
         }

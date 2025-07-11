@@ -228,6 +228,7 @@ class HierarchyWindow : public EditorWindow
     std::vector<TreeNode> nodes;
 
     int componentFilterIndex = 0;
+    ImGuiSelectionBasicStorage selection;
     
     void TreeNodeSetOpen(TreeNode* node, bool open)
     {
@@ -421,9 +422,18 @@ public:
             editorState.dirtyHierarchy |= true;
         }
         {
-            static ImGuiSelectionBasicStorage selection;
+            //ImGuiSelectionBasicStorage previousSelection = selection;
             if (editorState.selectedObject == entityInvalid)
                 selection.Clear();
+            
+            void* it = NULL;
+            ImGuiID id = 0;
+            selection.GetNextSelectedItem(&it, &id);
+            if (id != editorState.selectedObject)
+            {
+                selection.Clear();
+            }
+
             if (world.childs.size() > 0 && ImGui::BeginChild("##Tree", ImVec2(-FLT_MIN, -FLT_MIN), ImGuiChildFlags_FrameStyle))
             {
                 ImGuiMultiSelectFlags ms_flags = ImGuiMultiSelectFlags_ClearOnEscape | ImGuiMultiSelectFlags_BoxSelect2d;
@@ -679,14 +689,12 @@ public:
         if (ImGui::Button("Select"))
         {
             *(int*)handle = selectedEntity.id;
-            handle = nullptr;
-            isOpen = false;
+            Close();
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel"))
         {
-            handle = nullptr;
-            isOpen = false;
+            Close();
         }
 
         ImGui::End();
@@ -709,7 +717,7 @@ public:
             }
             else
             {
-                entry.name = "toto";
+                entry.name = "--";
             }
             entry.handle = entity.id;
             entries.push_back(entry);
@@ -718,8 +726,311 @@ public:
         selectedEntity = *(int*)handle;
         isOpen = true;
     }
+
+    void Close()
+    {
+        handle = nullptr;
+        isOpen = false;
+    }
 };
 HandlePickingWindow handlePickingWindow;
+
+class FileBrowserWindow : public EditorWindow
+{
+    String OriginalPath;
+    String NavigationGuess;
+    String EditedPath;
+    String Selected;
+    String RenameResult;
+    std::set<String> Ext;
+
+    enum class FileBrowserOption
+    {
+        DIRECTORY,
+        FILE
+    };
+    FileBrowserOption Option = FileBrowserOption::FILE;
+
+    const float Width = 500.0f;
+    const float Height = 400.0f;
+
+    std::vector<String> Directories;
+    std::vector<String> Files;
+
+    const float doubleClickTime = 200; // ms
+    float doubleClickTimer; // ms
+    bool selectedByDoubleClick = false;
+
+    typedef void (*callback)(String);
+    callback resultCB;
+
+public:
+    FileBrowserWindow() : EditorWindow("FileBrowserWindow") { isOpen = false; OriginalPath = ""; }
+
+    bool Open(callback result)
+    {
+        resultCB = result;
+        return Open(FileBrowserOption::FILE, {});
+    }
+
+    bool Open(FileBrowserOption InOption, const std::set<String>& InExt)
+    {
+        if(OriginalPath.empty())
+            OriginalPath = std::filesystem::current_path().string();
+
+        // Setup 
+        isOpen = true;
+        Option = InOption;
+        Ext = InExt;
+        selectedByDoubleClick = false;
+        TryApplyPath(OriginalPath);
+
+        return true;
+    }
+
+    bool FetchInternal()
+    {
+        if (!isOpen)
+            return false;
+
+        doubleClickTimer += Time::instance->deltaSeconds * 1000;
+
+        String OutSelectedPath;
+
+        bool result = false;
+        ImGuiIO& io = ImGui::GetIO();
+        ImGui::SetNextWindowSize({ Width, Height });
+        ImVec2 pos = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+        ImGui::SetNextWindowPos(pos, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowFocus();
+        if (ImGui::Begin(GetLabel().c_str(), nullptr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+        {
+            EditNavigation();
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            EditContent();
+            ImGui::Spacing();
+
+            // Extension text in the bottom right
+            String ext;
+            switch (Option)
+            {
+            case FileBrowserOption::DIRECTORY:
+                ext = "Directory";
+                break;
+            case FileBrowserOption::FILE:
+                for (auto e : Ext)
+                {
+                    if (!ext.empty())
+                        ext += ", ";
+                    ext += e;
+                }
+                break;
+            }
+            if (!ext.empty())
+            {
+                ImGui::Text((" Ext: " + ext).c_str());
+                ImGui::SameLine();
+            }
+
+            // Select / Cancel buttons
+            const ImGuiStyle style = ImGui::GetStyle();
+            constexpr ImVec2 buttonSize(100.f, 0.f);
+            const float widthNeeded = buttonSize.x + style.ItemSpacing.x + buttonSize.x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - widthNeeded);
+            if (ImGui::Button("Cancel", buttonSize))
+            {
+                OutSelectedPath = "";
+                result = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Select", buttonSize) || selectedByDoubleClick)
+            {
+                switch (Option)
+                {
+                case FileBrowserOption::DIRECTORY:
+                    OutSelectedPath = EditedPath;
+                    break;
+                case FileBrowserOption::FILE:
+                    OutSelectedPath = Selected.empty() ?
+                        "" : EditedPath + "\\" + Selected;
+                    break;
+                }
+                result = true;
+                OriginalPath = EditedPath; // keep the last directory ?
+                resultCB(OutSelectedPath);
+            }
+
+            ImGui::End();
+        }
+
+        return result;
+    }
+
+    String GetLabel() const
+    {
+        return "File Browser##" + OriginalPath;
+    }
+
+    void Refresh()
+    {
+        // 1. Find current directory
+        const std::filesystem::path path(EditedPath.c_str());
+        if (!std::filesystem::exists(path))
+        {
+            TryPopPath();
+            return;
+        }
+
+        // 2. Store directory content
+        Directories.clear();
+        Files.clear();
+        for (auto& entry : std::filesystem::directory_iterator(path))
+        {
+            if (entry.is_directory())
+            {
+                Directories.push_back(entry.path().filename().string());
+            }
+            else if (Option != FileBrowserOption::DIRECTORY)
+            {
+                // Filter extensions
+                if (!Ext.empty())
+                {
+                    if (!entry.path().has_extension())
+                        continue;
+                    const String ext = entry.path().extension().string();
+                    if (!Ext.contains(ext))
+                        continue;
+                }
+                Files.push_back(entry.path().filename().string());
+            }
+        }
+
+        Selected = "";
+        RenameResult = "";
+        NavigationGuess = "";
+    }
+
+    bool TryPopPath()
+    {
+        // Pop until exists or at root
+        std::filesystem::path path(EditedPath.c_str());
+        while (!std::filesystem::exists(path) && path.has_parent_path())
+            path = path.parent_path();
+        return TryApplyPath(path.parent_path().string());
+    }
+
+    bool TryApplyPath(const String& InString)
+    {
+        EditedPath = InString;
+        Refresh();
+        return true;
+    }
+
+    void EditNavigation()
+    {
+        constexpr ImGuiInputTextFlags flags =
+            ImGuiInputTextFlags_CharsNoBlank |
+            ImGuiInputTextFlags_AutoSelectAll |
+            ImGuiInputTextFlags_EnterReturnsTrue;
+            //|ImGuiInputTextFlags_CallbackCompletion |
+            //ImGuiInputTextFlags_CallbackHistory;
+        if (ImGui::InputText("##Path", EditedPath.data(), EditedPath.capacity()+1, flags))
+        {
+            EditedPath == ".." ?
+                TryPopPath() :
+                TryApplyPath(EditedPath);
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("^"))
+            TryPopPath();
+        ImGui::SameLine();
+        if (ImGui::Button("Refresh"))
+            Refresh();
+    }
+    void EditContent()
+    {
+        constexpr ImVec2 buttonSize(100.f, 0.f);
+
+        const ImGuiStyle style = ImGui::GetStyle();
+        const ImVec2 size = {
+            Width - style.WindowPadding.x * 2.0f,
+            Height - style.WindowPadding.y * 2.0f - 115.0f
+        };
+        if (ImGui::BeginListBox("##FileBrowserContent", size))
+        {
+            ImGui::Spacing();
+            ImGui::Spacing();
+
+            if (!EditedPath.empty())
+                if (ImGui::Selectable("  ..##FileListBack"))
+                    TryPopPath();
+
+            String newDir;
+            for (auto& dir : Directories)
+            {
+                if (ContentEntry(dir, true))
+                {
+                    if (dir == Selected && (doubleClickTimer < doubleClickTime))
+                    {
+                        newDir = dir;
+                    }
+                    else
+                    {
+                        Selected = dir;
+                    }
+                    doubleClickTimer = 0;
+                }
+            }
+
+            for (auto& file : Files)
+            {
+                if (ContentEntry(file, false))
+                {
+                    if (file == Selected && (doubleClickTimer < doubleClickTime))
+                    {
+                        Selected = file;
+                        selectedByDoubleClick = true;
+                    }
+                    else
+                    {
+                        Selected = file;
+                    }
+                    doubleClickTimer = 0;
+                }
+            }
+
+            if (!newDir.empty())
+                TryApplyPath(EditedPath + "\\" + newDir);
+
+            ImGui::Spacing();
+            ImGui::Spacing();
+
+            ImGui::EndListBox();
+        }
+    }
+
+    bool ContentEntry(const String& InEntry, bool InIsDir)
+    {
+        const bool selected = Selected == InEntry;
+        return ImGui::Selectable(((InIsDir ? "- " : "  ") + InEntry + "##ListEntry").c_str(), selected);
+    }
+
+    void Update() override final
+    {
+        ZoneScoped;
+        if (FetchInternal())
+            Close();
+    }
+
+    void Close()
+    {
+        isOpen = false;
+    }
+};
+FileBrowserWindow fileBrowserWindow;
 
 #include "ComponentsUIMetaData.h"
 class PropertyWindow : public EditorWindow
@@ -763,7 +1074,8 @@ public:
                             auto& m = metaData.members[memberIndex];
                             char* data = cmpData + m.offset;
                             ImGui::Text(m.name.c_str());
-                            ImGui::SameLine();
+                            if(m.dataCount == 1)
+                                ImGui::SameLine();
                             for (uint dc = 0; dc < m.dataCount; dc++)
                             {
                                 ImGui::PushID(pushID++);
@@ -798,15 +1110,42 @@ public:
                                 }
                                     break;
                                 case PropertyTypes::_assetID:
-                                    ImGui::InputInt("", &((int*)data)[dc]);
+                                    assetID id = ((assetID*)data)[dc];
+                                    if (AssetLibrary::instance->map.contains(id))
+                                    {
+                                        if (ImGui::SmallButton("o"))
+                                        {
+                                            fileBrowserWindow.Open([](String selectedPath)
+                                                {
+                                                    int toto = 0;
+                                                    //add the path to the assetlib
+                                                    //assign the new id to the assetID
+                                                }
+                                            );
+                                        }
+                                        ImGui::SameLine();
+                                        ImGui::Text(AssetLibrary::instance->map[id].originalFilePath.c_str());
+                                    }
                                     break;
                                 case PropertyTypes::_Handle:
                                 {
                                     World::Entity handleTarget = ((int*)data)[dc];
-                                    String handleName = "toto";
-                                    if (handleTarget != entityInvalid && handleTarget.Has<Components::Name>())
+                                    String handleName = "--";
+                                    if (handleTarget != entityInvalid)
                                     {
-                                        handleName = handleTarget.Get<Components::Name>().name;
+                                        if(handleTarget.Has<Components::Name>())
+                                            handleName = handleTarget.Get<Components::Name>().name;
+
+                                        if (ImGui::SmallButton("->"))
+                                        {
+                                            editorState.selectedObject = handleTarget;
+                                        }
+                                        ImGui::SameLine();
+                                        if (ImGui::SmallButton("x"))
+                                        {
+                                            ((int*)data)[dc] = entityInvalid;
+                                        }
+                                        ImGui::SameLine();
                                     }
                                     if (ImGui::SmallButton("o"))
                                     {
@@ -1113,7 +1452,7 @@ public:
                 if (ImGui::MenuItem("Load World"))
                 {
                     editorState.selectedObject = {};
-                    std::string file = "Save";
+                    String file = "Save";
                     World::instance->Load(file);
                 }
                 if (ImGui::MenuItem("Clear World"))

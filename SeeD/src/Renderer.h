@@ -981,9 +981,9 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         depth.Register("depth", view);
-        cullingResetShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingReset.hlsl");
-        cullingInstancesShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingInstances.hlsl");
-        cullingMeshletsShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\cullingMeshlets.hlsl");
+        cullingResetShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingReset.hlsl");
+        cullingInstancesShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingInstances.hlsl");
+        cullingMeshletsShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingMeshlets.hlsl");
     }
     void Setup(View* view) override
     {
@@ -1080,7 +1080,7 @@ public:
         depth.Register("depth", view);
         motion.Register("motion", view);
         motion.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16_FLOAT, "motion");
-        meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
+        meshShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
     {
@@ -1132,7 +1132,7 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        rayProbesDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracingprobes.hlsl");
+        rayProbesDispatchShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracingprobes.hlsl");
     }
     void Setup(View* view) override
     {
@@ -1193,10 +1193,10 @@ public:
         albedo.Register("albedo", view);
         depth.Register("depth", view);
         normal.Register("normal", view);
-        rayDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracing.hlsl");
-        ReSTIRSpacialShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\ReSTIRSpacial.hlsl");
-        rayValidateDispatchShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\raytracingValidate.hlsl");
-        applyLightingShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\lighting.hlsl");
+        rayDispatchShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracing.hlsl");
+        ReSTIRSpacialShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\ReSTIRSpacial.hlsl");
+        rayValidateDispatchShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracingValidate.hlsl");
+        applyLightingShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\lighting.hlsl");
 
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
         Shader& ReSTIRSpacial = *AssetLibrary::instance->Get<Shader>(ReSTIRSpacialShader.Get().id, true);
@@ -1313,7 +1313,7 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        indirectDebugInitShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\debugInit.hlsl");
+        indirectDebugInitShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debugInit.hlsl");
     }
     void Setup(View* view) override
     {
@@ -1352,7 +1352,7 @@ public:
         ZoneScoped;
         lighted.Register("lighted", view);
         depth.Register("depth", view);
-        indirectDebugShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\debug.hlsl");
+        indirectDebugShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debug.hlsl");
     }
     void Setup(View* view) override
     {
@@ -1400,7 +1400,7 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         depth.Register("depth", view);
-        meshShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl");
+        meshShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
     {
@@ -1444,8 +1444,8 @@ public:
         normal.Register("normal", view);
         motion.Register("motion", view);
         depth.Register("depth", view);
-        postProcessShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\PostProcess.hlsl");
-        TAAShader.Get().id = AssetLibrary::instance->Add("src\\Shaders\\TAA.hlsl");
+        postProcessShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\PostProcess.hlsl");
+        TAAShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\TAA.hlsl");
 
         ppparams.P = 1;
         ppparams.a = 1;

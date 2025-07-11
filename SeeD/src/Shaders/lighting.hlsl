@@ -63,6 +63,11 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     }
 #endif
     
+#if 0
+        RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+        GI[dtid.xy] = cd.viewDistDiff;
+#endif
+    
     if(cd.viewDist > 5000)
         lighted[dtid.xy] = float4(Sky(cd.viewDir) * 0.25, 1);
     
