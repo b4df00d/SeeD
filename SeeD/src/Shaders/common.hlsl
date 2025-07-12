@@ -205,7 +205,7 @@ uint xxhash(in uint p)
 
 uint xxhash(in uint2 pixel)
 {
-    uint p = viewContext.frameTime << 26 | pixel.x << 13 | pixel.y;
+    uint p = viewContext.frameTime << 20 | pixel.x << 10 | pixel.y;
     //p = 0 << 26 | pixel.x << 13 | pixel.y;
     return xxhash(p);
 }
@@ -216,7 +216,7 @@ uint initRand(uint2 pixel)
     //pixel *= 38742.6612f;
     //return initRand(pixel.x + (uint(viewContext.frameTime) % 123) * 2.621f, pixel.y + (uint(viewContext.frameTime) % 431) * 9.432f, 3);
     //return initRand(pixel.x + viewContext.frameTime, pixel.y + viewContext.frameTime, 3);
-    return initRand(pixel.x, pixel.y, 3);
+    //return initRand(pixel.x, pixel.y, 3);
 }
 
 // Takes our seed, updates it, and returns a pseudorandom float in [0..1]
@@ -1217,16 +1217,17 @@ float2 bary)
     return s;
 }
 
-static uint maxFrameFilteringCount = 6;
+static uint maxFrameFilteringCount = 12;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    if(rand <= (current.color_W.w / (previous.color_W.w + current.color_W.w)))
+    //if(rand <= (current.color_W.w / (previous.color_W.w + current.color_W.w)))
+    if(rand <= (current.color_W.w / ((previous.hit_Wsum.w / previous.dir_Wcount.w) + current.color_W.w)))
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.hit_Wsum.xyz = current.hit_Wsum.xyz;
         previous.dir_Wcount.xyz = current.dir_Wcount.xyz;
     }
-    previous.hit_Wsum.w += current.color_W.w;
+    previous.hit_Wsum.w += current.hit_Wsum.w;
     previous.dir_Wcount.w += current.dir_Wcount.w;
 }
 /*
@@ -1679,11 +1680,11 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
     
     float W = dot(bounceLight.xyz, float3(0.3, 0.59, 0.11));
     
-    float distDiff = length(r.hit_Wsum.xyz - bounceHit) * 10 - 0.001;
+    float distDiff = length(r.hit_Wsum.xyz - bounceHit);
     float wDiff = 0;//saturate(abs(W - r.color_W.w));
     float likeness = 1.0f-saturate(distDiff + wDiff);
     
-    float fail = likeness < 0.5 ? 1 : 0;
+    float fail = likeness < 0.99 ? 1 : 0;
     if(fail)
     {
         r = og;

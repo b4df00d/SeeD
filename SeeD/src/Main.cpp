@@ -258,7 +258,9 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     Engine engine;
     engine.On(window);
     engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
-    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\5v5GameMap.fbx"); 
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\5v5GameMap.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Japanese restaurant\\source\\Inakaya_Cycles2.fbx");
+    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\bridge\\source\\nature-and-cyvilization.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Human\\the-queen-of-swords\\the queen of swords.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\_Environment.fbx");
