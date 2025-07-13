@@ -2,7 +2,7 @@
 #ifndef __STRUCTS__
 #define __STRUCTS__
 
-#ifdef __cplusplus // bah c´est surtout pour par avoir ca dans le HLSL
+#ifdef __cplusplus // bah cï¿½est surtout pour par avoir ca dans le HLSL
 #define SeeDalign __declspec(align(16))
 #else
 #define SeeDalign
@@ -26,6 +26,27 @@ struct Options
 
 namespace HLSL
 {
+#ifdef __cplusplus // bah cï¿½est surtout pour par avoir ca dans le HLSL
+    #define CommonResourcesIndicesRegister 0
+    #define ViewContextRegister 1
+    #define EditorContextRegister 2
+    #define Custom1Register 3
+    #define Custom2Register 4
+    #define InstanceIndexIndirectRegister 5
+    #define meshletIndexIndirectRegister 6
+    /*
+#else
+    #define CommonResourcesIndicesRegister b0
+    #define ViewContextRegister b1
+    #define EditorContextRegister b2
+    #define Custom1Register b3
+    #define Custom2Register b4
+    #define InstanceIndexIndirectRegister b5
+    #define meshletIndexIndirectRegister b6
+    */
+#endif
+    
+    
     static const bool reverseZ = true;
     
     static const uint max_vertices = 64;
@@ -56,10 +77,6 @@ namespace HLSL
         uint instanceCount;
         uint instancesGPUHeapIndex; // only for instances created on GPU
         uint instanceGPUCount;
-        
-        uint debugBufferHeapIndex;
-        uint debugVerticesHeapIndex;
-        uint debugVerticesCountHeapIndex;
     };
     
     struct ViewContext
@@ -81,6 +98,7 @@ namespace HLSL
         uint roughnessIndex;
         uint normalIndex;
         uint motionIndex;
+        uint objectIDIndex;
         uint depthIndex;
         uint reverseZ;
         uint HZB;
@@ -143,8 +161,8 @@ namespace HLSL
         float4x4 previous;
         uint meshIndex;
         uint materialIndex;
+        uint objectID;
         uint pad1;
-        uint pad2;
         
         float4x4 unpack(float4x4 mat)
         {
@@ -158,7 +176,7 @@ namespace HLSL
     };
     
     // Data structure to match the command signature used for ExecuteIndirect.
-    #ifdef __cplusplus // bah c´est surtout pour par avoir ca dans le HLSL
+    #ifdef __cplusplus // bah cï¿½est surtout pour par avoir ca dans le HLSL
     #else
     typedef uint2 D3D12_GPU_VIRTUAL_ADDRESS;
     struct D3D12_DRAW_ARGUMENTS 
@@ -377,9 +395,19 @@ packed :
     // ----------------- End RT stuff ------------------
     
     //----------------------- DEBUG -----------------------
-    struct DebugParameters
+    struct EditorContext
     {
-	    D3D12_GPU_VIRTUAL_ADDRESS cbv;
+	    //D3D12_GPU_VIRTUAL_ADDRESS cbv;
+        
+        uint debugBufferHeapIndex;
+        uint debugVerticesHeapIndex;
+        uint debugVerticesCountHeapIndex;
+        uint selectionResultIndex;
+    };
+    
+    struct SelectionResult
+    {
+        uint objectID;
     };
 }
 #endif // __STRUCTS__

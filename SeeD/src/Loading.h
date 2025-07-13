@@ -1513,7 +1513,7 @@ public :
         {
             D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[2] = {};
             argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[0].Constant.RootParameterIndex = 4;
+            argumentDescs[0].Constant.RootParameterIndex = InstanceIndexIndirectRegister;
             argumentDescs[0].Constant.Num32BitValuesToSet = 1;
             argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
             argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
@@ -1531,11 +1531,11 @@ public :
         {
             D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
             argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[0].Constant.RootParameterIndex = 4;
+            argumentDescs[0].Constant.RootParameterIndex = InstanceIndexIndirectRegister;
             argumentDescs[0].Constant.Num32BitValuesToSet = 1;
             argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
             argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[1].Constant.RootParameterIndex = 5;
+            argumentDescs[1].Constant.RootParameterIndex = meshletIndexIndirectRegister;
             argumentDescs[1].Constant.Num32BitValuesToSet = 1;
             argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
             argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
@@ -1553,11 +1553,11 @@ public :
         {
             D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
             argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[0].Constant.RootParameterIndex = 4;
+            argumentDescs[0].Constant.RootParameterIndex = InstanceIndexIndirectRegister;
             argumentDescs[0].Constant.Num32BitValuesToSet = 1;
             argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
             argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[1].Constant.RootParameterIndex = 5;
+            argumentDescs[1].Constant.RootParameterIndex = meshletIndexIndirectRegister;
             argumentDescs[1].Constant.Num32BitValuesToSet = 1;
             argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
             argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
@@ -1575,11 +1575,11 @@ public :
         {
             D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
             argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[0].Constant.RootParameterIndex = 4;
+            argumentDescs[0].Constant.RootParameterIndex = InstanceIndexIndirectRegister;
             argumentDescs[0].Constant.Num32BitValuesToSet = 1;
             argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
             argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[1].Constant.RootParameterIndex = 5;
+            argumentDescs[1].Constant.RootParameterIndex = meshletIndexIndirectRegister;
             argumentDescs[1].Constant.Num32BitValuesToSet = 1;
             argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
             argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS;

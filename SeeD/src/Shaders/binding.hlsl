@@ -10,8 +10,9 @@
             "CBV(b1, space = 0), "\
             "CBV(b2, space = 0), "\
 			"CBV(b3, space = 0), "\
-            "RootConstants(b4, num32BitConstants = 1), "\
+			"CBV(b4, space = 0), "\
             "RootConstants(b5, num32BitConstants = 1), "\
+            "RootConstants(b6, num32BitConstants = 1), "\
             "StaticSampler(s0, "\
                             "filter         = FILTER_MIN_MAG_LINEAR_MIP_POINT, "\
                             "addressU       = TEXTURE_ADDRESS_WRAP, "\
@@ -84,31 +85,36 @@ cbuffer CommonResourcesIndices : register(b0)
     HLSL::CommonResourcesIndices commonResourcesIndices;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer viewContext : register(b1)
+cbuffer ViewContext : register(b1)
 {
     HLSL::ViewContext viewContext;
 };
 //---------------------------------------------------------------------------------------------
-#ifndef CUSTOM_ROOT_BUFFER_1 //defined by shaders to have 'personalized' data
-cbuffer Custom : register(b2)
+cbuffer EditorContext : register(b2)
 {
-    uint custom;
+    HLSL::EditorContext editorContext;
+};
+//---------------------------------------------------------------------------------------------
+#ifndef CUSTOM_ROOT_BUFFER_1 //defined by shaders to have 'personalized' data
+cbuffer Custom1 : register(b3)
+{
+    uint custom1;
 };
 #endif
 //---------------------------------------------------------------------------------------------
 #ifndef CUSTOM_ROOT_BUFFER_2
-cbuffer Nop2 : register(b3)
+cbuffer Custom2 : register(b4)
 {
-    uint notUsedYet2;
+    uint custom2;
 };
 #endif
 //---------------------------------------------------------------------------------------------
-cbuffer InstanceIndex : register(b4)
+cbuffer InstanceIndex : register(b5)
 {
     uint instanceIndexIndirect;
 };
 //---------------------------------------------------------------------------------------------
-cbuffer MeshletIndex : register(b5)
+cbuffer MeshletIndex : register(b6)
 {
     uint meshletIndexIndirect;
 };

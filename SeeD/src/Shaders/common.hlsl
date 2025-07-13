@@ -228,124 +228,6 @@ float nextRand(inout uint s)
 }
 
 
-// ------------------ DEPTH ----------------------------------
-/*
-// convert a point from post-projection space into view space
-float3 ConvertProjToView(float4 p)
-{
-    p = mul(p, camera.ipMat);
-    return (p / p.w).xyz;
-}
-// convert a depth value from post-projection space into view space
-float ConvertProjDepthToView(float z)
-{
-    return (1.f / (z * camera.ipMat._34 + camera.ipMat._44));
-}
-
-float4 WorldPosFromDepth(float d, float2 uvCoord)
-{
-    float2 screenPos = uvCoord * 2.0 - 1.0;
-
-	// Invert Y for DirectX-style coordinates.
-    screenPos.y = -screenPos.y;
-
-	// Unproject the pixel coordinate into a ray.
-    float4 world = mul(float4(screenPos, d, 1), camera.ipvMat);
-    world.xyz /= world.w;
-    return world;
-}
-//Returns World Position of a pixel from clipspace depth map
-float4 WorldPosFromDepth(Texture2D<float> depth, float2 uvCoord, float2 resolution)
-{
-    float d = depth.SampleLevel(pointSampler, uvCoord, 0);
-    return WorldPosFromDepth(d, uvCoord);
-}
-
-float4 WorldPosFromDepth(RWTexture2D<float> depth, float2 uvCoord)
-{
-    float d = depth.Load(int2(uvCoord));
-    return WorldPosFromDepth(d, uvCoord);
-}
-
-float linearZ(float z, float n, float f)
-{
-    return (n) / (f + z * (n - f));
-}
-
-float linearZ01(float z, float n, float f)
-{
-    return linearZ(z, n, f) / f;
-}
-
-float absolutZ(float z, float n, float f)
-{
-    return (n / z - f) / (n - f);
-}
-*/
-
-// ----------------- FROXEL ---------------------------------------------
-/*
-uint ZToFroxel(float linearZ)
-{
-    float A = linearZ; // 1/(camera.camClipsExt.x* nonLinearZ + camera.camClipsExt.y); // this is to linearize the z but it is already fed
-    float B = -log2(A);
-    float C = B * camera.camClipsExt.z + camera.camClipsExt.w;
-    return uint(max(0.0, C));
-	//return uint(max(0.0, log2(1/(camera.camClipsExt.x * linearZ + camera.camClipsExt.y)) * camera.camClipsExt.z + camera.camClipsExt.w));
-}
-
-float FroxelToZ(float froxelZ, float specialNear, float far, int count)
-{
-    if (froxelZ < 1)
-        return 0;
-    return exp2((froxelZ - count) * (-log2(specialNear / far) / (count - 1)));
-}
-
-float3 FroxelToWorld(float3 froxel)
-{
-    float4 clipPos = float4(froxel / float3(ATMO_VOLUME_SIZE_X, ATMO_VOLUME_SIZE_Y, ATMO_VOLUME_SIZE_Z), 1);
-    clipPos.xy = clipPos.xy * 2 - 1;
-    float4 worldPos = mul(clipPos, camera.ipMat);
-    worldPos = worldPos / worldPos.w;
-    worldPos = mul(worldPos, camera.vMat);
-
-    float3 viewDir = worldPos.xyz - camera.camWorldPos.xyz;
-    float viewDist = length(viewDir);
-    viewDir = viewDir / viewDist;
-
-    viewDist = FroxelToZ(froxel.z, ATMO_VOLUME_SPECIAL_NEAR, camera.camClips.y, ATMO_VOLUME_SIZE_Z) * camera.camClips.y;
-
-    worldPos.xyz = camera.camWorldPos.xyz + viewDir * viewDist;
-
-    return worldPos.xyz;
-}
-
-float3 WorldToFroxel(float3 pixelWorldPos)
-{
-    float4 uvw = mul(float4(pixelWorldPos, 1), camera.ivpMat);
-    uvw = uvw / uvw.w;
-    uvw.xy = uvw.xy * 0.5 + 0.5;
-    //uvw.y = 1 - uvw.y;
-    //uvw.xy *= float2(ATMO_VOLUME_SIZE_X, ATMO_VOLUME_SIZE_Y);
-    float linearDepth = length(pixelWorldPos - camera.camWorldPos.xyz) / camera.camClips.y;
-    uvw.z = ZToFroxel(linearDepth);
-
-    return uvw.xyz;
-}
-
-float3 NDCToFroxel(float3 NDC, float3 pixelWorldPos)
-{
-    float3 uvw = NDC;
-    uvw.xy /= globals.screenResolution.xy;
-    uvw.y = 1 - uvw.y;
-    uvw.xy *= float2(ATMO_VOLUME_SIZE_X, ATMO_VOLUME_SIZE_Y);
-    float linearDepth = length(pixelWorldPos - camera.camWorldPos.xyz) / camera.camClips.y;
-    uvw.z = ZToFroxel(linearDepth);
-
-    return uvw;
-}
-*/
-
 // ----------------- LIGHTING ---------------------------------------------
 float DistanceFromTriangle(in float3 v1, in float3 v2, in float3 v3, in float3 p)
 {
@@ -575,110 +457,6 @@ bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
     return bCulled;
 }
 
-/*
-LightComp GetLightComp(in uint globalLightIndex, float3 normal, float3 position, float clipZ, float3 viewDir, bool shadows = true)
-{
-	//https://www.shadertoy.com/view/ldfGWs
-	//https://www.gamedev.net/forums/topic/649245-spherical-area-lights/
-	//https://www.shadertoy.com/view/lsfGDN
-	//https://wickedengine.net/2017/09/07/area-lights/
-
-    Light currentLight = lights[globals.lightHeapIndex][globalLightIndex];
-
-    LightComp l;
-    l.color = currentLight.color;
-    l.attenuation = 1;
-    l.dir = viewDir;
-    l.dist = 1;
-    l.ndotl = 1;
-    l.reflDir = l.dir;
-    l.reflDist = l.dist;
-    if (currentLight.lightType == 1) // directionnal
-    {
-        l.dir = -currentLight.lightsPos.xyz;
-        l.dist = 1;
-        if (shadows && currentLight.shadowIndex != -1)
-        {
-            l.attenuation = GetShadow(globalLightIndex, position, clipZ);
-        }
-
-        l.ndotl = saturate(dot(normal, l.dir));
-
-        l.reflDir = l.dir;
-        l.reflDist = l.dist;
-
-		//l.color *= 0.01;
-    }
-    else if (currentLight.lightType == 2) // omni
-    {
-        l.dir = currentLight.lightsPos.xyz - position.xyz;
-        l.dist = length(l.dir);
-        if (shadows && currentLight.shadowIndex != -1)
-        {
-            l.attenuation = GetOmniShadow(globalLightIndex, -l.dir, l.dist);
-        }
-
-        l.dir = l.dir / l.dist;
-        l.ndotl = saturate(dot(normal, l.dir));
-
-        l.reflDir = l.dir;
-        l.reflDist = l.dist;
-
-        l.color *= 1 / (l.dist * l.dist + 0.01);
-        l.color *= (currentLight.lightsPos.w - l.dist) / currentLight.lightsPos.w;
-    }
-    else if (currentLight.lightType == 5) // sphere
-    {
-        l.dir = currentLight.lightsPos.xyz - position.xyz;
-        l.dist = length(l.dir);
-        if (shadows && currentLight.shadowIndex != -1)
-        {
-            l.attenuation = GetOmniShadow(globalLightIndex, -l.dir, l.dist);
-        }
-
-        l.dir = l.dir - (l.dir / l.dist * currentLight.color.a);
-        l.dist = length(l.dir);
-        l.dir = l.dir / l.dist;
-        l.ndotl = saturate(dot(normal, l.dir));
-
-        l.reflDir = (currentLight.lightsPos.xyz - position.xyz);
-        float3 R = reflect(viewDir, normal);
-        float3 centerToRay = dot(l.reflDir, R) * R - l.reflDir;
-        l.reflDir = l.reflDir + centerToRay * saturate(currentLight.color.a / length(centerToRay));
-        l.reflDist = length(l.reflDir);
-        l.reflDir = l.reflDir / l.reflDist;
-
-        l.color *= 1 / (l.dist * l.dist + 0.01);
-		//l.color *= (currentLight.lightsPos.w - l.dist) / currentLight.lightsPos.w;
-    }
-    else if (currentLight.lightType == 7) // tube
-    {
-        float3 p = ClosestPointPointCapsule(position, currentLight.lightsPos.xyz, currentLight.lightsPosEnd.xyz, currentLight.lightsPos.w);
-        l.dir = p - position;
-        l.dist = length(l.dir);
-        l.dir = l.dir / l.dist;
-        l.ndotl = saturate(dot(normal, l.dir));
-		
-        float3 l0 = currentLight.lightsPos.xyz - position;
-        float3 l1 = currentLight.lightsPosEnd.xyz - position;
-        float lengthL0 = length(l0);
-        float lengthL1 = length(l1);
-        float NdotL0 = dot(normal, l0) / (2. * lengthL0);
-        float NdotL1 = dot(normal, l1) / (2. * lengthL1);
-        l.ndotl = (2. * saturate(NdotL0 + NdotL1)) /
-			(lengthL0 * lengthL1 + dot(l0, l1) + 2.);
-		
-		// do a segment segment distance and ...
-		// https://zalo.github.io/blog/closest-point-between-segments/
-        l.reflDir = ClosestPointOnLineToSegment(position, position + reflect(viewDir, normal) * 1000, currentLight.lightsPos.xyz, currentLight.lightsPosEnd.xyz) - position;
-        l.reflDist = length(l.reflDir);
-        l.reflDir = l.reflDir / l.reflDist;
-
-        l.color *= 1 / (l.dist * l.dist + 0.01);
-    }
-    return l;
-}
-*/
 
 // ------ Panini-------------------------------------
 
@@ -768,6 +546,20 @@ float2 Panini_Generic(float2 view_pos, float d)
 inline uint3 ModulusI(uint3 a, uint3 b)
 {
     return (uint3(a % b) + b) % b;
+}
+
+
+float2 CalcVelocity(float4 newPos, float4 oldPos, float2 viewSize)
+{
+    oldPos /= oldPos.w;
+    oldPos.xy = (oldPos.xy+1)/2.0f;
+    oldPos.y = 1 - oldPos.y;
+    
+    newPos /= newPos.w;
+    newPos.xy = (newPos.xy+1)/2.0f;
+    newPos.y = 1 - newPos.y;
+    
+    return (oldPos - newPos).xy;
 }
 
 //  !! rip off from microsoft miniengine !!
@@ -1217,7 +1009,7 @@ float2 bary)
     return s;
 }
 
-static uint maxFrameFilteringCount = 12;
+static uint maxFrameFilteringCount = 6;
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
     //if(rand <= (current.color_W.w / (previous.color_W.w + current.color_W.w)))
@@ -1230,19 +1022,7 @@ void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir curre
     previous.hit_Wsum.w += current.hit_Wsum.w;
     previous.dir_Wcount.w += current.dir_Wcount.w;
 }
-/*
-void MergeGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
-{
-    if(rand <= (current.color_W.w / (max(previous.color_W.w * 8, 0.00001) + current.color_W.w)))
-    {
-        previous.color_W = current.color_W; // keep the new W so take the xyzw
-        previous.hit_Wsum.xyz = current.hit_Wsum.xyz;
-        previous.dir_Wcount.xyz = current.dir_Wcount.xyz;
-    }
-    previous.hit_Wsum.w += current.hit_Wsum.w;
-    previous.dir_Wcount.w += current.dir_Wcount.w;
-}
-*/
+
 void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
 {
     if (r.dir_Wcount.w >= frameFilteringCount)
@@ -1713,6 +1493,9 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
     
     return r;
 }
+
+// ----------------------------- DEBUG ----------------------------------
+
 #ifdef RAY_DISPATCH
 void DebugSurfaceData(float3 pos, float3 dir)
 {
@@ -1742,18 +1525,15 @@ void DebugSurfaceData(float3 pos, float3 dir)
 }
 #endif
 
-
-// ----------------------------- DEBUG ----------------------------------
-
 // world space positions
 void DrawLine(float3 begin, float3 end)
 {
-    RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[commonResourcesIndices.debugVerticesCountHeapIndex];
+    RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[editorContext.debugVerticesCountHeapIndex];
     uint index = 0;
     counter[0] = 1;
     InterlockedAdd(counter[1], 2, index);
     
-    RWStructuredBuffer<HLSL::Vertex> debugVertices = ResourceDescriptorHeap[commonResourcesIndices.debugVerticesHeapIndex];
+    RWStructuredBuffer<HLSL::Vertex> debugVertices = ResourceDescriptorHeap[editorContext.debugVerticesHeapIndex];
     HLSL::Vertex vertex1;
     HLSL::Vertex vertex2;
     
@@ -1768,7 +1548,7 @@ void DrawLine(float3 begin, float3 end)
     debugVertices[index] = vertex1;
     debugVertices[index+1] = vertex2;
     
-    RWStructuredBuffer<HLSL::IndirectCommand> debugIndirects = ResourceDescriptorHeap[commonResourcesIndices.debugBufferHeapIndex];
+    RWStructuredBuffer<HLSL::IndirectCommand> debugIndirects = ResourceDescriptorHeap[editorContext.debugBufferHeapIndex];
     HLSL::IndirectCommand di = debugIndirects[counter[0]-1];
     
 	//di.cbv = debugParameters.cbv;
@@ -1783,3 +1563,226 @@ void DrawLine(float3 begin, float3 end)
     
     debugIndirects[counter[0]-1] = di;
 }
+
+
+/*
+LightComp GetLightComp(in uint globalLightIndex, float3 normal, float3 position, float clipZ, float3 viewDir, bool shadows = true)
+{
+	//https://www.shadertoy.com/view/ldfGWs
+	//https://www.gamedev.net/forums/topic/649245-spherical-area-lights/
+	//https://www.shadertoy.com/view/lsfGDN
+	//https://wickedengine.net/2017/09/07/area-lights/
+
+    Light currentLight = lights[globals.lightHeapIndex][globalLightIndex];
+
+    LightComp l;
+    l.color = currentLight.color;
+    l.attenuation = 1;
+    l.dir = viewDir;
+    l.dist = 1;
+    l.ndotl = 1;
+    l.reflDir = l.dir;
+    l.reflDist = l.dist;
+    if (currentLight.lightType == 1) // directionnal
+    {
+        l.dir = -currentLight.lightsPos.xyz;
+        l.dist = 1;
+        if (shadows && currentLight.shadowIndex != -1)
+        {
+            l.attenuation = GetShadow(globalLightIndex, position, clipZ);
+        }
+
+        l.ndotl = saturate(dot(normal, l.dir));
+
+        l.reflDir = l.dir;
+        l.reflDist = l.dist;
+
+		//l.color *= 0.01;
+    }
+    else if (currentLight.lightType == 2) // omni
+    {
+        l.dir = currentLight.lightsPos.xyz - position.xyz;
+        l.dist = length(l.dir);
+        if (shadows && currentLight.shadowIndex != -1)
+        {
+            l.attenuation = GetOmniShadow(globalLightIndex, -l.dir, l.dist);
+        }
+
+        l.dir = l.dir / l.dist;
+        l.ndotl = saturate(dot(normal, l.dir));
+
+        l.reflDir = l.dir;
+        l.reflDist = l.dist;
+
+        l.color *= 1 / (l.dist * l.dist + 0.01);
+        l.color *= (currentLight.lightsPos.w - l.dist) / currentLight.lightsPos.w;
+    }
+    else if (currentLight.lightType == 5) // sphere
+    {
+        l.dir = currentLight.lightsPos.xyz - position.xyz;
+        l.dist = length(l.dir);
+        if (shadows && currentLight.shadowIndex != -1)
+        {
+            l.attenuation = GetOmniShadow(globalLightIndex, -l.dir, l.dist);
+        }
+
+        l.dir = l.dir - (l.dir / l.dist * currentLight.color.a);
+        l.dist = length(l.dir);
+        l.dir = l.dir / l.dist;
+        l.ndotl = saturate(dot(normal, l.dir));
+
+        l.reflDir = (currentLight.lightsPos.xyz - position.xyz);
+        float3 R = reflect(viewDir, normal);
+        float3 centerToRay = dot(l.reflDir, R) * R - l.reflDir;
+        l.reflDir = l.reflDir + centerToRay * saturate(currentLight.color.a / length(centerToRay));
+        l.reflDist = length(l.reflDir);
+        l.reflDir = l.reflDir / l.reflDist;
+
+        l.color *= 1 / (l.dist * l.dist + 0.01);
+		//l.color *= (currentLight.lightsPos.w - l.dist) / currentLight.lightsPos.w;
+    }
+    else if (currentLight.lightType == 7) // tube
+    {
+        float3 p = ClosestPointPointCapsule(position, currentLight.lightsPos.xyz, currentLight.lightsPosEnd.xyz, currentLight.lightsPos.w);
+        l.dir = p - position;
+        l.dist = length(l.dir);
+        l.dir = l.dir / l.dist;
+        l.ndotl = saturate(dot(normal, l.dir));
+		
+        float3 l0 = currentLight.lightsPos.xyz - position;
+        float3 l1 = currentLight.lightsPosEnd.xyz - position;
+        float lengthL0 = length(l0);
+        float lengthL1 = length(l1);
+        float NdotL0 = dot(normal, l0) / (2. * lengthL0);
+        float NdotL1 = dot(normal, l1) / (2. * lengthL1);
+        l.ndotl = (2. * saturate(NdotL0 + NdotL1)) /
+			(lengthL0 * lengthL1 + dot(l0, l1) + 2.);
+		
+		// do a segment segment distance and ...
+		// https://zalo.github.io/blog/closest-point-between-segments/
+        l.reflDir = ClosestPointOnLineToSegment(position, position + reflect(viewDir, normal) * 1000, currentLight.lightsPos.xyz, currentLight.lightsPosEnd.xyz) - position;
+        l.reflDist = length(l.reflDir);
+        l.reflDir = l.reflDir / l.reflDist;
+
+        l.color *= 1 / (l.dist * l.dist + 0.01);
+    }
+    return l;
+}
+*/
+// ------------------ DEPTH ----------------------------------
+/*
+// convert a point from post-projection space into view space
+float3 ConvertProjToView(float4 p)
+{
+    p = mul(p, camera.ipMat);
+    return (p / p.w).xyz;
+}
+// convert a depth value from post-projection space into view space
+float ConvertProjDepthToView(float z)
+{
+    return (1.f / (z * camera.ipMat._34 + camera.ipMat._44));
+}
+
+float4 WorldPosFromDepth(float d, float2 uvCoord)
+{
+    float2 screenPos = uvCoord * 2.0 - 1.0;
+
+	// Invert Y for DirectX-style coordinates.
+    screenPos.y = -screenPos.y;
+
+	// Unproject the pixel coordinate into a ray.
+    float4 world = mul(float4(screenPos, d, 1), camera.ipvMat);
+    world.xyz /= world.w;
+    return world;
+}
+//Returns World Position of a pixel from clipspace depth map
+float4 WorldPosFromDepth(Texture2D<float> depth, float2 uvCoord, float2 resolution)
+{
+    float d = depth.SampleLevel(pointSampler, uvCoord, 0);
+    return WorldPosFromDepth(d, uvCoord);
+}
+
+float4 WorldPosFromDepth(RWTexture2D<float> depth, float2 uvCoord)
+{
+    float d = depth.Load(int2(uvCoord));
+    return WorldPosFromDepth(d, uvCoord);
+}
+
+float linearZ(float z, float n, float f)
+{
+    return (n) / (f + z * (n - f));
+}
+
+float linearZ01(float z, float n, float f)
+{
+    return linearZ(z, n, f) / f;
+}
+
+float absolutZ(float z, float n, float f)
+{
+    return (n / z - f) / (n - f);
+}
+*/
+
+// ----------------- FROXEL ---------------------------------------------
+/*
+uint ZToFroxel(float linearZ)
+{
+    float A = linearZ; // 1/(camera.camClipsExt.x* nonLinearZ + camera.camClipsExt.y); // this is to linearize the z but it is already fed
+    float B = -log2(A);
+    float C = B * camera.camClipsExt.z + camera.camClipsExt.w;
+    return uint(max(0.0, C));
+	//return uint(max(0.0, log2(1/(camera.camClipsExt.x * linearZ + camera.camClipsExt.y)) * camera.camClipsExt.z + camera.camClipsExt.w));
+}
+
+float FroxelToZ(float froxelZ, float specialNear, float far, int count)
+{
+    if (froxelZ < 1)
+        return 0;
+    return exp2((froxelZ - count) * (-log2(specialNear / far) / (count - 1)));
+}
+
+float3 FroxelToWorld(float3 froxel)
+{
+    float4 clipPos = float4(froxel / float3(ATMO_VOLUME_SIZE_X, ATMO_VOLUME_SIZE_Y, ATMO_VOLUME_SIZE_Z), 1);
+    clipPos.xy = clipPos.xy * 2 - 1;
+    float4 worldPos = mul(clipPos, camera.ipMat);
+    worldPos = worldPos / worldPos.w;
+    worldPos = mul(worldPos, camera.vMat);
+
+    float3 viewDir = worldPos.xyz - camera.camWorldPos.xyz;
+    float viewDist = length(viewDir);
+    viewDir = viewDir / viewDist;
+
+    viewDist = FroxelToZ(froxel.z, ATMO_VOLUME_SPECIAL_NEAR, camera.camClips.y, ATMO_VOLUME_SIZE_Z) * camera.camClips.y;
+
+    worldPos.xyz = camera.camWorldPos.xyz + viewDir * viewDist;
+
+    return worldPos.xyz;
+}
+
+float3 WorldToFroxel(float3 pixelWorldPos)
+{
+    float4 uvw = mul(float4(pixelWorldPos, 1), camera.ivpMat);
+    uvw = uvw / uvw.w;
+    uvw.xy = uvw.xy * 0.5 + 0.5;
+    //uvw.y = 1 - uvw.y;
+    //uvw.xy *= float2(ATMO_VOLUME_SIZE_X, ATMO_VOLUME_SIZE_Y);
+    float linearDepth = length(pixelWorldPos - camera.camWorldPos.xyz) / camera.camClips.y;
+    uvw.z = ZToFroxel(linearDepth);
+
+    return uvw.xyz;
+}
+
+float3 NDCToFroxel(float3 NDC, float3 pixelWorldPos)
+{
+    float3 uvw = NDC;
+    uvw.xy /= globals.screenResolution.xy;
+    uvw.y = 1 - uvw.y;
+    uvw.xy *= float2(ATMO_VOLUME_SIZE_X, ATMO_VOLUME_SIZE_Y);
+    float linearDepth = length(pixelWorldPos - camera.camWorldPos.xyz) / camera.camClips.y;
+    uvw.z = ZToFroxel(linearDepth);
+
+    return uvw;
+}
+*/

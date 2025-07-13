@@ -1,6 +1,6 @@
 #include "structs.hlsl"
 
-cbuffer CustomRT : register(b2)
+cbuffer CustomRT : register(b3)
 {
     HLSL::PostProcessParameters ppParameters;
 };

@@ -1,11 +1,4 @@
 #include "structs.hlsl"
-
-cbuffer Custom : register(b2)
-{
-    HLSL::DebugParameters debugParameters;
-};
-#define CUSTOM_ROOT_BUFFER_1
-
 #include "binding.hlsl"
 #include "common.hlsl"
 
@@ -19,7 +12,7 @@ struct VS_OUTPUT
 // the comment after the SV_target is important
 struct PS_OUTPUT
 {
-    float4 albedo : SV_Target0; //DXGI_FORMAT_R11G11B10_FLOAT
+    float3 albedo : SV_Target0; //DXGI_FORMAT_R11G11B10_FLOAT
 };
 
 #pragma debug VertexMain PixelMain
@@ -32,10 +25,10 @@ VS_OUTPUT VertexMain(in uint vertexID : SV_VertexID, in uint instanceID : SV_Ins
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[viewContext.cameraIndex];
     
-    StructuredBuffer<HLSL::IndirectCommand> indirectCommands = ResourceDescriptorHeap[commonResourcesIndices.debugBufferHeapIndex];
+    StructuredBuffer<HLSL::IndirectCommand> indirectCommands = ResourceDescriptorHeap[editorContext.debugBufferHeapIndex];
     HLSL::IndirectCommand indirectCommand = indirectCommands[0];
     
-    StructuredBuffer<HLSL::Vertex> debugVertices = ResourceDescriptorHeap[commonResourcesIndices.debugVerticesHeapIndex];
+    StructuredBuffer<HLSL::Vertex> debugVertices = ResourceDescriptorHeap[editorContext.debugVerticesHeapIndex];
     HLSL::Vertex vertex = debugVertices[vertexID];
     
     float4 worldPos = float4(vertex.pos.xyz, 1);
@@ -50,7 +43,7 @@ PS_OUTPUT PixelMain(VS_OUTPUT inVerts)
 {
     PS_OUTPUT o;
     
-    o.albedo = inVerts.color;
+    o.albedo = inVerts.color.xyz;
     
     return o;
 }

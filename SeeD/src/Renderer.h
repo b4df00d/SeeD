@@ -315,20 +315,23 @@ struct ViewContext
     }
 };
 
-struct DebugContext
+struct EditorContext
 {
     // create a indirect buffer to store line to be drawn buy this debug shader 
-    HLSL::DebugParameters debugParameters;
-
+    HLSL::EditorContext editorContext;
     StructuredBuffer<HLSL::IndirectCommand> indirectDebugBuffer;
     StructuredBuffer<HLSL::Vertex> indirectDebugVertices;
     StructuredBuffer<uint> indirectDebugVerticesCount; // draw count, vertex index count
+
+    StructuredBuffer<HLSL::SelectionResult> selectionResult;
 
     void On()
     {
         indirectDebugBuffer.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         indirectDebugVertices.CreateBuffer(1000000, D3D12_RESOURCE_STATE_COMMON);
         indirectDebugVerticesCount.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
+
+        selectionResult.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
     }
 
     void Off()
@@ -336,6 +339,8 @@ struct DebugContext
         indirectDebugBuffer.Release();
         indirectDebugVertices.Release();
         indirectDebugVerticesCount.Release();
+
+        selectionResult.Release();
     }
 };
 
@@ -426,7 +431,7 @@ public:
     PerFrame<ViewWorld> viewWorld;
     RayTracingContext raytracingContext;
     ViewContext viewContext;
-    DebugContext debugContext;
+    EditorContext editorContext;
     std::map<UINT64, Resource> resources;
 
     virtual void On(uint2 _displayResolution, uint2 _renderResolution)
@@ -436,7 +441,7 @@ public:
         frame = 0;
         raytracingContext.On(renderResolution);
         viewContext.On();
-        debugContext.On();
+        editorContext.On();
     }
     virtual void Off()
     {
@@ -446,7 +451,7 @@ public:
         }
         raytracingContext.Off();
         viewContext.Off();
-        debugContext.Off();
+        editorContext.Off();
 
         for (auto& item : resources)
         {
@@ -490,9 +495,6 @@ public:
         commonResourcesIndices.instancesGPUHeapIndex = viewWorld->instancesGPU.gpuData.srv.offset;
         commonResourcesIndices.instanceGPUCount = viewWorld->instancesGPU.Size();
 
-        commonResourcesIndices.debugBufferHeapIndex = debugContext.indirectDebugBuffer.GetResource().uav.offset;
-        commonResourcesIndices.debugVerticesHeapIndex = debugContext.indirectDebugVertices.GetResource().uav.offset;
-        commonResourcesIndices.debugVerticesCountHeapIndex = debugContext.indirectDebugVerticesCount.GetResource().uav.offset;
 
         return commonResourcesIndices;
     }
@@ -519,6 +521,7 @@ public:
         viewContextParams.roughnessIndex = GetRegisteredResource("roughness").srv.offset;
         viewContextParams.normalIndex = GetRegisteredResource("normal").srv.offset;
         viewContextParams.motionIndex = GetRegisteredResource("motion").srv.offset;
+        viewContextParams.objectIDIndex = GetRegisteredResource("objectID").uav.offset;
         viewContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
         viewContextParams.reverseZ = true;
         viewContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
@@ -565,11 +568,16 @@ public:
         return rayTracingContextParams;
     }
 
-    HLSL::DebugParameters SetupDebugParams()
+    HLSL::EditorContext SetupEditorParams()
     {
-        HLSL::DebugParameters debugContextParams;
+        HLSL::EditorContext editorContextParams;
 
-        return debugContextParams;
+        editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
+        editorContextParams.debugVerticesHeapIndex = editorContext.indirectDebugVertices.GetResource().uav.offset;
+        editorContextParams.debugVerticesCountHeapIndex = editorContext.indirectDebugVerticesCount.GetResource().uav.offset;
+        editorContextParams.selectionResultIndex = editorContext.selectionResult.GetResource().uav.offset;
+
+        return editorContextParams;
     }
 
 };
@@ -1005,14 +1013,14 @@ public:
 
         Shader& reset = *AssetLibrary::instance->Get<Shader>(cullingResetShader.Get().id, true);
         commandBuffer->SetCompute(reset);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
         commandBuffer->cmd->Dispatch(1, 1, 1);
 
         Shader& cullingInstances = *AssetLibrary::instance->Get<Shader>(cullingInstancesShader.Get().id, true);
         commandBuffer->SetCompute(cullingInstances);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
         commandBuffer->cmd->Dispatch(cullingInstances.DispatchX(instances.Size()), 1, 1);
 
         view->viewContext.instancesInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
@@ -1020,8 +1028,8 @@ public:
 
         Shader& cullingMeshlets = *AssetLibrary::instance->Get<Shader>(cullingMeshletsShader.Get().id, true);
         commandBuffer->SetCompute(cullingMeshlets);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
         commandBuffer->cmd->ExecuteIndirect(cullingMeshlets.commandSignature, instances.Size(), view->viewContext.instancesInView.GetResourcePtr(), 0, view->viewContext.instancesCounter.GetResourcePtr(), 0);
 
         view->viewContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
@@ -1063,6 +1071,7 @@ class GBuffers : public Pass
     ViewResource roughness;
     ViewResource depth;
     ViewResource motion;
+    ViewResource objectID;
     Components::Handle<Components::Shader> meshShader;
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
@@ -1080,6 +1089,8 @@ public:
         depth.Register("depth", view);
         motion.Register("motion", view);
         motion.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16_FLOAT, "motion");
+        objectID.Register("objectID", view);
+        objectID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "objectID");
         meshShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
@@ -1097,8 +1108,9 @@ public:
         metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        Resource rts[] = { albedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get() };
+        Resource rts[] = { albedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get(), objectID.Get() };
         SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true, false);
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
@@ -1107,8 +1119,8 @@ public:
         Shader& shader = *AssetLibrary::instance->Get<Shader>(meshShader.Get().id, true);
         commandBuffer->SetGraphic(shader);
 
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);
 
         uint maxDraw = view->viewContext.meshletsInView.Size();
         commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->viewContext.meshletsInView.GetResourcePtr(), 0, view->viewContext.meshletsCounter.GetResourcePtr(), 0);
@@ -1118,6 +1130,7 @@ public:
         metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
 
         Close();
     }
@@ -1149,14 +1162,14 @@ public:
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayProbesDispatchShader.Get().id, true);
         commandBuffer->SetRaytracing(rayDispatch);
         // global root sig for ray tracing is the same as compute shaders
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
 
         for (uint i = 0; i < ARRAYSIZE(view->raytracingContext.probes); i++)
         {
             view->raytracingContext.rtParameters.probeToCompute = i;
             auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
-            commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
 
             D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
             drd.Width = view->raytracingContext.probes[i].probesResolution.x;
@@ -1225,9 +1238,9 @@ public:
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
         commandBuffer->SetRaytracing(rayDispatch); 
         // global root sig for ray tracing is the same as compute shaders
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
 
         D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
         drd.Width = view->renderResolution.x;
@@ -1239,15 +1252,15 @@ public:
         //Spacial
         Shader& ReSTIRSpacial = *AssetLibrary::instance->Get<Shader>(ReSTIRSpacialShader.Get().id, true);
         commandBuffer->SetRaytracing(ReSTIRSpacial);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
 
         // Spacial ReSTIR pass 1
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
         view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoir.Get().uav.offset;
         view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
         view->raytracingContext.rtParameters.passNumber = 0;
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
         drd = ReSTIRSpacial.GetRTDesc();
         drd.Width = view->renderResolution.x;
         drd.Height = view->renderResolution.y;
@@ -1259,7 +1272,7 @@ public:
         view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
         view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.GetPrevious().uav.offset;
         view->raytracingContext.rtParameters.passNumber = 1;
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
         drd = ReSTIRSpacial.GetRTDesc();
         drd.Width = view->renderResolution.x;
         drd.Height = view->renderResolution.y;
@@ -1271,9 +1284,9 @@ public:
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
         Shader& rayValidateDispatch = *AssetLibrary::instance->Get<Shader>(rayValidateDispatchShader.Get().id, true);
         commandBuffer->SetRaytracing(rayValidateDispatch);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, raytracingContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
         drd = rayValidateDispatch.GetRTDesc();
         drd.Width = view->renderResolution.x;
         drd.Height = view->renderResolution.y;
@@ -1286,13 +1299,13 @@ public:
 
         Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
         commandBuffer->SetCompute(applyLighting);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
 
         view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
         view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
         view->raytracingContext.rtParameters.passNumber = 1;
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
 
         commandBuffer->cmd->Dispatch(applyLighting.DispatchX(view->renderResolution.x), applyLighting.DispatchY(view->renderResolution.y), 1);
 
@@ -1326,13 +1339,13 @@ public:
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
-        auto debugParameterAddress = ConstantBuffer::instance->PushConstantBuffer(&view->debugContext.debugParameters);
+        auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
 
         Shader& debugInit = *AssetLibrary::instance->Get<Shader>(indirectDebugInitShader.Get().id, true);
         commandBuffer->SetCompute(debugInit);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, debugParameterAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
         commandBuffer->cmd->Dispatch(1, 1, 1);
 
         Close();
@@ -1344,6 +1357,7 @@ class GPUDebug : public Pass
     ViewResource lighted;
     ViewResource depth;
     Components::Handle<Components::Shader> indirectDebugShader;
+    Components::Handle<Components::Shader> selectionShader;
 
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
@@ -1353,6 +1367,7 @@ public:
         lighted.Register("lighted", view);
         depth.Register("depth", view);
         indirectDebugShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debug.hlsl");
+        selectionShader.Get().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\selection.hlsl");
     }
     void Setup(View* view) override
     {
@@ -1363,25 +1378,46 @@ public:
         ZoneScoped;
         Open();
 
+        Resource rts[] = { lighted.Get() };
+        SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);
+
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
+
+        Shader& selection = *AssetLibrary::instance->Get<Shader>(selectionShader.Get().id, true);
+        commandBuffer->SetCompute(selection);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
+
+        commandBuffer->cmd->Dispatch(1, 1, 1);
+
+        view->editorContext.selectionResult.ReadBack(commandBuffer.Get());
+
+        //move the reading of objectID outside graphic code ?
+        if (IOs::instance->mouse.mouseButtonLeftUp && !IOs::instance->mouse.mouseDrag)
+        {
+            uint* selectionResult = nullptr;
+            view->editorContext.selectionResult.ReadBackMap((void**)&selectionResult);
+            editorState.selectedObject = selectionResult[0];
+            view->editorContext.selectionResult.ReadBackUnMap();
+        }
+
+
         if (options.rayDebug)
         {
-            auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
-            auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
-            auto debugParameterAddress = ConstantBuffer::instance->PushConstantBuffer(&view->debugContext.debugParameters);
 
             lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-            Resource rts[] = { lighted.Get() };
-            SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);
-
             Shader& indirectDebug = *AssetLibrary::instance->Get<Shader>(indirectDebugShader.Get().id, true);
             commandBuffer->SetGraphic(indirectDebug);
-            commandBuffer->cmd->SetGraphicsRootConstantBufferView(0, commonResourcesIndicesAddress);
-            commandBuffer->cmd->SetGraphicsRootConstantBufferView(1, viewContextAddress);
-            commandBuffer->cmd->SetGraphicsRootConstantBufferView(2, debugParameterAddress);
+            commandBuffer->cmd->SetGraphicsRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetGraphicsRootConstantBufferView(EditorContextRegister, editorContextAddress);
 
             uint maxDraw = 2;
-            commandBuffer->cmd->ExecuteIndirect(indirectDebug.commandSignature, maxDraw, view->debugContext.indirectDebugBuffer.GetResourcePtr(), 0, view->debugContext.indirectDebugVerticesCount.GetResourcePtr(), 0);
+            commandBuffer->cmd->ExecuteIndirect(indirectDebug.commandSignature, maxDraw, view->editorContext.indirectDebugBuffer.GetResourcePtr(), 0, view->editorContext.indirectDebugVerticesCount.GetResourcePtr(), 0);
 
             lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         }
@@ -1478,9 +1514,9 @@ public:
 
         Shader& TAA = *AssetLibrary::instance->Get<Shader>(TAAShader.Get().id, true);
         commandBuffer->SetCompute(TAA);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ConstantBuffer::instance->PushConstantBuffer(&taaparams));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&taaparams));
         commandBuffer->cmd->Dispatch(TAA.DispatchX(view->renderResolution.x), TAA.DispatchY(view->renderResolution.y), 1);
 
 
@@ -1494,9 +1530,9 @@ public:
 
         Shader& postProcess = *AssetLibrary::instance->Get<Shader>(postProcessShader.Get().id, true);
         commandBuffer->SetCompute(postProcess);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(0, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(1, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(2, ConstantBuffer::instance->PushConstantBuffer(&ppparams));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&ppparams));
         commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->displayResolution.x), postProcess.DispatchY(view->displayResolution.y), 1);
 
         Close();
@@ -1741,9 +1777,9 @@ public:
                     HLSL::Instance& instance = localInstances[instanceCount];
                     instance.meshIndex = meshIndex;
                     instance.materialIndex = materialIndex;
-                    //instance.worldMatrix = worldMatrix;
                     instance.current = instance.pack(worldMatrix);
                     instance.previous = instance.pack(previousWorldMatrix);
+                    instance.objectID = ent.id;
                     // count instances with shader
                     instanceCount++;
 
@@ -1752,7 +1788,7 @@ public:
 
 
                     // if in range (depending on distance and BC size)
-                        // Add to TLAS
+                    // Add to TLAS
                     D3D12_RAYTRACING_INSTANCE_DESC& instanceDesc = localInstancesRayTracing[instanceRayTracingCount];
                     // Instance ID visible in the shader in InstanceID()
                     instanceDesc.InstanceID = instanceRayTracingCount;
@@ -2017,7 +2053,7 @@ public:
                 this->viewWorld->commonResourcesIndices = SetupCommonResourcesParams();
                 this->viewContext.viewContext = SetupViewContextParams();
                 this->raytracingContext.rtParameters = SetupRayTracingContextParams();
-                this->debugContext.debugParameters = SetupDebugParams();
+                this->editorContext.editorContext = SetupEditorParams();
             }
         ).name("upload instances buffer");
 

@@ -11,6 +11,7 @@ struct PS_OUTPUT
     float metalness : SV_Target2; //DXGI_FORMAT_R8_UNORM
     float roughness : SV_Target3; //DXGI_FORMAT_R8_UNORM
     float2 motion : SV_Target4; //DXGI_FORMAT_R16G16_FLOAT
+    uint objectID : SV_Target5; //DXGI_FORMAT_R32_UINT
 };
 
 #pragma gBuffer AmplificationMain MeshMain PixelgBuffer
@@ -26,6 +27,7 @@ struct MSVert
     float3 binormal : TEXCOORD3;
     float3 color : COLOR0;
     float2 uv : TEXCOORD4;
+    nointerpolation uint objectID : TEXCOORD5;
 };
 
 struct Payload
@@ -125,7 +127,6 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         float4x4 previousWorldMatrix = instance.unpack(instance.previous);
         float4 previousWorldPos = mul(previousWorldMatrix, pos);
         float4 previousClipPos = mul(camera.previousViewProj, previousWorldPos);
-        //previousClipPos.xy += viewContext.jitter.zw * previousClipPos.w;
         outVerts[groupThreadId.x].previousPos = previousClipPos;
         
         float3 normal = verticesData[index].normal.xyz;
@@ -136,6 +137,8 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         
         outVerts[groupThreadId.x].color = RandUINT(meshletIndexIndirect);
         outVerts[groupThreadId.x].uv = verticesData[index].uv;
+        
+        outVerts[groupThreadId.x].objectID = instance.objectID;
     }
     ByteAddressBuffer trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
     if (groupThreadId.x < meshlet.triangleCount)
@@ -177,29 +180,13 @@ PS_OUTPUT PixelForward(MSVert inVerts)
     o.metalness = s.metalness;
     o.normal = StoreR11G11B10Normal(normalize(s.normal));
     
-    float2 currScreenPos = inVerts.pos.xy;
-    float4 previousPos = inVerts.previousPos;
-    previousPos.y = -previousPos.y;
-    float2 prevScreenPos = (previousPos.xy / previousPos.w) * 0.5 + 0.5;
-    prevScreenPos *= viewContext.renderResolution.xy;
-    o.motion = (prevScreenPos - currScreenPos);
+    o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
     
-    //o.entityID = 1;
+    o.objectID = inVerts.objectID;
+    
     return o;
 }
 
-float2 CalcVelocity(float4 newPos, float4 oldPos, float2 viewSize)
-{
-    oldPos /= oldPos.w;
-    oldPos.xy = (oldPos.xy+1)/2.0f;
-    oldPos.y = 1 - oldPos.y;
-    
-    newPos /= newPos.w;
-    newPos.xy = (newPos.xy+1)/2.0f;
-    newPos.y = 1 - newPos.y;
-    
-    return (oldPos - newPos).xy;
-}
 
 PS_OUTPUT PixelgBuffer(MSVert inVerts)
 {
@@ -222,16 +209,9 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     o.metalness = s.metalness;
     o.normal = StoreR11G11B10Normal(normalize(s.normal));
     
-    /*
-    float2 currScreenPos = inVerts.currentPos.xy;
-    float4 previousPos = inVerts.previousPos;
-    previousPos.y = -previousPos.y;
-    float2 prevScreenPos = (previousPos.xy / previousPos.w) * 0.5 + 0.5;
-    prevScreenPos *= viewContext.renderResolution.xy;
-    o.motion = (prevScreenPos - currScreenPos);
-    */
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
     
-    //o.entityID = 1;
+    o.objectID = inVerts.objectID;
+    
     return o;
 }

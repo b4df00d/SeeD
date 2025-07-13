@@ -101,11 +101,6 @@ public:
 	Mouse mouse{};
     WindowInformation window;
 
-    void GetMouse()
-    {
-        ZoneScoped;
-    }
-
     void GetWindow()
     {
         ZoneScoped;
@@ -585,6 +580,11 @@ public:
 		std::ios::sync_with_stdio();
 	}
 
+	static void Log(std::string& str)
+	{
+		std::cout << str << "\n";
+		OutputDebugStringA(str.c_str());
+	}
 	template<typename... Args>
 	static void Log(std::string_view rt_fmt_str, Args&&... args)
 	{
@@ -592,6 +592,12 @@ public:
 		message.append("\n");
 		std::cout << message;
 		OutputDebugStringA(message.c_str());
+	}
+
+	static void Log(std::wstring& str)
+	{
+		std::wcout << str << "\n";
+		OutputDebugStringW(str.c_str());
 	}
 	template<typename... Args>
 	static void Log(std::wstring_view rt_fmt_str, Args&&... args)

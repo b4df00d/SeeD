@@ -1652,6 +1652,7 @@ class StructuredBuffer
 {
 public:
     Resource gpuData;
+    Resource readbackgpuData;
 
     void CreateBuffer(uint elementCount, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON)
     {
@@ -1663,6 +1664,7 @@ public:
     void Release()
     {
         gpuData.Release();
+        readbackgpuData.Release();
     }
 
     uint Size()
@@ -1697,6 +1699,31 @@ public:
             return 0;
         return gpuData.GetResource()->GetGPUVirtualAddress() + (index * sizeof(T));
     }
+
+    void ReadBack(CommandBuffer& cb)
+    {
+        ZoneScoped;
+        if (readbackgpuData.GetResource() == nullptr)
+        {
+            // can�t use resource.allocation->GetSize().... it give the entire DMA page size ?
+            auto descsource = gpuData.GetResource()->GetDesc();
+            readbackgpuData.CreateReadBackBuffer((uint)descsource.Width);
+        }
+        gpuData.Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cb.cmd->CopyResource(readbackgpuData.GetResource(), gpuData.GetResource());
+        gpuData.Transition(cb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+    }
+
+    void ReadBackMap(void** data)
+    {
+        readbackgpuData.GetResource()->Map(0, nullptr, data);
+    }
+
+    void ReadBackUnMap()
+    {
+        readbackgpuData.GetResource()->Unmap(0, nullptr);
+    }
+
 };
 
 template <class T>
@@ -1794,10 +1821,10 @@ public:
     }
 };
 
+// deprecated
 class ReadBackBuffer
 {
 public:
-    byte* cpuData;
     Resource gpuData;
 
     Resource& GetResource()
@@ -1822,15 +1849,7 @@ public:
         cb.cmd->CopyResource(GetResourcePtr(), resource.GetResource());
         resource.Transition(cb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
     }
-    template <class T>
-    void Get()
-    {
-        void* buf;
-        HRESULT hr = GetResourcePtr()->Map(0, nullptr, &buf);
-        memcpy(cpuData, buf, gpuData.allocation->GetSize());
-        GetResourcePtr()->Unmap(0, nullptr);
-    }
-
+    
     void Release()
     {
         gpuData.Release();
