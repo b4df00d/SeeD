@@ -106,7 +106,7 @@ void RayGen()
     HLSL::GIReservoir og = r;
     
     uint spacialReuse = 0;
-    float2 radius = (6.0 + 6.0 * nextRand(seed));// * (viewContext.renderResolution.xy * 0.001);
+    float2 radius = (6.0 + 16.0 * nextRand(seed));// * (viewContext.renderResolution.xy * 0.001);
     for (uint i = 0; i < poissonDiskCount; i++)
     {
         int2 pixel = dtid.xy + (poissonDisk[i]+float2(0.25, 0.5)) * radius;
@@ -125,7 +125,6 @@ void RayGen()
         }
     }
     r = Validate(rtParameters, s, seed, cd.offsetedWorldPos, r, og, dtid);
-    
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
     previousgiReservoir[dtid.x + dtid.y * viewContext.renderResolution.x] = PackGIReservoir(r);

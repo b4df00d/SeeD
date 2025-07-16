@@ -17,38 +17,15 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
 {
     if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y) return;
     
-    Texture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     
-    //Should not have any preference on shading a specific light here (the sun)... let the raytracing handle any light stuff ?
-    StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
-    HLSL::Light light = lights[0];
-    
     GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
-    SurfaceData s = GetSurfaceData(dtid.xy);
+    SurfaceData s = GetSurfaceData(cd.pixel.xy);
     
-    float3 direct = ComputeLight(light, shadows[dtid.xy], s, cd.viewDir);
-    
-    RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];   
-    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
-    HLSL::Light indirectLight;
-    indirectLight.pos = float4(r.hit_Wsum.xyz, 0);
-    indirectLight.dir = float4(normalize(cd.worldPos - r.hit_Wsum.xyz), 0);
-    //indirectLight.dir = float4(-r.dir_Wcount.xyz, 0);
-    indirectLight.color.xyz = r.color_W.xyz / r.color_W.w * (r.hit_Wsum.w / r.dir_Wcount.w);
-    indirectLight.range = 1;
-    indirectLight.angle = 1;
-    float3 indirect = ComputeLight(indirectLight, 1, s, cd.viewDir);
+    float3 direct = RESTIRLight(rtParameters.directReservoirIndex, cd, s);
+    float3 indirect = RESTIRLight(rtParameters.giReservoirIndex, cd, s);
     
     float3 result = direct + indirect;
-    //result = direct;
-    //result = indirect;
-    //result = indirectLight.color.xyz;
-    //result = r.color_W.xyz * 0.01;
-    //result = r.color_W.w * 0.001;
-    //result = r.hit_Wsum.w * 0.0001;
-    //result = r.dir_Wcount.w * 0.001;
-    //result = r.dir_Wcount.xyz;
     
     lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
     //lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s), 0);
@@ -71,12 +48,12 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     if(cd.viewDist > 5000)
         lighted[dtid.xy] = float4(Sky(cd.viewDir) * 0.25, 1);
     
-    
+    RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
     HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
     if(abs(length(debugPixel - dtid.xy)) < 5)
     {
-        float3 endDir = normalize(r.hit_Wsum.xyz - cd.offsetedWorldPos);
+        float3 endDir = normalize(rd.hit_Wsum.xyz - cd.offsetedWorldPos);
         DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endDir);
     }
 }

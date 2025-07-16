@@ -37,45 +37,19 @@ void RayGen()
     
     uint seed = initRand(dtid.xy);
     
-    float3 bounceDir;
-    float3 bounceNorm;
-    float3 bounceHit;
-    float4 bounceLight = IndirectLightR(rtParameters, s, cd.offsetedWorldPos, 0, seed, bounceDir, bounceNorm, bounceHit);
+    RESTIRRay indirectRay;
+    indirectRay.Origin = cd.offsetedWorldPos;
+    indirectRay.Direction = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 1));
+    indirectRay = IndirectLight(rtParameters, s, indirectRay, 0, seed);
+    RESTIR(indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, seed);
     
-    float shadow = DirectLight(rtParameters, s, cd.offsetedWorldPos, 0, seed).x > 0;
-        
-    RWTexture2D<float> shadows = ResourceDescriptorHeap[rtParameters.shadowsIndex];
-    shadows[dtid] = shadow;
-        
-    // ReSTIR
-    RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
-    HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
-    // if not first time fill with previous frame reservoir
-    if (viewContext.frameNumber == 0)
-    {
-        r.color_W = 0;
-        r.dir_Wcount = float4(0,0,0,1);
-        r.hit_Wsum = 0;
-    }
-        
-    float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.15 - 0.1);
-    uint frameFilteringCount = max(1, blend * maxFrameFilteringCount);
+    RESTIRRay directRay;
+    directRay.Origin = cd.offsetedWorldPos;
+    directRay = DirectLight(rtParameters, s, directRay, 0, seed);
+    RESTIR(directRay, rtParameters.previousDirectReservoirIndex, rtParameters.directReservoirIndex, cd, seed);
     
-    HLSL::GIReservoir newR;
-    float W = dot(bounceLight.xyz, float3(0.3, 0.59, 0.11));
-    newR.color_W = float4(bounceLight.xyz, W);
-    newR.dir_Wcount = float4(bounceDir, 1);
-    newR.hit_Wsum = float4(bounceHit, W);
-        
-    UpdateGIReservoir(r, newR, nextRand(seed));
-    ScaleGIReservoir(r, frameFilteringCount);
-        
-        
+    /*
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-    giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x] = PackGIReservoir(r);
-        
-    // end ReSTIR
-    
     HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
     if(abs(length(debugPixel - dtid)) < 10)
@@ -84,19 +58,17 @@ void RayGen()
         //DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + r.dir_Wcount.xyz);
         //DrawLine(cd.offsetedWorldPos, r.hit_Wsum.xyz);
     }
-    /*
     if(dtid.x%10==0 && dtid.y%10==0)
     {
         if(length(cd.offsetedWorldPos - bounceHit) < 10)
             DrawLine(cd.offsetedWorldPos, bounceHit);
     }
-    */
     
 #define REFERENCE
 #ifdef REFERENCE
     StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
     HLSL::Light light = lights[0];
-    float3 direct = ComputeLight(light, shadow, s, cd.viewDir);
+    float3 direct = ComputeLight(light, 1, s, cd.viewDir);
     HLSL::Light indirectLight;
     indirectLight.pos = float4(0,0,0, 0);
     indirectLight.dir = float4(normalize(cd.worldPos - r.hit_Wsum.xyz), 0);
@@ -111,6 +83,7 @@ void RayGen()
     if (viewContext.frameNumber == 0) GI[dtid] = result;
     GI[dtid] = (GI[dtid] * (r.dir_Wcount.w-1) + result) / r.dir_Wcount.w;
 #endif
+    */
 }
 
 [shader("miss")]

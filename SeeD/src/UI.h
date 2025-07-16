@@ -1065,12 +1065,15 @@ public:
             {
                 if ((editorState.selectedObject.GetMask() & knownComponents[i].mask) != 0)
                 {   
+                    ImGui::PushID(pushID++);
+
                     auto& metaData = knownComponents[i];
                     char* cmpData = editorState.selectedObject.Get(Components::MaskToBucket(metaData.mask));
                     if (ImGui::CollapsingHeader(metaData.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
                     {
                         for (uint memberIndex = 0; memberIndex < metaData.members.size(); memberIndex++)
                         {
+                            ImGui::PushID(pushID++);
                             auto& m = metaData.members[memberIndex];
                             char* data = cmpData + m.offset;
                             ImGui::Text(m.name.c_str());
@@ -1078,7 +1081,6 @@ public:
                                 ImGui::SameLine();
                             for (uint dc = 0; dc < m.dataCount; dc++)
                             {
-                                ImGui::PushID(pushID++);
                                 switch (m.dataType)
                                 {
                                 case PropertyTypes::_int:
@@ -1161,6 +1163,15 @@ public:
                                 ImGui::PopID();
                             }
                         }
+
+                        if (ImGui::Button("delete"))
+                        {
+                            editorState.selectedObject.Remove(knownComponents[i].mask);
+                            ImGui::PopID();
+                            editorState.dirtyHierarchy = true;
+                            break;
+                        }
+                        ImGui::PopID();
                     }
                 }
             }
@@ -1171,6 +1182,7 @@ public:
             if (ImGui::Button("add"))
             {
                 editorState.selectedObject.Add(knownComponents[componentAddIndex].mask);
+                editorState.dirtyHierarchy = true;
             }
         }
 

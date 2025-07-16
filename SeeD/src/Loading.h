@@ -1290,16 +1290,32 @@ public:
             if (l->mAttenuationConstant <= 0 && l->mAttenuationLinear <= 0 && l->mAttenuationQuadratic <= 0)
                 l->mAttenuationQuadratic = 1;
 
-
             if (l->mColorDiffuse.r == 0 && l->mColorDiffuse.g == 0 && l->mColorDiffuse.b == 0)
                 light.color = float4(1, 1, 1, 1);
             else
                 light.color = float4(l->mColorDiffuse.r, l->mColorDiffuse.g, l->mColorDiffuse.b, 1);
             float d = 1;
             float lightIntensity = 1 / (l->mAttenuationConstant + l->mAttenuationLinear * d + l->mAttenuationQuadratic * d * d);
+            lightIntensity = min(lightIntensity, float1(10));
             light.color *= lightIntensity;
-            light.color = min(4, light.color);
             light.range = lightIntensity * 20;
+
+            switch (l->mType)
+            {
+            case aiLightSourceType::aiLightSource_DIRECTIONAL :
+                light.type = 0;
+                break;
+            case aiLightSourceType::aiLightSource_POINT:
+                light.type = 1;
+                break;
+            case aiLightSourceType::aiLightSource_SPOT:
+                light.type = 2;
+                break;
+            default:
+                light.type = 1;
+                break;
+            }
+            
 
             ent.Set(light);
         }

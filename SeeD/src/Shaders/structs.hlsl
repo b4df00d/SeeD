@@ -327,11 +327,13 @@ namespace HLSL
     };
     
     // ----------------- RT stuff ------------------
-    static const uint maxRTDepth = 3;
+    static const uint maxRTDepth = 2;
     struct RTParameters
     {
         uint BVH;
         uint giIndex;
+        uint directReservoirIndex;
+        uint previousDirectReservoirIndex;
         uint giReservoirIndex;
         uint previousgiReservoirIndex;
         uint shadowsIndex;

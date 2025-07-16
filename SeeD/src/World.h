@@ -144,6 +144,7 @@ namespace Components
         float angle;
         float range;
         float4 color;
+        uint type;
     };
 
     struct Camera : ComponentBase<Camera>
@@ -364,6 +365,28 @@ public:
             auto& thisSlot = World::instance->entitySlots[id];
             EntitySlot newSlot;
             newSlot.pool = GetOrCreatePoolIndex(World::instance->components[thisSlot.pool].mask | mask);
+            newSlot.index = World::instance->components[newSlot.pool].GetSlot();
+
+            Copy(thisSlot, newSlot);
+
+            if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
+            {
+                EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
+                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>().index;
+                Copy(lastSlot, thisSlot);
+                World::instance->entitySlots[entityOfLastSlot.id] = thisSlot; //crash here !
+            }
+            World::instance->components[thisSlot.pool].count--;
+            // TODO : consider removing the pool ...
+
+            thisSlot = newSlot;
+        }
+
+        void Remove(Components::Mask mask)
+        {
+            auto& thisSlot = World::instance->entitySlots[id];
+            EntitySlot newSlot;
+            newSlot.pool = GetOrCreatePoolIndex(World::instance->components[thisSlot.pool].mask & ~mask);
             newSlot.index = World::instance->components[newSlot.pool].GetSlot();
 
             Copy(thisSlot, newSlot);

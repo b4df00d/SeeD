@@ -76,6 +76,7 @@ knownComponents.push_back(
 			{ "angle", PropertyTypes::_float, Components::Entity::mask, 1, offsetof(Components::Light, angle) },
 			{ "range", PropertyTypes::_float, Components::Entity::mask, 1, offsetof(Components::Light, range) },
 			{ "color", PropertyTypes::_float4, Components::Entity::mask, 1, offsetof(Components::Light, color) },
+			{ "type", PropertyTypes::_uint, Components::Entity::mask, 1, offsetof(Components::Light, type) },
 		}
  	}); 
 knownComponents.push_back(

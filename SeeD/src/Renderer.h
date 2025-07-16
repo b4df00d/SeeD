@@ -371,6 +371,7 @@ struct RayTracingContext
     Resource TLAS;
     Resource GI;
     Resource shadows;
+    PerFrame<Resource> directReservoir;
     PerFrame<Resource> giReservoir;
     PerFrame<Resource> giReservoirSpatial;
     ProbeGrid probes[3];
@@ -384,6 +385,7 @@ struct RayTracingContext
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
+            directReservoir.Get(i).CreateBuffer<HLSL::GIReservoirCompressed>(resolution.x * resolution.y, "directReservoir");
             giReservoir.Get(i).CreateBuffer<HLSL::GIReservoirCompressed>(resolution.x * resolution.y, "GIReservoir");
             giReservoirSpatial.Get(i).CreateBuffer<HLSL::GIReservoirCompressed>(resolution.x * resolution.y, "GIReservoirSpacial");
         }
@@ -407,6 +409,7 @@ struct RayTracingContext
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
+            directReservoir.Get(i).Release();
             giReservoir.Get(i).Release();
             giReservoirSpatial.Get(i).Release();
         }
@@ -531,7 +534,6 @@ public:
         viewContext.jitterIndex = (viewContextParams.frameNumber) % ARRAYSIZE(viewContext.jitter);
         float2 jit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy) * float2(2, 2);
         viewContextParams.jitter = float4(jit.x, jit.y, previousJit.x, previousJit.y);
-        //IOs::Log("{} {}", IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1]);
         
         return viewContextParams;
     }
@@ -540,16 +542,14 @@ public:
     {
         HLSL::RTParameters rayTracingContextParams;
 
-        //rayTracingContextParams.resolution = float4(1.0f * resolution.x, 1.0f * resolution.y, 1.0f / resolution.x, 1.0f / resolution.y);
-        //rayTracingContextParams.frame = frame++;
-        //if (IOs::instance->keys.pressed[VK_R]) rayTracingContextParams.frame = 0;
         rayTracingContextParams.BVH = raytracingContext.TLAS.srv.offset;
         rayTracingContextParams.giIndex = raytracingContext.GI.uav.offset;
         rayTracingContextParams.shadowsIndex = raytracingContext.shadows.uav.offset;
+        rayTracingContextParams.directReservoirIndex = raytracingContext.directReservoir.Get().uav.offset;
+        rayTracingContextParams.previousDirectReservoirIndex = raytracingContext.directReservoir.GetPrevious().uav.offset;
         rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get().uav.offset;
         rayTracingContextParams.previousgiReservoirIndex = raytracingContext.giReservoir.GetPrevious().uav.offset;
         rayTracingContextParams.passNumber = 0;
-        //rayTracingContextParams.lightedIndex = lighted.Get().uav.offset;
 
         for (uint i = 0; i < ARRAYSIZE(raytracingContext.probes); i++)
         {
@@ -1266,32 +1266,6 @@ public:
         drd.Height = view->renderResolution.y;
         commandBuffer->cmd->DispatchRays(&drd);
 
-        /*
-        // Spacial ReSTIR pass 2
-        view->raytracingContext.giReservoirSpatial.Get().Barrier(commandBuffer.Get());
-        view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
-        view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.GetPrevious().uav.offset;
-        view->raytracingContext.rtParameters.passNumber = 1;
-        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
-        drd = ReSTIRSpacial.GetRTDesc();
-        drd.Width = view->renderResolution.x;
-        drd.Height = view->renderResolution.y;
-        commandBuffer->cmd->DispatchRays(&drd);
-        */
-
-        /*
-        // Validating reservoirs
-        view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
-        Shader& rayValidateDispatch = *AssetLibrary::instance->Get<Shader>(rayValidateDispatchShader.Get().id, true);
-        commandBuffer->SetRaytracing(rayValidateDispatch);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
-        drd = rayValidateDispatch.GetRTDesc();
-        drd.Width = view->renderResolution.x;
-        drd.Height = view->renderResolution.y;
-        commandBuffer->cmd->DispatchRays(&drd);
-        */
 
         // Lighting
         view->raytracingContext.GI.Barrier(commandBuffer.Get());
@@ -1922,6 +1896,7 @@ public:
                     hlsllight.color = light.color;
                     hlsllight.angle = light.angle;
                     hlsllight.range = light.range;
+                    hlsllight.type = light.type;
 
                     this->viewWorld->lights.Add(hlsllight);
                 }
