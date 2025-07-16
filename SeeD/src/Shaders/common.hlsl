@@ -1390,7 +1390,6 @@ void CommonMiss(float3 WorldRayOrigin, float3 WorldRayDirection, float RayTCurre
     Payload.hitDistance = RayTCurrent;
     Payload.hitPos = WorldRayOrigin + WorldRayDirection * RayTCurrent;
     Payload.color = Sky(WorldRayDirection);
-    Payload.color = 0;
 }
 
 void TraceRayCommon(HLSL::RTParameters rtParameters,

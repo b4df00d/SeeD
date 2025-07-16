@@ -48,12 +48,19 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     if(cd.viewDist > 5000)
         lighted[dtid.xy] = float4(Sky(cd.viewDir) * 0.25, 1);
     
+    int2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
+    bool inRange = abs(length(debugPixel - int2(dtid.xy))) < 2.5;
+    
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-    HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
-    uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
-    if(abs(length(debugPixel - dtid.xy)) < 5)
+    HLSL::GIReservoir rid = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
+    RWStructuredBuffer<HLSL::GIReservoirCompressed> directReservoir = ResourceDescriptorHeap[rtParameters.directReservoirIndex];
+    HLSL::GIReservoir rd = UnpackGIReservoir(directReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
+    if(inRange)
     {
+        float3 endInDir = normalize(rid.hit_Wsum.xyz - cd.offsetedWorldPos);
+        DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endInDir);
         float3 endDir = normalize(rd.hit_Wsum.xyz - cd.offsetedWorldPos);
         DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endDir);
+        lighted[dtid.xy] = float4(1, 0, 0, 1);
     }
 }

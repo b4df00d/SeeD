@@ -1232,6 +1232,7 @@ public:
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
         auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
 
         // Trace rays (+ temporal ReSTIR)
@@ -1240,6 +1241,7 @@ public:
         // global root sig for ray tracing is the same as compute shaders
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
 
         D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
@@ -1254,6 +1256,7 @@ public:
         commandBuffer->SetRaytracing(ReSTIRSpacial);
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
 
         // Spacial ReSTIR pass 1
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
@@ -1275,6 +1278,7 @@ public:
         commandBuffer->SetCompute(applyLighting);
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
 
         view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
         view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
@@ -1381,7 +1385,6 @@ public:
 
         if (options.rayDebug)
         {
-
             lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
             Shader& indirectDebug = *AssetLibrary::instance->Get<Shader>(indirectDebugShader.Get().id, true);
