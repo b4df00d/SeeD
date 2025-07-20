@@ -61,6 +61,6 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endInDir);
         float3 endDir = normalize(rd.hit_Wsum.xyz - cd.offsetedWorldPos);
         DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endDir);
-        lighted[dtid.xy] = float4(1, 0, 0, 1);
+        //lighted[dtid.xy] = float4(1, 0, 0, 1);
     }
 }

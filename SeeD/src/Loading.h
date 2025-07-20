@@ -366,6 +366,7 @@ public:
         ZoneScoped;
         Resource resource = {};
 
+        // For a serious streaming system, should this be available in a RAM DataBase for super fast access ?
         String metaPath = path.substr(0, path.length() - 4) + ".meta";
         DirectStorageSampleTextureMetadataHeader metadata;
         std::ifstream fin(metaPath, std::ios::binary);
@@ -542,7 +543,7 @@ public:
     assetID Write(String name)
     {
         ZoneScoped;
-        bool compressionExhaustive = true;
+        bool compressionExhaustive = false;
         DSTORAGE_COMPRESSION_FORMAT compressionFormat = DSTORAGE_COMPRESSION_FORMAT_GDEFLATE;
         DSTORAGE_COMPRESSION compressionLevel = DSTORAGE_COMPRESSION_BEST_RATIO;
 
@@ -555,25 +556,25 @@ public:
 
         HRESULT hr;
         DirectX::TexMetadata metadata;
-        DirectX::ScratchImage* image = new DirectX::ScratchImage();
+        DirectX::ScratchImage imageOriginal;
         bool needCompression = false;
 
         if (originalPath.find(".dds") != -1)
         {
             ZoneScopedN("DDS");
-            hr = DirectX::LoadFromDDSFile(originalPath.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, *image);
+            hr = DirectX::LoadFromDDSFile(originalPath.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, imageOriginal);
             needCompression = false;
         }
         else if (originalPath.find(".tga") != -1)
         {
             ZoneScopedN("TGA");
-            hr = DirectX::LoadFromTGAFile(originalPath.ToWString().c_str(), DirectX::TGA_FLAGS_NONE, &metadata, *image);
+            hr = DirectX::LoadFromTGAFile(originalPath.ToWString().c_str(), DirectX::TGA_FLAGS_NONE, &metadata, imageOriginal);
             needCompression = true;
         }
         else
         {
             ZoneScopedN("WIC");
-            hr = DirectX::LoadFromWICFile(originalPath.ToWString().c_str(), DirectX::WIC_FLAGS_NONE, &metadata, *image);
+            hr = DirectX::LoadFromWICFile(originalPath.ToWString().c_str(), DirectX::WIC_FLAGS_NONE, &metadata, imageOriginal);
             needCompression = true;
         }
         if (FAILED(hr))
@@ -589,28 +590,42 @@ public:
             || (metadata.mipLevels > UINT16_MAX) || (metadata.arraySize > UINT16_MAX))
             hr = E_INVALIDARG;
 
+        DirectX::ScratchImage* image = &imageOriginal;
+
+        /*
+        DirectX::ScratchImage converted;
+        {
+            ZoneScopedN("Convert");
+            DirectX::Convert(image->GetImages(), image->GetImageCount(), metadata, DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, 0, converted);
+            metadata = converted.GetMetadata();
+            image = &converted;
+        }
+        */
+
         DirectX::ScratchImage mipChain;
         {
             ZoneScopedN("Mips");
             DirectX::GenerateMipMaps(image->GetImages(), image->GetImageCount(), metadata, DirectX::TEX_FILTER_DEFAULT, 0, mipChain);
+            metadata = mipChain.GetMetadata();
+            image = &mipChain;
         }
 
-        /*
         DirectX::ScratchImage imageBC;
-        //hr = DirectX::Compress(mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(), DXGI_FORMAT_BC7_UNORM, DirectX::TEX_COMPRESS_BC7_QUICK | DirectX::TEX_COMPRESS_PARALLEL, DirectX::TEX_THRESHOLD_DEFAULT, imageBC);
-        hr = DirectX::Compress(mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(), DXGI_FORMAT_BC1_UNORM, DirectX::TEX_COMPRESS_UNIFORM | DirectX::TEX_COMPRESS_PARALLEL, DirectX::TEX_THRESHOLD_DEFAULT, imageBC);
-        if (FAILED(hr))
-        {
-            IOs::Log("Fail to compress {}", name.c_str());
-            return assetID::Invalid;
-        }
         if (needCompression)
         {
-            DirectX::SaveToDDSFile(imageBC.GetImages(), imageBC.GetImageCount(), imageBC.GetMetadata(), DirectX::DDS_FLAGS_NONE, path.ToWString().c_str());
+            DXGI_FORMAT compressFormat = metadata.GetAlphaMode() == DirectX::TEX_ALPHA_MODE_OPAQUE ? DXGI_FORMAT_BC1_UNORM : DXGI_FORMAT_BC7_UNORM;
+            DirectX::TEX_COMPRESS_FLAGS compressFlag = compressFormat == DXGI_FORMAT_BC1_UNORM ? DirectX::TEX_COMPRESS_UNIFORM : DirectX::TEX_COMPRESS_BC7_QUICK;
+            hr = DirectX::Compress(image->GetImages(), image->GetImageCount(), image->GetMetadata(), compressFormat, compressFlag | DirectX::TEX_COMPRESS_PARALLEL, DirectX::TEX_THRESHOLD_DEFAULT, imageBC);
+            if (FAILED(hr))
+            {
+                IOs::Log("Fail to compress {}", name.c_str());
+                return assetID::Invalid;
+            }
+            //DirectX::SaveToDDSFile(imageBC.GetImages(), imageBC.GetImageCount(), imageBC.GetMetadata(), DirectX::DDS_FLAGS_NONE, path.ToWString().c_str());
+            metadata = imageBC.GetMetadata();
+            image = &imageBC;
         }
 
-        metadata = imageBC.GetMetadata();
-        */
 
         // Create resource desc.
         UINT subresourceCount = std::max(metadata.arraySize, metadata.depth) * metadata.mipLevels;
@@ -640,32 +655,19 @@ public:
             , &subresourceTotalByteCount);
 
         // Allocate memory to copy into.
-        std::vector<uint8_t> textureData(subresourceTotalByteCount, 0);
+        std::vector<uint8_t> textureData(subresourceTotalByteCount, 255);
 
         {
             ZoneScopedN("COPY");
             // copy texture data...
             for (UINT subResourceIdx = 0; subResourceIdx < subresourceCount; subResourceIdx++)
             {
-                // Src setup
-                size_t srcRowPitchBytes = ((DirectX::BitsPerPixel(metadata.format) * metadata.width) + 7) / 8; // rounded to nearest byte.
-                size_t srcSlicePitchBytes = srcRowPitchBytes * metadata.height; // assuming tightly packed image.
-
-                // Dst setup
                 const auto& resourceFootprint = subresourceFootprints[subResourceIdx];
-                auto resourcePtr = textureData.data() + resourceFootprint.Offset;
                 const auto& footprint = resourceFootprint.Footprint;
-                size_t dstRowPitchBytes = resourceFootprint.Footprint.RowPitch; // padded row pitch.
-                size_t dstRowPitchPackedBytes = subresourceRowByteCount[subResourceIdx];
-                size_t dstSlicePitchBytes = subresourceRowsCount[subResourceIdx] * dstRowPitchBytes;
+                auto resourcePtr = textureData.data() + resourceFootprint.Offset;
+                size_t srcRowPitchBytes = ((DirectX::BitsPerPixel(metadata.format) * footprint.Width) + 7) / 8; // rounded to nearest byte.
 
-                size_t resolvedHeight = std::min(subresourceRowsCount[subResourceIdx], (uint)metadata.height);
-                size_t resolvedPackedRowPitch = std::min(std::min(dstRowPitchBytes, srcRowPitchBytes), dstRowPitchPackedBytes);
-
-                for (uint32_t y = 0; y < resolvedHeight; y++)
-                {
-                    memcpy((char*)resourcePtr + y * dstRowPitchBytes, mipChain.GetImages()[subResourceIdx].pixels + y * resolvedPackedRowPitch, resolvedPackedRowPitch);
-                }
+                memcpy((char*)resourcePtr, image->GetImages()[subResourceIdx].pixels, srcRowPitchBytes * footprint.Height);
             }
         }
 
@@ -1154,15 +1156,16 @@ public:
         va_start(args, channels);
 
         int tests = 0;
-        aiString texName("");
-        while (texName.length == 0 && tests < channelCount)
+        aiString aitexName("");
+        while (aitexName.length == 0 && tests < channelCount)
         {
             aiTextureType t = static_cast<aiTextureType>(va_arg(args, int));
-            m->GetTexture(t, 0, &texName);
+            m->GetTexture(t, 0, &aitexName);
             tests++;
         }
 
-        assetID id;
+        String texName(aitexName.C_Str());
+        assetID id = assetID::Invalid;
         /*
         String path;
         id.hash = std::hash<std::string>{}(texName.C_Str());
@@ -1180,22 +1183,39 @@ public:
         */
 
         World::Entity ent{ entityInvalid };
-        if (texName.length > 0)
+        if (texName.size() > 0)
         {
-            // if the texture is found id should stay the same
-            // if not it will be assetID::invalid
-            id = TextureLoader::instance->IsCached(texName.C_Str());
-            if(id == assetID::Invalid)
-                id = TextureLoader::instance->Write(texName.C_Str());
-
-            if (id != assetID::Invalid)
+            int extensionTested = 0;
+            String exts[] = { "jpg", "jpeg" };
+            while (id == assetID::Invalid)
             {
-                ent.Make(Components::Texture::mask | Components::Name::mask);
+                // if the texture is found id should stay the same
+                // if not it will be assetID::invalid
+                id = TextureLoader::instance->IsCached(texName);
+                if(id == assetID::Invalid)
+                    id = TextureLoader::instance->Write(texName);
 
-                auto& name = ent.Get<Components::Name>();
-                strcpy_s(name.name, 256, texName.C_Str());
+                if (id != assetID::Invalid)
+                {
+                    ent.Make(Components::Texture::mask | Components::Name::mask);
 
-                ent.Get<Components::Texture>().id = id;
+                    auto& name = ent.Get<Components::Name>();
+                    strcpy_s(name.name, 256, texName.c_str());
+
+                    ent.Get<Components::Texture>().id = id;
+                    break;
+                }
+                else if (extensionTested < _countof(exts))
+                {
+                    uint extStart = texName.find_last_of('.');
+                    texName = texName.substr(0, extStart + 1);
+                    texName += exts[extensionTested];
+                    extensionTested++;
+                }
+                else
+                {
+                    break;
+                }
             }
         }
         else

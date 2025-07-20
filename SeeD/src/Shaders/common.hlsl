@@ -753,7 +753,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         s.albedo *= albedo.Sample(samplerLinear, uv);
         #endif
         s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
-        if(length(s.albedo.xyz) < 0.01) s.albedo.xyz = 1;
+        if(length(s.albedo.xyz) < 0.001) s.albedo.xyz = float3(1,0,1);
     }
     
     s.roughness = material.parameters[1];
@@ -1053,8 +1053,8 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
 
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    //if(rand <= (current.color_W.w / (previous.color_W.w + current.color_W.w)))
-    if(rand <= (current.color_W.w / ((previous.hit_Wsum.w / previous.dir_Wcount.w) + current.color_W.w)))
+    if(rand < (current.color_W.w / (previous.color_W.w + current.color_W.w)) || rand == 1)
+    //if(rand <= (current.color_W.w / ((previous.hit_Wsum.w / previous.dir_Wcount.w) + current.color_W.w)))
     {
         previous.color_W = current.color_W; // keep the new W so take the xyzw
         previous.hit_Wsum.xyz = current.hit_Wsum.xyz;

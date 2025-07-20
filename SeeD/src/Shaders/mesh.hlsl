@@ -202,8 +202,7 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     
     o.albedo = s.albedo;
     
-    if(o.albedo.a<0.1)
-        discard;
+    if(o.albedo.a<=0.0) discard;
     
     o.roughness = s.roughness;
     o.metalness = s.metalness;

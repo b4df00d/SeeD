@@ -1160,8 +1160,8 @@ public:
                                 default:
                                     break;
                                 }
-                                ImGui::PopID();
                             }
+                            ImGui::PopID();
                         }
 
                         if (ImGui::Button("delete"))
@@ -1492,6 +1492,7 @@ public:
                         trans.scale = float3(1);
                         auto& light = ent.Get<Components::Light>();
                         light.color = float4(2, 1.75, 1.5, 1);
+                        light.type = 0;
                     }
                     ImGui::EndMenu();
                 }
