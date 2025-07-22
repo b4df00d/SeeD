@@ -431,6 +431,13 @@ public:
     uint frame;
     uint2 renderResolution;
     uint2 displayResolution;
+    enum class Upscaling
+    {
+        none,
+        taa,
+        dlss
+    };
+    Upscaling upscaling = Upscaling::taa;
     PerFrame<ViewWorld> viewWorld;
     RayTracingContext raytracingContext;
     ViewContext viewContext;
@@ -609,8 +616,8 @@ std::mutex ViewResource::lock;
 
 class Pass
 {
-    View* view;
 public:
+    View* view;
     PerFrame<CommandBuffer> commandBuffer;
     PerFrame<CommandBuffer>* dependency = nullptr;
     PerFrame<CommandBuffer>* dependency2 = nullptr;
@@ -1486,20 +1493,23 @@ public:
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
 
-        taaparams.lightedIndex = lighted.Get().uav.offset;
-        taaparams.historyIndex = history.Get().uav.offset;
+        if (view->upscaling == View::Upscaling::taa)
+        {
+            taaparams.lightedIndex = lighted.Get().uav.offset;
+            taaparams.historyIndex = history.Get().uav.offset;
 
-        Shader& TAA = *AssetLibrary::instance->Get<Shader>(TAAShader.Get().id, true);
-        commandBuffer->SetCompute(TAA);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&taaparams));
-        commandBuffer->cmd->Dispatch(TAA.DispatchX(view->renderResolution.x), TAA.DispatchY(view->renderResolution.y), 1);
+            Shader& TAA = *AssetLibrary::instance->Get<Shader>(TAAShader.Get().id, true);
+            commandBuffer->SetCompute(TAA);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&taaparams));
+            commandBuffer->cmd->Dispatch(TAA.DispatchX(view->renderResolution.x), TAA.DispatchY(view->renderResolution.y), 1);
 
 
-        history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-        commandBuffer->cmd->CopyResource(history.Get().GetResource(), lighted.Get().GetResource());
-        history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON); // transition to present in the editor cmb
+            history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+            commandBuffer->cmd->CopyResource(history.Get().GetResource(), lighted.Get().GetResource());
+            history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON); // transition to present in the editor cmb
+        }
 
         ppparams.postProcessedIndex = postProcessed.Get().uav.offset;
         ppparams.lightedIndex = lighted.Get().uav.offset;
@@ -1511,6 +1521,168 @@ public:
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&ppparams));
         commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->displayResolution.x), postProcess.DispatchY(view->displayResolution.y), 1);
+
+        Close();
+    }
+};
+
+// https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf
+#include "nvsdk_ngx.h"
+#include "nvsdk_ngx_helpers.h"
+class DLSS : public Pass
+{
+    ViewResource lighted;
+    ViewResource motion;
+    ViewResource depth;
+    ViewResource postProcessed;
+
+public:
+    NVSDK_NGX_Parameter* ngx_parameters = nullptr;
+    NVSDK_NGX_Handle* dlss_feature = nullptr;
+    NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_Balanced;
+    float sharpness = 0.5f;
+
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        lighted.Register("lighted", view);
+        motion.Register("motion", view);
+        depth.Register("depth", view);
+        postProcessed.Register("postProcessed", view);
+    }
+    virtual void Off() override
+    {
+        Pass::Off();
+        ZoneScoped;
+    }
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+
+    }
+    void CreateDLSS(View* view)
+    {
+        // cant find _nvngx.dll or nvmgx.dll ... copied from some driver repo in the OS (do a global search)
+        // in faact its not needed it is working fine on the laptop .... why not on the descktop ?
+        // why does it work on the laptop 4050 ?!
+
+        // Turns out we can simply ignore the exception ...
+
+        static const wchar_t* dll_paths[] =
+        {
+            //L".",
+            //L"G:\\Work\\Dev\\Adria-master\\External\\DLSS\\lib\\dev",
+            //L"G:\\Work\\Dev\\Adria-master\\External\\DLSS\\lib\\rel",
+            L"G:\\Work\\Dev\\SeeD\\Third\\DLSS-main\\lib\\Windows_x86_64\\dev",
+            L"G:\\Work\\Dev\\SeeD\\Third\\DLSS-main\\lib\\Windows_x86_64\\rel",
+        };
+
+        NVSDK_NGX_FeatureCommonInfo feature_common_info{};
+        feature_common_info.LoggingInfo.LoggingCallback = [](const char* msg, NVSDK_NGX_Logging_Level level, NVSDK_NGX_Feature source) {
+            IOs::Log("{}", msg);
+            };
+        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+        feature_common_info.LoggingInfo.DisableOtherLoggingSinks = true;
+        feature_common_info.PathListInfo.Path = dll_paths;
+        feature_common_info.PathListInfo.Length = NVSDK_NGX_ARRAY_LEN(dll_paths);
+
+        static constexpr char const* project_guid = "a0f57b54-1daf-4934-90ae-c4035c19df04";
+        NVSDK_NGX_Result result = NVSDK_NGX_D3D12_Init_with_ProjectID(
+            project_guid,
+            NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+            "1.0",
+            L".",
+            GPU::instance->device,
+            &feature_common_info);
+        if (NVSDK_NGX_FAILED(result)) return;
+
+        result = NVSDK_NGX_D3D12_GetCapabilityParameters(&ngx_parameters);
+        if (NVSDK_NGX_FAILED(result)) return;
+
+        int needs_updated_driver = 0;
+        uint min_driver_version_major = 0;
+        uint min_driver_version_minor = 0;
+        NVSDK_NGX_Result result_updated_driver = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &needs_updated_driver);
+        NVSDK_NGX_Result result_min_driver_version_major = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMajor, &min_driver_version_major);
+        NVSDK_NGX_Result result_min_driver_version_minor = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMinor, &min_driver_version_minor);
+        if (NVSDK_NGX_SUCCEED(result_updated_driver))
+        {
+            if (needs_updated_driver)
+            {
+                if (NVSDK_NGX_SUCCEED(result_min_driver_version_major) &&
+                    NVSDK_NGX_SUCCEED(result_min_driver_version_minor))
+                {
+                    IOs::Log("Nvidia DLSS cannot be loaded due to outdated driver, min driver version: %ul.%ul", min_driver_version_major, min_driver_version_minor);
+                    return;
+                }
+                IOs::Log("Nvidia DLSS cannot be loaded due to outdated driver");
+            }
+        }
+
+        int dlss_available = 0;
+        result = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &dlss_available);
+        if (NVSDK_NGX_FAILED(result) || !dlss_available) return;
+
+        uint renderWidth, renderHeight;
+        uint renderMaxWidth, renderMaxHeight;
+        uint renderMinWidth, renderMinHeight;
+        NGX_DLSS_GET_OPTIMAL_SETTINGS(ngx_parameters, view->displayResolution.x, view->displayResolution.y, perf_quality, &renderWidth, &renderHeight, &renderMaxWidth, &renderMaxHeight, &renderMinWidth, &renderMinHeight, &sharpness);
+
+        view->renderResolution.x = renderWidth;
+        view->renderResolution.y = renderHeight;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        if (view->upscaling == View::Upscaling::dlss)
+        {
+            NVSDK_NGX_DLSS_Create_Params dlss_create_params{};
+            dlss_create_params.Feature.InWidth = view->renderResolution.x;
+            dlss_create_params.Feature.InHeight = view->renderResolution.y;
+            dlss_create_params.Feature.InTargetWidth = view->displayResolution.x;
+            dlss_create_params.Feature.InTargetHeight = view->displayResolution.y;
+            dlss_create_params.Feature.InPerfQualityValue = perf_quality;
+            dlss_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
+                NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
+                NVSDK_NGX_DLSS_Feature_Flags_DoSharpening |
+                NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+            dlss_create_params.InEnableOutputSubrects = false;
+
+            NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSS_EXT(commandBuffer->cmd, 0, 0, &dlss_feature, ngx_parameters, &dlss_create_params);
+            seedAssert(NVSDK_NGX_SUCCEED(result));
+
+            lighted.Get().Barrier(commandBuffer.Get());
+
+            ID3D12Resource* input_texture = lighted.Get().GetResource();
+            ID3D12Resource* velocity_texture = motion.Get().GetResource();
+            ID3D12Resource* depth_texture = depth.Get().GetResource();
+            ID3D12Resource* output_texture = postProcessed.Get().GetResource();
+
+            NVSDK_NGX_D3D12_DLSS_Eval_Params dlss_eval_params{};
+            dlss_eval_params.Feature.pInColor = input_texture;
+            dlss_eval_params.Feature.pInOutput = output_texture;
+            dlss_eval_params.Feature.InSharpness = sharpness;
+
+            dlss_eval_params.pInDepth = depth_texture;
+            dlss_eval_params.pInMotionVectors = velocity_texture;
+            dlss_eval_params.InMVScaleX = (float)view->renderResolution.x;
+            dlss_eval_params.InMVScaleY = (float)view->renderResolution.y;
+
+            dlss_eval_params.pInExposureTexture = nullptr;
+            dlss_eval_params.InExposureScale = 1.0f;
+
+            dlss_eval_params.InJitterOffsetX = view->viewContext.jitter[view->viewContext.jitterIndex].x;
+            dlss_eval_params.InJitterOffsetY = view->viewContext.jitter[view->viewContext.jitterIndex].y;
+            dlss_eval_params.InReset = false;
+            dlss_eval_params.InRenderSubrectDimensions = { view->renderResolution.x, view->renderResolution.y };
+
+            result = NGX_D3D12_EVALUATE_DLSS_EXT(commandBuffer->cmd, dlss_feature, ngx_parameters, &dlss_eval_params);
+            seedAssert(NVSDK_NGX_SUCCEED(result));
+        }
 
         Close();
     }
@@ -1555,6 +1727,7 @@ class MainView : public View
 {
 public:
     std::mutex InstanceRTSync;
+    GPUDebugInit gpuDebugInit;
     HZB hzb;
     Skinning skinning;
     Particles particles;
@@ -1566,9 +1739,9 @@ public:
     LightingProbes lightingProbes;
     Lighting lighting;
     Forward forward;
-    PostProcess postProcess;
-    GPUDebugInit gpuDebugInit;
     GPUDebug gpuDebug;
+    PostProcess postProcess;
+    DLSS dlss;
     Present present;
 
 
@@ -1588,13 +1761,15 @@ public:
         lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &accelerationStructure.commandBuffer, nullptr);
         lighting.On(this, GPU::instance->graphicQueue, "lighting", &accelerationStructure.commandBuffer, &lightingProbes.commandBuffer);
         forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer, nullptr);
+        gpuDebug.On(this, GPU::instance->graphicQueue, "gpuDebug", &dlss.commandBuffer, nullptr);
         postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &forward.commandBuffer, nullptr);
-        gpuDebug.On(this, GPU::instance->graphicQueue, "gpuDebug", &postProcess.commandBuffer, nullptr);
-        present.On(this, GPU::instance->graphicQueue, "present", &gpuDebugInit.commandBuffer, nullptr);
+        dlss.On(this, GPU::instance->graphicQueue, "dlss", &postProcess.commandBuffer, nullptr);
+        present.On(this, GPU::instance->graphicQueue, "present", &dlss.commandBuffer, nullptr);
     }
 
     void Off() override
     {
+        gpuDebugInit.Off();
         hzb.Off();
         skinning.Off();
         particles.Off();
@@ -1606,9 +1781,9 @@ public:
         lightingProbes.Off();
         lighting.Off();
         forward.Off();
-        postProcess.Off();
-        gpuDebugInit.Off();
         gpuDebug.Off();
+        postProcess.Off();
+        dlss.Off();
         present.Off();
 
         View::Off();
@@ -1638,8 +1813,9 @@ public:
         SUBTASKVIEWPASS(lightingProbes);
         SUBTASKVIEWPASS(lighting);
         SUBTASKVIEWPASS(forward);
-        SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(gpuDebug);
+        SUBTASKVIEWPASS(postProcess);
+        SUBTASKVIEWPASS(dlss);
         SUBTASKVIEWPASS(present);
 
         reset.precede(updateInstances, updateMaterials, updateLights, updateCameras); // should precede all, user need to check that
@@ -1648,9 +1824,9 @@ public:
         updateMaterials.precede(uploadAndSetup);
         updateCameras.precede(uploadAndSetup);
         updateLights.precede(uploadAndSetup);
-        uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask);
+        uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask, dlssTask);
 
-        presentTask.succeed(uploadAndSetup, hzbTask, skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask, gpuDebugInitTask, gpuDebugTask);
+        presentTask.succeed(uploadAndSetup, hzbTask, skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask, dlssTask, gpuDebugInitTask, gpuDebugTask);
 
         return presentTask;
     }
@@ -1672,6 +1848,7 @@ public:
         forward.Execute();
         gpuDebug.Execute();
         postProcess.Execute();
+        dlss.Execute();
         present.Execute();
     }
 
@@ -2097,9 +2274,6 @@ public:
 };
 
 
-// https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf
-#include "nvsdk_ngx.h"
-#include "nvsdk_ngx_helpers.h"
 
 // https://www.youtube.com/watch?v=cGB3wT0U5Ao&ab_channel=CppCon
 // use DAG
@@ -2112,18 +2286,14 @@ public:
     MainView mainView;
     EditorView editorView;
 
-    NVSDK_NGX_Parameter* ngx_parameters = nullptr;
-    NVSDK_NGX_PerfQuality_Value ngx_perfQuality = NVSDK_NGX_PerfQuality_Value_Balanced;
-    uint2 renderResolution;
-    uint2 displayResolution;
+    //uint2 renderResolution;
+    //uint2 displayResolution;
 
     void On(uint2 _displayResolution)
     {
         instance = this;
-        displayResolution = _displayResolution;
-        //renderResolution = displayResolution;
-        renderResolution = displayResolution / 2.0;
-        CreateDLSS();
+        uint2 displayResolution = _displayResolution;
+        uint2 renderResolution = displayResolution / 2.0;
 
         constantBuffer.On();
         meshStorage.On();
@@ -2140,80 +2310,6 @@ public:
         meshStorage.Off();
         constantBuffer.Off();
         instance = nullptr;
-    }
-
-    void CreateDLSS()
-    {
-        return;
-
-        // cant find _nvngx.dll or nvmgx.dll ... copied from some driver repo in the OS (do a global search)
-        // in faact its not needed it is working fine on the laptop .... why not on the descktop ?
-        // why does it work on the laptop 4050 ?!
-
-        static const wchar_t* dll_paths[] =
-        {
-            //L".",
-            //L"G:\\Work\\Dev\\Adria-master\\External\\DLSS\\lib\\dev",
-            //L"G:\\Work\\Dev\\Adria-master\\External\\DLSS\\lib\\rel",
-            L"G:\\Work\\Dev\\SeeD\\Third\\DLSS-main\\lib\\Windows_x86_64\\dev",
-            L"G:\\Work\\Dev\\SeeD\\Third\\DLSS-main\\lib\\Windows_x86_64\\rel",
-        };
-
-        NVSDK_NGX_FeatureCommonInfo feature_common_info{};
-        feature_common_info.LoggingInfo.LoggingCallback = [](const char* msg, NVSDK_NGX_Logging_Level level, NVSDK_NGX_Feature source) {
-            IOs::Log("{}", msg);
-            };
-        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
-        feature_common_info.LoggingInfo.DisableOtherLoggingSinks = true;
-        feature_common_info.PathListInfo.Path = dll_paths;
-        feature_common_info.PathListInfo.Length = NVSDK_NGX_ARRAY_LEN(dll_paths);
-
-        static constexpr char const* project_guid = "a0f57b54-1daf-4934-90ae-c4035c19df04";
-        NVSDK_NGX_Result result = NVSDK_NGX_D3D12_Init_with_ProjectID(
-            project_guid,
-            NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-            "1.0",
-            L".",
-            GPU::instance->device, 
-            &feature_common_info);
-        if (NVSDK_NGX_FAILED(result)) return;
-
-        result = NVSDK_NGX_D3D12_GetCapabilityParameters(&ngx_parameters);
-        if (NVSDK_NGX_FAILED(result)) return;
-
-        int needs_updated_driver = 0;
-        uint min_driver_version_major = 0;
-        uint min_driver_version_minor = 0;
-        NVSDK_NGX_Result result_updated_driver = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_NeedsUpdatedDriver, &needs_updated_driver);
-        NVSDK_NGX_Result result_min_driver_version_major = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMajor, &min_driver_version_major);
-        NVSDK_NGX_Result result_min_driver_version_minor = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_MinDriverVersionMinor, &min_driver_version_minor);
-        if (NVSDK_NGX_SUCCEED(result_updated_driver))
-        {
-            if (needs_updated_driver)
-            {
-                if (NVSDK_NGX_SUCCEED(result_min_driver_version_major) &&
-                    NVSDK_NGX_SUCCEED(result_min_driver_version_minor))
-                {
-                    IOs::Log("Nvidia DLSS cannot be loaded due to outdated driver, min driver version: %ul.%ul", min_driver_version_major, min_driver_version_minor);
-                    return;
-                }
-                IOs::Log("Nvidia DLSS cannot be loaded due to outdated driver");
-            }
-        }
-
-        int dlss_available = 0;
-        result = ngx_parameters->Get(NVSDK_NGX_Parameter_SuperSampling_Available, &dlss_available);
-        if (NVSDK_NGX_FAILED(result) || !dlss_available) return;
-
-        uint renderWidth, renderHeight;
-        uint renderMaxWidth, renderMaxHeight;
-        uint renderMinWidth, renderMinHeight;
-        float sharpness;
-        NGX_DLSS_GET_OPTIMAL_SETTINGS(ngx_parameters, displayResolution.x, displayResolution.y, ngx_perfQuality, &renderWidth, &renderHeight, &renderMaxWidth, &renderMaxHeight, &renderMinWidth, &renderMinHeight, &sharpness);
-
-        renderResolution.x = renderWidth;
-        renderResolution.y = renderHeight;
-
     }
 
     void Schedule(World& world, tf::Subflow& subflow)

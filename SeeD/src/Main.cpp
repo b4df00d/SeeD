@@ -252,19 +252,21 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 #endif
     window.fullScreen = false;
     window.windowInstance = hInstance;
-    window.windowResolution = uint2(float2(1600.0f, 900.0f) * 1.5f);
+    window.windowResolution = uint2(float2(1600.0f, 900.0f) * 1.75f);
 
     Engine engine;
     engine.On(window);
     engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\5v5GameMap.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Mario1\\scene.gltf");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Stronghold.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Japanese restaurant\\source\\Inakaya_Cycles2.fbx");
     engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\bridge\\source\\nature-and-cyvilization.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Human\\the-queen-of-swords\\the queen of swords.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\_Environment.fbx");
+    
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\5v5GameMap.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Human\\the-queen-of-swords\\the queen of swords.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\toko.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Mario1\\scene.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Blokcing_obj.obj");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\GTA.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Bistro\\BistroInterior.fbx");
@@ -272,7 +274,6 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\tokyo\\source\\Export.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\WildWest\\WildWest2.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Halo.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Stronghold.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\BOURDON-V01.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Objects\\primitives.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\caldera-main\\map_source\\prefabs\\br\\wz_vg\\mp_wz_island\\commercial\\hotel_01.usd");

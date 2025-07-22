@@ -964,8 +964,10 @@ float3 ComputeLight(HLSL::Light light, float shadow, SurfaceData s, float3 V)
 float3 Sky(float3 direction)
 {
     float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))), 0.5));
+    float dotDown = saturate(pow(saturate(dot(direction, float3(0, -1, 0)) * 2), 1));
     float3 sky = normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
-    return sky * 5;
+    sky = lerp(sky, float3(0, 0, 0), dotDown);
+    return sky * 3;
 }
 
 SurfaceData GetRTSurfaceData(

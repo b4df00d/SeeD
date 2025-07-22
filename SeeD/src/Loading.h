@@ -579,7 +579,7 @@ public:
         }
         if (FAILED(hr))
         {
-            IOs::Log("Fail to load {}", name.c_str());
+            //IOs::Log("Fail to load {}", name.c_str());
             return assetID::Invalid;
         }
 
@@ -664,10 +664,34 @@ public:
             {
                 const auto& resourceFootprint = subresourceFootprints[subResourceIdx];
                 const auto& footprint = resourceFootprint.Footprint;
-                auto resourcePtr = textureData.data() + resourceFootprint.Offset;
-                size_t srcRowPitchBytes = ((DirectX::BitsPerPixel(metadata.format) * footprint.Width) + 7) / 8; // rounded to nearest byte.
 
-                memcpy((char*)resourcePtr, image->GetImages()[subResourceIdx].pixels, srcRowPitchBytes * footprint.Height);
+                if (footprint.RowPitch > 256)
+                {
+                    const uint size = (subResourceIdx < subresourceCount - 1 ? subresourceFootprints[subResourceIdx + 1].Offset : subresourceTotalByteCount) - resourceFootprint.Offset;
+                    auto resourcePtr = textureData.data() + resourceFootprint.Offset;
+                    memcpy((char*)resourcePtr, image->GetImages()[subResourceIdx].pixels, size);
+                }
+                else
+                {
+                    // Src setup
+                    size_t srcRowPitchBytes = ((DirectX::BitsPerPixel(metadata.format) * metadata.width) + 7) / 8; // rounded to nearest byte.
+                    size_t srcSlicePitchBytes = srcRowPitchBytes * metadata.height; // assuming tightly packed image.
+
+                    // Dst setup
+                    auto resourcePtr = textureData.data() + resourceFootprint.Offset;
+                    size_t dstRowPitchBytes = resourceFootprint.Footprint.RowPitch; // padded row pitch.
+                    size_t dstRowPitchPackedBytes = subresourceRowByteCount[subResourceIdx];
+                    size_t dstSlicePitchBytes = subresourceRowsCount[subResourceIdx] * dstRowPitchBytes;
+
+                    size_t resolvedHeight = std::min(subresourceRowsCount[subResourceIdx], (uint)metadata.height);
+                    size_t resolvedPackedRowPitch = std::min(std::min(dstRowPitchBytes, srcRowPitchBytes), dstRowPitchPackedBytes);
+
+                    for (uint32_t y = 0; y < resolvedHeight; y++)
+                    {
+                        memcpy((char*)resourcePtr + y * dstRowPitchBytes, imageBC.GetImages()[subResourceIdx].pixels + y * resolvedPackedRowPitch, resolvedPackedRowPitch);
+                    }
+                }
+
             }
         }
 
@@ -1186,7 +1210,7 @@ public:
         if (texName.size() > 0)
         {
             int extensionTested = 0;
-            String exts[] = { "jpg", "jpeg" };
+            String exts[] = { "jpg", "jpeg", "tif" };
             while (id == assetID::Invalid)
             {
                 // if the texture is found id should stay the same
@@ -1207,16 +1231,28 @@ public:
                 }
                 else if (extensionTested < _countof(exts))
                 {
-                    uint extStart = texName.find_last_of('.');
-                    texName = texName.substr(0, extStart + 1);
-                    texName += exts[extensionTested];
-                    extensionTested++;
+                    size_t unityStuff = texName.find(".srgb");
+                    if (unityStuff != std::string::npos) // special unity case
+                    {
+                        texName = texName.substr(0, unityStuff + 1);
+                        texName += exts[extensionTested];
+                        extensionTested++;
+                    }
+                    else
+                    {
+                        uint extStart = texName.find_last_of('.');
+                        texName = texName.substr(0, extStart + 1);
+                        texName += exts[extensionTested];
+                        extensionTested++;
+                    }
                 }
                 else
                 {
                     break;
                 }
             }
+            if(id == assetID::Invalid)
+                IOs::Log("Fail to load {}", texName.c_str());
         }
         else
         {
