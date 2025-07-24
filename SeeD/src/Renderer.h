@@ -446,8 +446,8 @@ public:
 
     virtual void On(uint2 _displayResolution, uint2 _renderResolution)
     {
-        renderResolution = _renderResolution;
         displayResolution = _displayResolution;
+        renderResolution = _renderResolution;
         frame = 0;
         raytracingContext.On(renderResolution);
         viewContext.On();
@@ -1541,6 +1541,8 @@ public:
     NVSDK_NGX_Handle* dlss_feature = nullptr;
     NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_Balanced;
     float sharpness = 0.5f;
+    bool initialized = false;
+    bool created = false;
 
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
@@ -1561,8 +1563,11 @@ public:
         ZoneScoped;
 
     }
-    void CreateDLSS(View* view)
+    void CreateDLSS(View* view, uint2 displayResolution, uint2& renderResolution)
     {
+        if (initialized)
+            return;
+
         // cant find _nvngx.dll or nvmgx.dll ... copied from some driver repo in the OS (do a global search)
         // in faact its not needed it is working fine on the laptop .... why not on the descktop ?
         // why does it work on the laptop 4050 ?!
@@ -1627,10 +1632,13 @@ public:
         uint renderWidth, renderHeight;
         uint renderMaxWidth, renderMaxHeight;
         uint renderMinWidth, renderMinHeight;
-        NGX_DLSS_GET_OPTIMAL_SETTINGS(ngx_parameters, view->displayResolution.x, view->displayResolution.y, perf_quality, &renderWidth, &renderHeight, &renderMaxWidth, &renderMaxHeight, &renderMinWidth, &renderMinHeight, &sharpness);
+        NGX_DLSS_GET_OPTIMAL_SETTINGS(ngx_parameters, displayResolution.x, displayResolution.y, perf_quality, &renderWidth, &renderHeight, &renderMaxWidth, &renderMaxHeight, &renderMinWidth, &renderMinHeight, &sharpness);
 
-        view->renderResolution.x = renderWidth;
-        view->renderResolution.y = renderHeight;
+        renderResolution.x = renderWidth;
+        renderResolution.y = renderHeight;
+
+        initialized = true;
+        created = false;
     }
     void Render(View* view) override
     {
@@ -1639,23 +1647,28 @@ public:
 
         if (view->upscaling == View::Upscaling::dlss)
         {
-            NVSDK_NGX_DLSS_Create_Params dlss_create_params{};
-            dlss_create_params.Feature.InWidth = view->renderResolution.x;
-            dlss_create_params.Feature.InHeight = view->renderResolution.y;
-            dlss_create_params.Feature.InTargetWidth = view->displayResolution.x;
-            dlss_create_params.Feature.InTargetHeight = view->displayResolution.y;
-            dlss_create_params.Feature.InPerfQualityValue = perf_quality;
-            dlss_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
-                NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-                NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-                NVSDK_NGX_DLSS_Feature_Flags_DoSharpening |
-                NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
-            dlss_create_params.InEnableOutputSubrects = false;
-
-            NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSS_EXT(commandBuffer->cmd, 0, 0, &dlss_feature, ngx_parameters, &dlss_create_params);
-            seedAssert(NVSDK_NGX_SUCCEED(result));
-
             lighted.Get().Barrier(commandBuffer.Get());
+
+            if (!created)
+            {
+                NVSDK_NGX_DLSS_Create_Params dlss_create_params{};
+                dlss_create_params.Feature.InWidth = view->renderResolution.x;
+                dlss_create_params.Feature.InHeight = view->renderResolution.y;
+                dlss_create_params.Feature.InTargetWidth = view->displayResolution.x;
+                dlss_create_params.Feature.InTargetHeight = view->displayResolution.y;
+                dlss_create_params.Feature.InPerfQualityValue = perf_quality;
+                dlss_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
+                    NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                    NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
+                    NVSDK_NGX_DLSS_Feature_Flags_DoSharpening |
+                    NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+                dlss_create_params.InEnableOutputSubrects = false;
+
+                NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSS_EXT(commandBuffer->cmd, 0, 0, &dlss_feature, ngx_parameters, &dlss_create_params);
+                seedAssert(NVSDK_NGX_SUCCEED(result));
+
+                created = true;
+            }
 
             ID3D12Resource* input_texture = lighted.Get().GetResource();
             ID3D12Resource* velocity_texture = motion.Get().GetResource();
@@ -1680,7 +1693,7 @@ public:
             dlss_eval_params.InReset = false;
             dlss_eval_params.InRenderSubrectDimensions = { view->renderResolution.x, view->renderResolution.y };
 
-            result = NGX_D3D12_EVALUATE_DLSS_EXT(commandBuffer->cmd, dlss_feature, ngx_parameters, &dlss_eval_params);
+            NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSS_EXT(commandBuffer->cmd, dlss_feature, ngx_parameters, &dlss_eval_params);
             seedAssert(NVSDK_NGX_SUCCEED(result));
         }
 
@@ -1745,9 +1758,11 @@ public:
     Present present;
 
 
-    void On(uint2 displayResolution, uint2 renderResolution) override
+    void On(uint2 _displayResolution, uint2 _renderResolution) override
     {
-        View::On(displayResolution, renderResolution);
+        dlss.CreateDLSS(this, _displayResolution, _renderResolution);
+
+        View::On(_displayResolution, _renderResolution);
 
         hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr, nullptr);
         skinning.On(this, GPU::instance->computeQueue, "skinning", &AssetLibrary::instance->commandBuffer, nullptr);
@@ -2286,19 +2301,14 @@ public:
     MainView mainView;
     EditorView editorView;
 
-    //uint2 renderResolution;
-    //uint2 displayResolution;
-
     void On(uint2 _displayResolution)
     {
         instance = this;
-        uint2 displayResolution = _displayResolution;
-        uint2 renderResolution = displayResolution / 2.0;
 
         constantBuffer.On();
         meshStorage.On();
-        mainView.On(displayResolution, renderResolution);
-        editorView.On(displayResolution, renderResolution);
+        mainView.On(_displayResolution, float2(_displayResolution) * 0.5f);
+        editorView.On(_displayResolution, _displayResolution);
 
         endOfLastFrame = &editorView.editor.commandBuffer;
     }

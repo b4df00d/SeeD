@@ -260,8 +260,8 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Mario1\\scene.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Stronghold.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Japanese restaurant\\source\\Inakaya_Cycles2.fbx");
-    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\bridge\\source\\nature-and-cyvilization.fbx");
+    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Japanese restaurant\\source\\Inakaya_Cycles2.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\bridge\\source\\nature-and-cyvilization.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\_Environment.fbx");
     
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\5v5GameMap.fbx");
