@@ -1576,18 +1576,18 @@ public:
 
         static const wchar_t* dll_paths[] =
         {
-            //L".",
-            //L"G:\\Work\\Dev\\Adria-master\\External\\DLSS\\lib\\dev",
-            //L"G:\\Work\\Dev\\Adria-master\\External\\DLSS\\lib\\rel",
-            L"G:\\Work\\Dev\\SeeD\\Third\\DLSS-main\\lib\\Windows_x86_64\\dev",
-            L"G:\\Work\\Dev\\SeeD\\Third\\DLSS-main\\lib\\Windows_x86_64\\rel",
+            L".",
         };
 
         NVSDK_NGX_FeatureCommonInfo feature_common_info{};
         feature_common_info.LoggingInfo.LoggingCallback = [](const char* msg, NVSDK_NGX_Logging_Level level, NVSDK_NGX_Feature source) {
             IOs::Log("{}", msg);
             };
+#ifdef _DEBUG
         feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+#else
+        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
+#endif
         feature_common_info.LoggingInfo.DisableOtherLoggingSinks = true;
         feature_common_info.PathListInfo.Path = dll_paths;
         feature_common_info.PathListInfo.Length = NVSDK_NGX_ARRAY_LEN(dll_paths);

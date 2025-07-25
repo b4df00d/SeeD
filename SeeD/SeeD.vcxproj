@@ -122,7 +122,8 @@
     </Link>
     <PostBuildEvent>
       <Command>copy /Y "..\Third\DirectXShaderCompiler-main\bin\x64\*.*" "..\x64\Debug\"
-copy /Y "..\Third\assimp-master\out\build\x64-Debug\bin\*.*" "..\x64\Debug\"</Command>
+copy /Y "..\Third\assimp-master\out\build\x64-Debug\bin\*.*" "..\x64\Debug\"
+copy /Y "..\Third\DLSS-main\lib\Windows_x86_64\dev*.*" "..\x64\Debug\"</Command>
     </PostBuildEvent>
     <PreBuildEvent>
       <Command>
