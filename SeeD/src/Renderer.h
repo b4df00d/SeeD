@@ -435,9 +435,10 @@ public:
     {
         none,
         taa,
-        dlss
+        dlss,
+        dlssd
     };
-    Upscaling upscaling = Upscaling::taa;
+    Upscaling upscaling;
     PerFrame<ViewWorld> viewWorld;
     RayTracingContext raytracingContext;
     ViewContext viewContext;
@@ -1073,6 +1074,7 @@ public:
 class GBuffers : public Pass
 {
     ViewResource albedo;
+    ViewResource specularAlbedo;
     ViewResource normal;
     ViewResource metalness;
     ViewResource roughness;
@@ -1087,6 +1089,8 @@ public:
         ZoneScoped;
         albedo.Register("albedo", view);
         albedo.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "albedo");
+        specularAlbedo.Register("specularAlbedo", view);
+        specularAlbedo.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "specularAlbedo");
         normal.Register("normal", view);
         normal.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R11G11B10_FLOAT, "normal");
         metalness.Register("metalness", view);
@@ -1111,13 +1115,14 @@ public:
 
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        Resource rts[] = { albedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get(), objectID.Get() };
+        Resource rts[] = { albedo.Get(), specularAlbedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get(), objectID.Get()};
         SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true, false);
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
@@ -1133,6 +1138,7 @@ public:
         commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->viewContext.meshletsInView.GetResourcePtr(), 0, view->viewContext.meshletsCounter.GetResourcePtr(), 0);
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
@@ -1195,6 +1201,7 @@ public:
 class Lighting : public Pass
 {
     ViewResource lighted;
+    ViewResource specularHitDistance;
     ViewResource albedo;
     ViewResource depth;
     ViewResource normal;
@@ -1210,6 +1217,8 @@ public:
         ZoneScoped;
         lighted.Register("lighted", view);
         lighted.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R11G11B10_FLOAT, "lighted");
+        specularHitDistance.Register("specularHitDistance", view);
+        specularHitDistance.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16_FLOAT, "specularHitDistance");
         albedo.Register("albedo", view);
         depth.Register("depth", view);
         normal.Register("normal", view);
@@ -1236,6 +1245,7 @@ public:
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
 
         view->raytracingContext.rtParameters.lightedIndex = lighted.Get().uav.offset;
+        view->raytracingContext.rtParameters.specularHitDistanceIndex = specularHitDistance.Get().uav.offset;
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
@@ -1509,18 +1519,19 @@ public:
             history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
             commandBuffer->cmd->CopyResource(history.Get().GetResource(), lighted.Get().GetResource());
             history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON); // transition to present in the editor cmb
+
+            // currently tonemapping is only done after TAA... change that
+            ppparams.postProcessedIndex = postProcessed.Get().uav.offset;
+            ppparams.lightedIndex = lighted.Get().uav.offset;
+            ppparams.backBufferIndex = GPU::instance->backBuffer.Get().uav.offset;
+
+            Shader& postProcess = *AssetLibrary::instance->Get<Shader>(postProcessShader.Get().id, true);
+            commandBuffer->SetCompute(postProcess);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&ppparams));
+            commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->displayResolution.x), postProcess.DispatchY(view->displayResolution.y), 1);
         }
-
-        ppparams.postProcessedIndex = postProcessed.Get().uav.offset;
-        ppparams.lightedIndex = lighted.Get().uav.offset;
-        ppparams.backBufferIndex = GPU::instance->backBuffer.Get().uav.offset;
-
-        Shader& postProcess = *AssetLibrary::instance->Get<Shader>(postProcessShader.Get().id, true);
-        commandBuffer->SetCompute(postProcess);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&ppparams));
-        commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->displayResolution.x), postProcess.DispatchY(view->displayResolution.y), 1);
 
         Close();
     }
@@ -1529,11 +1540,17 @@ public:
 // https://github.com/NVIDIA/DLSS/blob/main/doc/DLSS_Programming_Guide_Release.pdf
 #include "nvsdk_ngx.h"
 #include "nvsdk_ngx_helpers.h"
+#include "nvsdk_ngx_helpers_dlssd.h"
 class DLSS : public Pass
 {
-    ViewResource lighted;
+    ViewResource albedo;
+    ViewResource specularAlbedo;
+    ViewResource normal;
+    ViewResource roughness;
     ViewResource motion;
     ViewResource depth;
+    ViewResource lighted;
+    ViewResource specularHitDistance;
     ViewResource postProcessed;
 
 public:
@@ -1543,14 +1560,20 @@ public:
     float sharpness = 0.5f;
     bool initialized = false;
     bool created = false;
+    View::Upscaling upscalingPreviousSetting;
 
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        lighted.Register("lighted", view);
+        albedo.Register("albedo", view);
+        specularAlbedo.Register("specularAlbedo", view);
+        normal.Register("normal", view);
+        roughness.Register("roughness", view);
         motion.Register("motion", view);
         depth.Register("depth", view);
+        lighted.Register("lighted", view);
+        specularHitDistance.Register("specularHitDistance", view);
         postProcessed.Register("postProcessed", view);
     }
     virtual void Off() override
@@ -1567,6 +1590,8 @@ public:
     {
         if (initialized)
             return;
+
+        view->upscaling = View::Upscaling::taa;
 
         // cant find _nvngx.dll or nvmgx.dll ... copied from some driver repo in the OS (do a global search)
         // in faact its not needed it is working fine on the laptop .... why not on the descktop ?
@@ -1592,12 +1617,23 @@ public:
         feature_common_info.PathListInfo.Path = dll_paths;
         feature_common_info.PathListInfo.Length = NVSDK_NGX_ARRAY_LEN(dll_paths);
 
-        static constexpr char const* project_guid = "a0f57b54-1daf-4934-90ae-c4035c19df04";
-        NVSDK_NGX_Result result = NVSDK_NGX_D3D12_Init_with_ProjectID(
-            project_guid,
-            NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-            "1.0",
-            L".",
+        NVSDK_NGX_Application_Identifier ngx_app_id = {};
+        ngx_app_id.IdentifierType = NVSDK_NGX_Application_Identifier_Type_Application_Id;
+        ngx_app_id.v.ApplicationId = 0xdeadbeef;
+
+        NVSDK_NGX_FeatureDiscoveryInfo featureDiscoveryInfo = {};
+        featureDiscoveryInfo.SDKVersion = NVSDK_NGX_Version_API;
+        featureDiscoveryInfo.FeatureID = NVSDK_NGX_Feature_RayReconstruction;
+        featureDiscoveryInfo.Identifier = ngx_app_id;
+        featureDiscoveryInfo.ApplicationDataPath = std::filesystem::temp_directory_path().wstring().c_str();
+        featureDiscoveryInfo.FeatureInfo = &feature_common_info;
+
+        NVSDK_NGX_FeatureRequirement dlssdSupported = {};
+        NVSDK_NGX_Result featureReq = NVSDK_NGX_D3D12_GetFeatureRequirements(GPU::instance->adapter, &featureDiscoveryInfo, &dlssdSupported);
+
+        NVSDK_NGX_Result result = NVSDK_NGX_D3D12_Init(
+            ngx_app_id.v.ApplicationId,
+            featureDiscoveryInfo.ApplicationDataPath,
             GPU::instance->device,
             &feature_common_info);
         if (NVSDK_NGX_FAILED(result)) return;
@@ -1639,62 +1675,122 @@ public:
 
         initialized = true;
         created = false;
+        view->upscaling = View::Upscaling::dlss;
+        if(dlssdSupported.FeatureSupported == NVSDK_NGX_FeatureSupportResult_Supported)
+            view->upscaling = View::Upscaling::dlssd;
+
+        upscalingPreviousSetting = View::Upscaling::none;
     }
     void Render(View* view) override
     {
         ZoneScoped;
         Open();
 
-        if (view->upscaling == View::Upscaling::dlss)
+        if (view->upscaling == View::Upscaling::dlss || view->upscaling == View::Upscaling::dlssd)
         {
             lighted.Get().Barrier(commandBuffer.Get());
 
-            if (!created)
+            if (upscalingPreviousSetting != view->upscaling)
             {
-                NVSDK_NGX_DLSS_Create_Params dlss_create_params{};
-                dlss_create_params.Feature.InWidth = view->renderResolution.x;
-                dlss_create_params.Feature.InHeight = view->renderResolution.y;
-                dlss_create_params.Feature.InTargetWidth = view->displayResolution.x;
-                dlss_create_params.Feature.InTargetHeight = view->displayResolution.y;
-                dlss_create_params.Feature.InPerfQualityValue = perf_quality;
-                dlss_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
-                    NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-                    NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-                    NVSDK_NGX_DLSS_Feature_Flags_DoSharpening |
-                    NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
-                dlss_create_params.InEnableOutputSubrects = false;
+                if (view->upscaling == View::Upscaling::dlss)
+                {
+                    NVSDK_NGX_DLSS_Create_Params dlss_create_params{};
+                    dlss_create_params.Feature.InWidth = view->renderResolution.x;
+                    dlss_create_params.Feature.InHeight = view->renderResolution.y;
+                    dlss_create_params.Feature.InTargetWidth = view->displayResolution.x;
+                    dlss_create_params.Feature.InTargetHeight = view->displayResolution.y;
+                    dlss_create_params.Feature.InPerfQualityValue = perf_quality;
+                    dlss_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
+                        NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                        NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
+                        NVSDK_NGX_DLSS_Feature_Flags_DoSharpening |
+                        NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
+                    dlss_create_params.InEnableOutputSubrects = false;
 
-                NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSS_EXT(commandBuffer->cmd, 0, 0, &dlss_feature, ngx_parameters, &dlss_create_params);
-                seedAssert(NVSDK_NGX_SUCCEED(result));
+                    NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSS_EXT(commandBuffer->cmd, 0, 0, &dlss_feature, ngx_parameters, &dlss_create_params);
+                    seedAssert(NVSDK_NGX_SUCCEED(result));
+                }
+                else if (view->upscaling == View::Upscaling::dlssd)
+                {
+                    NVSDK_NGX_DLSSD_Create_Params dlssd_create_params{};
+                    dlssd_create_params.InWidth = view->renderResolution.x;
+                    dlssd_create_params.InHeight = view->renderResolution.y;
+                    dlssd_create_params.InTargetWidth = view->displayResolution.x;
+                    dlssd_create_params.InTargetHeight = view->displayResolution.y;
+                    dlssd_create_params.InPerfQualityValue = perf_quality;
+                    dlssd_create_params.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode::NVSDK_NGX_DLSS_Roughness_Mode_Unpacked;
+                    dlssd_create_params.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type::NVSDK_NGX_DLSS_Depth_Type_HW;
+                    dlssd_create_params.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode::NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
+                    
+                    dlssd_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
+                        NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+
+                    NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSSD_EXT(commandBuffer->cmd, 0, 0, &dlss_feature, ngx_parameters, &dlssd_create_params);
+                    seedAssert(NVSDK_NGX_SUCCEED(result));
+                }
 
                 created = true;
+                upscalingPreviousSetting = view->upscaling;
             }
 
-            ID3D12Resource* input_texture = lighted.Get().GetResource();
-            ID3D12Resource* velocity_texture = motion.Get().GetResource();
-            ID3D12Resource* depth_texture = depth.Get().GetResource();
-            ID3D12Resource* output_texture = postProcessed.Get().GetResource();
+            if (view->upscaling == View::Upscaling::dlss)
+            {
 
-            NVSDK_NGX_D3D12_DLSS_Eval_Params dlss_eval_params{};
-            dlss_eval_params.Feature.pInColor = input_texture;
-            dlss_eval_params.Feature.pInOutput = output_texture;
-            dlss_eval_params.Feature.InSharpness = sharpness;
+                NVSDK_NGX_D3D12_DLSS_Eval_Params dlss_eval_params{};
+                dlss_eval_params.Feature.pInColor = lighted.Get().GetResource();
+                dlss_eval_params.Feature.pInOutput = postProcessed.Get().GetResource();
+                dlss_eval_params.Feature.InSharpness = sharpness;
 
-            dlss_eval_params.pInDepth = depth_texture;
-            dlss_eval_params.pInMotionVectors = velocity_texture;
-            dlss_eval_params.InMVScaleX = (float)view->renderResolution.x;
-            dlss_eval_params.InMVScaleY = (float)view->renderResolution.y;
+                dlss_eval_params.pInDepth = depth.Get().GetResource();
+                dlss_eval_params.pInMotionVectors = motion.Get().GetResource();
+                dlss_eval_params.InMVScaleX = (float)view->renderResolution.x;
+                dlss_eval_params.InMVScaleY = (float)view->renderResolution.y;
 
-            dlss_eval_params.pInExposureTexture = nullptr;
-            dlss_eval_params.InExposureScale = 1.0f;
+                dlss_eval_params.pInExposureTexture = nullptr;
+                dlss_eval_params.InExposureScale = 1.0f;
 
-            dlss_eval_params.InJitterOffsetX = view->viewContext.jitter[view->viewContext.jitterIndex].x;
-            dlss_eval_params.InJitterOffsetY = view->viewContext.jitter[view->viewContext.jitterIndex].y;
-            dlss_eval_params.InReset = false;
-            dlss_eval_params.InRenderSubrectDimensions = { view->renderResolution.x, view->renderResolution.y };
+                dlss_eval_params.InJitterOffsetX = view->viewContext.jitter[view->viewContext.jitterIndex].x;
+                dlss_eval_params.InJitterOffsetY = view->viewContext.jitter[view->viewContext.jitterIndex].y;
+                dlss_eval_params.InReset = false;
+                dlss_eval_params.InRenderSubrectDimensions = { view->renderResolution.x, view->renderResolution.y };
 
-            NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSS_EXT(commandBuffer->cmd, dlss_feature, ngx_parameters, &dlss_eval_params);
-            seedAssert(NVSDK_NGX_SUCCEED(result));
+                NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSS_EXT(commandBuffer->cmd, dlss_feature, ngx_parameters, &dlss_eval_params);
+                seedAssert(NVSDK_NGX_SUCCEED(result));
+            }
+            else if (view->upscaling == View::Upscaling::dlssd)
+            {
+                NVSDK_NGX_D3D12_DLSSD_Eval_Params dlss_eval_params{};
+                dlss_eval_params.pInColor = lighted.Get().GetResource();
+                dlss_eval_params.pInOutput = postProcessed.Get().GetResource();
+                dlss_eval_params.pInMotionVectors = motion.Get().GetResource();
+                dlss_eval_params.pInDepth = depth.Get().GetResource();
+                dlss_eval_params.pInNormals = normal.Get().GetResource();
+                dlss_eval_params.pInDiffuseAlbedo = albedo.Get().GetResource();
+                dlss_eval_params.pInSpecularAlbedo = specularAlbedo.Get().GetResource();
+                //dlss_eval_params.pInExposureTexture = nullptr; // not supported
+                //dlss_eval_params.pInAlpha = albedo.Get().GetResource();
+                dlss_eval_params.pInRoughness = roughness.Get().GetResource();
+                dlss_eval_params.InMVScaleX = (float)view->renderResolution.x;
+                dlss_eval_params.InMVScaleY = (float)view->renderResolution.y;
+                dlss_eval_params.InJitterOffsetX = view->viewContext.jitter[view->viewContext.jitterIndex].x;
+                dlss_eval_params.InJitterOffsetY = view->viewContext.jitter[view->viewContext.jitterIndex].y;
+
+                dlss_eval_params.InReset = 0;
+
+                dlss_eval_params.pInSpecularHitDistance = specularHitDistance.Get().GetResource();
+                dlss_eval_params.pInWorldToViewMatrix = reinterpret_cast<float*>(&view->viewWorld->cameras[0].view);
+                dlss_eval_params.pInViewToClipMatrix = reinterpret_cast<float*>(&view->viewWorld->cameras[0].proj);
+                /*
+                //dlss_eval_params.pInMotionVectorsReflections = getHandle(pSpecMotion);
+                //dlss_eval_params.pInTransparencyLayer = getHandle(pTransparent);
+                */
+
+                dlss_eval_params.InRenderSubrectDimensions.Width = view->renderResolution.x;
+                dlss_eval_params.InRenderSubrectDimensions.Height = view->renderResolution.y;
+
+                NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSSD_EXT(commandBuffer->cmd, dlss_feature, ngx_parameters, &dlss_eval_params);
+                seedAssert(NVSDK_NGX_SUCCEED(result));
+            }
         }
 
         Close();
@@ -1722,7 +1818,9 @@ public:
         ZoneScoped;
         Open();
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+        postProcessed.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
         commandBuffer->cmd->CopyResource(GPU::instance->backBuffer.Get().GetResource(), postProcessed.Get().GetResource());
+        postProcessed.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET); // transition to present in the editor cmb
         Close();
     }

@@ -7,11 +7,12 @@
 struct PS_OUTPUT
 {
     float4 albedo : SV_Target0; //DXGI_FORMAT_R8G8B8A8_UNORM
-    float3 normal : SV_Target1; //DXGI_FORMAT_R11G11B10_FLOAT
-    float metalness : SV_Target2; //DXGI_FORMAT_R8_UNORM
-    float roughness : SV_Target3; //DXGI_FORMAT_R8_UNORM
-    float2 motion : SV_Target4; //DXGI_FORMAT_R16G16_FLOAT
-    uint objectID : SV_Target5; //DXGI_FORMAT_R32_UINT
+    float4 specularAlbedo : SV_Target1; //DXGI_FORMAT_R8G8B8A8_UNORM
+    float3 normal : SV_Target2; //DXGI_FORMAT_R11G11B10_FLOAT
+    float metalness : SV_Target3; //DXGI_FORMAT_R8_UNORM
+    float roughness : SV_Target4; //DXGI_FORMAT_R8_UNORM
+    float2 motion : SV_Target5; //DXGI_FORMAT_R16G16_FLOAT
+    uint objectID : SV_Target6; //DXGI_FORMAT_R32_UINT
 };
 
 #pragma gBuffer AmplificationMain MeshMain PixelgBuffer
@@ -176,6 +177,7 @@ PS_OUTPUT PixelForward(MSVert inVerts)
     SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent, inVerts.binormal);
     
     o.albedo = s.albedo;
+    o.specularAlbedo = lerp(1, s.albedo, s.metalness);
     o.roughness = s.roughness;
     o.metalness = s.metalness;
     o.normal = StoreR11G11B10Normal(normalize(s.normal));
@@ -204,6 +206,7 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     
     if(o.albedo.a<=0.05) discard;
     
+    o.specularAlbedo = lerp(1, s.albedo, s.metalness);
     o.roughness = s.roughness;
     o.metalness = s.metalness;
     o.normal = StoreR11G11B10Normal(normalize(s.normal));

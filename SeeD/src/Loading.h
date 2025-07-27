@@ -1184,33 +1184,19 @@ public:
         while (aitexName.length == 0 && tests < channelCount)
         {
             aiTextureType t = static_cast<aiTextureType>(va_arg(args, int));
-            m->GetTexture(t, 0, &aitexName);
+            if(m->GetTextureCount(t))
+                m->GetTexture(t, 0, &aitexName);
             tests++;
         }
 
         String texName(aitexName.C_Str());
         assetID id = assetID::Invalid;
-        /*
-        String path;
-        id.hash = std::hash<std::string>{}(texName.C_Str());
-        path = std::format("{}{}.tex", AssetLibrary::instance->assetsPath.c_str(), id.hash);
-        id.hash = std::hash<std::string>{}(path);
-
-        if (AssetLibrary::instance->map.contains(id))
-        {
-            for (uint i = 0; i < textureToEntity.size(); i++)
-            {
-                if (textureToEntity[i].Get<Components::Texture>().id == id)
-                    return Components::Handle<Components::Texture> {textureToEntity[i].id};
-            }
-        }
-        */
 
         World::Entity ent{ entityInvalid };
         if (texName.size() > 0)
         {
             int extensionTested = 0;
-            String exts[] = { "jpg", "jpeg", "tif" };
+            String exts[] = { "jpg", "jpeg", "tif", "png"};
             while (id == assetID::Invalid)
             {
                 // if the texture is found id should stay the same

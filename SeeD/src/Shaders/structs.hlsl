@@ -338,6 +338,7 @@ namespace HLSL
         uint previousgiReservoirIndex;
         uint shadowsIndex;
         uint lightedIndex;
+        uint specularHitDistanceIndex;
         
         uint passNumber;
         

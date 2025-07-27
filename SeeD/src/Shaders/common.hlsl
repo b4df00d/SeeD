@@ -821,8 +821,8 @@ SurfaceData GetSurfaceData(uint2 pixel)
     s.roughness = roughness[pixel];
     s.tangent = cross(s.normal, float3(1, 0, 0));
     s.binormal = cross(s.normal, s.tangent);
-    s.specularTint = 0;
-    s._specular = 0;
+    s.specularTint = 1;
+    s._specular = 1;
     s.sheen = 0;
     s.sheenTint = 0.5;
     s.anisotropic = 0;
@@ -1105,16 +1105,21 @@ void RESTIR(RESTIRRay restirRay, uint previousReservoirIndex, uint currentReserv
     giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x] = PackGIReservoir(r);
 }
 
-float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in SurfaceData s)
+float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in SurfaceData s, out float hitDistance)
 {
     StructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];   
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x]);
-    
+    hitDistance = 0;
     if(any(r.color_W.xyz > 0))
     {
+        float3 dir = cd.worldPos - r.hit_Wsum.xyz;
+        float dirLength = length(dir);
+        hitDistance = dirLength;
+        dir /= dirLength;
+        
         HLSL::Light light;
         light.pos = float4(r.hit_Wsum.xyz, 0);
-        light.dir = float4(normalize(cd.worldPos - r.hit_Wsum.xyz), 0);
+        light.dir = float4(dir, 0);
         light.color.xyz = r.color_W.xyz / r.color_W.w * (r.hit_Wsum.w / r.dir_Wcount.w);
         light.range = 1;
         light.angle = 1;

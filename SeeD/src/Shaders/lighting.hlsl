@@ -18,16 +18,19 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y) return;
     
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
+    RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
     
     GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
     SurfaceData s = GetSurfaceData(cd.pixel.xy);
     
-    float3 direct = RESTIRLight(rtParameters.directReservoirIndex, cd, s);
-    float3 indirect = RESTIRLight(rtParameters.giReservoirIndex, cd, s);
+    float hitDistance = 0;
+    float3 direct = RESTIRLight(rtParameters.directReservoirIndex, cd, s, hitDistance);
+    float3 indirect = RESTIRLight(rtParameters.giReservoirIndex, cd, s, hitDistance);
     
     float3 result = direct + indirect;
     
     lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
+    specularHitDistance[dtid.xy] = hitDistance;
     //lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s), 0);
 #if 0
     if(dtid.x > viewContext.renderResolution.x * 0.5)
