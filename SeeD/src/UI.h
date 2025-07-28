@@ -1060,10 +1060,14 @@ public:
 
         if (editorState.selectedObject != entityInvalid)
         {
-            if (ImGui::Button("Delete"))
+            if (ImGui::Button("Delete") || IOs::instance->keys.pressed[VK_DELETE])
             {
                 editorState.selectedObject.Release();
+                editorState.selectedObject = entityInvalid;
                 editorState.dirtyHierarchy = true;
+
+                ImGui::End();
+                return;
             }
 
             uint pushID = 0;

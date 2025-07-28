@@ -141,6 +141,8 @@ public:
             RUN();
             CLEAR();
 
+            world.DeferredRelease(); // thread this ?
+
             if (options.stepMotion)
                 Sleep(500);
 
@@ -256,7 +258,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 
     Engine engine;
     engine.On(window);
-    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
+    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Mario1\\scene.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Stronghold.fbx");
@@ -275,12 +277,16 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\WildWest\\WildWest2.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Halo.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\BOURDON-V01.fbx");
-    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Objects\\primitives.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Objects\\primitives.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\caldera-main\\map_source\\prefabs\\br\\wz_vg\\mp_wz_island\\commercial\\hotel_01.usd");
 
 
-    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets2\\";
+    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets2\\";
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\BrutalistLevelKit\\brutalist.gltf");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\FantasticVillage\\map_village_day.gltf");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Cambodia\\TemplesOfCambodia_01_01_Exterior.gltf");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Bazaar\\LV_Bazaar.gltf");
+    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\ScienceLab\\ScieneLab.gltf");
 
     engine.Loop();
     engine.Off();

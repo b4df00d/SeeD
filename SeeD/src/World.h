@@ -314,21 +314,7 @@ public:
         // not used yet. Is this the proper way ?
         void Release()
         {
-            EntitySlot& thisSlot = World::instance->entitySlots[id];
-
-            if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
-            {
-                EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
-                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>().index;
-                Copy(lastSlot, thisSlot);
-                World::instance->entitySlots[entityOfLastSlot.id] = thisSlot;
-            }
-            World::instance->components[thisSlot.pool].count--;
-            // TODO : consider removing the pool ...
-
-            thisSlot.index = poolInvalid;
-            thisSlot.pool = poolInvalid;
-            World::instance->entityFreeSlots.push_back(id);
+            World::instance->deferredRelease.push_back(*this);
         }
 
         Components::Mask GetMask()
@@ -424,7 +410,7 @@ public:
             Copy(slotFrom, slotTo);
         }
 
-        void Copy(EntitySlot from, EntitySlot to)
+        static void Copy(EntitySlot from, EntitySlot to)
         {
             Pool poolFrom = World::instance->components[from.pool];
             Pool poolTo = World::instance->components[to.pool];
@@ -489,6 +475,8 @@ public:
     std::vector<uint> entityFreeSlots;
     std::vector<Pool> components;
 
+    std::vector<Entity> deferredRelease;
+
     std::array<std::vector<EntitySlot>, 128> frameQueries;
     std::atomic<uint> frameQueriesIndex;
 
@@ -543,6 +531,33 @@ public:
             //SUBTASKWORLD(sys);
             tf::Task t = subflow.emplace([this, i]() {this->systems[i]->Update(this); }).name("#system");
         }
+    }
+
+    void DeferredRelease()
+    {
+        ZoneScoped;
+        for (uint i = 0; i < deferredRelease.size(); i++)
+        {
+            Entity ent = deferredRelease[i];
+
+            EntitySlot& thisSlot = World::instance->entitySlots[ent.id];
+
+            if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
+            {
+                ZoneScoped;
+                EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
+                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>().index;
+                Entity::Copy(lastSlot, thisSlot);
+                World::instance->entitySlots[entityOfLastSlot.id] = thisSlot;
+            }
+            World::instance->components[thisSlot.pool].count--;
+            // TODO : consider removing the pool ...
+
+            thisSlot.index = poolInvalid;
+            thisSlot.pool = poolInvalid;
+            World::instance->entityFreeSlots.push_back(ent.id);
+        }
+        deferredRelease.clear();
     }
 
     uint Query(Components::Mask include, Components::Mask exclude)
