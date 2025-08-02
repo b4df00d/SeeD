@@ -1113,7 +1113,6 @@ public:
         ZoneScoped;
         Open();
 
-
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1556,7 +1555,7 @@ class DLSS : public Pass
 public:
     NVSDK_NGX_Parameter* ngx_parameters = nullptr;
     NVSDK_NGX_Handle* dlss_feature = nullptr;
-    NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_Balanced;
+    NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_MaxPerf;
     float sharpness = 0.5f;
     bool initialized = false;
     bool created = false;
@@ -2015,7 +2014,7 @@ public:
                         break;
 
                     auto& slot = queryResult[i + subQuery];
-                    World::Entity ent = World::Entity(slot.Get<Components::Entity>().index);
+                    World::Entity ent = World::Entity(slot.Get<Components::Entity>());
 
                     Components::Instance& instanceCmp = slot.Get<Components::Instance>();
                     Components::Mesh& meshCmp = instanceCmp.mesh.Get();
@@ -2031,7 +2030,7 @@ public:
                         continue;
 
                     uint materialIndex;
-                    bool materialAdded = viewWorld->materials.Add(World::Entity(instanceCmp.material.index), materialIndex);
+                    bool materialAdded = viewWorld->materials.Add(World::Entity(instanceCmp.material), materialIndex);
 
                     // everything should be loaded to be able to draw the instance
 
@@ -2113,7 +2112,7 @@ public:
                         return;
 
                     uint materialIndex;
-                    if (frameWorld.materials.Contains(World::Entity(queryResult[i + subQuery].Get<Components::Entity>().index), materialIndex))
+                    if (frameWorld.materials.Contains(World::Entity(queryResult[i + subQuery].Get<Components::Entity>()), materialIndex))
                     {
                         Components::Material& materialCmp = queryResult[i + subQuery].Get<Components::Material>();
                         HLSL::Material& material = frameWorld.materials.GetGPUData(materialIndex);
@@ -2127,7 +2126,7 @@ public:
                         bool materialReady = true;
                         for (uint texIndex = 0; texIndex < HLSL::MaterialTextureCount; texIndex++)
                         {
-                            if (materialCmp.textures[texIndex].index != entityInvalid)
+                            if (materialCmp.textures[texIndex] != entityInvalid)
                             {
                                 Components::Texture& textureCmp = materialCmp.textures[texIndex].Get();
                                 Resource* texture = AssetLibrary::instance->Get<Resource>(textureCmp.id);
@@ -2179,7 +2178,7 @@ public:
                     auto& light = queryResult[i].Get<Components::Light>();
                     //auto& trans = queryResult[i].Get<Components::WorldMatrix>();
 
-                    World::Entity ent = queryResult[i].Get<Components::Entity>().index;
+                    World::Entity ent = queryResult[i].Get<Components::Entity>();
                     float4x4 worldMatrix = ComputeWorldMatrix(ent);
 
                     HLSL::Light hlsllight;

@@ -30,9 +30,20 @@ namespace std
     };
 }
 
+struct EntityBase
+{
+    uint rev : 4 = 0b1111; // sync bit count with entitySlot rev
+    uint id : 28 = 0b1111111111111111111111111111; // sync bit count with invalidEntity
 
 
-static constexpr uint entityInvalid = ~0;
+    bool operator==(const EntityBase& other) const
+    {
+        return id == other.id && rev == other.rev;
+    }
+    bool IsValid();
+};
+static constexpr EntityBase entityInvalid = { 0b1111, 0b1111111111111111111111111111 };
+
 namespace Components
 {
     static constexpr uint componentMaxCount = 64;
@@ -46,6 +57,10 @@ namespace Components
     {
         strides[masksIndex] = sizeof(T);
         masksIndex++;
+        std::stringstream ss;
+        ss << typeid(T).name() << " " << masksIndex - 1 << " " << sizeof(T) << "\n";
+        std::string debugInfo(ss.str());
+        OutputDebugStringA(debugInfo.c_str());
         return masksIndex - 1;
     }
 
@@ -74,18 +89,20 @@ namespace Components
     concept IsComponent = std::is_base_of<Components::ComponentBase<T>, T>::value;
 
     template<Components::IsComponent T>
-    struct Handle
+    struct Handle : EntityBase
     {
-        uint index = entityInvalid;
         T& Get();
-        bool IsValid() { return index != entityInvalid; }
-        //explicit operator World::Entity() const;
+        bool IsValid() { return id != entityInvalid.id; }
     };
 
     // Be able to get the entity index from the entitySlot
-    struct Entity : ComponentBase<Entity>
+    struct Entity : ComponentBase<Entity>, EntityBase
     {
-        uint index = entityInvalid;
+        Entity(const EntityBase& other)
+        {
+            id = other.id;
+            rev = other.rev;
+        }
     };
 
     struct Name : ComponentBase<Name>
@@ -214,7 +231,9 @@ public:
 
     struct EntitySlot
     {
-        uint pool : 16;
+        uint permanent : 1;
+        uint rev : 4; // sync bit count with entity rev
+        uint pool : 11; // sync bit count with the assert in GetOrCreatePoolIndex
         uint index : 16;
 
         template <Components::IsComponent T>
@@ -237,6 +256,9 @@ public:
         template <Components::IsComponent T>
         T& Get()
         {
+            T* data = (T*)Get(T::bucketIndex);
+            return *data;
+            /*
             auto& poolpool = World::instance->components[pool];
             // TODO : check that the pool have the right mask (debug assert ?)
             seedAssert(T::bucketIndex < Components::componentMaxCount);
@@ -245,16 +267,22 @@ public:
             T* data = (T*)poolpool.data[T::bucketIndex];
             auto& res = data[index];
             return res;
+            */
         }
     };
 
-    struct Entity
+    struct Entity : EntityBase
     {
-        uint id;
-
         Entity()
         {
-            id = entityInvalid;
+            id = entityInvalid.id;
+            rev = entityInvalid.rev;
+        }
+
+        Entity(const EntityBase& other)
+        {
+            id = other.id;
+            rev = other.rev;
         }
 
         Entity(const uint& i)
@@ -269,16 +297,22 @@ public:
 
         bool operator==(const Entity& other) const
         {
-            return id == other.id;
+            return id == other.id && rev == other.rev;
+        }
+
+        bool operator==(const EntityBase& other) const
+        {
+            return id == other.id && rev == other.rev;
         }
 
         inline Entity Make(uint i)
         {
             id = i;
+            rev = 0;
             return *this;
         }
 
-        Entity Make(Components::Mask mask, String name = "")
+        Entity Make(Components::Mask mask, String name = "", bool permanent = false)
         {
             mask |= Components::Entity::mask;
 
@@ -288,20 +322,24 @@ public:
             EntitySlot slot;
             slot.pool = GetOrCreatePoolIndex(mask);
             slot.index = World::instance->components[slot.pool].GetSlot();
+            slot.permanent = permanent;
 
             if (World::instance->entityFreeSlots.size())
             {
                 id = (uint)World::instance->entityFreeSlots.back();
                 World::instance->entityFreeSlots.pop_back(); // pourquoi le popback avec la convertion en uint compile pas !??!?
+                slot.rev = World::instance->entitySlots[id].rev++;
                 World::instance->entitySlots[id] = slot;
             }
             else
             {
+                slot.rev = 0;
                 World::instance->entitySlots.push_back(slot);
                 id = (uint)World::instance->entitySlots.size() - 1;
             }
 
-            Get<Components::Entity>().index = id;
+            rev = slot.rev;
+            Get<Components::Entity>() = *(EntityBase*)this;
 
             if (!name.empty())
             {
@@ -352,13 +390,15 @@ public:
             EntitySlot newSlot;
             newSlot.pool = GetOrCreatePoolIndex(World::instance->components[thisSlot.pool].mask | mask);
             newSlot.index = World::instance->components[newSlot.pool].GetSlot();
+            newSlot.rev = thisSlot.rev;
+            newSlot.permanent = thisSlot.permanent;
 
             Copy(thisSlot, newSlot);
 
             if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
             {
                 EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
-                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>().index;
+                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>();
                 Copy(lastSlot, thisSlot);
                 World::instance->entitySlots[entityOfLastSlot.id] = thisSlot; //crash here !
             }
@@ -380,7 +420,7 @@ public:
             if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
             {
                 EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
-                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>().index;
+                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>();
                 Copy(lastSlot, thisSlot);
                 World::instance->entitySlots[entityOfLastSlot.id] = thisSlot; //crash here !
             }
@@ -434,6 +474,7 @@ public:
                 if (pool.mask == mask && pool.count < poolMaxSlots)
                     return i;
             }
+            seedAssert(World::instance->components.size() < (1 << 11)); //sync with entitySlot.pool bit count
             Pool newPool;
             newPool.mask = mask;
             newPool.On();
@@ -459,7 +500,7 @@ public:
                         EntitySlot slot = { i, j };
                         if (name == slot.Get<Components::Name>().name)
                         {
-                            *this = slot.Get<Components::Entity>().index;
+                            *this = slot.Get<Components::Entity>();
                             return true;
                         }
                     }
@@ -546,7 +587,7 @@ public:
             {
                 ZoneScoped;
                 EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
-                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>().index;
+                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>();
                 Entity::Copy(lastSlot, thisSlot);
                 World::instance->entitySlots[entityOfLastSlot.id] = thisSlot;
             }
@@ -566,7 +607,8 @@ public:
         uint queryIndex = frameQueriesIndex++;
         std::vector<EntitySlot>& queryResult = frameQueries[queryIndex];
         queryResult.clear();
-        queryResult.reserve(components.size() * poolMaxSlots);
+        //queryResult.reserve(components.size() * poolMaxSlots);
+        queryResult.reserve(poolMaxSlots * 2);
         for (uint i = 0; i < components.size(); i++)
         {
             Pool& pool = components[i];
@@ -574,7 +616,7 @@ public:
             {
                 for (uint j = 0; j < pool.count; j++)
                 {
-                    queryResult.push_back({ i, j });
+                    queryResult.push_back({ 0, 0, i, j });
                 }
             }
         }
@@ -609,31 +651,27 @@ namespace std
     };
 }
 
+
+bool EntityBase::IsValid()
+{
+    return id != entityInvalid.id && rev == World::instance->entitySlots[id].rev && World::instance->entitySlots[id].pool != poolInvalid;
+}
+
 namespace Components
 {
     template<Components::IsComponent T>
     T& Handle<T>::Get()
     {
-        World::Entity entity;
-        if (index == entityInvalid)
+        World::Entity entity = *this;
+        if (!entity.IsValid())
         {
             IOs::Log("Should not be adding something if in multitrhead");
             entity.Make(T::mask);
-            index = entity.id;
-        }
-        else
-        {
-            entity.Make(index);
+            id = entity.id;
+            rev = entity.rev;
         }
         return entity.Get<T>();
     }
-    /*
-    template<Components::IsComponent T>
-    inline Handle<T>::operator World::Entity() const
-    {
-        return World::Entity(index);
-    }
-    */
 }
 
 float4x4 ComputeLocalMatrix(World::Entity ent)
@@ -663,7 +701,7 @@ float4x4 ComputeWorldMatrix(World::Entity ent)
     if (ent.Has<Components::Parent>())
     {
         auto& parentCmp = ent.Get<Components::Parent>();
-        auto parentEnt = World::Entity(parentCmp.entity.Get().index);
+        auto parentEnt = World::Entity(parentCmp.entity.Get());
         if (parentEnt != entityInvalid)
         {
             float4x4 parentMatrix = ComputeWorldMatrix(parentEnt);
@@ -719,7 +757,6 @@ namespace Systems
 
             auto& cam = camera.Get<Components::Camera>();
             auto& trans = camera.Get<Components::Transform>();
-            //auto& mat = camera.Get<Components::WorldMatrix>();
             Components::WorldMatrix mat;
             mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
 
@@ -774,14 +811,5 @@ namespace Systems
             mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
 
         }
-
-        /*
-        IOs::Log("----------------");
-        IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Entity).name(), Components::Entity::mask.to_string(), Components::Entity::bucketIndex, Components::Entity::stride);
-        IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Shader).name(), Components::Shader::mask.to_string(), Components::Shader::bucketIndex, Components::Shader::stride);
-        IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Mesh).name(), Components::Mesh::mask.to_string(), Components::Mesh::bucketIndex, Components::Mesh::stride);
-        IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Material).name(), Components::Material::mask.to_string(), Components::Material::bucketIndex, Components::Material::stride);
-        IOs::Log("component {} mask {} bucketIndex {} size {}", typeid(Components::Instance).name(), Components::Instance::mask.to_string(), Components::Instance::bucketIndex, Components::Instance::stride);
-        */
     };
 }

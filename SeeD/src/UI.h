@@ -359,7 +359,7 @@ public:
             for (uint i = 0; i < result.size(); i++)
             {
                 TreeNode newNode;
-                newNode.entity = { result[i].Get<Components::Entity>().index };
+                newNode.entity = { result[i].Get<Components::Entity>() };
                 if (result[i].Has<Components::Name>())
                 {
                     newNode.name = std::format("{}{}", result[i].Get<Components::Name>().name, i);
@@ -390,7 +390,7 @@ public:
                     }
                     else
                     {
-                        World::Entity parent = { pent.Get().index };
+                        World::Entity parent = { pent.Get() };
                         for (uint j = 0; j < result.size(); j++)
                         {
                             TreeNode& nodeParent = nodes[j];
@@ -715,7 +715,7 @@ public:
         for (uint i = 0; i < result.size(); i++)
         {
             HandleEntry entry;
-            World::Entity entity = { result[i].Get<Components::Entity>().index };
+            World::Entity entity = { result[i].Get<Components::Entity>() };
             if (entity.Has<Components::Name>())
             {
                 entry.name = entity.Get<Components::Name>().name;
@@ -1141,7 +1141,7 @@ public:
                                     break;
                                 case PropertyTypes::_Handle:
                                 {
-                                    World::Entity handleTarget = ((int*)data)[dc];
+                                    World::Entity handleTarget = ((World::Entity*)data)[dc];
                                     String handleName = "--";
                                     if (handleTarget != entityInvalid)
                                     {
@@ -1155,7 +1155,7 @@ public:
                                         ImGui::SameLine();
                                         if (ImGui::SmallButton("x"))
                                         {
-                                            ((int*)data)[dc] = entityInvalid;
+                                            ((EntityBase*)data)[dc] = entityInvalid;
                                         }
                                         ImGui::SameLine();
                                     }
@@ -1219,7 +1219,7 @@ public:
         }
         if (par != NULL && par->entity.IsValid())
         {
-            World::Entity parentEnt = par->entity.Get().index;
+            World::Entity parentEnt = par->entity.Get();
             float4x4 parentMatrix = ComputeWorldMatrix(parentEnt);
             float4x4 invParentMat = inverse(parentMatrix);
 

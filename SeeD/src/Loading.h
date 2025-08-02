@@ -1078,8 +1078,8 @@ public:
                 }
 
                 auto& instance = ent.Get<Components::Instance>();
-                instance.mesh = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i]].id };
-                instance.material = Components::Handle<Components::Material>{ matIndexToEntity[_scene->mMeshes[node->mMeshes[i]]->mMaterialIndex].id };
+                instance.mesh = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i]] };
+                instance.material = Components::Handle<Components::Material>{ matIndexToEntity[_scene->mMeshes[node->mMeshes[i]]->mMaterialIndex] };
             }
         }
 
@@ -1272,7 +1272,7 @@ public:
             strcpy_s(name.name, 256, m->GetName().C_Str());
 
             auto& newMat = ent.Get<Components::Material>();
-            newMat.shader = { shader.id };
+            newMat.shader = { shader };
 
             aiString texName;
             /*
