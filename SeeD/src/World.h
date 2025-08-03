@@ -35,7 +35,6 @@ struct EntityBase
     uint rev : 4 = 0b1111; // sync bit count with entitySlot rev
     uint id : 28 = 0b1111111111111111111111111111; // sync bit count with invalidEntity
 
-
     bool operator==(const EntityBase& other) const
     {
         return id == other.id && rev == other.rev;
@@ -102,6 +101,12 @@ namespace Components
     struct Handle : EntityBase
     {
         T& Get();
+        T& GetPermanent();
+        void Set(const EntityBase& other)
+        {
+            id = other.id;
+            rev = other.rev;
+        }
         bool IsValid() { return id != entityInvalid.id; }
     };
 
@@ -197,7 +202,7 @@ namespace Systems
 
 // Just one world. keep it simple.
 static constexpr uint poolMaxSlots = 65535;
-static constexpr uint poolInvalid = 65535;
+static constexpr uint poolInvalid = 0b11111111111;
 class World
 {
 public:
@@ -242,7 +247,7 @@ public:
     struct EntitySlot
     {
         uint permanent : 1;
-        uint rev : 4; // sync bit count with entity rev
+        uint rev : 4; // sync bit count with EntityBase rev
         uint pool : 11; // sync bit count with the assert in GetOrCreatePoolIndex
         uint index : 16;
 
@@ -310,13 +315,6 @@ public:
             return id == other.id && rev == other.rev;
         }
 
-        inline Entity Make(uint i)
-        {
-            id = i;
-            rev = 0;
-            return *this;
-        }
-
         Entity Make(Components::Mask mask, String name = "", bool permanent = false)
         {
             mask |= Components::Entity::mask;
@@ -333,7 +331,7 @@ public:
             {
                 id = (uint)World::instance->entityFreeSlots.back();
                 World::instance->entityFreeSlots.pop_back(); // pourquoi le popback avec la convertion en uint compile pas !??!?
-                slot.rev = World::instance->entitySlots[id].rev++;
+                slot.rev = World::instance->entitySlots[id].rev++ % 15; //sync witch rev count bits (leave the value 15 for invalid)
                 World::instance->entitySlots[id] = slot;
             }
             else
@@ -448,14 +446,7 @@ public:
             res = value;
         }
 
-        void Copy(Entity from)
-        {
-            auto& slotFrom = World::instance->entitySlots[from.id];
-            auto& slotTo = World::instance->entitySlots[id];
-            Copy(slotFrom, slotTo);
-        }
-
-        static void Copy(EntitySlot from, EntitySlot to)
+        static void Copy(EntitySlot& from, EntitySlot& to)
         {
             Pool poolFrom = World::instance->components[from.pool];
             Pool poolTo = World::instance->components[to.pool];
@@ -534,6 +525,8 @@ public:
     {
         instance = this;
         playing = false;
+        entitySlots.reserve(1024);
+        entityFreeSlots.reserve(entitySlots.size());
     }
 
     void Off()
@@ -553,15 +546,27 @@ public:
 
     void Clear()
     {
+        std::vector<Systems::SystemBase*> systemsStopped;
+        systemsStopped.reserve(systems.size());
         for (uint i = 0; i < systems.size(); i++)
         {
             auto sys = systems[i];
             sys->Off();
+            systemsStopped.push_back(sys);
         }
-        components.clear();
-        for (uint i = 0; i < systems.size(); i++)
+        for (uint i = 0; i < entitySlots.size(); i++)
         {
-            auto sys = systems[i];
+            if (!entitySlots[i].permanent && entitySlots[i].pool != poolInvalid)
+            {
+                Entity ent;
+                ent.rev = entitySlots[i].rev;
+                ent.id = i;
+                ent.Release();
+            }
+        }
+        for (uint i = 0; i < systemsStopped.size(); i++)
+        {
+            auto sys = systemsStopped[i];
             sys->On();
         }
     }
@@ -586,22 +591,27 @@ public:
         {
             Entity ent = deferredRelease[i];
 
-            EntitySlot& thisSlot = World::instance->entitySlots[ent.id];
+            EntitySlot& thisSlot = entitySlots[ent.id];
 
-            if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
+            if (components[thisSlot.pool].count > 1 && thisSlot.index < components[thisSlot.pool].count - 1)
             {
                 ZoneScoped;
-                EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
-                Entity entityOfLastSlot = lastSlot.Get<Components::Entity>();
+                EntitySlot tmpSlot = thisSlot; // only interested in pool and index, permanent and rev are not relevent right now
+                tmpSlot.index = components[thisSlot.pool].count - 1;
+                Entity entityOfLastSlot = tmpSlot.Get<Components::Entity>();
+                EntitySlot& lastSlot = entitySlots[entityOfLastSlot.id]; // now the permanent and rev are correct
                 Entity::Copy(lastSlot, thisSlot);
-                World::instance->entitySlots[entityOfLastSlot.id] = thisSlot;
+                thisSlot.permanent = lastSlot.permanent;
+                thisSlot.rev = lastSlot.rev;
+                seedAssert(entityOfLastSlot.rev == thisSlot.rev);
+                entitySlots[entityOfLastSlot.id] = thisSlot;
             }
-            World::instance->components[thisSlot.pool].count--;
+            components[thisSlot.pool].count--;
             // TODO : consider removing the pool ...
 
-            thisSlot.index = poolInvalid;
+            //thisSlot.index = poolInvalid;
             thisSlot.pool = poolInvalid;
-            World::instance->entityFreeSlots.push_back(ent.id);
+            entityFreeSlots.push_back(ent.id);
         }
         deferredRelease.clear();
     }
@@ -671,7 +681,20 @@ namespace Components
         if (!entity.IsValid())
         {
             IOs::Log("Should not be adding something if in multitrhead");
-            entity.Make(T::mask);
+            entity.Make(T::mask, "", false);
+            id = entity.id;
+            rev = entity.rev;
+        }
+        return entity.Get<T>();
+    }
+    template<Components::IsComponent T>
+    T& Handle<T>::GetPermanent()
+    {
+        World::Entity entity = *this;
+        if (!entity.IsValid())
+        {
+            IOs::Log("Should not be adding something if in multitrhead");
+            entity.Make(T::mask, "", true);
             id = entity.id;
             rev = entity.rev;
         }

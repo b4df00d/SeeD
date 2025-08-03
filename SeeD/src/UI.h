@@ -1386,8 +1386,9 @@ public:
                 {
                     if (ImGui::MenuItem("Empty"))
                     {
+                        // TODO !
                         World::Entity ent;
-                        editorState.selectedObject = ent.Make(0);
+                        //editorState.selectedObject = ent.Make(0);
                     }
                     if (ImGui::MenuItem("Light Directional"))
                     {

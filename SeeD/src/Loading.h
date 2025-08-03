@@ -1051,7 +1051,7 @@ public:
             if (parentEntity != entityInvalid)
             {
                 auto& parent = ent.Get<Components::Parent>();
-                parent.entity = { parentEntity.id };
+                parent.entity.Set(parentEntity);
             }
         }
         else
@@ -1074,7 +1074,7 @@ public:
                 if (parentEntity != entityInvalid)
                 {
                     auto& parent = ent.Get<Components::Parent>();
-                    parent.entity = { parentEntity.id };
+                    parent.entity.Set(parentEntity);
                 }
 
                 auto& instance = ent.Get<Components::Instance>();
@@ -1247,7 +1247,7 @@ public:
         
         textureToEntity.push_back(ent);
 
-        return Components::Handle<Components::Texture> {ent.id};
+        return Components::Handle<Components::Texture> {ent};
 
         va_end(args);
     }
