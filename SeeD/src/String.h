@@ -68,3 +68,10 @@ public:
 		return std::wstring(begin(), end());
 	}
 };
+
+template<typename... Args>
+static String StringFormat(std::string_view rt_fmt_str, Args&&... args)
+{
+	String message = std::vformat(rt_fmt_str, std::make_format_args(args...));
+	return message;
+}

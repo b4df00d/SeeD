@@ -1058,6 +1058,12 @@ public:
         
         InitKnownComponents();
 
+        if (!editorState.selectedObject.IsValid())
+        {
+            ImGui::End();
+            return;
+        }
+
         if (editorState.selectedObject != entityInvalid)
         {
             if (ImGui::Button("Delete") || IOs::instance->keys.pressed[VK_DELETE])
@@ -1340,11 +1346,69 @@ public:
     void Update() override final
     {
         ZoneScoped;
-        if (editorState.selectedObject != entityInvalid && editorState.selectedObject.Has<Components::Transform>())
+        if (editorState.selectedObject.IsValid() && editorState.selectedObject.Has<Components::Transform>())
             EditTransform(editorState.cameraView, editorState.cameraProj, editorState.selectedObject);
     }
 };
 Guizmo guizmo;
+
+#include <format>
+class ECSWindow : public EditorWindow
+{
+public:
+    ECSWindow() : EditorWindow("ECS") {}
+
+    void Update() override final
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("ECS", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+
+        if (ImGui::BeginTable("split", 2, ImGuiTableFlags_Resizable))
+        {
+            ImGui::TableNextColumn();
+
+            auto& slots = World::instance->entitySlots;
+            ImGui::Text(StringFormat("used slots {}", slots.size()).c_str());
+            for (uint i = 0; i < slots.size(); i++)
+            {
+                ImGui::Text(StringFormat("    {} {} {} {}", (size_t)slots[i].permanent, (size_t)slots[i].rev, (size_t)slots[i].pool, (size_t)slots[i].index).c_str());
+            }
+
+            auto& freeslots = World::instance->entityFreeSlots;
+            ImGui::Text(StringFormat("free slots {}", freeslots.size()).c_str());
+            for (uint i = 0; i < freeslots.size(); i++)
+            {
+                ImGui::Text(StringFormat("    {}", (size_t)freeslots[i]).c_str());
+            }
+
+            ImGui::TableNextColumn();
+
+            auto& components = World::instance->components;
+            ImGui::Text(StringFormat("components {}", components.size()).c_str());
+            for (uint i = 0; i < components.size(); i++)
+            {
+                String cmps;
+                for (uint bitIdx = 1; bitIdx < Components::componentMaxCount; bitIdx++)
+                {
+                    if (components[i].mask.test(bitIdx))
+                    {
+                        cmps += Components::names[bitIdx] + " ";
+                    }
+                }
+                ImGui::Text(StringFormat("    {} {}", (size_t)components[i].count, cmps.c_str()).c_str());
+            }
+
+            ImGui::EndTable();
+        }
+
+        ImGui::End();
+    }
+};
+ECSWindow ecsWindow;
 
 class MainMenu : public EditorWindow
 {
@@ -1386,8 +1450,9 @@ public:
                 {
                     if (ImGui::MenuItem("Empty"))
                     {
+                        // TODO !
                         World::Entity ent;
-                        editorState.selectedObject = ent.Make(0);
+                        //editorState.selectedObject = ent.Make(0);
                     }
                     if (ImGui::MenuItem("Light Directional"))
                     {
