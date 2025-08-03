@@ -161,7 +161,7 @@ namespace HLSL
         float4x4 previous;
         uint meshIndex;
         uint materialIndex;
-        uint objectID;
+        uint objectID; // map to entityBase
         uint pad1;
         
         float4x4 unpack(float4x4 mat)

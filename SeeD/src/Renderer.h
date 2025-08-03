@@ -1394,7 +1394,7 @@ public:
         {
             uint* selectionResult = nullptr;
             view->editorContext.selectionResult.ReadBackMap((void**)&selectionResult);
-            editorState.selectedObject = selectionResult[0];
+            editorState.selectedObject.FromUInt(selectionResult[0]);
             view->editorContext.selectionResult.ReadBackUnMap();
         }
 
@@ -2045,7 +2045,7 @@ public:
                     instance.materialIndex = materialIndex;
                     instance.current = instance.pack(worldMatrix);
                     instance.previous = instance.pack(previousWorldMatrix);
-                    instance.objectID = ent.id;
+                    instance.objectID = ent.ToUInt();
                     // count instances with shader
                     instanceCount++;
 

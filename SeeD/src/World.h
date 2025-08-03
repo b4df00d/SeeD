@@ -41,6 +41,16 @@ struct EntityBase
         return id == other.id && rev == other.rev;
     }
     bool IsValid();
+
+    void FromUInt(uint obj)
+    {
+        *this = *(EntityBase*)&obj;
+    }
+    uint ToUInt()
+    {
+        uint res = *(uint*)this;
+        return res;
+    }
 };
 static constexpr EntityBase entityInvalid = { 0b1111, 0b1111111111111111111111111111 };
 
@@ -283,11 +293,6 @@ public:
         {
             id = other.id;
             rev = other.rev;
-        }
-
-        Entity(const uint& i)
-        {
-            id = i;
         }
 
         ~Entity()

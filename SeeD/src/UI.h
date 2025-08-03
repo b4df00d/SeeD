@@ -243,7 +243,7 @@ class HierarchyWindow : public EditorWindow
     int TreeCloseAndUnselectChildNodes(TreeNode* node, ImGuiSelectionBasicStorage* selection, int depth = 0)
     {
         // Recursive close (the test for depth == 0 is because we call this on a node that was just closed!)
-        int unselected_count = selection->Contains((ImGuiID)node->entity.id) ? 1 : 0;
+        int unselected_count = selection->Contains(node->entity.ToUInt()) ? 1 : 0;
         if (depth == 0 || TreeNodeGetOpen(node))
         {
             for (TreeNode* child : node->childs)
@@ -252,7 +252,7 @@ class HierarchyWindow : public EditorWindow
         }
 
         // Select root node if any of its child was selected, otherwise unselect
-        selection->SetItemSelected((ImGuiID)node->entity.id, (depth == 0 && unselected_count > 0));
+        selection->SetItemSelected(node->entity.ToUInt(), (depth == 0 && unselected_count > 0));
         return unselected_count;
     }
 
@@ -262,7 +262,7 @@ class HierarchyWindow : public EditorWindow
         tree_node_flags |= ImGuiTreeNodeFlags_NavLeftJumpsBackHere; // Enable pressing left to jump to parent
         if (node->childs.size() == 0)
             tree_node_flags |= ImGuiTreeNodeFlags_Bullet | ImGuiTreeNodeFlags_Leaf;
-        if (selection->Contains((ImGuiID)node->entity.id))
+        if (selection->Contains(node->entity.ToUInt()))
             tree_node_flags |= ImGuiTreeNodeFlags_Selected;
         if(node == &world)
             tree_node_flags |= ImGuiTreeNodeFlags_DefaultOpen;
@@ -270,7 +270,7 @@ class HierarchyWindow : public EditorWindow
         // Using SetNextItemStorageID() to specify storage id, so we can easily peek into
         // the storage holding open/close stage, using our TreeNodeGetOpen/TreeNodeSetOpen() functions.
         ImGui::SetNextItemSelectionUserData((ImGuiSelectionUserData)(intptr_t)node);
-        ImGui::SetNextItemStorageID((ImGuiID)node->entity.id);
+        ImGui::SetNextItemStorageID(node->entity.ToUInt());
         if (ImGui::TreeNodeEx(node->name.c_str(), tree_node_flags))
         {
             for (TreeNode* child : node->childs)
@@ -286,7 +286,7 @@ class HierarchyWindow : public EditorWindow
     void TreeSetAllInOpenNodes(TreeNode* node, ImGuiSelectionBasicStorage* selection, bool selected)
     {
         if (node->parent != NULL) // Root node isn't visible nor selectable in our scheme
-            selection->SetItemSelected((ImGuiID)node->entity.id, selected);
+            selection->SetItemSelected(node->entity.ToUInt(), selected);
         if (node->parent == NULL || TreeNodeGetOpen(node))
             for (TreeNode* child : node->childs)
                 TreeSetAllInOpenNodes(child, selection, selected);
@@ -329,7 +329,7 @@ class HierarchyWindow : public EditorWindow
                 TreeNode* first_node = (TreeNode*)(intptr_t)req.RangeFirstItem;
                 TreeNode* last_node = (TreeNode*)(intptr_t)req.RangeLastItem;
                 for (TreeNode* node = first_node; node != NULL; node = TreeGetNextNodeInVisibleOrder(node, last_node))
-                    selection->SetItemSelected((ImGuiID)node->entity.id, req.Selected);
+                    selection->SetItemSelected(node->entity.ToUInt(), req.Selected);
             }
         }
     }
@@ -429,7 +429,7 @@ public:
             void* it = NULL;
             ImGuiID id = 0;
             selection.GetNextSelectedItem(&it, &id);
-            if (id != editorState.selectedObject)
+            if (id != editorState.selectedObject.ToUInt())
             {
                 selection.Clear();
             }
@@ -448,7 +448,7 @@ public:
                 selection.GetNextSelectedItem(&it, &id);
                 if (id != 0)
                 {
-                    editorState.selectedObject = { id };
+                    editorState.selectedObject.FromUInt(id);
                 }
 
                 ImGui::EndChild();
@@ -644,12 +644,12 @@ class HandlePickingWindow : public EditorWindow
 {
     struct HandleEntry
     {
-        int handle;
+        EntityBase handle;
         String name;
     };
     std::vector<HandleEntry> entries;
     
-    void* handle;
+    EntityBase* handle;
     World::Entity selectedEntity = entityInvalid;
 public:
     HandlePickingWindow() : EditorWindow("HandlePickingWindow") { isOpen = false; }
@@ -675,7 +675,7 @@ public:
         {
             ImGui::PushID(i);
             bool selected;
-            selected = selectedEntity.id == entries[i].handle;
+            selected = selectedEntity == entries[i].handle;
             if (selected)
             {
                 ImGui::TextColored(ImVec4(1, 1, 0, 1), entries[i].name.c_str());
@@ -684,7 +684,7 @@ public:
             {
                 ImGui::Selectable(entries[i].name.c_str(), &selected);
                 if (selected)
-                    selectedEntity.id = entries[i].handle;
+                    selectedEntity = entries[i].handle;
             }
             ImGui::PopID();
         }
@@ -693,7 +693,7 @@ public:
 
         if (ImGui::Button("Select"))
         {
-            *(int*)handle = selectedEntity.id;
+            *handle = selectedEntity;
             Close();
         }
         ImGui::SameLine();
@@ -705,7 +705,7 @@ public:
         ImGui::End();
     }
 
-    void Open(Components::Mask mask, void* _handle)
+    void Open(Components::Mask mask, EntityBase* _handle)
     {
         uint resCount = World::instance->CountQuery(mask, 0);
         uint instanceQueryIndex = World::instance->Query(mask, 0);
@@ -724,11 +724,11 @@ public:
             {
                 entry.name = "--";
             }
-            entry.handle = entity.id;
+            entry.handle = entity;
             entries.push_back(entry);
         }
         handle = _handle;
-        selectedEntity = *(int*)handle;
+        selectedEntity = *handle;
         isOpen = true;
     }
 
@@ -1161,7 +1161,7 @@ public:
                                     }
                                     if (ImGui::SmallButton("o"))
                                     {
-                                        handlePickingWindow.Open(m.dataTemplateType, &((int*)data)[dc]);
+                                        handlePickingWindow.Open(m.dataTemplateType, &((EntityBase*)data)[dc]);
                                     }
                                     ImGui::SameLine();
                                     ImGui::Text(handleName.c_str());
