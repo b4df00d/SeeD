@@ -2021,8 +2021,8 @@ public:
                     Components::Material& materialCmp = instanceCmp.material.Get();
                     Components::Shader& shaderCmp = materialCmp.shader.Get();
 
-                    uint meshIndex = AssetLibrary::instance->GetIndex(meshCmp.id);
-                    if (meshIndex == ~0)
+                    Mesh* mesh = AssetLibrary::instance->Get<Mesh>(meshCmp.id);
+                    if (!mesh)
                         continue;
 
                     Shader* shader = AssetLibrary::instance->Get<Shader>(shaderCmp.id);
@@ -2041,7 +2041,7 @@ public:
                     matrixCmp.matrix = worldMatrix;
 
                     HLSL::Instance& instance = localInstances[instanceCount];
-                    instance.meshIndex = meshIndex;
+                    instance.meshIndex = mesh->storageIndex;
                     instance.materialIndex = materialIndex;
                     instance.current = instance.pack(worldMatrix);
                     instance.previous = instance.pack(previousWorldMatrix);
@@ -2049,9 +2049,7 @@ public:
                     // count instances with shader
                     instanceCount++;
 
-                    Mesh* mesh = AssetLibrary::instance->Get<Mesh>(meshCmp.id);
                     localMeshletCount += mesh->meshletCount;
-
 
                     // if in range (depending on distance and BC size)
                     // Add to TLAS
@@ -2117,7 +2115,7 @@ public:
                         Components::Material& materialCmp = queryResult[i + subQuery].Get<Components::Material>();
                         HLSL::Material& material = frameWorld.materials.GetGPUData(materialIndex);
 
-                        material.shaderIndex = AssetLibrary::instance->GetIndex(materialCmp.shader.Get().id);
+                        material.shaderIndex = 0; // not used ?
                         for (uint paramIndex = 0; paramIndex < HLSL::MaterialParametersCount; paramIndex++)
                         {
                             // memcpy ? it is even just a cashline 

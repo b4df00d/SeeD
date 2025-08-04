@@ -2283,6 +2283,7 @@ struct MeshStorage
         newMesh.indexOffset = _nextIndexOffset;
         newMesh.vertexCount = (uint)meshData.vertices.size();
         newMesh.vertexOffset = _nextVertexOffset;
+        newMesh.storageIndex = _nextMeshOffset;
         for (uint i = 0; i < meshData.meshlets.size(); i++)
         {
             meshData.meshlets[i].triangleOffset += _nextMeshletTriangleOffset;
@@ -2386,5 +2387,7 @@ struct MeshStorage
 
         lock.unlock();
     }
+
+    // TODO : a real release in meshStorage
 };
 MeshStorage* MeshStorage::instance;

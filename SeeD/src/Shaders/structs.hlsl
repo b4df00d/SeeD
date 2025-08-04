@@ -142,8 +142,8 @@ namespace HLSL
         uint vertexCount;
         uint indexOffset;
         uint indexCount;
+        uint storageIndex;
         uint pad1;
-        uint pad2;
     };
     
     static const uint MaterialTextureCount = 7;

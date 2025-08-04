@@ -203,7 +203,7 @@ public:
 
         for (auto& item : AssetLibrary::instance->map)
         {
-            ImGui::RadioButton("##radio", item.second.indexInVector != ~0);
+            ImGui::RadioButton("##radio", item.second.data != nullptr);
             ImGui::SameLine();
             ImGui::Text("%ul %s", item.first, item.second.path.c_str());
         }

@@ -15,17 +15,18 @@ public:
         String path;
         String originalFilePath;
         AssetLibrary::AssetType type;
-        uint indexInVector = ~0;
+        void* data = nullptr;
+        uint lastGetFrameCount = 0;
     };
     static AssetLibrary* instance;
     // https://www.youtube.com/watch?v=cGB3wT0U5Ao&ab_channel=CppCon
     // used Open Addressing Hash Map ?
     // plf::colony ?
+    String file = "..\\assetLibrary.txt";
+    String assetsPath = "..\\Assets\\";
     std::unordered_map<assetID, Asset> map;
     String importPath = "..\\Assets\\";
     std::unordered_map<assetID, String> allAssetsInImportPath;
-    String assetsPath = "..\\Assets\\";
-    String file = "..\\assetLibrary.txt";
     std::unordered_map<assetID, uint> loadingRequest;
     int meshLoadingLimit = 5;
     int shaderLoadingLimit = 5;
@@ -33,10 +34,6 @@ public:
     int meshLoaded = 0;
     int shaderLoaded = 0;
     int textureLoaded = 0;
-
-    std::vector<Mesh> meshes;
-    std::vector<Shader> shaders;
-    std::vector<Resource> textures;
 
     PerFrame<CommandBuffer> commandBuffer;
     const char* name = "AssetLibraryUpload";
@@ -60,18 +57,28 @@ public:
         {
             commandBuffer.Get(i).Off();
         }
-        for (uint i = 0; i < meshes.size(); i++)
+
+        for (auto& item : map)
         {
-            meshes[i].BLAS.Release();
+            if (item.second.data != nullptr)
+            {
+                if (item.second.type == AssetLibrary::AssetType::mesh)
+                {
+                    // TODO : a real release in meshStorage
+                    ((Mesh*)item.second.data)->BLAS.Release();
+                }
+                else if (item.second.type == AssetLibrary::AssetType::shader)
+                {
+                    ((Shader*)item.second.data)->shaderBindingTable.Release();
+                }
+                else if (item.second.type == AssetLibrary::AssetType::texture)
+                {
+                    ((Resource*)item.second.data)->allocation->Release();
+                }
+                item.second.data = nullptr;
+            }
         }
-        for (uint i = 0; i < shaders.size(); i++)
-        {
-            shaders[i].shaderBindingTable.Release();
-        }
-        for (uint i = 0; i < textures.size(); i++)
-        {
-            textures[i].allocation->Release();
-        }
+
         instance = nullptr;
     }
 
@@ -133,12 +140,36 @@ public:
         {
             if (item.second.type == AssetLibrary::AssetType::shader)
             {
-                if (map[item.first].indexInVector != ~0)
+                if (map[item.first].data != nullptr)
                 {
                     if (Get<Shader>(item.first)->NeedReload())
                     {
                         LoadAsset(item.first, false);
                     }
+                }
+            }
+            else if (item.second.type == AssetLibrary::AssetType::mesh || item.second.type == AssetLibrary::AssetType::texture)
+            {
+                if (item.second.data != nullptr)
+                {
+                    if (item.second.lastGetFrameCount > 100)
+                    {
+                        if (item.second.type == AssetLibrary::AssetType::mesh)
+                        {
+                            // TODO : a real release in meshStorage
+                            ((Mesh*)item.second.data)->BLAS.Release();
+                        }
+                        else if (item.second.type == AssetLibrary::AssetType::shader)
+                        {
+                            ((Shader*)item.second.data)->shaderBindingTable.Release();
+                        }
+                        else if (item.second.type == AssetLibrary::AssetType::texture)
+                        {
+                            ((Resource*)item.second.data)->allocation->Release();
+                        }
+                        item.second.data = nullptr;
+                    }
+                    item.second.lastGetFrameCount++;
                 }
             }
         }
@@ -182,20 +213,6 @@ public:
         return map[id].path;
     }
 
-    uint GetIndex(assetID id)
-    {
-        if (id == assetID::Invalid) return ~0;
-        seedAssert(map.contains(id));
-        auto& asset = map[id];
-        if (asset.indexInVector == ~0)
-        {
-            lock.lock();
-            loadingRequest[id]++;
-            lock.unlock();
-        }
-        return asset.indexInVector;
-    }
-
     template<typename T>
     T* Get(assetID id, bool immediate = false)
     {
@@ -204,7 +221,7 @@ public:
 
         seedAssert(map.contains(id));
         auto& asset = map[id];
-        if (asset.indexInVector == ~0)
+        if (asset.data == nullptr)
         {
             if (!immediate)
             {
@@ -219,14 +236,10 @@ public:
             }
         }
 
-        if (asset.indexInVector != ~0)
+        if (asset.data != nullptr)
         {
-            if (asset.type == AssetLibrary::AssetType::mesh)
-                return (T*)&meshes[asset.indexInVector];
-            else if (asset.type == AssetLibrary::AssetType::shader)
-                return (T*)&shaders[asset.indexInVector];
-            else if (asset.type == AssetLibrary::AssetType::texture)
-                return (T*)&textures[asset.indexInVector];
+            asset.lastGetFrameCount = 0;
+            return (T*)asset.data;
         }
 
         return nullptr;
@@ -2251,8 +2264,8 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             {
                 Mesh mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get());
                 lock.lock();
-                meshes.push_back(mesh);
-                map[id].indexInVector = (uint)meshes.size() - 1;
+                map[id].data = new Mesh(mesh);
+                //*(Mesh*)map[id].data = mesh;
                 meshLoaded++;
                 lock.unlock();
             }
@@ -2268,16 +2281,11 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             if (compiled)
             {
                 lock.lock();
-                uint index = map[id].indexInVector;
-                if (index != ~0)
+                if (map[id].data == nullptr)
                 {
-                    shaders[index] = shader;
+                    map[id].data = new Shader();
                 }
-                else
-                {
-                    shaders.push_back(shader);
-                    map[id].indexInVector = (uint)shaders.size() - 1;
-                }
+                *(Shader*)map[id].data = shader;
                 shaderLoaded++;
                 lock.unlock();
             }
@@ -2292,8 +2300,8 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             if (texture.allocation != nullptr)
             {
                 lock.lock();
-                textures.push_back(texture);
-                map[id].indexInVector = (uint)textures.size() - 1;
+                map[id].data = new Resource(texture);
+                //*(Resource*)map[id].data = texture;
                 textureLoaded++;
                 lock.unlock();
             }
