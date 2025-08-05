@@ -111,6 +111,7 @@ public:
         shaderLoader.On();
         renderer.On(uint2(gpu.backBuffer.Get().GetResource()->GetDesc().Width, gpu.backBuffer.Get().GetResource()->GetDesc().Height));
         ui.On(&ios.window, gpu.device, gpu.swapChain);
+        EditorWindow::Load();
 
         player.On();
     }
@@ -170,6 +171,7 @@ public:
         gpu.Off();
         ios.Off();
         time.Off();
+        EditorWindow::Save();
     }
 
     void ScheduleInputs(tf::Subflow& subflow)

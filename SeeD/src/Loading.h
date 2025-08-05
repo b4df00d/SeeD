@@ -134,8 +134,9 @@ public:
         commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
-    void CheckReload()
+    void CheckAssetsLifeTime()
     {
+        ZoneScoped;
         for (auto& item : map)
         {
             if (item.second.type == AssetLibrary::AssetType::shader)
@@ -2249,7 +2250,7 @@ inline void AssetLibrary::LoadAssets()
             break;
     }
     loadingRequest.clear();
-    CheckReload();
+    CheckAssetsLifeTime();
 }
 inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
 {

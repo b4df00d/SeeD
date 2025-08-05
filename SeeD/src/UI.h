@@ -86,7 +86,8 @@ public:
         {
             for (uint i = 0; i < guiWindows.size(); i++)
             {
-                guiWindows[i]->Update();
+                if (guiWindows[i]->isOpen)
+                    guiWindows[i]->Update();
             }
         }
         else
@@ -105,7 +106,6 @@ public:
 
                 ImGui::EndMainMenuBar();
             }
-            //ImGui::End();
         }
     }
 
@@ -114,6 +114,46 @@ public:
         isOpen = true;
     }
     virtual void Update() = 0;
+
+    // static load save status
+
+    static void Save()
+    {
+        ZoneScoped;
+        String file = "..\\UILayout.txt";
+
+        String line;
+        std::ofstream myfile(file);
+        if (myfile.is_open())
+        {
+            for (auto& item : guiWindows)
+            {
+                myfile << item->name << " " << item->isOpen << std::endl;
+            }
+        }
+    }
+
+    static void Load()
+    {
+        ZoneScoped;
+        String file = "..\\UILayout.txt";
+
+        String line;
+        std::ifstream myfile(file);
+        if (myfile.is_open())
+        {
+            String name;
+            bool open;
+            while (myfile >> name >> open)
+            {
+                for (auto& item : guiWindows)
+                {
+                    if (item->name == name)
+                        item->isOpen = open;
+                }
+            }
+        }
+    }
 };
 std::vector<EditorWindow*> EditorWindow::guiWindows;
 
@@ -177,8 +217,9 @@ ProfilerWindow profilerWindow;
 
 class AssetLibraryWindow : public EditorWindow
 {
+    bool showOnlyLoaded;
 public:
-    AssetLibraryWindow() : EditorWindow("AssetLibrary") {}
+    AssetLibraryWindow() : EditorWindow("AssetLibrary") { showOnlyLoaded = true; }
     void Update() override final
     {
         ZoneScoped;
@@ -192,6 +233,10 @@ public:
         {
             AssetLibrary::instance->map.clear();
         }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Show Only Loaded", &showOnlyLoaded))
+        {
+        }
 
         char path[256];
         strcpy(path, AssetLibrary::instance->importPath.c_str());
@@ -203,9 +248,13 @@ public:
 
         for (auto& item : AssetLibrary::instance->map)
         {
-            ImGui::RadioButton("##radio", item.second.data != nullptr);
-            ImGui::SameLine();
-            ImGui::Text("%ul %s", item.first, item.second.path.c_str());
+            bool loaded = item.second.data != nullptr;
+            if (!showOnlyLoaded || loaded)
+            {
+                ImGui::RadioButton("##radio", loaded);
+                ImGui::SameLine();
+                ImGui::Text("%ul %s", item.first, item.second.path.c_str());
+            }
         }
 
         ImGui::End();
@@ -335,7 +384,7 @@ class HierarchyWindow : public EditorWindow
     }
 
 public:
-    HierarchyWindow() : EditorWindow("HierarchyWindow") {}
+    HierarchyWindow() : EditorWindow("Hierarchy") {}
     void Update() override final
     {
         ZoneScoped;
@@ -652,7 +701,7 @@ class HandlePickingWindow : public EditorWindow
     EntityBase* handle;
     World::Entity selectedEntity = entityInvalid;
 public:
-    HandlePickingWindow() : EditorWindow("HandlePickingWindow") { isOpen = false; }
+    HandlePickingWindow() : EditorWindow("HandlePicking") { isOpen = false; }
     void Update() override final
     {
         ZoneScoped;
@@ -770,7 +819,7 @@ class FileBrowserWindow : public EditorWindow
     callback resultCB;
 
 public:
-    FileBrowserWindow() : EditorWindow("FileBrowserWindow") { isOpen = false; OriginalPath = ""; }
+    FileBrowserWindow() : EditorWindow("FileBrowser") { isOpen = false; OriginalPath = ""; }
 
     bool Open(callback result)
     {
@@ -1046,7 +1095,7 @@ class PropertyWindow : public EditorWindow
         return log2(n & -n) + 1;
     }
 public:
-    PropertyWindow() : EditorWindow("PropertyWindow") {}
+    PropertyWindow() : EditorWindow("Property") {}
     void Update() override final
     {
         ZoneScoped;
@@ -1413,7 +1462,7 @@ ECSWindow ecsWindow;
 class MainMenu : public EditorWindow
 {
 public:
-    MainMenu() : EditorWindow("MainMenu") {}
+    MainMenu() : EditorWindow("MainMenu") { isOpen = true; }
     void Update() override final
     {
         ZoneScoped;
