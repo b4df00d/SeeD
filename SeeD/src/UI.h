@@ -49,6 +49,7 @@ struct ComponentInfoParse
 {
     String name;
     std::vector<MemberInfoParse> members;
+    String propertyDrawPtr;
 };
 struct MemberInfo
 {
@@ -60,8 +61,9 @@ struct MemberInfo
 };
 struct ComponentInfo
 {
-    String name;       // Member name
+    String name;       // Component name
     Components::Mask mask;
+    void (*PropertyDraw)(char*);
     std::vector<MemberInfo> members;
 };
 std::vector<ComponentInfo> knownComponents;
@@ -1136,97 +1138,107 @@ public:
                     char* cmpData = editorState.selectedObject.Get(Components::MaskToBucket(metaData.mask));
                     if (ImGui::CollapsingHeader(metaData.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
                     {
-                        for (uint memberIndex = 0; memberIndex < metaData.members.size(); memberIndex++)
+                        if (metaData.PropertyDraw != nullptr)
                         {
-                            ImGui::PushID(pushID++);
-                            auto& m = metaData.members[memberIndex];
-                            char* data = cmpData + m.offset;
-                            ImGui::Text(m.name.c_str());
-                            if(m.dataCount == 1)
-                                ImGui::SameLine();
-                            for (uint dc = 0; dc < m.dataCount; dc++)
+                            metaData.PropertyDraw(cmpData);
+                        }
+                        else
+                        {
+                            for (uint memberIndex = 0; memberIndex < metaData.members.size(); memberIndex++)
                             {
-                                switch (m.dataType)
+                                ImGui::PushID(pushID++);
+                                auto& m = metaData.members[memberIndex];
+                                char* data = cmpData + m.offset;
+                                ImGui::Text(m.name.c_str());
+                                if (m.dataCount == 1)
+                                    ImGui::SameLine();
+                                for (uint dc = 0; dc < m.dataCount; dc++)
                                 {
-                                case PropertyTypes::_int:
-                                case PropertyTypes::_uint:
-                                    ImGui::InputInt("", &((int*)data)[dc]);
-                                    break;
-                                case PropertyTypes::_float:
-                                    ImGui::InputFloat("", &((float*)data)[dc]);
-                                    break;
-                                case PropertyTypes::_float2:
-                                    ImGui::InputFloat2("", &((float*)data)[dc]);
-                                    break;
-                                case PropertyTypes::_float3:
-                                    ImGui::InputFloat3("", &((float*)data)[dc]);
-                                    break;
-                                case PropertyTypes::_float4:
-                                    ImGui::InputFloat4("", &((float*)data)[dc]);
-                                    break;
-                                case PropertyTypes::_quaternion:
-                                    ImGui::InputFloat4("", &((float*)data)[dc]);
-                                    break;
-                                case PropertyTypes::_float4x4:
-                                {
-                                    float4x4& mat = ((float4x4*)data)[dc];
-                                    ImGui::InputFloat4("x", (float*)&mat[0]);
-                                    ImGui::InputFloat4("y", (float*)&mat[1]);
-                                    ImGui::InputFloat4("z", (float*)&mat[2]);
-                                    ImGui::InputFloat4("pos", (float*)&mat[3]);
-                                }
-                                    break;
-                                case PropertyTypes::_assetID:
-                                    assetID id = ((assetID*)data)[dc];
-                                    if (AssetLibrary::instance->map.contains(id))
+                                    ImGui::PushID(pushID++);
+                                    switch (m.dataType)
                                     {
+                                    case PropertyTypes::_int:
+                                    case PropertyTypes::_uint:
+                                        ImGui::InputInt("", &((int*)data)[dc]);
+                                        break;
+                                    case PropertyTypes::_float:
+                                        ImGui::DragFloat("", &((float*)data)[dc]);
+                                        break;
+                                    case PropertyTypes::_float2:
+                                        ImGui::DragFloat2("", &((float*)data)[dc]);
+                                        break;
+                                    case PropertyTypes::_float3:
+                                        ImGui::DragFloat3("", &((float*)data)[dc]);
+                                        break;
+                                    case PropertyTypes::_float4:
+                                        ImGui::DragFloat4("", &((float*)data)[dc]);
+                                        break;
+                                    case PropertyTypes::_quaternion:
+                                        ImGui::DragFloat4("", &((float*)data)[dc]);
+                                        break;
+                                    case PropertyTypes::_float4x4:
+                                    {
+                                        float4x4& mat = ((float4x4*)data)[dc];
+                                        ImGui::DragFloat4("x", (float*)&mat[0]);
+                                        ImGui::DragFloat4("y", (float*)&mat[1]);
+                                        ImGui::DragFloat4("z", (float*)&mat[2]);
+                                        ImGui::DragFloat4("pos", (float*)&mat[3]);
+                                    }
+                                    break;
+                                    case PropertyTypes::_assetID:
+                                        assetID id = ((assetID*)data)[dc];
+                                        if (AssetLibrary::instance->map.contains(id))
+                                        {
+                                            if (ImGui::SmallButton("o"))
+                                            {
+                                                fileBrowserWindow.Open([](String selectedPath)
+                                                    {
+                                                        int toto = 0;
+                                                        //add the path to the assetlib
+                                                        //assign the new id to the assetID
+                                                    }
+                                                );
+                                            }
+                                            ImGui::SameLine();
+                                            ImGui::Text(AssetLibrary::instance->map[id].originalFilePath.c_str());
+                                        }
+                                        break;
+                                    case PropertyTypes::_Handle:
+                                    {
+                                        World::Entity handleTarget = ((World::Entity*)data)[dc];
+                                        String handleName = "--";
+                                        if (handleTarget != entityInvalid)
+                                        {
+                                            if (handleTarget.Has<Components::Name>())
+                                                handleName = handleTarget.Get<Components::Name>().name;
+
+                                            if (ImGui::SmallButton("->"))
+                                            {
+                                                editorState.selectedObject = handleTarget;
+                                            }
+                                            ImGui::SameLine();
+                                            if (ImGui::SmallButton("x"))
+                                            {
+                                                ((EntityBase*)data)[dc] = entityInvalid;
+                                            }
+                                            ImGui::SameLine();
+                                        }
                                         if (ImGui::SmallButton("o"))
                                         {
-                                            fileBrowserWindow.Open([](String selectedPath)
-                                                {
-                                                    int toto = 0;
-                                                    //add the path to the assetlib
-                                                    //assign the new id to the assetID
-                                                }
-                                            );
+                                            handlePickingWindow.Open(m.dataTemplateType, &((EntityBase*)data)[dc]);
                                         }
                                         ImGui::SameLine();
-                                        ImGui::Text(AssetLibrary::instance->map[id].originalFilePath.c_str());
+                                        ImGui::Text(handleName.c_str());
                                     }
                                     break;
-                                case PropertyTypes::_Handle:
-                                {
-                                    World::Entity handleTarget = ((World::Entity*)data)[dc];
-                                    String handleName = "--";
-                                    if (handleTarget != entityInvalid)
-                                    {
-                                        if(handleTarget.Has<Components::Name>())
-                                            handleName = handleTarget.Get<Components::Name>().name;
+                                    default:
+                                        break;
+                                    }
 
-                                        if (ImGui::SmallButton("->"))
-                                        {
-                                            editorState.selectedObject = handleTarget;
-                                        }
-                                        ImGui::SameLine();
-                                        if (ImGui::SmallButton("x"))
-                                        {
-                                            ((EntityBase*)data)[dc] = entityInvalid;
-                                        }
-                                        ImGui::SameLine();
-                                    }
-                                    if (ImGui::SmallButton("o"))
-                                    {
-                                        handlePickingWindow.Open(m.dataTemplateType, &((EntityBase*)data)[dc]);
-                                    }
-                                    ImGui::SameLine();
-                                    ImGui::Text(handleName.c_str());
+                                    ImGui::PopID();
                                 }
-                                    break;
-                                default:
-                                    break;
-                                }
+                                ImGui::PopID();
                             }
-                            ImGui::PopID();
                         }
 
                         if (ImGui::Button("Delete"))
@@ -1253,8 +1265,6 @@ public:
 
         ImGui::End();
     }
-
-    
 };
 PropertyWindow propertyWindow;
 
@@ -1564,7 +1574,7 @@ public:
     }
     String FormatMetaData(ComponentInfoParse cmpInfo, uint& cmpIndex)
     {
-        String out = std::format("knownComponents.push_back(\n \t{{ \"{0}\", Components::{0}::mask, \n \t\t{{\n", cmpInfo.name.c_str());
+        String out = std::format("knownComponents.push_back(\n \t{{ \"{0}\", Components::{0}::mask, {1}, \n \t\t{{\n", cmpInfo.name.c_str(), cmpInfo.propertyDrawPtr.c_str());
 
         for (uint i = 0; i < cmpInfo.members.size(); i++)
         {
@@ -1593,7 +1603,7 @@ public:
             fout << "if(initialized) return;\n" << std::endl;
             fout << "initialized = true;\n" << std::endl;
 
-            std::vector<String> componentsKnownNames;
+            std::vector<ComponentInfoParse> cmpInfos;
             String line;
             uint cmpIndex = 0;
             while (getline(fin, line))
@@ -1601,16 +1611,18 @@ public:
                 if (line.find(": ComponentBase<") != -1)
                 {
                     auto tokens = line.Split(" ");
-                    ComponentInfoParse cmpInfo;
+                    cmpInfos.resize(cmpInfos.size() + 1);
+                    ComponentInfoParse& cmpInfo = cmpInfos[cmpInfos.size()-1];
+                    cmpInfo.propertyDrawPtr = "nullptr";
                     cmpInfo.name = tokens[1];
                     while (line.find("};") == -1)
                     {
                         getline(fin, line);
                         tokens = line.Split(" ");
-                        if (tokens.size() == 2)
+                        if (tokens.size() >= 2)
                         {
                             String typeToken = tokens[0];
-                            String templateTypeToken = "Components::Entity::mask"; // a BS component but one that is always here
+                            String templateTypeToken = "NULL";
                             int chevron = typeToken.find("<");
                             if (chevron != -1)
                             {
@@ -1639,9 +1651,30 @@ public:
                             }
                         }
                     }
-                    fout << FormatMetaData(cmpInfo, cmpIndex);
-                    componentsKnownNames.push_back(cmpInfo.name);
                 }
+                else if (line.find("PropertyDraw(") != -1)
+                {
+                    int start = line.find("void ") + 5;
+                    int end = line.find("PropertyDraw(");
+                    String drawTarget = line.substr(start, end - start);
+
+                    for (uint i = 0; i < cmpInfos.size(); i++)
+                    {
+                        if (cmpInfos[i].name == drawTarget)
+                        {
+                            int start = line.find("void ") + 5;
+                            int end = line.find("(");
+                            String funcName = line.substr(start, end - start);
+                            cmpInfos[i].propertyDrawPtr = "Components::"+funcName;
+                        }
+                    }
+                }
+            }
+
+            for (uint i = 0; i < cmpInfos.size(); i++)
+            {
+
+                fout << FormatMetaData(cmpInfos[i], cmpIndex);
             }
 
             fout << "}\n" << std::endl;

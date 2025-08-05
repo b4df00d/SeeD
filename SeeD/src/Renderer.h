@@ -2119,7 +2119,7 @@ public:
                         for (uint paramIndex = 0; paramIndex < HLSL::MaterialParametersCount; paramIndex++)
                         {
                             // memcpy ? it is even just a cashline 
-                            material.parameters[paramIndex] = materialCmp.prameters[paramIndex];
+                            material.parameters[paramIndex] = materialCmp.parameters[paramIndex];
                         }
                         bool materialReady = true;
                         for (uint texIndex = 0; texIndex < HLSL::MaterialTextureCount; texIndex++)

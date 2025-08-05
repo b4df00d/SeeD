@@ -1316,12 +1316,12 @@ public:
 
             for (uint j = 0; j < HLSL::MaterialParametersCount; j++)
             {
-                newMat.prameters[j] = { 1 };
+                newMat.parameters[j] = { 1 };
             }
-            newMat.prameters[0] = { 1 }; // albedo
-            newMat.prameters[1] = { 1 }; // roughness
-            newMat.prameters[2] = { 0 }; // metalness
-            newMat.prameters[3] = { 1 }; // normal
+            newMat.parameters[0] = { 1 }; // albedo
+            newMat.parameters[1] = { 1 }; // roughness
+            newMat.parameters[2] = { 0 }; // metalness
+            newMat.parameters[3] = { 1 }; // normal
 
             matIndexToEntity.push_back(ent);
         }

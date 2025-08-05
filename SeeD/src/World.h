@@ -146,10 +146,15 @@ namespace Components
 
     struct Material : ComponentBase<Material>
     {
-        Handle<Texture> textures[HLSL::MaterialTextureCount];
-        float prameters[HLSL::MaterialParametersCount];
         Handle<Shader> shader;
+        Handle<Texture> textures[HLSL::MaterialTextureCount]; //name:[albedo, roughness, metalness, normal]
+        float parameters[HLSL::MaterialParametersCount]; //name:[albedo, roughness, metalness, normal]
     };
+
+    static void MaterialPropertyDraw(char* mat)
+    {
+
+    }
 
     struct Transform : ComponentBase<Transform>
     {
