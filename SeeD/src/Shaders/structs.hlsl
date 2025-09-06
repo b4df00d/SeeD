@@ -371,9 +371,12 @@ namespace HLSL
     
     struct GIReservoir
     {
-        float4 color_W;
-        float4 dir_Wcount;
-        float4 dist_Wsum;
+        float3 dir;
+        float dist;
+        float3 color;
+        float W;
+        float Wsum;
+        float Wcount;
     };
     
     struct GIReservoirCompressed

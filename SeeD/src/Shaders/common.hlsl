@@ -1113,50 +1113,51 @@ struct RESTIRRay
     float3 HitNormal;
 };
 
-static const uint octahedralPrecision = 16;
+static const uint octahedralPrecision = 8; //per axis
 HLSL::GIReservoirCompressed PackGIReservoir(HLSL::GIReservoir r)
 {
     HLSL::GIReservoirCompressed result = (HLSL::GIReservoirCompressed) 0;
-    result.color = PackRGBE_sqrt(r.color_W.xyz);
-    result.Wcount_W = (asuint(f32tof16(r.dir_Wcount.w)) << 16) | asuint(f32tof16(r.color_W.w));
-    result.dist_dir = (asuint(f32tof16(r.dist_Wsum.x)) << 16) | octahedral_32(r.dir_Wcount.xyz, octahedralPrecision);
-    result.Wsum = r.dist_Wsum.w;
+    result.color = PackRGBE_sqrt(r.color);
+    result.Wcount_W = (asuint(f32tof16(r.Wcount)) << 16) | asuint(f32tof16(r.W));
+    result.dist_dir = (asuint(f32tof16(r.dist)) << 16) | octahedral_32(r.dir, octahedralPrecision);
+    result.Wsum = r.Wsum;
     return result;
 }
 
 HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
 {
     HLSL::GIReservoir result = (HLSL::GIReservoir)0;
-    result.color_W.xyz = UnpackRGBE_sqrt(r.color);
-    result.color_W.w = f16tof32(r.Wcount_W & 0xffff);
-    result.dir_Wcount.w = f16tof32(r.Wcount_W >> 16u);
-    result.dir_Wcount.xyz = i_octahedral_32(r.dist_dir & 0xffff, octahedralPrecision);
-    result.dist_Wsum.xyz = f16tof32(r.dist_dir >> 16u);
-    result.dist_Wsum.w = r.Wsum;
+    result.color = UnpackRGBE_sqrt(r.color);
+    result.W = f16tof32(r.Wcount_W & 0xffff);
+    result.Wcount = f16tof32(r.Wcount_W >> 16u);
+    result.dir = i_octahedral_32(r.dist_dir & 0xffff, octahedralPrecision);
+    result.dist = f16tof32(r.dist_dir >> 16u);
+    result.Wsum = r.Wsum;
     return result;
 }
 
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    if(rand < (current.color_W.w / (previous.color_W.w + current.color_W.w)) || rand == 1)
+    if(rand < (current.W / (previous.W + current.W)) || rand == 1)
     //if(rand <= (current.color_W.w / ((previous.hit_Wsum.w / previous.dir_Wcount.w) + current.color_W.w)))
     {
-        previous.color_W = current.color_W; // keep the new W so take the xyzw
-        previous.dist_Wsum.xyz = current.dist_Wsum.xyz;
-        previous.dir_Wcount.xyz = current.dir_Wcount.xyz;
+        previous.color = current.color;
+        previous.W = current.W;
+        previous.dist = current.dist;
+        previous.dir = current.dir;
     }
-    previous.dist_Wsum.w += current.dist_Wsum.w;
-    previous.dir_Wcount.w += current.dir_Wcount.w;
+    previous.Wsum += current.Wsum;
+    previous.Wcount += current.Wcount;
 }
 
 void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
 {
-    if (r.dir_Wcount.w >= frameFilteringCount)
+    if (r.Wcount >= frameFilteringCount)
     {
-        float factor = max(0, float(frameFilteringCount) / max(r.dir_Wcount.w, 1.0f));
-        //r.color_W.w *= factor;
-        r.dist_Wsum.w *= factor;
-        r.dir_Wcount.w *= factor;
+        float factor = max(0, float(frameFilteringCount) / max(r.Wcount, 1.0f));
+        //r.W *= factor;
+        r.Wsum *= factor;
+        r.Wcount *= factor;
     }
 }
 
@@ -1167,9 +1168,12 @@ void RESTIR(RESTIRRay restirRay, uint previousReservoirIndex, uint currentReserv
     // if not first time fill with previous frame reservoir
     if (viewContext.frameNumber == 0)
     {
-        r.color_W = 0;
-        r.dir_Wcount = float4(0,0,0,1);
-        r.dist_Wsum = 0;
+        r.dir = 0;
+        r.dist = 0;
+        r.color = 0;
+        r.W = 0;
+        r.Wsum = 0;
+        r.Wcount = 0;
     }
         
     float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.15 - 0.1);
@@ -1177,9 +1181,12 @@ void RESTIR(RESTIRRay restirRay, uint previousReservoirIndex, uint currentReserv
     
     HLSL::GIReservoir newR;
     float W = dot(restirRay.HitRadiance.xyz, float3(0.3, 0.59, 0.11));
-    newR.color_W = float4(restirRay.HitRadiance.xyz, W);
-    newR.dir_Wcount = float4(restirRay.Direction, 1); // there is no dir in dir_Wcount when packed !
-    newR.dist_Wsum = float4(length(restirRay.HitPosition - restirRay.Origin), 0, 0, W);
+    newR.color = restirRay.HitRadiance.xyz;
+    newR.W = W;
+    newR.dir = restirRay.Direction;
+    newR.Wcount = 1;
+    newR.dist = length(restirRay.HitPosition - restirRay.Origin);
+    newR.Wsum = W;
         
     UpdateGIReservoir(r, newR, nextRand(seed));
     ScaleGIReservoir(r, frameFilteringCount);
@@ -1193,16 +1200,16 @@ float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in Surfa
     StructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];   
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x]);
     hitDistance = 0;
-    if(any(r.color_W.xyz > 0))
+    if(any(r.color > 0))
     {
-        float3 dir = r.dir_Wcount.xyz;
-        hitDistance = r.dist_Wsum.x;
+        float3 dir = r.dir;
+        hitDistance = r.dist;
         float3 pos = cd.worldPos + dir * hitDistance;
         
         HLSL::Light light;
         light.pos = float4(pos, 0);
         light.dir = float4(dir, 0);
-        light.color.xyz = r.color_W.xyz / r.color_W.w * (r.dist_Wsum.w / r.dir_Wcount.w);
+        light.color.xyz = r.color / r.W * (r.Wsum / r.Wcount);
         light.range = 1;
         light.angle = 1;
         return ComputeLight(light, 1, s, cd.viewDir);
@@ -1619,12 +1626,12 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
     RESTIRRay restirRay;
     restirRay.Origin = origin;
     //restirRay.Direction = normalize(r.hit_Wsum.xyz - origin);
-    restirRay.Direction = r.dir_Wcount.xyz;
+    restirRay.Direction = r.dir;
     restirRay = IndirectLight(rtParameters, s, restirRay, 0, seed);
     
-    float W = dot(restirRay.HitRadiance.xyz, float3(0.3, 0.59, 0.11));
+    float W = dot(restirRay.HitRadiance, float3(0.3, 0.59, 0.11));
     
-    float distDiff = abs(r.dist_Wsum.x - length(restirRay.HitPosition - origin));
+    float distDiff = abs(r.dist - length(restirRay.HitPosition - origin));
     float wDiff = 0;//saturate(abs(W - r.color_W.w));
     float likeness = 1.0f-saturate(distDiff + wDiff);
     
@@ -1632,13 +1639,14 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
     if(fail)
     {
         r = og;
-        //r.hit_Wsum.w /= r.dir_Wcount.w;
-        //r.dir_Wcount.w = 1;
         
         HLSL::GIReservoir newR;
-        newR.color_W = float4(restirRay.HitRadiance.xyz, W);
-        newR.dir_Wcount = float4(restirRay.HitNormal, r.dir_Wcount.w);
-        newR.dist_Wsum = float4(restirRay.HitPosition, r.dist_Wsum.w);
+        newR.color = restirRay.HitRadiance;
+        newR.W = W;
+        newR.dir = restirRay.Direction;
+        newR.Wcount = r.Wcount;
+        newR.dist = length(restirRay.HitPosition - restirRay.Origin);
+        newR.Wsum = r.Wsum;
         
         UpdateGIReservoir(r, newR, nextRand(seed));
     }

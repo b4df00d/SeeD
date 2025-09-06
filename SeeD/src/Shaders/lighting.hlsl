@@ -43,14 +43,21 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     }
 #endif
     
-#if 0
-        RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-        GI[dtid.xy] = cd.viewDistDiff;
+    if(cd.viewDist > 5000)
+    {
+        lighted[dtid.xy] = float4(Sky(cd.viewDir) * 0.25, 1);
+        return;
+    }
+    
+#if 1
+    StructuredBuffer<HLSL:: GIReservoirCompressed > giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
+    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x]);
+    
+    RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+    GI[dtid.xy] = i_octahedral_32(giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x].dist_dir & 0xffff, octahedralPrecision);
 #endif
     
-    if(cd.viewDist > 5000)
-        lighted[dtid.xy] = float4(Sky(cd.viewDir) * 0.25, 1);
-    
+#if 0
     int2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
     bool inRange = abs(length(debugPixel - int2(dtid.xy))) < 2.5;
     
@@ -60,10 +67,11 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     HLSL::GIReservoir rd = UnpackGIReservoir(directReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     if(inRange)
     {
-        float3 endInDir = rid.dir_Wcount.xyz;
+        float3 endInDir = rid.dir;
         DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endInDir);
-        float3 endDir = rd.dir_Wcount.xyz;
+        float3 endDir = rd.dir;
         DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endDir);
         //lighted[dtid.xy] = float4(1, 0, 0, 1);
     }
+#endif
 }
