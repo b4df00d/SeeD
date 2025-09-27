@@ -1348,7 +1348,7 @@ public:
 
 class GPUDebug : public Pass
 {
-    ViewResource lighted;
+    ViewResource postProcessed;
     ViewResource depth;
     Components::Handle<Components::Shader> indirectDebugShader;
     Components::Handle<Components::Shader> selectionShader;
@@ -1358,7 +1358,7 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        lighted.Register("lighted", view);
+        postProcessed.Register("postProcessed", view);
         depth.Register("depth", view);
         indirectDebugShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debug.hlsl");
         selectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\selection.hlsl");
@@ -1371,9 +1371,6 @@ public:
     {
         ZoneScoped;
         Open();
-
-        Resource rts[] = { lighted.Get() };
-        SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
@@ -1401,7 +1398,11 @@ public:
 
         if (options.rayDebug)
         {
-            lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            Resource rts[] = { postProcessed.Get() };
+            //SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);
+            SetupView(view, rts, ARRAYSIZE(rts), false, nullptr, false, true);
+
+            postProcessed.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
             Shader& indirectDebug = *AssetLibrary::instance->Get<Shader>(indirectDebugShader.Get().id, true);
             commandBuffer->SetGraphic(indirectDebug);
@@ -1412,7 +1413,7 @@ public:
             uint maxDraw = 2;
             commandBuffer->cmd->ExecuteIndirect(indirectDebug.commandSignature, maxDraw, view->editorContext.indirectDebugBuffer.GetResourcePtr(), 0, view->editorContext.indirectDebugVerticesCount.GetResourcePtr(), 0);
 
-            lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+            postProcessed.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         }
 
         Close();
@@ -1849,9 +1850,9 @@ public:
     LightingProbes lightingProbes;
     Lighting lighting;
     Forward forward;
-    GPUDebug gpuDebug;
     PostProcess postProcess;
     DLSS dlss;
+    GPUDebug gpuDebug;
     Present present;
 
 
@@ -1925,9 +1926,9 @@ public:
         SUBTASKVIEWPASS(lightingProbes);
         SUBTASKVIEWPASS(lighting);
         SUBTASKVIEWPASS(forward);
-        SUBTASKVIEWPASS(gpuDebug);
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(dlss);
+        SUBTASKVIEWPASS(gpuDebug);
         SUBTASKVIEWPASS(present);
 
         reset.precede(updateInstances, updateMaterials, updateLights, updateCameras); // should precede all, user need to check that
@@ -1958,9 +1959,9 @@ public:
         lightingProbes.Execute();
         lighting.Execute();
         forward.Execute();
-        gpuDebug.Execute();
         postProcess.Execute();
         dlss.Execute();
+        gpuDebug.Execute();
         present.Execute();
     }
 

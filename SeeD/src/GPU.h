@@ -96,6 +96,11 @@ public:
         const uint alignment = D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT;
         return (bufferSize + (alignment - 1)) & ~(alignment - 1);
     }
+    uint StrideForStructuredBuffer(uint stride)
+    {
+        const uint alignment = D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT;
+        return (stride + (alignment - 1)) & ~(alignment - 1);
+    }
     static void ReleaseResources(bool everything = false);
 
     static std::mutex lock;
@@ -305,7 +310,7 @@ struct Shader
 
         CopyRTShaderData(sbt, rayGen);
         sbt += drd.RayGenerationShaderRecord.SizeInBytes;
-        
+
         CopyRTShaderData(sbt, miss);
         sbt += drd.MissShaderTable.SizeInBytes;
 
@@ -831,7 +836,7 @@ void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name)
     }
 
     //exclude BC format for UAV
-    if(!((resourceDesc.Format >= DXGI_FORMAT_BC1_TYPELESS && resourceDesc.Format <= DXGI_FORMAT_BC5_SNORM)
+    if (!((resourceDesc.Format >= DXGI_FORMAT_BC1_TYPELESS && resourceDesc.Format <= DXGI_FORMAT_BC5_SNORM)
         || (resourceDesc.Format >= DXGI_FORMAT_BC6H_TYPELESS && resourceDesc.Format <= DXGI_FORMAT_BC7_UNORM_SRGB)
         || !(resourceDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)))
     {
@@ -1094,6 +1099,9 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D
     resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
+    D3D12_RESOURCE_ALLOCATION_INFO1 allocInfo;
+    GPU::instance->device->GetResourceAllocationInfo1(0, 1, &resourceDesc, &allocInfo);
+
     D3D12MA::ALLOCATION_DESC allocationDesc = {};
     allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
 
@@ -1181,12 +1189,14 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D
 template <typename T>
 void Resource::CreateBuffer(uint count, String name)
 {
-    CreateBuffer(sizeof(T) * count, sizeof(T), false, name);
+    uint stride = sizeof(T);
+    CreateBuffer(stride * count, stride, false, name);
 }
 template <typename T>
 void Resource::CreateUploadBuffer(uint count, String name)
 {
-    CreateBuffer(sizeof(T) * count, sizeof(T), true, name);
+    uint stride = sizeof(T);
+    CreateBuffer(stride * count, stride, true, name);
 }
 template <typename T>
 void Resource::CreateAppendBuffer(uint count, String name)
@@ -1402,7 +1412,7 @@ ID3D12Resource* Resource::GetResource()
 {
     if (rtv.raw)
         return rtv.raw;
-    if(allocation)
+    if (allocation)
         return allocation->GetResource();
     return nullptr;
 }
@@ -1751,7 +1761,7 @@ public:
         uint index = 0;
         for (; index < cpuData.size(); index++)
         {
-            if(memcmp(&cpuData[index], &value, sizeof(T)) == 0)
+            if (memcmp(&cpuData[index], &value, sizeof(T)) == 0)
                 return index;
         }
         cpuData.push_back(value);
@@ -1849,7 +1859,7 @@ public:
         cb.cmd->CopyResource(GetResourcePtr(), resource.GetResource());
         resource.Transition(cb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
     }
-    
+
     void Release()
     {
         gpuData.Release();
@@ -1919,7 +1929,7 @@ public:
         if (pages->size() <= page)
         {
             auto& newPage = pages->emplace_back();
-            newPage.CreateBuffer((pageSize+1) * pageStride, pageStride, true, "constant buffer");
+            newPage.CreateBuffer((pageSize + 1) * pageStride, pageStride, true, "constant buffer");
         }
         auto& pageBuff = pages.Get()[page];
 
@@ -1945,7 +1955,7 @@ ConstantBuffer* ConstantBuffer::instance;
 struct Profiler
 {
     static Profiler* instance;
- 
+
     struct ProfileData
     {
         LPCSTR name = nullptr;
@@ -2015,7 +2025,7 @@ struct Profiler
             queueIndex = 2;
 
         auto& prof = queueProfile[queueIndex];
-        
+
         UINT64 profileIdx = UINT64(-1);
         for (UINT64 i = 0; i < prof.entries.size(); ++i)
         {

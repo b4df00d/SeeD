@@ -1202,7 +1202,7 @@ float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in Surfa
     hitDistance = 0;
     if(any(r.color > 0))
     {
-        float3 dir = r.dir;
+        float3 dir = -r.dir;
         hitDistance = r.dist;
         float3 pos = cd.worldPos + dir * hitDistance;
         

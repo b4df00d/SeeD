@@ -1272,7 +1272,10 @@ PropertyWindow propertyWindow;
 class Guizmo : public EditorWindow
 {
 public:
-    Guizmo() : EditorWindow("Guizmo") {}
+    Guizmo() : EditorWindow("Guizmo") 
+    {
+        isOpen = true;
+    }
 
     void SetWorldPositionRotationScale(World::Entity ent, float3 position, quaternion rotation, float3 scale)
     {
