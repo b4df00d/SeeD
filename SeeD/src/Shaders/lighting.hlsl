@@ -50,11 +50,14 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     }
     
 #if 1
-    StructuredBuffer<HLSL:: GIReservoirCompressed > giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x]);
+    s.albedo = 1;
+    
+    float h = 0;
+    float3 d = RESTIRLight(rtParameters.directReservoirIndex, cd, s, h);
+    float3 i = RESTIRLight(rtParameters.giReservoirIndex, cd, s, h);
     
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    GI[dtid.xy] = i_octahedral_32(giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x].dist_dir & 0xffff, octahedralPrecision);
+    GI[dtid.xy] = d + i;
 #endif
     
 #if 0

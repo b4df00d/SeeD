@@ -101,6 +101,8 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     HDR *= ppParameters.expoMul;
     HDR += ppParameters.expoAdd;
     
+    HDR = lerp(HDR, 0.5, saturate(1-exp(-cd.viewDist * 0.025)));
+    
 #if 1
     float r = GranTurismoTonemapper(HDR.r);
     float g = GranTurismoTonemapper(HDR.g);
@@ -115,11 +117,13 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     RWTexture2D<float4> postProcessed = ResourceDescriptorHeap[ppParameters.postProcessedIndex];
     postProcessed[dtid.xy] = SDR; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
     
+    /*
     if(dtid.x > viewContext.displayResolution.x * 0.5)
     {
         //postProcessed[dtid.xy] = lighted[renderPixel.xy]; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
         return;
     }
+    */
     
     /*
     Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];

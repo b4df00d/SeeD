@@ -9,7 +9,7 @@ cbuffer CustomRT : register(b3)
 #include "binding.hlsl"
 #include "common.hlsl"
 
-static uint poissonDiskCount = 64;
+static uint poissonDiskCount = 32;
 static float2 poissonDisk[64] = 
 {
     float2(-0.613392, 0.617481),
@@ -106,7 +106,7 @@ void RayGen()
     HLSL::GIReservoir og = r;
     
     uint spacialReuse = 0;
-    float2 radius = (6.0 + 16.0 * nextRand(seed));// * (viewContext.renderResolution.xy * 0.001);
+    float2 radius = (4.0 + 28.0 * nextRand(seed));// * (viewContext.renderResolution.xy * 0.001);
     for (uint i = 0; i < poissonDiskCount; i++)
     {
         int2 pixel = dtid.xy + (poissonDisk[i]+float2(0.25, 0.5)) * radius;

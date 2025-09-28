@@ -840,9 +840,10 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         #else
         s.albedo *= albedo.Sample(samplerLinear, uv);
         #endif
-        s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
+        //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
         if(length(s.albedo.xyz) < 0.001) s.albedo.xyz = float3(1,0,1);
     }
+    //s.albedo.xyz = lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 2);
     
     s.roughness = material.parameters[1];
     textureIndex = material.textures[1];
@@ -1052,7 +1053,7 @@ float3 ComputeLight(HLSL::Light light, float shadow, SurfaceData s, float3 V)
 float3 Sky(float3 direction)
 {
     float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))), 0.5));
-    float dotDown = saturate(pow(saturate(dot(direction, float3(0, -1, 0)) * 2), 1));
+    float dotDown = saturate(pow(saturate(dot(direction, float3(0, -1, 0)) * 20), 1));
     float3 sky = normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
     sky = lerp(sky, float3(0, 0, 0), dotDown);
     return sky * 3;
@@ -1399,6 +1400,7 @@ RESTIRRay IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRa
     
     if(depth > 0)
     {
+        s.albedo.xyz = lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 2);
         color = color * saturate(dot(s.normal, restirRay.Direction)) * s.albedo.xyz;
     }
         
@@ -1419,25 +1421,27 @@ float3 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
         restirRay = DirectLight(rtParameters, s, restirRay, depth, seed);
     }
     
-    #if 0
-    if (depth + 1 < HLSL::maxRTDepth)
+    #if 1
+    if (depth < HLSL::maxRTDepth)
     {
-        float3 bounceDir;
-        float3 bounceNorm;
-        float3 bounceHit;
-        color.xyz += IndirectLightR(rtParameters, s, hitPos, depth, seed, bounceDir, bounceNorm, bounceHit).xyz;
+        RESTIRRay indirectRay;
+        indirectRay.Origin = hitPos;
+        indirectRay.Direction = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 1));
+        indirectRay = IndirectLight(rtParameters, s, indirectRay, depth, seed);
+        restirRay.HitRadiance += indirectRay.HitRadiance;
     }
-    #elif 1
+    #elif 0
     restirRay.HitRadiance += SampleProbes(rtParameters, hitPos, s, true).xyz;
     #else
     if(nextRand(seed) > 0.66)
     {
         if (depth + 1 < HLSL::maxRTDepth)
         {
-            float3 bounceDir;
-            float3 bounceNorm;
-            float3 bounceHit;
-            color.xyz += IndirectLightR(rtParameters, s, hitPos, depth, seed, bounceDir, bounceNorm, bounceHit).xyz;
+            RESTIRRay indirectRay;
+            indirectRay.Origin = hitPos;
+            indirectRay.Direction = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 1));
+            indirectRay = IndirectLight(rtParameters, s, indirectRay, depth + 1, seed);
+            restirRay.HitRadiance += indirectRay.HitRadiance;
         }
     }
     else

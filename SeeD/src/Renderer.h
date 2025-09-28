@@ -1519,6 +1519,7 @@ public:
             history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
             commandBuffer->cmd->CopyResource(history.Get().GetResource(), lighted.Get().GetResource());
             history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON); // transition to present in the editor cmb
+        }
 
             // currently tonemapping is only done after TAA... change that
             ppparams.postProcessedIndex = postProcessed.Get().uav.offset;
@@ -1531,7 +1532,6 @@ public:
             commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
             commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&ppparams));
             commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->displayResolution.x), postProcess.DispatchY(view->displayResolution.y), 1);
-        }
 
         Close();
     }
@@ -1959,8 +1959,8 @@ public:
         lightingProbes.Execute();
         lighting.Execute();
         forward.Execute();
-        postProcess.Execute();
         dlss.Execute();
+        postProcess.Execute();
         gpuDebug.Execute();
         present.Execute();
     }
