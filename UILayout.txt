@@ -1,0 +1,12 @@
+Profiler 1
+AssetLibrary 0
+Hierarchy 1
+GPUResources 1
+Option 1
+PostProcess 1
+HandlePicking 0
+FileBrowser 0
+Property 1
+Guizmo 1
+ECS 0
+MainMenu 1
