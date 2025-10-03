@@ -92,11 +92,14 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
         return;
     
     uint2 renderPixel = dtid.xy * viewContext.displayResolution.zw * viewContext.renderResolution.xy;
-    
     GBufferCameraData cd = GetGBufferCameraData(renderPixel.xy);
     
+    uint2 inputPixel = dtid.xy;
+    if(ppParameters.inputIsFullResolution == 0)
+        inputPixel = dtid.xy * viewContext.displayResolution.zw * viewContext.renderResolution.xy;
+    
     Texture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
-    float4 HDR = lighted[renderPixel.xy] * HLSL::brightnessClippingAdjust;
+    float4 HDR = float4(lighted[inputPixel.xy].xyz * HLSL::brightnessClippingAdjust, 1);
     HDR -= ppParameters.expoAdd;
     HDR *= ppParameters.expoMul;
     HDR += ppParameters.expoAdd;

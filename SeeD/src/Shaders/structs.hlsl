@@ -292,7 +292,7 @@ namespace HLSL
     
     struct PostProcessParameters
     {
-        //float4 resolution; //x, y, 1/x, 1/y
+        uint inputIsFullResolution;
         uint lightedIndex;
         uint postProcessedIndex;
         uint backBufferIndex;

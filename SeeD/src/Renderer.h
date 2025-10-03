@@ -1522,16 +1522,26 @@ public:
         }
 
             // currently tonemapping is only done after TAA... change that
-            ppparams.postProcessedIndex = postProcessed.Get().uav.offset;
-            ppparams.lightedIndex = lighted.Get().uav.offset;
-            ppparams.backBufferIndex = GPU::instance->backBuffer.Get().uav.offset;
 
-            Shader& postProcess = *AssetLibrary::instance->Get<Shader>(postProcessShader.Get().id, true);
-            commandBuffer->SetCompute(postProcess);
-            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&ppparams));
-            commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->displayResolution.x), postProcess.DispatchY(view->displayResolution.y), 1);
+        if (view->upscaling == View::Upscaling::dlss || view->upscaling == View::Upscaling::dlssd)
+        {
+            ppparams.inputIsFullResolution = 1;
+            ppparams.lightedIndex = postProcessed.Get().uav.offset;
+        }
+        else
+        {
+            ppparams.inputIsFullResolution = 0;
+            ppparams.lightedIndex = lighted.Get().uav.offset;
+        }
+        ppparams.postProcessedIndex = postProcessed.Get().uav.offset;
+        ppparams.backBufferIndex = GPU::instance->backBuffer.Get().uav.offset;
+
+        Shader& postProcess = *AssetLibrary::instance->Get<Shader>(postProcessShader.Get().id, true);
+        commandBuffer->SetCompute(postProcess);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&ppparams));
+        commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->displayResolution.x), postProcess.DispatchY(view->displayResolution.y), 1);
 
         Close();
     }
