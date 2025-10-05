@@ -416,7 +416,7 @@ public:
 
             if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
             {
-                EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
+                EntitySlot lastSlot = { 0, 0, thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
                 Entity entityOfLastSlot = lastSlot.Get<Components::Entity>();
                 Copy(lastSlot, thisSlot);
                 World::instance->entitySlots[entityOfLastSlot.id] = thisSlot; //crash here !
@@ -439,7 +439,7 @@ public:
 
             if (World::instance->components[thisSlot.pool].count > 1 && thisSlot.index < World::instance->components[thisSlot.pool].count - 1)
             {
-                EntitySlot lastSlot = { thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
+                EntitySlot lastSlot = { 0, 0, thisSlot.pool, World::instance->components[thisSlot.pool].count - 1 };
                 Entity entityOfLastSlot = lastSlot.Get<Components::Entity>();
                 Copy(lastSlot, thisSlot);
                 World::instance->entitySlots[entityOfLastSlot.id] = thisSlot; //crash here !

@@ -12,7 +12,7 @@ struct VS_OUTPUT
 // the comment after the SV_target is important
 struct PS_OUTPUT
 {
-    float3 albedo : SV_Target0; //DXGI_FORMAT_R11G11B10_FLOAT
+    float4 albedo : SV_Target0; //DXGI_FORMAT_R8G8B8A8_UNORM
 };
 
 #pragma debug VertexMain PixelMain
@@ -43,7 +43,7 @@ PS_OUTPUT PixelMain(VS_OUTPUT inVerts)
 {
     PS_OUTPUT o;
     
-    o.albedo = inVerts.color.xyz;
+    o.albedo = float4(inVerts.color.xyz, 1);
     
     return o;
 }

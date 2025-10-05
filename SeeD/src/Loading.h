@@ -2086,10 +2086,16 @@ public :
 					}
 				}
 
+                /*
                 else if (line.find("SV_Target0") != -1)
                 {
-
+                    auto tokens = line.Split(" ");
+                    for (uint i = 0; i < (uint)tokens.size(); i++)
+                    {
+                        if(tokens[i].find("DXGI") != -1)
+                    }
                 }
+                */
 
 				else if (line._Starts_with("#pragma "))
 				{
@@ -2187,6 +2193,7 @@ public :
                             RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
                         }
                         stream.RTFormats = RTVFormats;
+                        stream.DSVFormat = DXGI_FORMAT_UNKNOWN;
                         stream.VS = vertexShaderBytecode;
                         stream.PS = pixelShaderBytecode;
                         stream.PrimitiveTopology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
