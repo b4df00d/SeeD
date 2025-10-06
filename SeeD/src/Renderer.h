@@ -581,6 +581,7 @@ public:
     {
         HLSL::EditorContext editorContextParams;
 
+        editorContextParams.debugMode = (uint)options.debugMode;
         editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
         editorContextParams.debugVerticesHeapIndex = editorContext.indirectDebugVertices.GetResource().uav.offset;
         editorContextParams.debugVerticesCountHeapIndex = editorContext.indirectDebugVerticesCount.GetResource().uav.offset;
@@ -1400,7 +1401,8 @@ public:
         }
 
 
-        if (options.rayDebug)
+        if (options.debugMode == Options::DebugMode::ray
+            || options.debugMode == Options::DebugMode::boundingSphere)
         {
             Resource rts[] = { postProcessed.Get() };
             //SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);

@@ -135,12 +135,6 @@ void RayGen()
     gi = float(spacialReuse) / poissonDiskCount;
     //gi = s.albedo.xyz;
     //GI[dtid.xy] = gi;
-    
-    uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
-    if(abs(length(debugPixel - dtid)) < 3)
-    {
-        //DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + r.dir_Wcount.xyz);
-    }
 }
 
 [shader("miss")]

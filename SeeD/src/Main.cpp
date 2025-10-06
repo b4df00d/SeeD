@@ -44,9 +44,25 @@ void operator delete(void* ptr) noexcept
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
 
-
 #include "Containers.h"
 #include "String.h"
+
+
+struct Options
+{
+    bool stopFrustumUpdate;
+    bool stopBufferUpload;
+    bool stepMotion;
+    bool shaderReload;
+
+    enum class DebugMode
+    {
+        none,
+        ray,
+        boundingSphere,
+    };
+    DebugMode debugMode;
+} options;
 
 #include "Time.h"
 #include "IO.h"
@@ -73,6 +89,7 @@ struct EditorState
     */
 };
 EditorState editorState;
+
 #include "Loading.h"
 #include "Renderer.h"
 #include "UI.h"

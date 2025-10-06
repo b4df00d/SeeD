@@ -30,8 +30,9 @@ void RayGen()
     uint2 dtid = DispatchRaysIndex().xy;
     //if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y) return;
     
-    GBufferCameraData cd = GetGBufferCameraData(dtid); 
-    if(cd.viewDist > 5000) return;
+    GBufferCameraData cd = GetGBufferCameraData(dtid);
+    if (cd.viewDist > 5000)
+        return;
     
     SurfaceData s = GetSurfaceData(dtid.xy);
     
@@ -48,16 +49,16 @@ void RayGen()
     directRay = DirectLight(rtParameters, s, directRay, 0, seed);
     RESTIR(directRay, rtParameters.previousDirectReservoirIndex, rtParameters.directReservoirIndex, cd, seed);
     
-    /*
-    RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-    HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
-    uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
-    if(abs(length(debugPixel - dtid)) < 6)
+    if (editorContext.debugMode == 1) // daw ray
     {
-        DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + rd.dir.xyz * min(rd.dist, 2));
-        //DrawLine(indirectRay.Origin, indirectRay.Origin + indirectRay.Direction);
+        RWStructuredBuffer<HLSL:: GIReservoirCompressed > giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
+        HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
+        uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
+        if (abs(length(debugPixel - dtid)) < 6)
+        {
+            DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + rd.dir.xyz * min(rd.dist, 2));
+        }
     }
-    */
     /*
     if(dtid.x%10==0 && dtid.y%10==0)
     {

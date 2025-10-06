@@ -1128,12 +1128,12 @@ public:
                     v.pz = m->mVertices[j].z;
 
                     minBB.x = min(minBB.x, v.px);
-                    minBB.y = min(minBB.x, v.py);
-                    minBB.z = min(minBB.x, v.pz);
+                    minBB.y = min(minBB.y, v.py);
+                    minBB.z = min(minBB.z, v.pz);
 
                     maxBB.x = max(maxBB.x, v.px);
-                    maxBB.y = max(maxBB.x, v.py);
-                    maxBB.z = max(maxBB.x, v.pz);
+                    maxBB.y = max(maxBB.y, v.py);
+                    maxBB.z = max(maxBB.z, v.pz);
 
                     if (m->HasNormals())
                     {

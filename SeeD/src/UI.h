@@ -652,7 +652,11 @@ public:
         ImGui::Checkbox("stopBufferUpload", &options.stopBufferUpload);
         ImGui::Checkbox("stepMotion", &options.stepMotion);
         ImGui::Checkbox("shaderHotReload", &options.shaderReload);
-        ImGui::Checkbox("rayDebug", &options.rayDebug);
+
+        int debugModeIndex = (int)options.debugMode;
+        const char* items[] = { "none", "ray", "boundingSphere" };
+        ImGui::Combo("debugMode", &debugModeIndex, items, IM_ARRAYSIZE(items));
+        options.debugMode = (Options::DebugMode)debugModeIndex;
 
         ImGui::End();
     }

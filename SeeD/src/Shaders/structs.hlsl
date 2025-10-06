@@ -15,15 +15,6 @@
 
 #include "sphericalharmonics.hlsl"
 
-struct Options
-{
-    bool stopFrustumUpdate;
-    bool stopBufferUpload;
-    bool stepMotion;
-    bool shaderReload;
-    bool rayDebug;
-} options;
-
 namespace HLSL
 {
 #ifdef __cplusplus // bah c�est surtout pour par avoir ca dans le HLSL
@@ -167,7 +158,7 @@ namespace HLSL
         
         float3 GetPosition()
         {
-            return float3(current[0][3].x, current[1][3], current[2][3]);
+            return float3(current[0][3], current[1][3], current[2][3]);
         }
         
         float GetScale()
@@ -415,7 +406,7 @@ packed :
     struct EditorContext
     {
 	    //D3D12_GPU_VIRTUAL_ADDRESS cbv;
-        
+        uint debugMode; // see Options::DebugMode
         uint debugBufferHeapIndex;
         uint debugVerticesHeapIndex;
         uint debugVerticesCountHeapIndex;
