@@ -1738,6 +1738,98 @@ void DrawLine(float3 begin, float3 end)
     debugIndirects[counter[0]-1] = di;
 }
 
+// https://ai.stackexchange.com/questions/14041/how-can-i-derive-the-rotation-matrix-from-the-axis-angle-rotation-vector
+// https://en.wikipedia.org/wiki/Rotation_matrix
+float4x4 GetMatrix(float3 position, float3 axis, float angle, float scale)
+{
+    float3 k = axis;
+    float oneMinuscosO, cosO, sinO;
+    sincos(angle, sinO, cosO);
+    oneMinuscosO = 1-cosO;
+    
+    float4x4 mat;
+    
+    mat[0][0] = cosO + k.x*k.x*oneMinuscosO;
+    mat[1][0] = k.x*k.y*oneMinuscosO - k.z*sinO;
+    mat[2][0] = k.x*k.z*oneMinuscosO + k.y*sinO;
+    mat[3][0] = 0;
+    
+    mat[0][1] = k.y*k.x*oneMinuscosO + k.z*sinO;
+    mat[1][1] = cosO + k.y*k.y*oneMinuscosO;
+    mat[2][1] = k.y*k.z*oneMinuscosO - k.x*sinO;
+    mat[3][1] = 0;
+    
+    mat[0][2] = k.z*k.x*oneMinuscosO - k.y*sinO;
+    mat[1][2] = k.z*k.y*oneMinuscosO + k.x*sinO;
+    mat[2][2] = cosO + k.z*k.z*oneMinuscosO;
+    mat[3][2] = 0;
+    
+    mat[0][3] = position.x;
+    mat[1][3] = position.y;
+    mat[2][3] = position.z;
+    mat[3][3] = 1;
+    
+    return mat;
+}
+
+// world space positions
+void DrawCircle(float3 center, float radius, float3 axis)
+{
+    #define steps 16.0
+    float stepsAngle = (2.0*PI) / steps;
+    RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[editorContext.debugVerticesCountHeapIndex];
+    uint index = 0;
+    counter[0] = 1;
+    InterlockedAdd(counter[1], steps*2, index);
+    
+    float3 color = RandUINT(asuint(Rand(center)));
+    
+    RWStructuredBuffer<HLSL::Vertex> debugVertices = ResourceDescriptorHeap[editorContext.debugVerticesHeapIndex];
+    
+    float4 p = float4(radius, 0, 0, 1);
+    if(axis.x > 0.66)
+        p = float4(0, radius, 0, 1);
+    
+    for (float i = 0; i < steps; i++)
+    {
+        float4x4 mat1 = GetMatrix(center, axis, stepsAngle * i, radius);
+        float4x4 mat2 = GetMatrix(center, axis, stepsAngle * (i+1), radius);
+        
+        HLSL::Vertex vertex1;
+        HLSL::Vertex vertex2;
+        
+        float3 begin = mul(mat1, p).xyz;
+        float3 end = mul(mat2, p).xyz;
+    
+        vertex1.pos = begin;
+        vertex1.normal = color;
+        vertex1.uv = 0;
+    
+        vertex2.pos = end;
+        vertex2.normal = color;
+        vertex2.uv = 0;
+    
+        debugVertices[index + i * 2] = vertex1;
+        debugVertices[index + i * 2 + 1] = vertex2;
+    }
+    
+    
+    RWStructuredBuffer<HLSL::IndirectCommand> debugIndirects = ResourceDescriptorHeap[editorContext.debugBufferHeapIndex];
+    HLSL::IndirectCommand di = debugIndirects[counter[0]-1];
+    
+	di.drawArguments.InstanceCount = 1;
+    di.drawArguments.VertexCountPerInstance = index+steps*2;
+    
+    debugIndirects[counter[0]-1] = di;
+}
+
+void DrawSphere(float3 center, float radius)
+{
+    DrawCircle(center, radius, float3(1, 0, 0));
+    DrawCircle(center, radius, float3(0, 1, 0));
+    DrawCircle(center, radius, float3(0, 0, 1));
+}
+
 
 /*
 LightComp GetLightComp(in uint globalLightIndex, float3 normal, float3 position, float clipZ, float3 viewDir, bool shadows = true)

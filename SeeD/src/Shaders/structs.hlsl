@@ -99,6 +99,7 @@ namespace HLSL
         uint normalIndex;
         uint motionIndex;
         uint objectIDIndex;
+        uint instanceIDIndex;
         uint depthIndex;
         uint reverseZ;
         uint HZB;
@@ -162,7 +163,17 @@ namespace HLSL
         uint meshIndex;
         uint materialIndex;
         uint objectID; // map to entityBase
-        uint pad1;
+        uint instanceID;
+        
+        float3 GetPosition()
+        {
+            return float3(current[0][3].x, current[1][3], current[2][3]);
+        }
+        
+        float GetScale()
+        {
+            return abs(max(max(length(current[0].xyz), length(current[1].xyz)), length(current[2].xyz)));
+        }
         
         float4x4 unpack(float4x4 mat)
         {

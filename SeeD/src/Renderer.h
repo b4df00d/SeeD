@@ -533,6 +533,7 @@ public:
         viewContextParams.normalIndex = GetRegisteredResource("normal").srv.offset;
         viewContextParams.motionIndex = GetRegisteredResource("motion").srv.offset;
         viewContextParams.objectIDIndex = GetRegisteredResource("objectID").uav.offset;
+        viewContextParams.instanceIDIndex = GetRegisteredResource("instanceID").uav.offset;
         viewContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
         viewContextParams.reverseZ = true;
         viewContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
@@ -1081,6 +1082,7 @@ class GBuffers : public Pass
     ViewResource depth;
     ViewResource motion;
     ViewResource objectID;
+    ViewResource instanceID;
     Components::Handle<Components::Shader> meshShader;
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
@@ -1102,6 +1104,8 @@ public:
         motion.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16_FLOAT, "motion");
         objectID.Register("objectID", view);
         objectID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "objectID");
+        instanceID.Register("instanceID", view);
+        instanceID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "instanceID");
         meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
@@ -1121,7 +1125,7 @@ public:
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        Resource rts[] = { albedo.Get(), specularAlbedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get(), objectID.Get()};
+        Resource rts[] = { albedo.Get(), specularAlbedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get(), objectID.Get(), instanceID.Get()};
         SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true, false);
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);

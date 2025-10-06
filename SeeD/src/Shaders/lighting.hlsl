@@ -60,21 +60,36 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     GI[dtid.xy] = d + i;
 #endif
     
-#if 0
+#if 1
     int2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
-    bool inRange = abs(length(debugPixel - int2(dtid.xy))) < 2.5;
+    bool inRange = abs(length(debugPixel - int2(dtid.xy))) <= 0;
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
     HLSL::GIReservoir rid = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     RWStructuredBuffer<HLSL::GIReservoirCompressed> directReservoir = ResourceDescriptorHeap[rtParameters.directReservoirIndex];
     HLSL::GIReservoir rd = UnpackGIReservoir(directReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
+    
     if(inRange)
     {
+        Texture2D<uint> instanceID = ResourceDescriptorHeap[viewContext.instanceIDIndex];
+        uint sampleInstanceID = instanceID[debugPixel];
+    
+        StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+        HLSL::Instance instance = instances[sampleInstanceID];
+        
+        StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
+        HLSL::Mesh mesh = meshes[instance.meshIndex];
+        
         float3 endInDir = rid.dir;
-        DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endInDir);
+        //DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endInDir);
         float3 endDir = rd.dir;
-        DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endDir);
+        //DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + endDir);
         //lighted[dtid.xy] = float4(1, 0, 0, 1);
+        
+        float4x4 worldMatrix = instance.unpack(instance.current);
+        float3 center = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
+        float radius = instance.GetScale() * mesh.boundingSphere.w;
+        DrawSphere(center, radius);
     }
 #endif
 }

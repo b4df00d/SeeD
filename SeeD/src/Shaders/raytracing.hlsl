@@ -48,6 +48,7 @@ void RayGen()
     directRay = DirectLight(rtParameters, s, directRay, 0, seed);
     RESTIR(directRay, rtParameters.previousDirectReservoirIndex, rtParameters.directReservoirIndex, cd, seed);
     
+    /*
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
     HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
     uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
@@ -56,6 +57,7 @@ void RayGen()
         DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + rd.dir.xyz * min(rd.dist, 2));
         //DrawLine(indirectRay.Origin, indirectRay.Origin + indirectRay.Direction);
     }
+    */
     /*
     if(dtid.x%10==0 && dtid.y%10==0)
     {

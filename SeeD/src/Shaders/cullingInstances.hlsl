@@ -26,7 +26,7 @@ void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     
     float4x4 worldMatrix = instance.unpack(instance.current);
     float3 center = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
-    float radius = abs(max(max(length(worldMatrix[0].xyz), length(worldMatrix[1].xyz)), length(worldMatrix[2].xyz)) * mesh.boundingSphere.w); // assume uniform scaling
+    float radius = abs(instance.GetScale() * mesh.boundingSphere.w); // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
     
     bool culled = false;//FrustumCulling(camera, boundingSphere);

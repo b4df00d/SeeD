@@ -13,6 +13,7 @@ struct PS_OUTPUT
     float roughness : SV_Target4; //DXGI_FORMAT_R8_UNORM
     float2 motion : SV_Target5; //DXGI_FORMAT_R16G16_FLOAT
     uint objectID : SV_Target6; //DXGI_FORMAT_R32_UINT
+    uint instanceID : SV_Target7; //DXGI_FORMAT_R32_UINT
 };
 
 #pragma gBuffer AmplificationMain MeshMain PixelgBuffer
@@ -29,6 +30,7 @@ struct MSVert
     float3 color : COLOR0;
     float2 uv : TEXCOORD4;
     nointerpolation uint objectID : TEXCOORD5;
+    nointerpolation uint instanceID : TEXCOORD6;
 };
 
 struct Payload
@@ -140,6 +142,7 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         outVerts[groupThreadId.x].uv = verticesData[index].uv;
         
         outVerts[groupThreadId.x].objectID = instance.objectID;
+        outVerts[groupThreadId.x].instanceID = instanceIndexIndirect;
     }
     ByteAddressBuffer trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
     if (groupThreadId.x < meshlet.triangleCount)
@@ -185,6 +188,7 @@ PS_OUTPUT PixelForward(MSVert inVerts)
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
     
     o.objectID = inVerts.objectID;
+    o.instanceID = inVerts.instanceID;
     
     return o;
 }
@@ -204,7 +208,7 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     
     o.albedo = s.albedo;
     
-    if(o.albedo.a<=0.05) discard;
+    if(o.albedo.a<=0.2) discard;
     
     o.specularAlbedo = lerp(1, s.albedo, s.metalness);
     o.roughness = s.roughness;
@@ -214,6 +218,7 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
     
     o.objectID = inVerts.objectID;
+    o.instanceID = inVerts.instanceID;
     
     return o;
 }
