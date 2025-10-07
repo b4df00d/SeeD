@@ -841,7 +841,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         s.albedo *= albedo.Sample(samplerLinear, uv);
         #endif
         //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
-        if(length(s.albedo.xyz) < 0.001) s.albedo.xyz = float3(1,0,1);
+        //if(length(s.albedo.xyz) < 0.001) s.albedo.xyz = float3(1,0,1);
     }
     //s.albedo.xyz = lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 2);
     
@@ -873,14 +873,19 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     s.tangent = tangent;
     s.binormal = binormal;
     textureIndex = material.textures[3];
+    float normalStrength = material.parameters[3];
     if(textureIndex != ~0)
     {
         Texture2D<float4> normals = ResourceDescriptorHeap[textureIndex];
+        
         #ifdef RAY_DISPATCH
-        s.normal *= normals.SampleLevel(samplerLinear, uv, 3).xyz;
+        float3 nrm = normals.SampleLevel(samplerLinear, uv, 3).xyz;
         #else
-        s.normal *= normals.Sample(samplerLinear, uv).xyz;
+        float3 nrm = normals.Sample(samplerLinear, uv).xyz;
         #endif
+        
+	    float3x3 tbn = float3x3(normalize(tangent), normalize(binormal), normalize(normal));
+        s.normal = WorldNormal(nrm, tbn, normalStrength);
     }
     
     s.specularTint = 1;
@@ -897,7 +902,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
 
 SurfaceData GetSurfaceData(uint2 pixel)
 {
-    Texture2D<float4> albedo = ResourceDescriptorHeap[viewContext.albedoIndex];
+    Texture2D<float4> albedo = ResourceDescriptorHeap[viewConteat.albedoIndex];
     Texture2D<float> metalness = ResourceDescriptorHeap[viewContext.metalnessIndex];
     Texture2D<float> roughness = ResourceDescriptorHeap[viewContext.roughnessIndex];
     Texture2D<float3> normal = ResourceDescriptorHeap[viewContext.normalIndex];

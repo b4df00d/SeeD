@@ -159,7 +159,22 @@ namespace Components
     {
         Material* material = (Material*)mat;
 
-        UIHelpers::DrawHandle(*(EntityBase*)&material->textures[0], Texture::mask);
+        uint pushID = 0;
+        ImGui::PushID(pushID++);
+        UIHelpers::DrawHandle(*(EntityBase*)&material->shader, Shader::mask);
+        ImGui::PopID();
+        ImGui::Spacing();
+
+        const char* names[] = { "albedo", "roughness", "metalness",  "normal" };
+        for (uint i = 0; i < 4; i++)
+        {
+            ImGui::Text(names[i]);
+            ImGui::PushID(pushID++);
+            UIHelpers::DrawHandle(*(EntityBase*)&material->textures[i], Texture::mask);
+            ImGui::PopID();
+            ImGui::SliderFloat(names[i], &material->parameters[i], 0, 1);
+            ImGui::Spacing();
+        }
     }
 
     struct Transform : ComponentBase<Transform>
