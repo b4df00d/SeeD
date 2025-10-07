@@ -1939,7 +1939,7 @@ public:
         auto hr = pageBuff.GetResource()->Map(0, &rangeRead, (void**)&buf);
         if (SUCCEEDED(hr))
         {
-            DebugRanges(rangeWrite.Begin, rangeWrite.End);
+            DebugRanges((uint)rangeWrite.Begin, (uint)rangeWrite.End);
             buf += index * pageStride;
             memcpy(buf, data, pageStride);
             pageBuff.GetResource()->Unmap(0, &rangeWrite);

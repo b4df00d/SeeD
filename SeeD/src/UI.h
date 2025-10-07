@@ -68,6 +68,9 @@ struct ComponentInfo
 };
 std::vector<ComponentInfo> knownComponents;
 
+
+#include "UIHelpers.h"
+
 class EditorWindow
 {
 public:
@@ -453,7 +456,7 @@ public:
                     }
                 }
 
-                node.indexInParent = node.parent->childs.size();
+                node.indexInParent = (uint)node.parent->childs.size();
                 node.parent->childs.push_back(&node);
             }
             editorState.dirtyHierarchy = false;
@@ -464,7 +467,7 @@ public:
             ImGui::End();
             return;
         }
-        editorState.dirtyHierarchy |= ImGui::Combo("##Filter", &componentFilterIndex, [](void* data, int n) { return (*(std::vector<ComponentInfo>*)data)[n].name.c_str(); }, (void*)&knownComponents, knownComponents.size());
+        editorState.dirtyHierarchy |= ImGui::Combo("##Filter", &componentFilterIndex, [](void* data, int n) { return (*(std::vector<ComponentInfo>*)data)[n].name.c_str(); }, (void*)&knownComponents, (int)knownComponents.size());
         ImGui::SameLine();
         if(ImGui::Button("new Entity"))
         {
@@ -1098,10 +1101,11 @@ class PropertyWindow : public EditorWindow
     int componentAddIndex = 0;
     unsigned int getFirstSetBitPos(int n)
     {
-        return log2(n & -n) + 1;
+        return (uint)log2(n & -n) + 1;
     }
 public:
     PropertyWindow() : EditorWindow("Property") {}
+
     void Update() override final
     {
         ZoneScoped;
@@ -1156,7 +1160,7 @@ public:
                                 ImGui::Text(m.name.c_str());
                                 if (m.dataCount == 1)
                                     ImGui::SameLine();
-                                for (uint dc = 0; dc < m.dataCount; dc++)
+                                for (int dc = 0; dc < m.dataCount; dc++)
                                 {
                                     ImGui::PushID(pushID++);
                                     switch (m.dataType)
@@ -1209,30 +1213,7 @@ public:
                                         break;
                                     case PropertyTypes::_Handle:
                                     {
-                                        World::Entity handleTarget = ((World::Entity*)data)[dc];
-                                        String handleName = "--";
-                                        if (handleTarget != entityInvalid)
-                                        {
-                                            if (handleTarget.Has<Components::Name>())
-                                                handleName = handleTarget.Get<Components::Name>().name;
-
-                                            if (ImGui::SmallButton("->"))
-                                            {
-                                                editorState.selectedObject = handleTarget;
-                                            }
-                                            ImGui::SameLine();
-                                            if (ImGui::SmallButton("x"))
-                                            {
-                                                ((EntityBase*)data)[dc] = entityInvalid;
-                                            }
-                                            ImGui::SameLine();
-                                        }
-                                        if (ImGui::SmallButton("o"))
-                                        {
-                                            handlePickingWindow.Open(m.dataTemplateType, &((EntityBase*)data)[dc]);
-                                        }
-                                        ImGui::SameLine();
-                                        ImGui::Text(handleName.c_str());
+                                        UIHelpers::DrawHandle(((EntityBase*)data)[dc], m.dataTemplateType);
                                     }
                                     break;
                                     default:
@@ -1258,7 +1239,7 @@ public:
             }
             
             ImGui::Separator();
-            editorState.dirtyHierarchy |= ImGui::Combo("##AddComp", &componentAddIndex, [](void* data, int n) { return (*(std::vector<ComponentInfo>*)data)[n].name.c_str(); }, (void*)&knownComponents, knownComponents.size());
+            editorState.dirtyHierarchy |= ImGui::Combo("##AddComp", &componentAddIndex, [](void* data, int n) { return (*(std::vector<ComponentInfo>*)data)[n].name.c_str(); }, (void*)&knownComponents, (uint)knownComponents.size());
             ImGui::SameLine();
             if (ImGui::Button("add"))
             {
@@ -1630,7 +1611,7 @@ public:
                         {
                             String typeToken = tokens[0];
                             String templateTypeToken = "NULL";
-                            int chevron = typeToken.find("<");
+                            int chevron = (int)typeToken.find("<");
                             if (chevron != -1)
                             {
                                 templateTypeToken = typeToken.substr(chevron + 1, typeToken.find(">") - chevron - 1);
@@ -1643,10 +1624,10 @@ public:
                                 info.dataType = typeToken;
                                 info.dataTemplateType = templateTypeToken;
                                 info.name = tokens[1].substr(0, tokens[1].length() - 1); //delete the ; at the end
-                                int bracketIndex = info.name.find("[");
+                                int bracketIndex = (int)info.name.find("[");
                                 if (bracketIndex != -1)
                                 {
-                                    int bracketIndexOut = info.name.find("]");
+                                    int bracketIndexOut = (int)info.name.find("]");
                                     info.dataCount = info.name.substr(bracketIndex + 1, bracketIndexOut - bracketIndex - 1);
                                     info.name = info.name.substr(0, bracketIndex);
                                 }
@@ -1661,16 +1642,16 @@ public:
                 }
                 else if (line.find("PropertyDraw(") != -1)
                 {
-                    int start = line.find("void ") + 5;
-                    int end = line.find("PropertyDraw(");
+                    int start = (int)line.find("void ") + 5;
+                    int end = (int)line.find("PropertyDraw(");
                     String drawTarget = line.substr(start, end - start);
 
-                    for (uint i = 0; i < cmpInfos.size(); i++)
+                    for (uint i = 0; i < (uint)cmpInfos.size(); i++)
                     {
                         if (cmpInfos[i].name == drawTarget)
                         {
-                            int start = line.find("void ") + 5;
-                            int end = line.find("(");
+                            int start = (int)line.find("void ") + 5;
+                            int end = (int)line.find("(");
                             String funcName = line.substr(start, end - start);
                             cmpInfos[i].propertyDrawPtr = "Components::"+funcName;
                         }
@@ -1678,7 +1659,7 @@ public:
                 }
             }
 
-            for (uint i = 0; i < cmpInfos.size(); i++)
+            for (uint i = 0; i < (uint)cmpInfos.size(); i++)
             {
 
                 fout << FormatMetaData(cmpInfos[i], cmpIndex);
@@ -1692,6 +1673,34 @@ public:
     }
 };
 MainMenu mainMenu;
+
+void UIHelpers::DrawHandle(EntityBase& target, Components::Mask dataTemplateType)
+{
+    World::Entity& handleTarget = *(World::Entity*)&target;
+    String handleName = "--";
+    if (handleTarget != entityInvalid)
+    {
+        if (handleTarget.Has<Components::Name>())
+            handleName = handleTarget.Get<Components::Name>().name;
+
+        if (ImGui::SmallButton("->"))
+        {
+            editorState.selectedObject = handleTarget;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("x"))
+        {
+            handleTarget = entityInvalid;
+        }
+        ImGui::SameLine();
+    }
+    if (ImGui::SmallButton("o"))
+    {
+        handlePickingWindow.Open(dataTemplateType, &handleTarget);
+    }
+    ImGui::SameLine();
+    ImGui::Text(handleName.c_str());
+}
 
 /*
 class AboutWindow : public EditorWindow

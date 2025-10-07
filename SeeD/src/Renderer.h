@@ -520,7 +520,7 @@ public:
         viewContextParams.frameNumber = frame;
         if (IOs::instance->keys.pressed[VK_R])
             viewContextParams.frameNumber = 0;
-        viewContextParams.frameTime = Time::instance->currentTicks;
+        viewContextParams.frameTime = (uint)Time::instance->currentTicks;
         viewContextParams.cameraIndex = options.stopFrustumUpdate ? 1 : 0;
         viewContextParams.lightsIndex = 0;
         viewContextParams.culledInstanceIndex = viewContext.instancesInView.GetResource().uav.offset;

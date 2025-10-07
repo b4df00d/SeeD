@@ -179,6 +179,7 @@ copy /Y "..\Third\DLSS-main\lib\Windows_x86_64\rel\*.*" "..\x64\Release\"</Comma
     <ClInclude Include="src\Tasks.h" />
     <ClInclude Include="src\Time.h" />
     <ClInclude Include="src\UI.h" />
+    <ClInclude Include="src\UIHelpers.h" />
     <ClInclude Include="src\World.h" />
   </ItemGroup>
   <ItemGroup>

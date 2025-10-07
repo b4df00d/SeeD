@@ -64,6 +64,7 @@ struct Options
     DebugMode debugMode;
 } options;
 
+
 #include "Time.h"
 #include "IO.h"
 #include "Tasks.h"
@@ -77,16 +78,6 @@ struct EditorState
 
     float4x4 cameraView;
     float4x4 cameraProj;
-    /*
-    ECS::Entity lastSelectedObject = { 0 };
-    uint activeWorld = 0;
-    ImGui::FileBrowser fileDialog;
-    float gizmoScale = 0.1f;
-    bool showEditorCamera;
-    ECS::Entity browseEntity = { 0 };
-    int browseSavedWorld = -1;
-    char filter[512];
-    */
 };
 EditorState editorState;
 

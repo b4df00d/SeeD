@@ -401,11 +401,11 @@ public:
         req.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_MULTIPLE_SUBRESOURCES;
         req.Source.File.Source = fileHandle;
         req.Source.File.Offset = metadata.resourceOffset;
-        req.Source.File.Size = metadata.resourceSizeCompressed;
+        req.Source.File.Size = (uint)metadata.resourceSizeCompressed;
         req.Destination.Texture.Resource = resource.GetResource();
         req.Destination.MultipleSubresources.Resource = resource.GetResource();
         req.Destination.MultipleSubresources.FirstSubresource = 0;
-        req.UncompressedSize = metadata.resourceSizeUncompressed;
+        req.UncompressedSize = (uint)metadata.resourceSizeUncompressed;
 
         req.CancellationTag = 0;
         req.Name = (char*)path.c_str();
@@ -642,14 +642,14 @@ public:
 
 
         // Create resource desc.
-        UINT subresourceCount = std::max(metadata.arraySize, metadata.depth) * metadata.mipLevels;
+        UINT subresourceCount = (uint)(std::max(metadata.arraySize, metadata.depth) * metadata.mipLevels);
         D3D12_RESOURCE_DESC resourceDesc{};
         resourceDesc.Dimension = metadata.depth > 1 ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         resourceDesc.Alignment = 0;
-        resourceDesc.Width = metadata.width;
-        resourceDesc.Height = metadata.height;
-        resourceDesc.DepthOrArraySize = std::max(metadata.arraySize, metadata.depth);
-        resourceDesc.MipLevels = metadata.mipLevels;
+        resourceDesc.Width = (uint)metadata.width;
+        resourceDesc.Height = (uint)metadata.height;
+        resourceDesc.DepthOrArraySize = (unsigned short int)std::max(metadata.arraySize, metadata.depth);
+        resourceDesc.MipLevels = (unsigned short int)metadata.mipLevels;
         resourceDesc.Format = metadata.format;
         resourceDesc.SampleDesc = { 1, 0 };
         resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -681,7 +681,7 @@ public:
 
                 if (footprint.RowPitch > 256)
                 {
-                    const uint size = (subResourceIdx < subresourceCount - 1 ? subresourceFootprints[subResourceIdx + 1].Offset : subresourceTotalByteCount) - resourceFootprint.Offset;
+                    const uint size = (uint)((subResourceIdx < subresourceCount - 1 ? subresourceFootprints[subResourceIdx + 1].Offset : subresourceTotalByteCount) - resourceFootprint.Offset);
                     auto resourcePtr = textureData.data() + resourceFootprint.Offset;
                     memcpy((char*)resourcePtr, image->GetImages()[subResourceIdx].pixels, size);
                 }
@@ -740,7 +740,7 @@ public:
                 return assetID::Invalid;
             }
 
-            if (textureData.size() <= gpuDataSize)
+            if ((uint)textureData.size() <= (uint)gpuDataSize)
             {
                 // Turns out compression didn't help us at all. TODO: Determine threshold at which compression should be disabled.
                 IOs::Log("Compression ineffective for {}", path.c_str());
@@ -1240,7 +1240,7 @@ public:
                     }
                     else
                     {
-                        uint extStart = texName.find_last_of('.');
+                        uint extStart = (uint)texName.find_last_of('.');
                         texName = texName.substr(0, extStart + 1);
                         texName += exts[extensionTested];
                         extensionTested++;
@@ -2115,12 +2115,12 @@ public :
                         D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader);
                         PipelineStateStream stream{};
                         D3D12_RT_FORMAT_ARRAY RTVFormats = {};
-                        RTVFormats.NumRenderTargets = shader.outputs.size();
-                        for (uint i = 0; i < shader.outputs.size(); i++)
+                        RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
+                        for (uint i = 0; i < (uint)shader.outputs.size(); i++)
                         {
                             RTVFormats.RTFormats[i] = shader.outputs[i];
                         }
-                        for (uint i = shader.outputs.size(); i < 8; i++)
+                        for (uint i = (uint)shader.outputs.size(); i < 8; i++)
                         {
                             RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
                         }
@@ -2160,12 +2160,12 @@ public :
                         D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader);
                         PipelineStateStream stream;
                         D3D12_RT_FORMAT_ARRAY RTVFormats = {};
-                        RTVFormats.NumRenderTargets = shader.outputs.size();
-                        for (uint i = 0; i < shader.outputs.size(); i++)
+                        RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
+                        for (uint i = 0; i < (uint)shader.outputs.size(); i++)
                         {
                             RTVFormats.RTFormats[i] = shader.outputs[i];
                         }
-                        for (uint i = shader.outputs.size(); i < 8; i++)
+                        for (uint i = (uint)shader.outputs.size(); i < 8; i++)
                         {
                             RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
                         }
@@ -2183,12 +2183,12 @@ public :
                         D3D12_SHADER_BYTECODE pixelShaderBytecode = Compile(file, tokens[3], "ps_6_6", &shader);
                         PipelineStateStream stream{};
                         D3D12_RT_FORMAT_ARRAY RTVFormats = {};
-                        RTVFormats.NumRenderTargets = shader.outputs.size();
-                        for (uint i = 0; i < shader.outputs.size(); i++)
+                        RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
+                        for (uint i = 0; i < (uint)shader.outputs.size(); i++)
                         {
                             RTVFormats.RTFormats[i] = shader.outputs[i];
                         }
-                        for (uint i = shader.outputs.size(); i < 8; i++)
+                        for (uint i = (uint)shader.outputs.size(); i < 8; i++)
                         {
                             RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
                         }

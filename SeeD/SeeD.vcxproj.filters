@@ -74,6 +74,9 @@
     <ClInclude Include="..\Third\ImGuizmo-master\ImGuizmo.h">
       <Filter>Third Files\imgui</Filter>
     </ClInclude>
+    <ClInclude Include="src\UIHelpers.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Main.cpp">

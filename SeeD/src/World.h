@@ -122,7 +122,12 @@ namespace Components
             rev = other.rev;
         }
     };
+}
 
+#include "UIHelpers.h"
+
+namespace Components
+{
     struct Name : ComponentBase<Name>
     {
         #define ECS_NAME_LENGTH 256
@@ -150,10 +155,11 @@ namespace Components
         Handle<Texture> textures[HLSL::MaterialTextureCount]; //name:[albedo, roughness, metalness, normal]
         float parameters[HLSL::MaterialParametersCount]; //name:[albedo, roughness, metalness, normal]
     };
-
     static void MaterialPropertyDraw(char* mat)
     {
+        Material* material = (Material*)mat;
 
+        UIHelpers::DrawHandle(*(EntityBase*)&material->textures[0], Texture::mask);
     }
 
     struct Transform : ComponentBase<Transform>
