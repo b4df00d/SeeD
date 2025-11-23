@@ -1146,13 +1146,20 @@ public:
                         v.u = m->mTextureCoords[0][j].x;
                         v.v = m->mTextureCoords[0][j].y;
                     }
-                    /*
+                    if (m->HasTextureCoords(1))
+                    {
+                        v.u1 = m->mTextureCoords[1][j].x;
+                        v.v1 = m->mTextureCoords[1][j].y;
+                    }
                     if (m->HasTangentsAndBitangents())
                     {
-                        v->tangent = *(float4*)(&m->mTangents[j]);
-                        v->binormal = *(float4*)(&m->mBitangents[j]);
+                        v.tx = m->mTangents[j].x;
+                        v.ty = m->mTangents[j].y;
+                        v.tz = m->mTangents[j].z;
+                        v.bx = m->mBitangents[j].x;
+                        v.by = m->mBitangents[j].y;
+                        v.bz = m->mBitangents[j].z;
                     }
-                    */
                 }
 
                 // pour le moment ca marche que pour du triangul� (le 3)
@@ -1307,9 +1314,9 @@ public:
             }
 
             newMat.textures[0] = CreateOrLoadTexture(m, 2, aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE);
-            newMat.textures[1] = CreateOrLoadTexture(m, 3, aiTextureType_NORMAL_CAMERA, aiTextureType_NORMALS, aiTextureType_HEIGHT);
+            newMat.textures[1] = CreateOrLoadTexture(m, 2, aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_SHININESS);
             newMat.textures[2] = CreateOrLoadTexture(m, 2, aiTextureType_METALNESS, aiTextureType_SPECULAR);
-            newMat.textures[3] = CreateOrLoadTexture(m, 2, aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_SHININESS);
+            newMat.textures[3] = CreateOrLoadTexture(m, 3, aiTextureType_NORMAL_CAMERA, aiTextureType_NORMALS, aiTextureType_HEIGHT);
             newMat.textures[4] = CreateOrLoadTexture(m, 2, aiTextureType_AMBIENT_OCCLUSION, aiTextureType_AMBIENT);
             newMat.textures[5] = CreateOrLoadTexture(m, 2, aiTextureType_EMISSION_COLOR, aiTextureType_EMISSIVE);
 
@@ -1321,7 +1328,16 @@ public:
             newMat.parameters[0] = { 1 }; // albedo
             newMat.parameters[1] = { 1 }; // roughness
             newMat.parameters[2] = { 0 }; // metalness
-            newMat.parameters[3] = { 1 }; // normal
+
+            float normalScale = 1;
+            m->Get(AI_MATKEY_BUMPSCALING, normalScale); // normal
+            newMat.parameters[3] = normalScale;
+
+            float opacity = 1;
+            m->Get(AI_MATKEY_OPACITY, opacity); // cutout
+            newMat.parameters[4] = min(opacity, newMat.parameters[4]);
+            m->Get(AI_MATKEY_TRANSPARENCYFACTOR, opacity); // cutout
+            newMat.parameters[4] = min(opacity, newMat.parameters[4]);
 
             matIndexToEntity.push_back(ent);
         }

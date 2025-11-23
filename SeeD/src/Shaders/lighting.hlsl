@@ -42,6 +42,9 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         //lighted[dtid.xy] = float4(s.normal, 1);
     }
 #endif
+#if 0
+    lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, true).xyz, 1);
+#endif
     
     if(cd.viewDist > 5000)
     {
@@ -49,7 +52,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         return;
     }
     
-#if 1
+#if 0
     s.albedo = 1;
     
     float h = 0;

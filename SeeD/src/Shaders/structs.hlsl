@@ -107,7 +107,10 @@ namespace HLSL
     {
         float3 pos;
         float3 normal;
+        float3 tangent;
+        float3 binormal;
         float2 uv;
+        float2 uv1;
     };
     
     // must be similar to MeshLoader::Triangles (unsigned char)
@@ -329,7 +332,7 @@ namespace HLSL
     };
     
     // ----------------- RT stuff ------------------
-    static const uint maxRTDepth = 2;
+    static const uint maxRTDepth = 3;
     struct RTParameters
     {
         uint BVH;

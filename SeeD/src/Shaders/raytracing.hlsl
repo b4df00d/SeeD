@@ -40,18 +40,21 @@ void RayGen()
     
     RESTIRRay indirectRay;
     indirectRay.Origin = cd.offsetedWorldPos;
-    indirectRay.Direction = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 1));
+    indirectRay.Direction = normalize(lerp(reflect(cd.viewDir, s.normal), getCosHemisphereSample(seed, s.normal), s.roughness));
+    //indirectRay.proba = max(0.1, pow(s.roughness, 3));
+    indirectRay.proba = max(0.00001, s.roughness);
     indirectRay = IndirectLight(rtParameters, s, indirectRay, 0, seed);
     RESTIR(indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, seed);
     
     RESTIRRay directRay;
     directRay.Origin = cd.offsetedWorldPos;
+    directRay.proba = 1;
     directRay = DirectLight(rtParameters, s, directRay, 0, seed);
     RESTIR(directRay, rtParameters.previousDirectReservoirIndex, rtParameters.directReservoirIndex, cd, seed);
     
     if (editorContext.debugMode == 1) // daw ray
     {
-        RWStructuredBuffer<HLSL:: GIReservoirCompressed > giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
+        RWStructuredBuffer<HLSL:: GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
         HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
         uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
         if (abs(length(debugPixel - dtid)) < 6)

@@ -153,7 +153,7 @@ namespace Components
     {
         Handle<Shader> shader;
         Handle<Texture> textures[HLSL::MaterialTextureCount]; //name:[albedo, roughness, metalness, normal]
-        float parameters[HLSL::MaterialParametersCount]; //name:[albedo, roughness, metalness, normal]
+        float parameters[HLSL::MaterialParametersCount]; //name:[albedo, roughness, metalness, normal, cutout]
     };
     static void MaterialPropertyDraw(char* mat)
     {
@@ -165,8 +165,8 @@ namespace Components
         ImGui::PopID();
         ImGui::Spacing();
 
-        const char* names[] = { "albedo", "roughness", "metalness",  "normal" };
-        for (uint i = 0; i < 4; i++)
+        const char* names[] = { "albedo", "roughness", "metalness", "normal", "cutout" };
+        for (uint i = 0; i < ARRAYSIZE(names); i++)
         {
             ImGui::Text(names[i]);
             ImGui::PushID(pushID++);

@@ -68,7 +68,6 @@ struct ComponentInfo
 };
 std::vector<ComponentInfo> knownComponents;
 
-
 #include "UIHelpers.h"
 
 class EditorWindow
@@ -506,6 +505,25 @@ public:
                 }
 
                 ImGui::EndChild();
+            }
+        }
+
+        if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+        {
+            if (ImGui::IsKeyPressed(ImGuiKey_Delete))
+            {
+                void* it = NULL;
+                ImGuiID id = 0;
+                selection.GetNextSelectedItem(&it, &id);
+                while (id != 0)
+                {
+                    editorState.selectedObject.FromUInt(id);
+                    editorState.selectedObject.Release();
+                    editorState.selectedObject = entityInvalid;
+                    if (!selection.GetNextSelectedItem(&it, &id))
+                        break;
+                }
+                editorState.dirtyHierarchy = true;
             }
         }
 
@@ -1125,7 +1143,7 @@ public:
 
         if (editorState.selectedObject != entityInvalid)
         {
-            if (ImGui::Button("Delete") || IOs::instance->keys.pressed[VK_DELETE])
+            if (ImGui::Button("Delete"))
             {
                 editorState.selectedObject.Release();
                 editorState.selectedObject = entityInvalid;

@@ -135,11 +135,18 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         float3 normal = verticesData[index].normal.xyz;
         float3 worldNormal = mul((float3x3)worldMatrix, normal);
         outVerts[groupThreadId.x].normal = normalize(worldNormal);
-        outVerts[groupThreadId.x].tangent = 0;// TODO : compute those 
-        outVerts[groupThreadId.x].binormal = 0;// TODO : compute those 
+        
+        float3 tangent = verticesData[index].tangent.xyz;
+        float3 worldTangent = mul((float3x3)worldMatrix, tangent);
+        outVerts[groupThreadId.x].tangent = worldTangent;
+        
+        float3 binormal = verticesData[index].binormal.xyz;
+        float3 worldBinormal = mul((float3x3)worldMatrix, binormal);
+        outVerts[groupThreadId.x].binormal = worldBinormal;
         
         outVerts[groupThreadId.x].color = RandUINT(meshletIndexIndirect);
         outVerts[groupThreadId.x].uv = verticesData[index].uv;
+        //outVerts[groupThreadId.x].uv = verticesData[index].uv1;
         
         outVerts[groupThreadId.x].objectID = instance.objectID;
         outVerts[groupThreadId.x].instanceID = instanceIndexIndirect;
@@ -208,7 +215,7 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     
     o.albedo = s.albedo;
     
-    if(o.albedo.a<=0.2) discard;
+    if((o.albedo.a+0.01) < material.parameters[4]) discard;
     
     o.specularAlbedo = lerp(1, s.albedo, s.metalness);
     o.roughness = s.roughness;

@@ -22,7 +22,6 @@ GlobalRootSignature SeeDRootSignatureRT =
 [shader("raygeneration")]
 void RayGen()
 {
-    return;
     RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH]; 
     
     uint3 launchIndex = DispatchRaysIndex().xyz;

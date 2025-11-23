@@ -2161,7 +2161,9 @@ struct Vertex // et pas HLSL::Vertex car a cause de hlsl++ il sera pas aligne pa
 {
     float px, py, pz;
     float nx, ny, nz;
-    float u, v;
+    float tx, ty, tz;
+    float bx, by, bz;
+    float u, v, u1, v1;
 };
 
 struct Meshlet : HLSL::Meshlet
@@ -2181,13 +2183,6 @@ struct MeshData
     std::vector<unsigned int> indices;
     std::vector<Vertex> vertices;
     float4 boundingSphere;
-};
-
-struct Material
-{
-    uint shaderIndex;
-    float parameters[15];
-    SRV texturesSRV[16]; // <- pas bon ! c´est pas aligné comme HLSL::Material
 };
 
 /*

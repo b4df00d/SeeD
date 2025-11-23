@@ -830,7 +830,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     SurfaceData s;
     uint textureIndex = ~0;
     
-    s.albedo = material.parameters[0];
+    s.albedo = float4(material.parameters[0], material.parameters[0], material.parameters[0], 1);
     textureIndex = material.textures[0];
     if(textureIndex != ~0)
     {
@@ -902,7 +902,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
 
 SurfaceData GetSurfaceData(uint2 pixel)
 {
-    Texture2D<float4> albedo = ResourceDescriptorHeap[viewConteat.albedoIndex];
+    Texture2D<float4> albedo = ResourceDescriptorHeap[viewContext.albedoIndex];
     Texture2D<float> metalness = ResourceDescriptorHeap[viewContext.metalnessIndex];
     Texture2D<float> roughness = ResourceDescriptorHeap[viewContext.roughnessIndex];
     Texture2D<float3> normal = ResourceDescriptorHeap[viewContext.normalIndex];
@@ -1060,8 +1060,8 @@ float3 Sky(float3 direction)
     float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))), 0.5));
     float dotDown = saturate(pow(saturate(dot(direction, float3(0, -1, 0)) * 20), 1));
     float3 sky = normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
-    sky = lerp(sky, float3(0, 0, 0), dotDown);
-    return sky * 3;
+    sky = lerp(sky, float3(0, 0, 0), dotDown) * 5;
+    return sky;
 }
 
 SurfaceData GetRTSurfaceData(
@@ -1109,7 +1109,7 @@ float2 bary)
     return s;
 }
 
-static const uint maxFrameFilteringCount = 6;
+static const uint maxFrameFilteringCount = 3;
 struct RESTIRRay
 {
     float3 Origin;
@@ -1117,6 +1117,7 @@ struct RESTIRRay
     float3 HitPosition;
     float3 HitRadiance;
     float3 HitNormal;
+    float proba;
 };
 
 static const uint octahedralPrecision = 8; //per axis
@@ -1144,7 +1145,8 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
 
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    if(rand < (current.W / (previous.W + current.W)) || rand == 1)
+    #define PREVIOUS_WEIGHT 0.25
+    if(rand < (current.W / (previous.W * PREVIOUS_WEIGHT + current.W)) || rand == 1)
     //if(rand <= (current.color_W.w / ((previous.hit_Wsum.w / previous.dir_Wcount.w) + current.color_W.w)))
     {
         previous.color = current.color;
@@ -1192,7 +1194,7 @@ void RESTIR(RESTIRRay restirRay, uint previousReservoirIndex, uint currentReserv
     newR.dir = restirRay.Direction;
     newR.Wcount = 1;
     newR.dist = length(restirRay.HitPosition - restirRay.Origin);
-    newR.Wsum = W;
+    newR.Wsum = W * max(restirRay.proba, 0.001);
         
     UpdateGIReservoir(r, newR, nextRand(seed));
     ScaleGIReservoir(r, frameFilteringCount);
@@ -1341,15 +1343,15 @@ RESTIRRay DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRay 
     else if (light.type == 1) // point
     {
         lightDir = light.pos.xyz - restirRay.Origin;
-        float lightDist = length(lightDir);
-        light.color.xyz /= pow(lightDist + 1, 2);
+        float lightDist = length(lightDir);// >= 10 ? 10000 : 1;
+        light.color.xyz /= max(0.000001, pow(lightDist + 1, 2));
         lightDir /= lightDist;
     }
     else if (light.type == 2) // spot
     {
         lightDir = light.pos.xyz - restirRay.Origin;
         float lightDist = length(lightDir);
-        light.color.xyz /= pow(lightDist + 1, 2);
+        light.color.xyz /= max(0.000001, pow(lightDist + 1, 2));
         light.color.xyz *= saturate(dot(light.dir.xyz, lightDir) * 5.0 - light.angle);
         lightDir /= lightDist;
     }
@@ -1358,7 +1360,7 @@ RESTIRRay DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRay 
     
     RayDesc ray;
     ray.Origin = restirRay.Origin;
-    ray.Direction = restirRay.Direction;
+    ray.Direction = normalize(restirRay.Direction);
     ray.TMin = 0.001;
     ray.TMax = 10000;
     
@@ -1370,11 +1372,12 @@ RESTIRRay DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRay 
     newPayload.depth = depth;
     newPayload.seed = seed;
     
+    // cant use RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH because of point/spot lights
     TraceRayCommon(rtParameters, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, newPayload);
     
     // did we hit something ? by knowing if the hit is before or after the light
     float visible = newPayload.hitDistance >= (length(light.pos.xyz - ray.Origin) * 0.999f) ? 1 : 0;
-    float3 color = (light.color.xyz * visible);// * saturate(dot(s.normal, lightDir)) * s.albedo.xyz;
+    float3 color = (light.color.xyz * visible);
     
     restirRay.HitRadiance = color;
     restirRay.HitPosition = light.pos.xyz;
@@ -1405,8 +1408,9 @@ RESTIRRay IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRa
     
     if(depth > 0)
     {
-        s.albedo.xyz = lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 2);
-        color = color * saturate(dot(s.normal, restirRay.Direction)) * s.albedo.xyz;
+        //color *= s.albedo.xyz;
+        //color *= saturate(dot(s.normal, restirRay.Direction));
+        color *= lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 1);
     }
         
     restirRay.HitNormal = newPayload.hitNorm;
@@ -1423,7 +1427,7 @@ float3 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
     
     if (depth < HLSL::maxRTDepth)
     {
-        restirRay = DirectLight(rtParameters, s, restirRay, depth, seed);
+        restirRay = DirectLight(rtParameters, s, restirRay, 1000, seed);
     }
     
     #if 1
@@ -1431,11 +1435,11 @@ float3 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
     {
         RESTIRRay indirectRay;
         indirectRay.Origin = hitPos;
-        indirectRay.Direction = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 1));
+        indirectRay.Direction = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), s.roughness));
         indirectRay = IndirectLight(rtParameters, s, indirectRay, depth, seed);
         restirRay.HitRadiance += indirectRay.HitRadiance;
     }
-    #elif 0
+    #elif 1
     restirRay.HitRadiance += SampleProbes(rtParameters, hitPos, s, true).xyz;
     #else
     if(nextRand(seed) > 0.66)
@@ -1451,7 +1455,7 @@ float3 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
     }
     else
     {
-        restirRay.hitRadiance += SampleProbes(rtParameters, hitPos, s, true).xyz;
+        restirRay.HitRadiance += SampleProbes(rtParameters, hitPos, s, true).xyz;
     }
     #endif
     
@@ -1470,7 +1474,7 @@ bool committedTriangleFrontFace,
 inout HLSL::HitInfo payload)
 {
     payload.hitDistance = RayTCurrent;
-    if(payload.type == 0) // shadow ray hit
+    if(payload.type == 0) // direct / shadow ray hit
     {
         payload.color = 0;
         return;
@@ -1718,11 +1722,17 @@ void DrawLine(float3 begin, float3 end)
     
     vertex1.pos = begin;
     vertex1.normal = RandUINT(asuint(Rand(begin)));
+    vertex1.tangent = 0;
+    vertex1.binormal = 0;
     vertex1.uv = 0;
+    vertex1.uv1 = 0;
     
     vertex2.pos = end;
     vertex2.normal = vertex1.normal;
+    vertex2.tangent = 0;
+    vertex2.binormal = 0;
     vertex2.uv = 0;
+    vertex2.uv1 = 0;
     
     debugVertices[index] = vertex1;
     debugVertices[index+1] = vertex2;
@@ -1808,11 +1818,17 @@ void DrawCircle(float3 center, float radius, float3 axis)
     
         vertex1.pos = begin;
         vertex1.normal = color;
+        vertex1.tangent = 0;
+        vertex1.binormal = 0;
         vertex1.uv = 0;
+        vertex1.uv1 = 0;
     
         vertex2.pos = end;
         vertex2.normal = color;
+        vertex2.tangent = 0;
+        vertex2.binormal = 0;
         vertex2.uv = 0;
+        vertex2.uv1 = 0;
     
         debugVertices[index + i * 2] = vertex1;
         debugVertices[index + i * 2 + 1] = vertex2;
