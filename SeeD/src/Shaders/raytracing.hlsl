@@ -52,7 +52,7 @@ void RayGen()
     directRay = DirectLight(rtParameters, s, directRay, 0, seed);
     RESTIR(directRay, rtParameters.previousDirectReservoirIndex, rtParameters.directReservoirIndex, cd, seed);
     
-    if (editorContext.debugMode == 1) // daw ray
+    if (editorContext.rays) // daw ray
     {
         RWStructuredBuffer<HLSL:: GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
         HLSL::GIReservoir rd = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
