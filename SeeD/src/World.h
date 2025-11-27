@@ -240,13 +240,11 @@ public:
     public:
         Components::Mask mask;
         uint count;
-        //Slots freeslots;
         std::array<void*, Components::componentMaxCount> data;
 
         void On()
         {
             count = 0;
-            //freeslots.On(poolMaxSlots);
             for (uint i = 0; i < data.size(); i++)
             {
                 data[i] = nullptr;
@@ -258,16 +256,7 @@ public:
         uint GetSlot()
         {
             return count++;
-            //return freeslots.Get();
         }
-
-        /*
-        void ReleaseSlot(uint index)
-        {
-            count--;
-            freeslots.Release(index);
-        }
-        */
 
         inline bool Satisfy(Components::Mask include, Components::Mask exclude)
         {
@@ -566,7 +555,7 @@ public:
     {
         instance = this;
         playing = false;
-        entitySlots.reserve(1024);
+        entitySlots.reserve(1024 * 1024);
         entityFreeSlots.reserve(entitySlots.size());
     }
 
@@ -577,12 +566,236 @@ public:
 
     void Load(String name)
     {
+        ZoneScoped;
 
+        std::ifstream fin((std::string)name, std::ios::binary);
+        if (!fin.is_open())
+        {
+            IOs::Log("Fail to open {}", name.c_str());
+            return;
+        }
+
+        // Header check
+        char magic[4] = {};
+        fin.read(magic, sizeof(magic));
+        if (fin.gcount() != sizeof(magic) || std::string(magic, 4) != "SEED")
+        {
+            IOs::Log("Invalid world file {}", name.c_str());
+            return;
+        }
+
+        uint32_t version = 0;
+        fin.read((char*)&version, sizeof(version));
+        if (version != 1)
+        {
+            IOs::Log("Unsupported world version {} in {}", version, name.c_str());
+            return;
+        }
+
+        // Clear current runtime data (free component allocations)
+        for (auto& pool : components)
+        {
+            for (uint i = 0; i < Components::componentMaxCount; i++)
+            {
+                if (pool.data[i] != nullptr)
+                {
+                    free(pool.data[i]);
+                    pool.data[i] = nullptr;
+                }
+            }
+        }
+        components.clear();
+        entitySlots.clear();
+        entityFreeSlots.clear();
+        deferredRelease.clear();
+        frameQueriesIndex = 0;
+        for (auto& fq : frameQueries) fq.clear();
+
+        // --- entitySlots
+        uint64_t entitySlotsCount = 0;
+        fin.read((char*)&entitySlotsCount, sizeof(entitySlotsCount));
+        if (!fin)
+        {
+            IOs::Log("Corrupted world file (entitySlots count) {}", name.c_str());
+            return;
+        }
+        entitySlots.resize((size_t)entitySlotsCount);
+        if (entitySlotsCount)
+        {
+            fin.read((char*)entitySlots.data(), entitySlotsCount * sizeof(EntitySlot));
+            if (!fin) { IOs::Log("Corrupted world file (entitySlots data) {}", name.c_str()); return; }
+        }
+
+        // --- entityFreeSlots
+        uint64_t freeSlotsCount = 0;
+        fin.read((char*)&freeSlotsCount, sizeof(freeSlotsCount));
+        if (!fin)
+        {
+            IOs::Log("Corrupted world file (freeSlots count) {}", name.c_str());
+            return;
+        }
+        entityFreeSlots.resize((size_t)freeSlotsCount);
+        if (freeSlotsCount)
+        {
+            fin.read((char*)entityFreeSlots.data(), freeSlotsCount * sizeof(uint));
+            if (!fin) { IOs::Log("Corrupted world file (freeSlots data) {}", name.c_str()); return; }
+        }
+
+        // --- components (pools)
+        uint64_t poolsCount = 0;
+        fin.read((char*)&poolsCount, sizeof(poolsCount));
+        if (!fin)
+        {
+            IOs::Log("Corrupted world file (pools count) {}", name.c_str());
+            return;
+        }
+        components.resize((size_t)poolsCount);
+
+        for (uint64_t p = 0; p < poolsCount; p++)
+        {
+            Pool& pool = components[(size_t)p];
+
+            // read mask
+            uint64_t maskull = 0;
+            fin.read((char*)&maskull, sizeof(maskull));
+            if (!fin) { IOs::Log("Corrupted world file (pool mask) {}", name.c_str()); return; }
+            pool.mask = Components::Mask(maskull);
+
+            // read count
+            uint32_t count = 0;
+            fin.read((char*)&count, sizeof(count));
+            if (!fin) { IOs::Log("Corrupted world file (pool count) {}", name.c_str()); return; }
+
+            // initialize pool allocations according to mask (Pool::On uses Components::strides)
+            pool.On();
+            pool.count = count;
+
+            // present buckets bitmask
+            uint64_t presentBuckets = 0;
+            fin.read((char*)&presentBuckets, sizeof(presentBuckets));
+            if (!fin) { IOs::Log("Corrupted world file (present buckets) {}", name.c_str()); return; }
+
+            for (uint i = 0; i < Components::componentMaxCount; i++)
+            {
+                if ((presentBuckets >> i) & 1ull)
+                {
+                    uint32_t strideOnDisk = 0;
+                    fin.read((char*)&strideOnDisk, sizeof(strideOnDisk));
+                    if (!fin) { IOs::Log("Corrupted world file (stride) {}", name.c_str()); return; }
+
+                    uint32_t expectedStride = Components::strides[i];
+                    if (expectedStride == 0)
+                    {
+                        // If global stride not known (unlikely), accept disk stride and set it.
+                        Components::strides[i] = strideOnDisk;
+                        expectedStride = strideOnDisk;
+                    }
+
+                    if (strideOnDisk != expectedStride)
+                    {
+                        IOs::Log("Warning: stride mismatch for bucket {} (disk {}, expected {}). Loading anyway.", i, strideOnDisk, expectedStride);
+                    }
+
+                    size_t bytes = (size_t)strideOnDisk * (size_t)count;
+                    if (pool.data[i] == nullptr)
+                    {
+                        // allocate if Pool::On didn't
+                        pool.data[i] = (void*)malloc(poolMaxSlots * strideOnDisk);
+                    }
+
+                    // read component bytes for 'count' entries into beginning of allocated block
+                    fin.read((char*)pool.data[i], bytes);
+                    if (!fin) { IOs::Log("Corrupted world file (component data) {}", name.c_str()); return; }
+                }
+                else
+                {
+                    // ensure data pointer is null when not present
+                    if (pool.data[i] != nullptr && !pool.mask[i])
+                    {
+                        // If On allocated (because mask had bit) but saved had no data, keep allocation but leave contents uninitialized.
+                    }
+                }
+            }
+        }
+
+        fin.close();
+
+        IOs::Log("World loaded from {}", name.c_str());
     }
 
     void Save(String name)
     {
+        ZoneScoped;
 
+        std::ofstream fout((std::string)name, std::ios::binary);
+        if (!fout.is_open())
+        {
+            IOs::Log("Fail to open {}", name.c_str());
+            return;
+        }
+
+        // Header
+        const char magic[4] = { 'S','E','E','D' };
+        fout.write(magic, sizeof(magic));
+        uint32_t version = 1;
+        fout.write((char*)&version, sizeof(version));
+
+        // --- entitySlots
+        uint64_t entitySlotsCount = (uint64_t)entitySlots.size();
+        fout.write((char*)&entitySlotsCount, sizeof(entitySlotsCount));
+        if (entitySlotsCount)
+        {
+            fout.write((char*)entitySlots.data(), entitySlotsCount * sizeof(EntitySlot));
+        }
+
+        // --- entityFreeSlots
+        uint64_t freeSlotsCount = (uint64_t)entityFreeSlots.size();
+        fout.write((char*)&freeSlotsCount, sizeof(freeSlotsCount));
+        if (freeSlotsCount)
+        {
+            fout.write((char*)entityFreeSlots.data(), freeSlotsCount * sizeof(uint));
+        }
+
+        // --- components (pools)
+        uint64_t poolsCount = (uint64_t)components.size();
+        fout.write((char*)&poolsCount, sizeof(poolsCount));
+        for (uint64_t p = 0; p < poolsCount; p++)
+        {
+            auto& pool = components[(size_t)p];
+
+            // mask (save as 64-bit)
+            uint64_t mask = pool.mask.to_ullong();
+            fout.write((char*)&mask, sizeof(mask));
+
+            // count (number of used slots in that pool)
+            uint32_t count = pool.count;
+            fout.write((char*)&count, sizeof(count));
+
+            // which buckets are present in this pool (bitset -> 64-bit mask)
+            uint64_t presentBuckets = 0;
+            for (uint i = 0; i < Components::componentMaxCount; i++)
+            {
+                if (pool.data[i] != nullptr)
+                    presentBuckets |= (1ull << i);
+            }
+            fout.write((char*)&presentBuckets, sizeof(presentBuckets));
+
+            // For each present bucket write stride then the array bytes (count elements)
+            for (uint i = 0; i < Components::componentMaxCount; i++)
+            {
+                if ((presentBuckets >> i) & 1ull)
+                {
+                    uint32_t stride = Components::strides[i];
+                    fout.write((char*)&stride, sizeof(stride));
+                    // write only `count` elements (not full poolMaxSlots)
+                    size_t bytes = (size_t)stride * (size_t)count;
+                    fout.write((char*)pool.data[i], bytes);
+                }
+            }
+        }
+
+        fout.close();
+        IOs::Log("World saved to {}", name.c_str());
     }
 
     void Clear()

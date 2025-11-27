@@ -618,7 +618,10 @@ public:
     {
         HLSL::EditorContext editorContextParams;
 
-        editorContextParams.debugMode = (uint)options.debugMode;
+        editorContextParams.rays = options.debugMode == Options::DebugMode::ray;
+        editorContextParams.boundingVolumes = options.debugMode == Options::DebugMode::boundingSphere;
+        editorContextParams.albedo = options.debugDraw == Options::DebugDraw::albedo;
+        editorContextParams.lighting = options.debugDraw == Options::DebugDraw::lighting;
         editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
         editorContextParams.debugVerticesHeapIndex = editorContext.indirectDebugVertices.GetResource().uav.offset;
         editorContextParams.debugVerticesCountHeapIndex = editorContext.indirectDebugVerticesCount.GetResource().uav.offset;

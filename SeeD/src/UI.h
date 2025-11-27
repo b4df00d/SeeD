@@ -679,6 +679,11 @@ public:
         ImGui::Combo("debugMode", &debugModeIndex, items, IM_ARRAYSIZE(items));
         options.debugMode = (Options::DebugMode)debugModeIndex;
 
+        int debugDrawIndex = (int)options.debugDraw;
+        const char* itemsDraw[] = { "none", "albedo", "lighting" };
+        ImGui::Combo("debugDraw", &debugDrawIndex, itemsDraw, IM_ARRAYSIZE(itemsDraw));
+        options.debugDraw = (Options::DebugDraw)debugDrawIndex;
+
         ImGui::End();
     }
 };
@@ -1212,6 +1217,7 @@ public:
                                     }
                                     break;
                                     case PropertyTypes::_assetID:
+                                    {
                                         assetID id = ((assetID*)data)[dc];
                                         if (AssetLibrary::instance->map.contains(id))
                                         {
@@ -1228,7 +1234,8 @@ public:
                                             ImGui::SameLine();
                                             ImGui::Text(AssetLibrary::instance->map[id].originalFilePath.c_str());
                                         }
-                                        break;
+                                    }
+                                    break;
                                     case PropertyTypes::_Handle:
                                     {
                                         UIHelpers::DrawHandle(((EntityBase*)data)[dc], m.dataTemplateType);
@@ -1495,12 +1502,12 @@ public:
             {
                 if (ImGui::MenuItem("Save World"))
                 {
-                    World::instance->Save("Save");
+                    World::instance->Save("Save.seed");
                 }
                 if (ImGui::MenuItem("Load World"))
                 {
                     editorState.selectedObject = {};
-                    String file = "Save";
+                    String file = "Save.seed";
                     World::instance->Load(file);
                 }
                 if (ImGui::MenuItem("Clear World"))

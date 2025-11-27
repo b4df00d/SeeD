@@ -409,7 +409,10 @@ packed :
     struct EditorContext
     {
 	    //D3D12_GPU_VIRTUAL_ADDRESS cbv;
-        uint debugMode; // see Options::DebugMode
+        uint rays : 1;
+        uint boundingVolumes : 1;
+        uint albedo : 1;
+        uint lighting : 1;
         uint debugBufferHeapIndex;
         uint debugVerticesHeapIndex;
         uint debugVerticesCountHeapIndex;

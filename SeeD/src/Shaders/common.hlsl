@@ -808,6 +808,11 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     return cd;
 }
 
+float Luminance(float3 color)
+{
+    return dot(float3(0.299, 0.587, 0.114), color);
+}
+
 struct SurfaceData
 {
     float4 albedo; //with alpha
@@ -1408,9 +1413,9 @@ RESTIRRay IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRa
     
     if(depth > 0)
     {
-        //color *= s.albedo.xyz;
+        color *= s.albedo.xyz;
         //color *= saturate(dot(s.normal, restirRay.Direction));
-        color *= lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 1);
+        //color *= lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 1);
     }
         
     restirRay.HitNormal = newPayload.hitNorm;
@@ -1442,14 +1447,14 @@ float3 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
     #elif 1
     restirRay.HitRadiance += SampleProbes(rtParameters, hitPos, s, true).xyz;
     #else
-    if(nextRand(seed) > 0.66)
+    if(nextRand(seed) > 0.5)
     {
-        if (depth + 1 < HLSL::maxRTDepth)
+        if (depth < HLSL::maxRTDepth)
         {
             RESTIRRay indirectRay;
             indirectRay.Origin = hitPos;
-            indirectRay.Direction = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 1));
-            indirectRay = IndirectLight(rtParameters, s, indirectRay, depth + 1, seed);
+            indirectRay.Direction = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), s.roughness));
+            indirectRay = IndirectLight(rtParameters, s, indirectRay, depth, seed);
             restirRay.HitRadiance += indirectRay.HitRadiance;
         }
     }
@@ -1499,7 +1504,7 @@ void CommonMiss(float3 WorldRayOrigin, float3 WorldRayDirection, float RayTCurre
     Payload.hitDistance = RayTCurrent;
     Payload.hitPos = WorldRayOrigin + WorldRayDirection * RayTCurrent;
     Payload.color = Sky(WorldRayDirection);
-}
+    }
 
 void TraceRayCommon(HLSL::RTParameters rtParameters,
     uint RayFlags,
