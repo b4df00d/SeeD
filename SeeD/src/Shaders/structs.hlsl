@@ -341,7 +341,7 @@ namespace HLSL
         uint previousDirectReservoirIndex;
         uint giReservoirIndex;
         uint previousgiReservoirIndex;
-        uint shadowsIndex;
+        //uint shadowsIndex;
         uint lightedIndex;
         uint specularHitDistanceIndex;
         
@@ -413,6 +413,7 @@ packed :
         uint boundingVolumes : 1;
         uint albedo : 1;
         uint lighting : 1;
+        uint GIprobes : 1;
         uint debugBufferHeapIndex;
         uint debugVerticesHeapIndex;
         uint debugVerticesCountHeapIndex;

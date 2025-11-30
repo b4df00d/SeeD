@@ -343,7 +343,7 @@ public:
                 mask |= Components::Name::mask;
 
             EntitySlot slot;
-            slot.pool = GetOrCreatePoolIndex(mask);
+            slot.pool = World::instance->GetOrCreatePoolIndex(mask);
             slot.index = World::instance->components[slot.pool].GetSlot();
             slot.permanent = permanent;
 
@@ -372,7 +372,22 @@ public:
             return *this;
         }
 
-        // not used yet. Is this the proper way ?
+        Entity Clone(String name = "", bool permanent = false)
+        {
+            Entity newEntity;
+            newEntity.Make(GetMask(), name, permanent);
+            // copy all components
+            auto& thisSlot = World::instance->entitySlots[id];
+            auto& newSlot = World::instance->entitySlots[newEntity.id];
+            Copy(thisSlot, newSlot);
+            if (!name.empty())
+            {
+                strcpy(newEntity.Get<Components::Name>().name, name.c_str());
+            }
+            Get<Components::Entity>() = newEntity;
+            return newEntity;
+        }
+
         void Release()
         {
             seedAssert(IsValid());
@@ -417,7 +432,7 @@ public:
             seedAssert(IsValid());
             auto& thisSlot = World::instance->entitySlots[id];
             EntitySlot newSlot;
-            newSlot.pool = GetOrCreatePoolIndex(World::instance->components[thisSlot.pool].mask | mask);
+            newSlot.pool = World::instance->GetOrCreatePoolIndex(World::instance->components[thisSlot.pool].mask | mask);
             newSlot.index = World::instance->components[newSlot.pool].GetSlot();
             newSlot.rev = thisSlot.rev;
             newSlot.permanent = thisSlot.permanent;
@@ -442,7 +457,7 @@ public:
             seedAssert(IsValid());
             auto& thisSlot = World::instance->entitySlots[id];
             EntitySlot newSlot;
-            newSlot.pool = GetOrCreatePoolIndex(World::instance->components[thisSlot.pool].mask & ~mask);
+            newSlot.pool = World::instance->GetOrCreatePoolIndex(World::instance->components[thisSlot.pool].mask & ~mask);
             newSlot.index = World::instance->components[newSlot.pool].GetSlot();
 
             Copy(thisSlot, newSlot);
@@ -485,30 +500,6 @@ public:
                     memcpy(to.Get(i), from.Get(i), Components::strides[i]);
                 }
             }
-        }
-
-        // not thread safe when need to create
-        uint GetOrCreatePoolIndex(Components::Mask mask)
-        {
-            mask |= Components::Entity::mask;
-
-            for (uint i = 0; i < World::instance->components.size(); i++)
-            {
-                auto& pool = World::instance->components[i];
-                if (pool.mask == mask && pool.count < poolMaxSlots)
-                    return i;
-            }
-            seedAssert(World::instance->components.size() < (1 << 11)); //sync with entitySlot.pool bit count
-            Pool newPool;
-            newPool.mask = mask;
-            newPool.On();
-            World::instance->components.push_back(newPool);
-            return (uint)World::instance->components.size() - 1;
-        }
-
-        Pool& GetOrCreatePool(Components::Mask mask)
-        {
-            return World::instance->components[GetOrCreatePoolIndex(mask)];       
         }
 
         // if found set the calling entity to the found entity
@@ -836,6 +827,30 @@ public:
             //SUBTASKWORLD(sys);
             tf::Task t = subflow.emplace([this, i]() {this->systems[i]->Update(this); }).name("#system");
         }
+    }
+
+    // not thread safe when need to create
+    uint GetOrCreatePoolIndex(Components::Mask mask)
+    {
+        mask |= Components::Entity::mask;
+
+        for (uint i = 0; i < components.size(); i++)
+        {
+            auto& pool = components[i];
+            if (pool.mask == mask && pool.count < poolMaxSlots)
+                return i;
+        }
+        seedAssert(components.size() < (1 << 11)); //sync with entitySlot.pool bit count
+        Pool newPool;
+        newPool.mask = mask;
+        newPool.On();
+        components.push_back(newPool);
+        return (uint)components.size() - 1;
+    }
+
+    Pool& GetOrCreatePool(Components::Mask mask)
+    {
+        return components[GetOrCreatePoolIndex(mask)];
     }
 
     void DeferredRelease()

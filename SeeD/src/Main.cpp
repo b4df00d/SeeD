@@ -68,6 +68,7 @@ struct Options
         none,
         albedo,
         lighting,
+        GIprobes,
     };
     DebugDraw debugDraw;
 } options;
@@ -265,6 +266,9 @@ public:
 
 int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nCmdShow)
 {
+    // call that each time to force the correctness of component metadata ?
+    //ParseCpp("G:\\Work\\Dev\\SeeD\\SeeD\\src\\World.h");
+
     IOs::WindowInformation window;
     window.usevSync = false;
 #ifdef _DEBUG
@@ -276,7 +280,10 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 
     Engine engine;
     engine.On(window);
-    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
+
+    World::instance->Load("Save.seed");
+
+    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Mario1\\scene.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Stronghold.fbx");
@@ -296,7 +303,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\WildWest\\WildWest2.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Halo.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\BOURDON-V01.fbx");
-    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Objects\\primitives.fbx");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Objects\\primitives.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\caldera-main\\map_source\\prefabs\\br\\wz_vg\\mp_wz_island\\commercial\\hotel_01.usd");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\appart-vincent-03-v02.fbx");
 

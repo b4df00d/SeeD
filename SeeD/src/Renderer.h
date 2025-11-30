@@ -407,7 +407,7 @@ struct RayTracingContext
     PerFrame<StructuredUploadBuffer<D3D12_RAYTRACING_INSTANCE_DESC>> instancesRayTracing;
     Resource TLAS;
     Resource GI;
-    Resource shadows;
+    //Resource shadows;
     PerFrame<Resource> directReservoir;
     PerFrame<Resource> giReservoir;
     PerFrame<Resource> giReservoirSpatial;
@@ -418,7 +418,7 @@ struct RayTracingContext
         TLAS.CreateAccelerationStructure(1000000, "TLAS");
         //scratchBuffer.CreateBuffer(1000000, 1, false, "scratchBuffer");
         GI.CreateTexture(resolution, DXGI_FORMAT_R11G11B10_FLOAT, false, "GI");
-        shadows.CreateTexture(resolution, DXGI_FORMAT_R8_UNORM, false, "shadows");
+        //shadows.CreateTexture(resolution, DXGI_FORMAT_R8_UNORM, false, "shadows");
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -442,7 +442,7 @@ struct RayTracingContext
         TLAS.Release();
         //scratchBuffer.Release();
         GI.Release();
-        shadows.Release();
+        //shadows.Release();
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -576,9 +576,9 @@ public:
         viewContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
         viewContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
         viewContextParams.mousePixel = int4(IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1], IOs::instance->mouse.mousePos[2], IOs::instance->mouse.mousePos[3]);
-        float2 previousJit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy) * float2(2, 2);
+        float2 previousJit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy);
         viewContext.jitterIndex = (viewContextParams.frameNumber) % ARRAYSIZE(viewContext.jitter);
-        float2 jit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy) * float2(2, 2);
+        float2 jit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy);
         viewContextParams.jitter = float4(jit.x, jit.y, previousJit.x, previousJit.y);
         
         return viewContextParams;
@@ -590,7 +590,7 @@ public:
 
         rayTracingContextParams.BVH = raytracingContext.TLAS.srv.offset;
         rayTracingContextParams.giIndex = raytracingContext.GI.uav.offset;
-        rayTracingContextParams.shadowsIndex = raytracingContext.shadows.uav.offset;
+        //rayTracingContextParams.shadowsIndex = raytracingContext.shadows.uav.offset;
         rayTracingContextParams.directReservoirIndex = raytracingContext.directReservoir.Get().uav.offset;
         rayTracingContextParams.previousDirectReservoirIndex = raytracingContext.directReservoir.GetPrevious().uav.offset;
         rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get().uav.offset;
@@ -622,6 +622,7 @@ public:
         editorContextParams.boundingVolumes = options.debugMode == Options::DebugMode::boundingSphere;
         editorContextParams.albedo = options.debugDraw == Options::DebugDraw::albedo;
         editorContextParams.lighting = options.debugDraw == Options::DebugDraw::lighting;
+        editorContextParams.GIprobes = options.debugDraw == Options::DebugDraw::GIprobes;
         editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
         editorContextParams.debugVerticesHeapIndex = editorContext.indirectDebugVertices.GetResource().uav.offset;
         editorContextParams.debugVerticesCountHeapIndex = editorContext.indirectDebugVerticesCount.GetResource().uav.offset;
@@ -1260,7 +1261,7 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         lighted.Register("lighted", view);
-        lighted.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R11G11B10_FLOAT, "lighted");
+        lighted.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "lighted");
         specularHitDistance.Register("specularHitDistance", view);
         specularHitDistance.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16_FLOAT, "specularHitDistance");
         albedo.Register("albedo", view);
@@ -1500,6 +1501,7 @@ class PostProcess : public Pass
     ViewResource motion;
     ViewResource depth;
     ViewResource history;
+    ViewResource upscaled;
     Components::Handle<Components::Shader> postProcessShader;
     Components::Handle<Components::Shader> TAAShader;
 
@@ -1514,12 +1516,13 @@ public:
         postProcessed.Register("postProcessed", view);
         postProcessed.Get().CreateRenderTarget(view->displayResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "postProcessed"); // must be same as backbuffer for a resource copy at end of frame 
         history.Register("history", view);
-        history.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R11G11B10_FLOAT, "history"); // must be the same as Lighted input
+        history.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "history"); // must be the same as Lighted input
         lighted.Register("lighted", view);
         albedo.Register("albedo", view);
         normal.Register("normal", view);
         motion.Register("motion", view);
         depth.Register("depth", view);
+        upscaled.Register("upscaled", view);
         postProcessShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\PostProcess.hlsl");
         TAAShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\TAA.hlsl");
 
@@ -1567,12 +1570,10 @@ public:
             history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON); // transition to present in the editor cmb
         }
 
-            // currently tonemapping is only done after TAA... change that
-
         if (view->upscaling == View::Upscaling::dlss || view->upscaling == View::Upscaling::dlssd)
         {
             ppparams.inputIsFullResolution = 1;
-            ppparams.lightedIndex = postProcessed.Get().uav.offset;
+            ppparams.lightedIndex = upscaled.Get().uav.offset;
         }
         else
         {
@@ -1607,13 +1608,13 @@ class DLSS : public Pass
     ViewResource depth;
     ViewResource lighted;
     ViewResource specularHitDistance;
-    ViewResource postProcessed;
+    ViewResource upscaled;
 
 public:
     NVSDK_NGX_Parameter* ngx_parameters = nullptr;
     NVSDK_NGX_Handle* dlss_feature = nullptr;
-    NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;// NVSDK_NGX_PerfQuality_Value_MaxPerf;
-    float sharpness = 0.5f;
+    NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_Balanced;// NVSDK_NGX_PerfQuality_Value_MaxQuality;// NVSDK_NGX_PerfQuality_Value_MaxPerf;
+    float sharpness = 0.33f;
     bool initialized = false;
     bool created = false;
     View::Upscaling upscalingPreviousSetting;
@@ -1630,7 +1631,8 @@ public:
         depth.Register("depth", view);
         lighted.Register("lighted", view);
         specularHitDistance.Register("specularHitDistance", view);
-        postProcessed.Register("postProcessed", view);
+        upscaled.Register("upscaled", view);
+        upscaled.Get().CreateRenderTarget(view->displayResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "upscaled"); // must be the same as Lighted input
     }
     virtual void Off() override
     {
@@ -1758,8 +1760,9 @@ public:
                     dlss_create_params.Feature.InPerfQualityValue = perf_quality;
                     dlss_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
                         NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-                        NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
-                        NVSDK_NGX_DLSS_Feature_Flags_DoSharpening |
+                        //NVSDK_NGX_DLSS_Feature_Flags_MVJittered |
+                        //NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
+                        //NVSDK_NGX_DLSS_Feature_Flags_DoSharpening |
                         NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
                     dlss_create_params.InEnableOutputSubrects = false;
 
@@ -1777,9 +1780,12 @@ public:
                     dlssd_create_params.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode::NVSDK_NGX_DLSS_Roughness_Mode_Unpacked;
                     dlssd_create_params.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type::NVSDK_NGX_DLSS_Depth_Type_HW;
                     dlssd_create_params.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode::NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
-                    
                     dlssd_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
-                        NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+                        NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
+                        //NVSDK_NGX_DLSS_Feature_Flags_MVJittered |
+                        //NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
+                        //NVSDK_NGX_DLSS_Feature_Flags_DoSharpening |
+                        NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
 
                     NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSSD_EXT(commandBuffer->cmd, 0, 0, &dlss_feature, ngx_parameters, &dlssd_create_params);
                     seedAssert(NVSDK_NGX_SUCCEED(result));
@@ -1794,19 +1800,21 @@ public:
 
                 NVSDK_NGX_D3D12_DLSS_Eval_Params dlss_eval_params{};
                 dlss_eval_params.Feature.pInColor = lighted.Get().GetResource();
-                dlss_eval_params.Feature.pInOutput = postProcessed.Get().GetResource();
-                dlss_eval_params.Feature.InSharpness = sharpness;
-
+                dlss_eval_params.Feature.pInOutput = upscaled.Get().GetResource();
                 dlss_eval_params.pInDepth = depth.Get().GetResource();
                 dlss_eval_params.pInMotionVectors = motion.Get().GetResource();
-                dlss_eval_params.InMVScaleX = (float)view->renderResolution.x;
+                dlss_eval_params.InMVScaleX = (float)view->renderResolution.x; // because my MotionVectors are in uv space
                 dlss_eval_params.InMVScaleY = (float)view->renderResolution.y;
+
+                dlss_eval_params.Feature.InSharpness = sharpness;
 
                 dlss_eval_params.pInExposureTexture = nullptr;
                 dlss_eval_params.InExposureScale = 1.0f;
 
-                dlss_eval_params.InJitterOffsetX = view->viewContext.jitter[view->viewContext.jitterIndex].x;
-                dlss_eval_params.InJitterOffsetY = view->viewContext.jitter[view->viewContext.jitterIndex].y;
+                // use jitter info only if NVSDK_NGX_DLSS_Feature_Flags_MVJittered ?
+                //dlss_eval_params.InJitterOffsetX = view->viewContext.jitter[view->viewContext.jitterIndex].x;
+                //dlss_eval_params.InJitterOffsetY = view->viewContext.jitter[view->viewContext.jitterIndex].y;
+
                 dlss_eval_params.InReset = false;
                 dlss_eval_params.InRenderSubrectDimensions = { view->renderResolution.x, view->renderResolution.y };
 
@@ -1817,21 +1825,24 @@ public:
             {
                 NVSDK_NGX_D3D12_DLSSD_Eval_Params dlss_eval_params{};
                 dlss_eval_params.pInColor = lighted.Get().GetResource();
-                dlss_eval_params.pInOutput = postProcessed.Get().GetResource();
-                dlss_eval_params.pInMotionVectors = motion.Get().GetResource();
-                dlss_eval_params.pInDepth = depth.Get().GetResource();
+                dlss_eval_params.pInOutput = upscaled.Get().GetResource();
                 dlss_eval_params.pInNormals = normal.Get().GetResource();
                 dlss_eval_params.pInDiffuseAlbedo = albedo.Get().GetResource();
                 dlss_eval_params.pInSpecularAlbedo = specularAlbedo.Get().GetResource();
-                //dlss_eval_params.pInExposureTexture = nullptr; // not supported
-                //dlss_eval_params.pInAlpha = albedo.Get().GetResource();
                 dlss_eval_params.pInRoughness = roughness.Get().GetResource();
-                dlss_eval_params.InMVScaleX = (float)view->renderResolution.x;
+                dlss_eval_params.pInDepth = depth.Get().GetResource();
+                dlss_eval_params.pInMotionVectors = motion.Get().GetResource();
+                dlss_eval_params.InMVScaleX = (float)view->renderResolution.x; // because my MotionVectors are in uv space
                 dlss_eval_params.InMVScaleY = (float)view->renderResolution.y;
-                dlss_eval_params.InJitterOffsetX = view->viewContext.jitter[view->viewContext.jitterIndex].x;
-                dlss_eval_params.InJitterOffsetY = view->viewContext.jitter[view->viewContext.jitterIndex].y;
 
-                dlss_eval_params.InReset = 0;
+                //dlss_eval_params.pInExposureTexture = nullptr; // not supported
+                dlss_eval_params.InExposureScale = 1.0f;
+                //dlss_eval_params.pInAlpha = albedo.Get().GetResource();
+
+
+                // use jitter info only if NVSDK_NGX_DLSS_Feature_Flags_MVJittered ?
+                //dlss_eval_params.InJitterOffsetX = view->viewContext.jitter[view->viewContext.jitterIndex].x;
+                //dlss_eval_params.InJitterOffsetY = view->viewContext.jitter[view->viewContext.jitterIndex].y;
 
                 dlss_eval_params.pInSpecularHitDistance = specularHitDistance.Get().GetResource();
                 dlss_eval_params.pInWorldToViewMatrix = reinterpret_cast<float*>(&view->viewWorld->cameras[0].view);
@@ -1841,8 +1852,8 @@ public:
                 //dlss_eval_params.pInTransparencyLayer = getHandle(pTransparent);
                 */
 
-                dlss_eval_params.InRenderSubrectDimensions.Width = view->renderResolution.x;
-                dlss_eval_params.InRenderSubrectDimensions.Height = view->renderResolution.y;
+                dlss_eval_params.InReset = 0;
+                dlss_eval_params.InRenderSubrectDimensions = { view->renderResolution.x, view->renderResolution.y };
 
                 NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSSD_EXT(commandBuffer->cmd, dlss_feature, ngx_parameters, &dlss_eval_params);
                 seedAssert(NVSDK_NGX_SUCCEED(result));

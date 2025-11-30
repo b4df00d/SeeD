@@ -205,15 +205,15 @@ uint xxhash(in uint p)
 
 uint xxhash(in uint2 pixel)
 {
-    uint p = viewContext.frameTime << 20 | pixel.x << 10 | pixel.y;
+    uint p = viewContext.frameTime << 28 | pixel.x << 14 | pixel.y;
     //p = 0 << 20 | pixel.x << 10 | pixel.y;
     return xxhash(p);
 }
 // Generates a seed for a random number generator from 2 inputs plus a backoff
 uint initRand(uint2 pixel)
 {
+    //pixel *= 0.016612f;
     return xxhash(pixel);
-    //pixel *= 38742.6612f;
     //return initRand(pixel.x + (uint(viewContext.frameTime) % 123) * 2.621f, pixel.y + (uint(viewContext.frameTime) % 431) * 9.432f, 3);
     //return initRand(pixel.x + viewContext.frameTime, pixel.y + viewContext.frameTime, 3);
     //return initRand(pixel.x, pixel.y, 3);
@@ -222,11 +222,44 @@ uint initRand(uint2 pixel)
 // Takes our seed, updates it, and returns a pseudorandom float in [0..1]
 float nextRand(inout uint s)
 {
-    s = (1664525u * s + 1013904223u);
-    //s = xxhash(s);
+    s = xxhash(s);
+    //s = (1664525u * s + 1013904223u);
+    //return RadicalInverse_VdC(s);
     return float(s & 0x00FFFFFF) / float(0x01000000);
 }
 
+// ----------------- HEMISPHERE ---------------------------------------------
+// Utility function to get a vector perpendicular to an input vector 
+//    (from "Efficient Construction of Perpendicular Vectors Without Branching")
+float3 getPerpendicularVector(float3 u)
+{
+    float3 a = abs(u);
+    uint xm = ((a.x - a.y) < 0 && (a.x - a.z) < 0) ? 1 : 0;
+    uint ym = (a.y - a.z) < 0 ? (1 ^ xm) : 0;
+    uint zm = 1 ^ (xm | ym);
+    return cross(u, float3(xm, ym, zm));
+}
+
+float3 getCosHemisphereSample(in uint randSeed, float3 hitNorm)
+{
+    hitNorm = normalize(hitNorm);
+    // Get 2 random numbers to select our sample with
+    float2 randVal = float2(nextRand(randSeed), nextRand(randSeed));
+
+    // Cosine weighted hemisphere sample from RNG
+    float3 bitangent = getPerpendicularVector(hitNorm);
+    float3 tangent = cross(bitangent, hitNorm);
+    float r = sqrt(randVal.x);
+    float phi = 2.0f * 3.14159265f * randVal.y;
+
+    // Get our cosine-weighted hemisphere lobe sample direction
+    float3 dir = normalize(tangent * (r * cos(phi)) + bitangent * (r * sin(phi)) + hitNorm.xyz * sqrt(1 - randVal.x));
+    
+    //int3 dirInt = dir * 128;
+    //dir = normalize(float3(dirInt));
+    
+    return dir;
+}
 
 // ----------------- LIGHTING ---------------------------------------------
 float DistanceFromTriangle(in float3 v1, in float3 v2, in float3 v3, in float3 p)
@@ -552,11 +585,11 @@ inline uint3 ModulusI(uint3 a, uint3 b)
 float2 CalcVelocity(float4 newPos, float4 oldPos, float2 viewSize)
 {
     oldPos /= oldPos.w;
-    oldPos.xy = (oldPos.xy+1)/2.0f;
+    oldPos.xy = oldPos.xy * 0.5f + 0.5f;
     oldPos.y = 1 - oldPos.y;
     
     newPos /= newPos.w;
-    newPos.xy = (newPos.xy+1)/2.0f;
+    newPos.xy = newPos.xy * 0.5f + 0.5f;
     newPos.y = 1 - newPos.y;
     
     return (oldPos - newPos).xy;
@@ -777,6 +810,7 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     float3 rayDir = worldSpace.xyz - cd.camera.worldPos.xyz;
     float rayLength = length(rayDir);
     rayDir /= rayLength;
+    //rayDir = normalize(rayDir);
     
     Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];
     float2 motion = motionT[pixel.xy];
@@ -801,9 +835,17 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     cd.viewDistDiff = abs(rayLength - previousRayLength);
     cd.previousViewDist = previousRayLength;
     
-    cd.offsetedWorldPos = cd.worldPos - (cd.viewDir * cd.viewDist * 0.005) + (cd.worldNorm * cd.viewDist * 0.002);
+    float viewDistSqr = cd.viewDist * cd.viewDist;
+    
+    cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * 0.001 * viewDistSqr); // -(cd.viewDir * viewDistSqr * 0.0001);
     
     cd.pixel = pixel;
+    
+    
+    
+    //uint seed = initRand(pixel.xy);
+    //cd.viewDir = normalize(lerp(cd.viewDir, getCosHemisphereSample(seed, cd.viewDir), 0.05));
+    //cd.viewDir = normalize(cd.viewDir);
     
     return cd;
 }
@@ -916,6 +958,8 @@ SurfaceData GetSurfaceData(uint2 pixel)
     
     s.albedo = albedo[pixel];
     s.normal = ReadR11G11B10Normal(normal[pixel]);
+    //uint seed = initRand(pixel.xy);
+    //s.normal = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 0.01));
     s.metalness = metalness[pixel];
     s.roughness = roughness[pixel];
     s.tangent = cross(s.normal, float3(1, 0, 0));
@@ -1054,10 +1098,15 @@ float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor)
 
 float3 ComputeLight(HLSL::Light light, float shadow, SurfaceData s, float3 V)
 {
-    float3 brdf = BRDF(s, V, light.dir.xyz, light.color.xyz);
-    float NdotL = max(dot(s.normal,-light.dir.xyz),0.0);
-    float3 lighted = brdf * NdotL * shadow;
-    return lighted;
+    if (any(light.color.xyz > 0))
+    {
+        float NdotL = max(dot(s.normal, -light.dir.xyz), 0.0);
+        return NdotL * s.albedo.xyz * light.color.xyz;
+        float3 brdf = BRDF(s, V, light.dir.xyz, light.color.xyz);
+        float3 lighted = brdf;// * NdotL * shadow;
+        return lighted;
+    }
+    return 0;
 }
 
 float3 Sky(float3 direction)
@@ -1065,7 +1114,8 @@ float3 Sky(float3 direction)
     float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))), 0.5));
     float dotDown = saturate(pow(saturate(dot(direction, float3(0, -1, 0)) * 20), 1));
     float3 sky = normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
-    sky = lerp(sky, float3(0, 0, 0), dotDown) * 5;
+    sky = lerp(sky, float3(0, 0, 0), dotDown);
+    sky *= 2;
     return sky;
 }
 
@@ -1104,7 +1154,6 @@ float2 bary)
     float3 nrm3 = verticesData[i3].normal;
 
     float3 normal = ((1 - bary.x - bary.y) * nrm1 + bary.x * nrm2 + bary.y * nrm3);
-    normal = normalize(normal);
     float4x4 worldMatrix = instance.unpack(instance.current);
     float3 worldNormal = mul((float3x3) worldMatrix, normal);
     worldNormal = normalize(worldNormal);
@@ -1230,39 +1279,6 @@ float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in Surfa
     return float3(0, 0, 0);
 }
 
-
-// Utility function to get a vector perpendicular to an input vector 
-//    (from "Efficient Construction of Perpendicular Vectors Without Branching")
-float3 getPerpendicularVector(float3 u)
-{
-    float3 a = abs(u);
-    uint xm = ((a.x - a.y) < 0 && (a.x - a.z) < 0) ? 1 : 0;
-    uint ym = (a.y - a.z) < 0 ? (1 ^ xm) : 0;
-    uint zm = 1 ^ (xm | ym);
-    return cross(u, float3(xm, ym, zm));
-}
-
-float3 getCosHemisphereSample(in uint randSeed, float3 hitNorm)
-{
-    hitNorm = normalize(hitNorm);
-    // Get 2 random numbers to select our sample with
-    float2 randVal = float2(nextRand(randSeed), nextRand(randSeed));
-
-    // Cosine weighted hemisphere sample from RNG
-    float3 bitangent = getPerpendicularVector(hitNorm);
-    float3 tangent = cross(bitangent, hitNorm);
-    float r = sqrt(randVal.x);
-    float phi = 2.0f * 3.14159265f * randVal.y;
-
-    // Get our cosine-weighted hemisphere lobe sample direction
-    float3 dir = normalize(tangent * (r * cos(phi).x) + bitangent * (r * sin(phi)) + hitNorm.xyz * sqrt(1 - randVal.x));
-    
-    //int3 dirInt = dir * 128;
-    //dir = normalize(float3(dirInt));
-    
-    return dir;
-}
-
 float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, SurfaceData s, bool writeWorldPosAsOffset = false)
 {
     worldPos += s.normal * 0.1;
@@ -1366,7 +1382,7 @@ RESTIRRay DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRay 
     RayDesc ray;
     ray.Origin = restirRay.Origin;
     ray.Direction = normalize(restirRay.Direction);
-    ray.TMin = 0.001;
+    ray.TMin = 0.005;
     ray.TMax = 10000;
     
     HLSL::HitInfo newPayload;
@@ -1396,7 +1412,7 @@ RESTIRRay IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRa
     RayDesc ray;
     ray.Origin = restirRay.Origin;
     ray.Direction = restirRay.Direction;
-    ray.TMin = 0.001;
+    ray.TMin = 0.005;
     ray.TMax = 10000;
     
     HLSL::HitInfo newPayload;
@@ -1413,7 +1429,7 @@ RESTIRRay IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRa
     
     if(depth > 0)
     {
-        color *= s.albedo.xyz;
+        color *= saturate(dot(s.normal, restirRay.Direction)) * s.albedo.xyz;
         //color *= saturate(dot(s.normal, restirRay.Direction));
         //color *= lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 1);
     }
@@ -1504,7 +1520,8 @@ void CommonMiss(float3 WorldRayOrigin, float3 WorldRayDirection, float RayTCurre
     Payload.hitDistance = RayTCurrent;
     Payload.hitPos = WorldRayOrigin + WorldRayDirection * RayTCurrent;
     Payload.color = Sky(WorldRayDirection);
-    }
+
+}
 
 void TraceRayCommon(HLSL::RTParameters rtParameters,
     uint RayFlags,

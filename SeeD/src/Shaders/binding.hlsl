@@ -5,6 +5,9 @@
 //https://learn.microsoft.com/en-us/windows/win32/direct3d12/dynamic-indexing-using-hlsl-5-1
 //https://devblogs.microsoft.com/directx/in-the-works-hlsl-shader-model-6-6/
 
+// in sampler 0 and 4 we use miplodbias to -1 because of upscalling
+// ideally this mip bias should be dynamically calculated and updated depending on the upscaling factor of dlss
+
 #define SeeDRootSignature  "RootFlags(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED),"\
             "CBV(b0, space = 0), "\
             "CBV(b1, space = 0), "\
@@ -18,8 +21,8 @@
                             "addressU       = TEXTURE_ADDRESS_WRAP, "\
                             "addressV       = TEXTURE_ADDRESS_WRAP, "\
                             "addressW       = TEXTURE_ADDRESS_WRAP, "\
-                            "mipLodBias     = 0.0f, "\
-                            "maxAnisotropy  = 0, "\
+                            "mipLodBias     = -1.0f, "\
+                            "maxAnisotropy  = 16, "\
                             "comparisonFunc = COMPARISON_NEVER, "\
                             "borderColor    = STATIC_BORDER_COLOR_TRANSPARENT_BLACK, "\
                             "minLOD         = 0.0f, "\
@@ -70,8 +73,8 @@
                             "addressU       = TEXTURE_ADDRESS_CLAMP, "\
                             "addressV       = TEXTURE_ADDRESS_CLAMP, "\
                             "addressW       = TEXTURE_ADDRESS_CLAMP, "\
-                            "mipLodBias     = 0.0f, "\
-                            "maxAnisotropy  = 0, "\
+                            "mipLodBias     = -1.0f, "\
+                            "maxAnisotropy  = 16, "\
                             "comparisonFunc = COMPARISON_NEVER, "\
                             "borderColor    = STATIC_BORDER_COLOR_OPAQUE_WHITE, "\
                             "minLOD         = 0.0f, "\

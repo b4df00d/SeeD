@@ -104,7 +104,7 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     HDR *= ppParameters.expoMul;
     HDR += ppParameters.expoAdd;
     
-    HDR = lerp(HDR, 0.5, saturate(1-exp(-cd.viewDist * 0.0025)));
+    //HDR = lerp(HDR, 0.5, saturate(1-exp(-cd.viewDist * 0.0025)));
     
 #if 1
     float r = GranTurismoTonemapper(HDR.r);

@@ -31,24 +31,13 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     
     lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
     specularHitDistance[dtid.xy] = hitDistance;
-    //lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s), 0);
-#if 0
-    if(dtid.x > viewContext.renderResolution.x * 0.5)
-    {
-        Texture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-        float3 ref = GI[dtid.xy] / HLSL::brightnessClippingAdjust;
-        //ref /= r.dir_Wcount.w;
-        lighted[dtid.xy] = float4(ref, 1);
-        //lighted[dtid.xy] = float4(s.normal, 1);
-    }
-#endif
     
-    
-    
-
     if (editorContext.albedo)
     {
         lighted[dtid.xy] = s.albedo;
+        //lighted[dtid.xy] = float4((cd.viewDir * 0.5) + 0.5, 1);
+        //lighted[dtid.xy] = (cd.viewDist - 2) * 0.1;
+
     }
     if (editorContext.lighting)
     {
@@ -60,12 +49,10 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     
         RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
         lighted[dtid.xy] = float4(d + i, 1);
-        //lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, true).xyz, 1);
     }
-    if(cd.viewDist > 5000)
+    if (editorContext.GIprobes)
     {
-        lighted[dtid.xy] = float4(Sky(cd.viewDir) * 0.25, 1);
-        return;
+        lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, true).xyz, 1);
     }
     int2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
     bool inRange = abs(length(debugPixel - int2(dtid.xy))) <= 0;
@@ -87,5 +74,9 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
             float radius = instance.GetScale() * mesh.boundingSphere.w;
             DrawSphere(center, radius);
         }
+    }
+    if(cd.viewDist > 5000)
+    {
+        lighted[dtid.xy] = float4(Sky(cd.viewDir), 1);
     }
 }

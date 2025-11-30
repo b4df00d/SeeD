@@ -68,6 +68,131 @@ struct ComponentInfo
 };
 std::vector<ComponentInfo> knownComponents;
 
+String FormatComponentsArray(std::vector<String>& componentsInfo)
+{
+    String out = "ComponentInfo knownComponents[] = \n{\n";
+
+    for (uint i = 0; i < componentsInfo.size(); i++)
+    {
+        auto& name = componentsInfo[i];
+        out += std::format("\t{}MetaData,\n", name.c_str());
+    }
+
+    out += "};\n";
+
+    return out;
+}
+String FormatMetaData(ComponentInfoParse cmpInfo, uint& cmpIndex)
+{
+    String out = std::format("knownComponents.push_back(\n \t{{ \"{0}\", Components::{0}::mask, {1}, \n \t\t{{\n", cmpInfo.name.c_str(), cmpInfo.propertyDrawPtr.c_str());
+
+    for (uint i = 0; i < cmpInfo.members.size(); i++)
+    {
+        auto& m = cmpInfo.members[i];
+        out += std::format("\t\t\t{{ \"{0}\", PropertyTypes::_{1}, {2}, {3}, offsetof(Components::{4}, {0}) }},\n", m.name.c_str(), m.dataType.c_str(), m.dataTemplateType.c_str(), m.dataCount.c_str(), cmpInfo.name.c_str());
+    }
+
+    out += "\t\t}\n \t}";
+    out += "); \n";
+
+    cmpIndex++;
+    return out;
+}
+void ParseCpp(String path)
+{
+    std::ifstream fin(path);
+    std::ofstream fout("G:\\Work\\Dev\\SeeD\\SeeD\\src\\ComponentsUIMetaData.h");
+    if (fin.is_open() && fout.is_open())
+    {
+        fout << "#pragma once" << std::endl;
+
+        //fout << "std::vector<ComponentInfo> knownComponents;" << std::endl;
+        fout << "void InitKnownComponents() { \n" << std::endl;
+        fout << "static bool initialized = false;\n" << std::endl;
+        fout << "if(initialized) return;\n" << std::endl;
+        fout << "initialized = true;\n" << std::endl;
+
+        std::vector<ComponentInfoParse> cmpInfos;
+        String line;
+        uint cmpIndex = 0;
+        while (getline(fin, line))
+        {
+            if (line.find(": ComponentBase<") != -1)
+            {
+                auto tokens = line.Split(" ");
+                cmpInfos.resize(cmpInfos.size() + 1);
+                ComponentInfoParse& cmpInfo = cmpInfos[cmpInfos.size() - 1];
+                cmpInfo.propertyDrawPtr = "nullptr";
+                cmpInfo.name = tokens[1];
+                while (line.find("};") == -1)
+                {
+                    getline(fin, line);
+                    tokens = line.Split(" ");
+                    if (tokens.size() >= 2)
+                    {
+                        String typeToken = tokens[0];
+                        String templateTypeToken = "NULL";
+                        int chevron = (int)typeToken.find("<");
+                        if (chevron != -1)
+                        {
+                            templateTypeToken = typeToken.substr(chevron + 1, typeToken.find(">") - chevron - 1);
+                            templateTypeToken = std::format("Components::{0}::mask", templateTypeToken.c_str());
+                            typeToken = typeToken.substr(0, chevron);
+                        }
+                        if (KnownType(typeToken))
+                        {
+                            MemberInfoParse info;
+                            info.dataType = typeToken;
+                            info.dataTemplateType = templateTypeToken;
+                            info.name = tokens[1].substr(0, tokens[1].length() - 1); //delete the ; at the end
+                            int bracketIndex = (int)info.name.find("[");
+                            if (bracketIndex != -1)
+                            {
+                                int bracketIndexOut = (int)info.name.find("]");
+                                info.dataCount = info.name.substr(bracketIndex + 1, bracketIndexOut - bracketIndex - 1);
+                                info.name = info.name.substr(0, bracketIndex);
+                            }
+                            else
+                            {
+                                info.dataCount = "1";
+                            }
+                            cmpInfo.members.push_back(info);
+                        }
+                    }
+                }
+            }
+            else if (line.find("PropertyDraw(") != -1)
+            {
+                int start = (int)line.find("void ") + 5;
+                int end = (int)line.find("PropertyDraw(");
+                String drawTarget = line.substr(start, end - start);
+
+                for (uint i = 0; i < (uint)cmpInfos.size(); i++)
+                {
+                    if (cmpInfos[i].name == drawTarget)
+                    {
+                        int start = (int)line.find("void ") + 5;
+                        int end = (int)line.find("(");
+                        String funcName = line.substr(start, end - start);
+                        cmpInfos[i].propertyDrawPtr = "Components::" + funcName;
+                    }
+                }
+            }
+        }
+
+        for (uint i = 0; i < (uint)cmpInfos.size(); i++)
+        {
+
+            fout << FormatMetaData(cmpInfos[i], cmpIndex);
+        }
+
+        fout << "}\n" << std::endl;
+
+        fin.close();
+        fout.close();
+    }
+}
+
 #include "UIHelpers.h"
 
 class EditorWindow
@@ -680,7 +805,7 @@ public:
         options.debugMode = (Options::DebugMode)debugModeIndex;
 
         int debugDrawIndex = (int)options.debugDraw;
-        const char* itemsDraw[] = { "none", "albedo", "lighting" };
+        const char* itemsDraw[] = { "none", "albedo", "lighting", "GIprobes" };
         ImGui::Combo("debugDraw", &debugDrawIndex, itemsDraw, IM_ARRAYSIZE(itemsDraw));
         options.debugDraw = (Options::DebugDraw)debugDrawIndex;
 
@@ -1148,6 +1273,18 @@ public:
 
         if (editorState.selectedObject != entityInvalid)
         {
+            if (editorState.selectedObject.Has<Components::Name>())
+            {
+                ImGui::InputText("##Name", editorState.selectedObject.Get<Components::Name>().name, ECS_NAME_LENGTH);
+            }
+
+            if (ImGui::Button("Clone"))
+            {
+                World::Entity clone = editorState.selectedObject.Clone("dup", false);
+                editorState.selectedObject = clone;
+                editorState.dirtyHierarchy = true;
+            }
+            ImGui::SameLine();
             if (ImGui::Button("Delete"))
             {
                 editorState.selectedObject.Release();
@@ -1161,13 +1298,27 @@ public:
             uint pushID = 0;
             for (uint i = 0; i < knownComponents.size(); i++)
             {
-                if ((editorState.selectedObject.GetMask() & knownComponents[i].mask) != 0)
+                Components::Mask mask = knownComponents[i].mask;
+                mask &= ~Components::Name::mask; // exclude name component from properties window
+                mask &= ~Components::Entity::mask; // exclude entity component from properties window
+
+                if ((editorState.selectedObject.GetMask() & mask) != 0)
                 {   
                     ImGui::PushID(pushID++);
 
                     auto& metaData = knownComponents[i];
                     char* cmpData = editorState.selectedObject.Get(Components::MaskToBucket(metaData.mask));
-                    if (ImGui::CollapsingHeader(metaData.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
+                    bool isopen = ImGui::CollapsingHeader(metaData.name.c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowItemOverlap);
+                    ImGui::SameLine();
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("Delete").x - 25);
+                    if (ImGui::Button("Delete"))
+                    {
+                        editorState.selectedObject.Remove(knownComponents[i].mask);
+                        ImGui::PopID();
+                        editorState.dirtyHierarchy = true;
+                        break;
+                    }
+                    if (isopen)
                     {
                         if (metaData.PropertyDraw != nullptr)
                         {
@@ -1249,14 +1400,6 @@ public:
                                 }
                                 ImGui::PopID();
                             }
-                        }
-
-                        if (ImGui::Button("Delete"))
-                        {
-                            editorState.selectedObject.Remove(knownComponents[i].mask);
-                            ImGui::PopID();
-                            editorState.dirtyHierarchy = true;
-                            break;
                         }
                         ImGui::PopID();
                     }
@@ -1568,132 +1711,6 @@ public:
             ImGui::Separator();
 
             ImGui::EndMainMenuBar();
-        }
-    }
-
-    String FormatComponentsArray(std::vector<String>& componentsInfo)
-    {
-        String out = "ComponentInfo knownComponents[] = \n{\n";
-
-        for (uint i = 0; i < componentsInfo.size(); i++)
-        {
-            auto& name = componentsInfo[i];
-            out += std::format("\t{}MetaData,\n", name.c_str());
-        }
-
-        out += "};\n";
-
-        return out;
-    }
-    String FormatMetaData(ComponentInfoParse cmpInfo, uint& cmpIndex)
-    {
-        String out = std::format("knownComponents.push_back(\n \t{{ \"{0}\", Components::{0}::mask, {1}, \n \t\t{{\n", cmpInfo.name.c_str(), cmpInfo.propertyDrawPtr.c_str());
-
-        for (uint i = 0; i < cmpInfo.members.size(); i++)
-        {
-            auto& m = cmpInfo.members[i];
-            out += std::format("\t\t\t{{ \"{0}\", PropertyTypes::_{1}, {2}, {3}, offsetof(Components::{4}, {0}) }},\n", m.name.c_str(), m.dataType.c_str(), m.dataTemplateType.c_str(), m.dataCount.c_str(), cmpInfo.name.c_str());
-        }
-
-        out += "\t\t}\n \t}";
-        out += "); \n";
-
-        cmpIndex++;
-        return out;
-    }
-    void ParseCpp(String path)
-    {
-
-        std::ifstream fin(path);
-        std::ofstream fout("G:\\Work\\Dev\\SeeD\\SeeD\\src\\ComponentsUIMetaData.h");
-        if (fin.is_open() && fout.is_open())
-        {
-            fout << "#pragma once" << std::endl;
-
-            //fout << "std::vector<ComponentInfo> knownComponents;" << std::endl;
-            fout << "void InitKnownComponents() { \n" << std::endl;
-            fout << "static bool initialized = false;\n" << std::endl;
-            fout << "if(initialized) return;\n" << std::endl;
-            fout << "initialized = true;\n" << std::endl;
-
-            std::vector<ComponentInfoParse> cmpInfos;
-            String line;
-            uint cmpIndex = 0;
-            while (getline(fin, line))
-            {
-                if (line.find(": ComponentBase<") != -1)
-                {
-                    auto tokens = line.Split(" ");
-                    cmpInfos.resize(cmpInfos.size() + 1);
-                    ComponentInfoParse& cmpInfo = cmpInfos[cmpInfos.size()-1];
-                    cmpInfo.propertyDrawPtr = "nullptr";
-                    cmpInfo.name = tokens[1];
-                    while (line.find("};") == -1)
-                    {
-                        getline(fin, line);
-                        tokens = line.Split(" ");
-                        if (tokens.size() >= 2)
-                        {
-                            String typeToken = tokens[0];
-                            String templateTypeToken = "NULL";
-                            int chevron = (int)typeToken.find("<");
-                            if (chevron != -1)
-                            {
-                                templateTypeToken = typeToken.substr(chevron + 1, typeToken.find(">") - chevron - 1);
-                                templateTypeToken = std::format("Components::{0}::mask", templateTypeToken.c_str());
-                                typeToken = typeToken.substr(0, chevron);
-                            }
-                            if (KnownType(typeToken))
-                            {
-                                MemberInfoParse info;
-                                info.dataType = typeToken;
-                                info.dataTemplateType = templateTypeToken;
-                                info.name = tokens[1].substr(0, tokens[1].length() - 1); //delete the ; at the end
-                                int bracketIndex = (int)info.name.find("[");
-                                if (bracketIndex != -1)
-                                {
-                                    int bracketIndexOut = (int)info.name.find("]");
-                                    info.dataCount = info.name.substr(bracketIndex + 1, bracketIndexOut - bracketIndex - 1);
-                                    info.name = info.name.substr(0, bracketIndex);
-                                }
-                                else
-                                {
-                                    info.dataCount = "1";
-                                }
-                                cmpInfo.members.push_back(info);
-                            }
-                        }
-                    }
-                }
-                else if (line.find("PropertyDraw(") != -1)
-                {
-                    int start = (int)line.find("void ") + 5;
-                    int end = (int)line.find("PropertyDraw(");
-                    String drawTarget = line.substr(start, end - start);
-
-                    for (uint i = 0; i < (uint)cmpInfos.size(); i++)
-                    {
-                        if (cmpInfos[i].name == drawTarget)
-                        {
-                            int start = (int)line.find("void ") + 5;
-                            int end = (int)line.find("(");
-                            String funcName = line.substr(start, end - start);
-                            cmpInfos[i].propertyDrawPtr = "Components::"+funcName;
-                        }
-                    }
-                }
-            }
-
-            for (uint i = 0; i < (uint)cmpInfos.size(); i++)
-            {
-
-                fout << FormatMetaData(cmpInfos[i], cmpIndex);
-            }
-
-            fout << "}\n" << std::endl;
-
-            fin.close();
-            fout.close();
         }
     }
 };

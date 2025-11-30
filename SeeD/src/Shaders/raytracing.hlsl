@@ -34,15 +34,16 @@ void RayGen()
     if (cd.viewDist > 5000)
         return;
     
-    SurfaceData s = GetSurfaceData(dtid.xy);
-    
     uint seed = initRand(dtid.xy);
+    
+    SurfaceData s = GetSurfaceData(dtid.xy);
     
     RESTIRRay indirectRay;
     indirectRay.Origin = cd.offsetedWorldPos;
     indirectRay.Direction = normalize(lerp(reflect(cd.viewDir, s.normal), getCosHemisphereSample(seed, s.normal), s.roughness));
+    indirectRay.proba = 1;
     //indirectRay.proba = max(0.1, pow(s.roughness, 3));
-    indirectRay.proba = max(0.00001, s.roughness);
+    //indirectRay.proba = max(0.00001, s.roughness);
     indirectRay = IndirectLight(rtParameters, s, indirectRay, 0, seed);
     RESTIR(indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, seed);
     
@@ -63,12 +64,6 @@ void RayGen()
         }
     }
     /*
-    if(dtid.x%10==0 && dtid.y%10==0)
-    {
-        if(length(cd.offsetedWorldPos - bounceHit) < 10)
-            DrawLine(cd.offsetedWorldPos, bounceHit);
-    }
-    
 #define REFERENCE
 #ifdef REFERENCE
     StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
