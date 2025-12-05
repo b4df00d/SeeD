@@ -38,10 +38,11 @@ void RayGen()
   
     RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
     
-    uint seed = initRand(launchIndex.xy);
-    
-    
     HLSL::ProbeData probeData = probesBuffer[probeIndex];
+    
+    // check if the probe is still active
+    if (probeData.position_Activation.w <= 0) return;
+    
     HLSL::SHProbe probe = probeData.sh;
     
     //Initialise sh to 0
@@ -49,6 +50,7 @@ void RayGen()
     probe.G = shZero();
     probe.B = shZero();
     
+    uint seed = initRand(launchIndex.xy);
     // Accumulate coefficients according to surounding direction/color tuples.
     for (float az = 0.5f; az < probes.probesSamplesPerFrame; az += 1.0f)
     {
@@ -58,7 +60,7 @@ void RayGen()
             
             RayDesc ray;
             float3 randVal = (float3(nextRand(seed), nextRand(seed), nextRand(seed)) * 2.f - 1.f) * cellSize * 0.125f;
-            ray.Origin = probeWorldPos + probeData.position.xyz;//  + randVal;
+            ray.Origin = probeWorldPos + probeData.position_Activation.xyz; //  + randVal;
             ray.Direction = rayDir;
             ray.TMin = 0;
             ray.TMax = 100000;
@@ -88,7 +90,8 @@ void RayGen()
     probe.B = shScale(probe.B, shFactor);
     
     probeData.sh = probe;
-    probeData.position = 0;
+    probeData.position_Activation.xyz = 0;
+    probeData.position_Activation.w = max(0, probeData.position_Activation.w-1);
     probesBuffer[probeIndex] = probeData;
 }
 

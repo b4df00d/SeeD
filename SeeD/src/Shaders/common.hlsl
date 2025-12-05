@@ -205,7 +205,7 @@ uint xxhash(in uint p)
 
 uint xxhash(in uint2 pixel)
 {
-    uint p = viewContext.frameTime << 28 | pixel.x << 14 | pixel.y;
+    uint p = viewContext.frameTime << 24 | pixel.x << 12 | pixel.y;
     //p = 0 << 20 | pixel.x << 10 | pixel.y;
     return xxhash(p);
 }
@@ -837,7 +837,7 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     
     float viewDistSqr = cd.viewDist * cd.viewDist;
     
-    cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * 0.001 * viewDistSqr); // -(cd.viewDir * viewDistSqr * 0.0001);
+    cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * 0.0001 * viewDistSqr); // -(cd.viewDir * viewDistSqr * 0.0001);
     
     cd.pixel = pixel;
     
@@ -1199,9 +1199,9 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
 
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    #define PREVIOUS_WEIGHT 0.25
+    #define PREVIOUS_WEIGHT 0.66
     if(rand < (current.W / (previous.W * PREVIOUS_WEIGHT + current.W)) || rand == 1)
-    //if(rand <= (current.color_W.w / ((previous.hit_Wsum.w / previous.dir_Wcount.w) + current.color_W.w)))
+    //if(rand <= (current.W / ((previous.Wsum / previous.Wcount) + current.W)))
     {
         previous.color = current.color;
         previous.W = current.W;
@@ -1301,8 +1301,9 @@ float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, SurfaceDat
         RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
         float3 probeCenter = launchIndex * cellSize + probes.probesBBMin.xyz;
         float3 probeOffset = worldPos - probeCenter;
-        float currentOffsetLength = length(probesBuffer[probeIndex].position.xyz);
-        if(currentOffsetLength == 0 || length(probeOffset) < currentOffsetLength) probesBuffer[probeIndex].position = float4(probeOffset, 0);
+        float currentOffsetLength = length(probesBuffer[probeIndex].position_Activation.xyz);
+        if (currentOffsetLength == 0 || length(probeOffset) < currentOffsetLength)
+            probesBuffer[probeIndex].position_Activation = float4(probeOffset, 10);
     }
     
     //with jitter for sampling
@@ -1451,7 +1452,7 @@ float3 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
         restirRay = DirectLight(rtParameters, s, restirRay, 1000, seed);
     }
     
-    #if 1
+    #if 0
     if (depth < HLSL::maxRTDepth)
     {
         RESTIRRay indirectRay;

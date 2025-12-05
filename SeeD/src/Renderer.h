@@ -427,10 +427,11 @@ struct RayTracingContext
             giReservoirSpatial.Get(i).CreateBuffer<HLSL::GIReservoirCompressed>(resolution.x * resolution.y, "GIReservoirSpacial");
         }
 
+        float multiRes = 2;
         float multi = 2;
-        probes[0].On(uint3(8, 8, 8) * multi, float3(16, 16, 16) * multi);
-        probes[1].On(uint3(8, 8, 8) * multi, float3(32, 32, 32) * multi);
-        probes[2].On(uint3(8, 8, 8) * multi, float3(128, 128, 128) * multi);
+        probes[0].On(uint3(8, 8, 8) * multi * multiRes, float3(16, 16, 16) * multi);
+        probes[1].On(uint3(8, 8, 8) * multi * multiRes, float3(32, 32, 32) * multi);
+        probes[2].On(uint3(8, 8, 8) * multi * multiRes, float3(128, 128, 128) * multi);
     }
 
     void Off()

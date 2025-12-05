@@ -316,7 +316,7 @@ namespace HLSL
     struct ProbeData
     {
         HLSL::SHProbe sh;
-        float4 position;
+        float4 position_Activation; // in w with store if the probe is active or not
     };
     
     struct ProbeGrid

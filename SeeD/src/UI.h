@@ -633,23 +633,24 @@ public:
             }
         }
 
-        if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+        //always add selected object to selection storage
+        if(editorState.selectedObject != entityInvalid)
+            selection.SetItemSelected(editorState.selectedObject.ToUInt(), true);
+
+        if ((ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ImGui::IsKeyPressed(ImGuiKey_Delete)) || IOs::instance->keys.pressed[VK_DELETE])
         {
-            if (ImGui::IsKeyPressed(ImGuiKey_Delete))
+            void* it = NULL;
+            ImGuiID id = 0;
+            selection.GetNextSelectedItem(&it, &id);
+            while (id != 0)
             {
-                void* it = NULL;
-                ImGuiID id = 0;
-                selection.GetNextSelectedItem(&it, &id);
-                while (id != 0)
-                {
-                    editorState.selectedObject.FromUInt(id);
-                    editorState.selectedObject.Release();
-                    editorState.selectedObject = entityInvalid;
-                    if (!selection.GetNextSelectedItem(&it, &id))
-                        break;
-                }
-                editorState.dirtyHierarchy = true;
+                editorState.selectedObject.FromUInt(id);
+                editorState.selectedObject.Release();
+                editorState.selectedObject = entityInvalid;
+                if (!selection.GetNextSelectedItem(&it, &id))
+                    break;
             }
+            editorState.dirtyHierarchy = true;
         }
 
         ImGui::End();
