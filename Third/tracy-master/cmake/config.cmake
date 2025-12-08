@@ -23,7 +23,9 @@ else()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    add_compile_options(-fexperimental-library)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+        add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fexperimental-library>)
+    endif()
 endif()
 
 if(WIN32)
@@ -47,6 +49,12 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
         add_compile_options(-fno-eliminate-unused-debug-types)
     endif()
+endif()
+
+find_program(CCACHE ccache)
+if(CCACHE)
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
+    set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ccache) 
 endif()
 
 file(GENERATE OUTPUT .gitignore CONTENT "*")

@@ -9,6 +9,7 @@
 #include "TracyVector.hpp"
 #include "TracyView.hpp"
 #include "tracy_pdqsort.h"
+#include "../Fonts.hpp"
 
 namespace tracy
 {
@@ -27,7 +28,17 @@ void View::BuildFlameGraph( const Worker& worker, std::vector<FlameGraphItem>& d
         {
             if( !v.IsEndValid() ) break;
             const auto srcloc = v.SrcLoc();
-            const auto duration = v.End() - v.Start();
+
+            auto start = v.Start();
+            auto end = v.End();
+
+            if ( m_flameGraphInvariant.range.active )
+            {
+                start = std::clamp(start, m_flameGraphInvariant.range.min, m_flameGraphInvariant.range.max);
+                end = std::clamp(end, m_flameGraphInvariant.range.min, m_flameGraphInvariant.range.max);
+            }
+
+            const auto duration = end - start;
             if( srcloc == last )
             {
                 cache->time += duration;
@@ -70,7 +81,17 @@ void View::BuildFlameGraph( const Worker& worker, std::vector<FlameGraphItem>& d
         {
             if( !v->IsEndValid() ) break;
             const auto srcloc = v->SrcLoc();
-            const auto duration = v->End() - v->Start();
+
+            auto start = v->Start();
+            auto end = v->End();
+
+            if ( m_flameGraphInvariant.range.active )
+            {
+                start = std::clamp(start, m_flameGraphInvariant.range.min, m_flameGraphInvariant.range.max);
+                end = std::clamp(end, m_flameGraphInvariant.range.min, m_flameGraphInvariant.range.max);
+            }
+
+            const auto duration = end - start;
             if( srcloc == last )
             {
                 cache->time += duration;
@@ -124,7 +145,15 @@ void View::BuildFlameGraph( const Worker& worker, std::vector<FlameGraphItem>& d
             const auto srcloc = v.SrcLoc();
             int64_t duration;
             uint64_t cnt;
-            if( !GetZoneRunningTime( ctx, v, duration, cnt ) ) break;
+            if ( m_flameRange.active )
+            {
+                if( !GetZoneRunningTime( ctx, v, m_flameGraphInvariant.range, duration, cnt ) ) continue;
+            }
+            else
+            {
+                if( !GetZoneRunningTime( ctx, v, duration, cnt ) ) break;
+            }
+
             if( srcloc == last )
             {
                 cache->time += duration;
@@ -169,7 +198,15 @@ void View::BuildFlameGraph( const Worker& worker, std::vector<FlameGraphItem>& d
             const auto srcloc = v->SrcLoc();
             int64_t duration;
             uint64_t cnt;
-            if( !GetZoneRunningTime( ctx, *v, duration, cnt ) ) break;
+            if ( m_flameRange.active )
+            {
+                if( !GetZoneRunningTime( ctx, *v, m_flameGraphInvariant.range, duration, cnt ) ) continue;
+            }
+            else
+            {
+                if( !GetZoneRunningTime( ctx, *v, duration, cnt ) ) break;
+            }
+
             if( srcloc == last )
             {
                 cache->time += duration;
@@ -210,37 +247,123 @@ void View::BuildFlameGraph( const Worker& worker, std::vector<FlameGraphItem>& d
 
 void View::BuildFlameGraph( const Worker& worker, std::vector<FlameGraphItem>& data, const Vector<SampleData>& samples )
 {
+    struct FrameCache
+    {
+        uint64_t symaddr;
+        StringIdx name;
+        bool external;
+    };
+
+    std::vector<FrameCache> cache;
+
     for( auto& v : samples )
     {
+        if ( m_flameGraphInvariant.range.active )
+        {
+            if ( v.time.Val() < m_flameGraphInvariant.range.min ||
+                 v.time.Val() > m_flameGraphInvariant.range.max )
+            {
+                continue;
+            }
+        }
+
+        cache.clear();
+
         const auto cs = v.callstack.Val();
         const auto& callstack = worker.GetCallstack( cs );
-
-        auto vec = &data;
         const auto csz = callstack.size();
-        for( size_t i=csz; i>0; i--)
+        if( m_flameExternal )
         {
-            auto frameData = worker.GetCallstackFrame( callstack[i-1] );
-            if( frameData )
+            for( size_t i=csz; i>0; i-- )
             {
-                for( uint8_t j=frameData->size; j>0; j-- )
+                auto frameData = worker.GetCallstackFrame( callstack[i-1] );
+                if( frameData )
                 {
-                    const auto frame = frameData->data[j-1];
-                    const auto symaddr = frame.symAddr;
-                    if( symaddr != 0 )
+                    for( uint8_t j=frameData->size; j>0; j-- )
                     {
-                        auto it = std::find_if( vec->begin(), vec->end(), [symaddr]( const auto& v ) { return v.srcloc == symaddr; } );
-                        if( it == vec->end() )
+                        const auto frame = frameData->data[j-1];
+                        const auto symaddr = frame.symAddr;
+                        if( symaddr != 0 )
                         {
-                            vec->emplace_back( FlameGraphItem { (int64_t)symaddr, 1, frame.name } );
-                            vec = &vec->back().children;
-                        }
-                        else
-                        {
-                            it->time++;
-                            vec = &it->children;
+                            cache.emplace_back( FrameCache { symaddr, frame.name } );
                         }
                     }
                 }
+            }
+        }
+        else if( !m_flameExternalTail )
+        {
+            for( size_t i=csz; i>0; i-- )
+            {
+                auto frameData = worker.GetCallstackFrame( callstack[i-1] );
+                if( frameData )
+                {
+                    for( uint8_t j=frameData->size; j>0; j-- )
+                    {
+                        const auto frame = frameData->data[j-1];
+                        const auto symaddr = frame.symAddr;
+                        if( symaddr != 0 )
+                        {
+                            auto filename = m_worker.GetString( frame.file );
+                            auto image = frameData->imageName.Active() ? m_worker.GetString( frameData->imageName ) : nullptr;
+                            if( !IsFrameExternal( filename, image ) )
+                            {
+                                cache.emplace_back( FrameCache { symaddr, frame.name } );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            for( size_t i=csz; i>0; i-- )
+            {
+                auto frameData = worker.GetCallstackFrame( callstack[i-1] );
+                if( frameData )
+                {
+                    for( uint8_t j=frameData->size; j>0; j-- )
+                    {
+                        const auto frame = frameData->data[j-1];
+                        const auto symaddr = frame.symAddr;
+                        if( symaddr != 0 )
+                        {
+                            auto filename = m_worker.GetString( frame.file );
+                            auto image = frameData->imageName.Active() ? m_worker.GetString( frameData->imageName ) : nullptr;
+                            cache.emplace_back( FrameCache { symaddr, frame.name, IsFrameExternal( filename, image ) } );
+                        }
+                    }
+                }
+            }
+
+            bool tail = true;
+            for( size_t i=cache.size(); i>0; i-- )
+            {
+                const auto idx = i-1;
+                if( !cache[idx].external )
+                {
+                    tail = false;
+                }
+                else if( !tail )
+                {
+                    cache.erase( cache.begin() + idx );
+                }
+            }
+        }
+
+        auto vec = &data;
+        for( auto& v : cache )
+        {
+            auto it = std::find_if( vec->begin(), vec->end(), [symaddr = v.symaddr]( const auto& v ) { return v.srcloc == symaddr; } );
+            if( it == vec->end() )
+            {
+                vec->emplace_back( FlameGraphItem { (int64_t)v.symaddr, 1, v.name } );
+                vec = &vec->back().children;
+            }
+            else
+            {
+                it->time++;
+                vec = &it->children;
             }
         }
     }
@@ -436,13 +559,13 @@ void View::DrawFlameGraphItem( const FlameGraphItem& item, FlameGraphContext& ct
                     TextDisabledUnformatted( ICON_FA_HAT_WIZARD " kernel" );
                 }
                 ImGui::SameLine();
-                ImGui::PushFont( m_smallFont );
+                ImGui::PushFont( g_fonts.normal, FontSmall );
                 ImGui::AlignTextToFramePadding();
                 ImGui::TextDisabled( "0x%" PRIx64, symAddr );
                 ImGui::PopFont();
                 if( normalized != name && strcmp( normalized, name ) != 0 )
                 {
-                    ImGui::PushFont( m_smallFont );
+                    ImGui::PushFont( g_fonts.normal, FontSmall );
                     TextDisabledUnformatted( name );
                     ImGui::PopFont();
                 }
@@ -639,6 +762,41 @@ void View::DrawFlameGraph()
             assert( !m_flameRunningTime );
         }
     }
+    else
+    {
+        ImGui::SameLine();
+        ImGui::SeparatorEx( ImGuiSeparatorFlags_Vertical );
+        ImGui::SameLine();
+        ImGui::Text( ICON_FA_SHIELD_HALVED "External" );
+        ImGui::SameLine();
+        if( ImGui::Checkbox( "Frames", &m_flameExternal ) ) m_flameGraphInvariant.Reset();
+        ImGui::SameLine();
+        if( m_flameExternal ) ImGui::BeginDisabled();
+        if( ImGui::Checkbox( "Tails", &m_flameExternalTail ) ) m_flameGraphInvariant.Reset();
+        if( m_flameExternal ) ImGui::EndDisabled();
+    }
+
+    ImGui::SameLine();
+    ImGui::SeparatorEx( ImGuiSeparatorFlags_Vertical );
+    ImGui::SameLine();
+
+    if( ImGui::Checkbox( "Limit range", &m_flameRange.active ) )
+    {
+        if( m_flameRange.active && m_flameRange.min == 0 && m_flameRange.max == 0 )
+        {
+            m_flameRange.min = m_vd.zvStart;
+            m_flameRange.max = m_vd.zvEnd;
+        }
+
+        m_flameGraphInvariant.Reset();
+    }
+    if( m_flameRange.active )
+    {
+        ImGui::SameLine();
+        TextColoredUnformatted( 0xFF00FFFF, ICON_FA_TRIANGLE_EXCLAMATION );
+        ImGui::SameLine();
+        ToggleButton( ICON_FA_RULER " Limits", m_showRanges );
+    }
 
     auto& td = m_worker.GetThreadData();
     auto expand = ImGui::TreeNode( ICON_FA_SHUFFLE " Visible threads:" );
@@ -701,8 +859,11 @@ void View::DrawFlameGraph()
     ImGui::PopStyleVar();
 
     if( m_flameMode == 0 && ( m_flameGraphInvariant.count != m_worker.GetZoneCount() || m_flameGraphInvariant.lastTime != m_worker.GetLastTime() ) ||
-        m_flameMode == 1 && ( m_flameGraphInvariant.count != m_worker.GetCallstackSampleCount() ) )
+        m_flameMode == 1 && ( m_flameGraphInvariant.count != m_worker.GetCallstackSampleCount() ) ||
+        m_flameGraphInvariant.range != m_flameRange )
     {
+        m_flameGraphInvariant.range = m_flameRange;
+
         size_t sz = 0;
         for( auto& thread : td ) if( FlameGraphThread( thread->id ) ) sz++;
 
@@ -778,7 +939,7 @@ void View::DrawFlameGraph()
 
     if( m_flameGraphData.empty() )
     {
-        ImGui::PushFont( m_bigFont );
+        ImGui::PushFont( g_fonts.normal, FontBig );
         ImGui::Dummy( ImVec2( 0, ( region.y - ImGui::GetTextLineHeight() * 2 ) * 0.5f ) );
         TextCentered( ICON_FA_CAT );
         TextCentered( "No data available to display" );
