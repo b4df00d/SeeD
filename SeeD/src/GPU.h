@@ -70,6 +70,7 @@ public:
 
     void Create(D3D12_RESOURCE_DESC desc, String name = "Texture");
     void CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, String name = "Texture");
+    void CreateTexture(uint3 resolution, DXGI_FORMAT format, bool mips, String name = "Texture");
     void CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
     void CreateDepthTarget(uint2 resolution, String name = "Texture");
     void CreateBuffer(uint size, uint stride, bool upload = false, String name = "Buffer", D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON);
@@ -856,14 +857,19 @@ void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name)
 // definitions of Resource
 void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, String name)
 {
+    CreateTexture(uint3(resolution.x, resolution.y, 1), format, mips, name);
+}
+
+void Resource::CreateTexture(uint3 resolution, DXGI_FORMAT format, bool mips, String name)
+{ 
     //ZoneScoped;
     D3D12_RESOURCE_DESC resourceDesc = {};
-    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    resourceDesc.Dimension = resolution.z > 1 ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     resourceDesc.Alignment = 0;
     resourceDesc.Width = resolution.x;
     resourceDesc.Height = resolution.y;
-    resourceDesc.DepthOrArraySize = 1;
-    resourceDesc.MipLevels = mips ? 0 : 1;
+    resourceDesc.DepthOrArraySize = resolution.z;
+    resourceDesc.MipLevels = mips ? 10 : 1;
     resourceDesc.Format = format;
     resourceDesc.SampleDesc.Count = 1;
     resourceDesc.SampleDesc.Quality = 0;
@@ -896,10 +902,12 @@ void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, St
         handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
         srv.handle.ptr = static_cast<SIZE_T>(GPU::instance->descriptorHeap.globalDescriptorHeap->GetGPUDescriptorHandleForHeapStart().ptr + INT64(srv.offset) * UINT64(GPU::instance->descriptorHeap.descriptorIncrementSize));
 
+        D3D12_SRV_DIMENSION dim = resourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? D3D12_SRV_DIMENSION_TEXTURE3D : D3D12_SRV_DIMENSION_TEXTURE2D;
+
         D3D12_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
         SRVDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         SRVDesc.Format = desc.Format;
-        SRVDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        SRVDesc.ViewDimension = dim;
         SRVDesc.Texture2D.MipLevels = desc.MipLevels;
         GPU::instance->device->CreateShaderResourceView(GetResource(), &SRVDesc, handle);
     }
@@ -912,8 +920,18 @@ void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, St
 
         D3D12_UNORDERED_ACCESS_VIEW_DESC UAVDesc = {};
         UAVDesc.Format = desc.Format;
-        UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        UAVDesc.Texture2D.MipSlice = 0;
+        if (resourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+        {
+            UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            UAVDesc.Texture2D.MipSlice = 0;
+        }
+        else if (resourceDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+        {
+            UAVDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+            UAVDesc.Texture3D.MipSlice = 0;
+            UAVDesc.Texture3D.FirstWSlice = 0;
+            UAVDesc.Texture3D.WSize = resolution.z;
+        }
         GPU::instance->device->CreateUnorderedAccessView(GetResource(), nullptr, &UAVDesc, handle);
     }
 }
@@ -2348,7 +2366,7 @@ struct MeshStorage
         prebuildDesc.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
         prebuildDesc.NumDescs = 1;
         prebuildDesc.pGeometryDescs = &descriptor;
-        prebuildDesc.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+        prebuildDesc.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
 
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
         GPU::instance->device->GetRaytracingAccelerationStructurePrebuildInfo(&prebuildDesc, &info);

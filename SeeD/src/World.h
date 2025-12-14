@@ -202,10 +202,11 @@ namespace Components
 
     struct Light : ComponentBase<Light>
     {
-        float angle;
-        float range;
-        float4 color;
         uint type;
+        float4 color;
+        float size;
+        float range;
+        float angle;
     };
 
     struct Camera : ComponentBase<Camera>

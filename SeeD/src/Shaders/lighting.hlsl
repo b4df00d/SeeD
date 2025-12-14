@@ -75,7 +75,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
             DrawSphere(center, radius);
         }
     }
-    if(cd.viewDist > 5000)
+    if(cd.viewDist >= 10000.0f)
     {
         lighted[dtid.xy] = float4(Sky(cd.viewDir), 1);
     }

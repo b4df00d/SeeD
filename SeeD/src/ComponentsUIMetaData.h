@@ -73,10 +73,11 @@ knownComponents.push_back(
 knownComponents.push_back(
  	{ "Light", Components::Light::mask, nullptr, 
  		{
-			{ "angle", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, angle) },
-			{ "range", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, range) },
-			{ "color", PropertyTypes::_float4, NULL, 1, offsetof(Components::Light, color) },
 			{ "type", PropertyTypes::_uint, NULL, 1, offsetof(Components::Light, type) },
+			{ "color", PropertyTypes::_float4, NULL, 1, offsetof(Components::Light, color) },
+			{ "size", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, size) },
+			{ "range", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, range) },
+			{ "angle", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, angle) },
 		}
  	}); 
 knownComponents.push_back(

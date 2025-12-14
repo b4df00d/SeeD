@@ -260,6 +260,125 @@ float3 getCosHemisphereSample(in uint randSeed, float3 hitNorm)
     
     return dir;
 }
+// ------------------ DEPTH ----------------------------------
+// convert a point from post-projection space into view space
+float3 ConvertProjToView(float4 p, HLSL::Camera camera)
+{
+    p = mul(p, camera.proj_inv);
+    return (p / p.w).xyz;
+}
+// convert a depth value from post-projection space into view space
+float ConvertProjDepthToView(float z, HLSL::Camera camera)
+{
+    return (1.f / (z * camera.proj_inv._34 + camera.proj_inv._44));
+}
+
+float4 WorldPosFromDepth(float d, float2 uvCoord, HLSL::Camera camera)
+{
+    float2 screenPos = uvCoord * 2.0 - 1.0;
+
+	// Invert Y for DirectX-style coordinates.
+    screenPos.y = -screenPos.y;
+
+	// Unproject the pixel coordinate into a ray.
+    float4 world = mul(float4(screenPos, d, 1), camera.viewProj_inv);
+    world.xyz /= world.w;
+    return world;
+}
+//Returns World Position of a pixel from clipspace depth map
+float4 WorldPosFromDepth(Texture2D<float> depth, float2 uvCoord, float2 resolution, HLSL::Camera camera)
+{
+    float d = depth.SampleLevel(samplerPoint, uvCoord, 0);
+    return WorldPosFromDepth(d, uvCoord, camera);
+}
+
+float4 WorldPosFromDepth(RWTexture2D<float> depth, float2 uvCoord, float2 resolution, HLSL::Camera camera)
+{
+    float d = depth.Load(int2(uvCoord));
+    return WorldPosFromDepth(d, uvCoord, camera);
+}
+
+float linearZ(float z, float n, float f)
+{
+    return (n) / (f + z * (n - f));
+}
+
+float linearZ01(float z, float n, float f)
+{
+    return linearZ(z, n, f) / f;
+}
+
+float absolutZ(float z, float n, float f)
+{
+    return (n / z - f) / (n - f);
+}
+
+// ----------------- FROXEL ---------------------------------------------
+uint ZToFroxel(float linearZ, uint froxelsZSize, float froxelsNear, float farClip)
+{
+    float B = -log2(linearZ);
+    float C = B * ((froxelsZSize - 1) / log2(froxelsNear / farClip)) + froxelsZSize;
+    return uint(max(0.0, C));
+}
+
+float FroxelToZ(float froxelZ, int froxelsZSize, float froxelsNear, float farClip)
+{
+    if (froxelZ < 1) return 0;
+    return exp2((froxelZ - froxelsZSize) * (-log2(froxelsNear / farClip) / (froxelsZSize - 1)));
+}
+
+float3 FroxelToWorld(float3 froxel, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
+{
+    float4 clipPos = float4(froxel / froxelsSize, 1);
+    clipPos.xy = clipPos.xy * 2 - 1;
+    float4 worldPos = mul(clipPos, camera.proj_inv);
+    worldPos = worldPos / worldPos.w;
+    worldPos = mul(worldPos, camera.view);
+
+    float3 viewDir = worldPos.xyz - camera.worldPos.xyz;
+    float viewDist = length(viewDir);
+    viewDir = viewDir / viewDist;
+
+    viewDist = FroxelToZ(froxel.z, froxelsNear, camera.farClip, froxelsSize.z) * camera.farClip;
+
+    worldPos.xyz = camera.worldPos.xyz + viewDir * viewDist;
+
+    return worldPos.xyz;
+}
+
+float3 WorldToFroxel(float3 pixelWorldPos, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
+{
+    float4 uvw = mul(float4(pixelWorldPos, 1), camera.viewProj_inv);
+    uvw = uvw / uvw.w;
+    uvw.xy = uvw.xy * 0.5 + 0.5;
+    float linearDepth = length(pixelWorldPos - camera.worldPos.xyz) / camera.farClip;
+    uvw.z = ZToFroxel(linearDepth, froxelsNear, camera.farClip, froxelsSize.z);
+
+    return uvw.xyz;
+}
+
+float3 WorldTohistoryFroxel(float3 pixelWorldPos, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
+{
+    float4 uvw = mul(float4(pixelWorldPos, 1), camera.previousViewProj_inv);
+    uvw = uvw / uvw.w;
+    uvw.xy = uvw.xy * 0.5 + 0.5;
+    float linearDepth = length(pixelWorldPos - camera.previousWorldPos.xyz) / camera.farClip;
+    uvw.z = ZToFroxel(linearDepth, froxelsNear, camera.farClip, froxelsSize.z);
+
+    return uvw.xyz;
+}
+
+float3 NDCToFroxel(float3 NDC, float3 pixelWorldPos, HLSL::Camera camera, uint2 resolution, float3 froxelsSize, float froxelsNear, float farClip)
+{
+    float3 uvw = NDC;
+    uvw.xy /= resolution;
+    uvw.y = 1 - uvw.y;
+    uvw.xy *= froxelsSize.xy;
+    float linearDepth = length(pixelWorldPos - camera.worldPos.xyz) / camera.farClip;
+    uvw.z = ZToFroxel(linearDepth, froxelsNear, farClip, froxelsSize.z);
+
+    return uvw;
+}
 
 // ----------------- LIGHTING ---------------------------------------------
 float DistanceFromTriangle(in float3 v1, in float3 v2, in float3 v3, in float3 p)
@@ -841,11 +960,12 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     
     cd.pixel = pixel;
     
-    
-    
-    //uint seed = initRand(pixel.xy);
-    //cd.viewDir = normalize(lerp(cd.viewDir, getCosHemisphereSample(seed, cd.viewDir), 0.05));
-    //cd.viewDir = normalize(cd.viewDir);
+    if(previousClipSpace.z >= 1.0f)
+    {
+        const float backgroundDist = 10000.0f;
+        cd.viewDist = backgroundDist;
+        cd.worldPos = cd.camera.worldPos.xyz + cd.viewDir * backgroundDist;
+    }
     
     return cd;
 }
@@ -1347,7 +1467,7 @@ bool MyLogicSaysStopSearchingForSomeReason()
 }
 
 //return color + distance cosine weighted on surface normal
-RESTIRRay DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRay restirRay, uint depth, inout uint seed)
+RESTIRRay DirectLight(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint depth, inout uint seed)
 {
     StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
     uint lightIndex = floor(nextRand(seed) * commonResourcesIndices.lightCount);
@@ -1355,28 +1475,31 @@ RESTIRRay DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRay 
     lightIndex = lightIndex % commonResourcesIndices.lightCount;
     HLSL::Light light = lights[lightIndex];
     
+    float lightDist = 0;
     float3 lightDir = -light.dir.xyz;
     if (light.type == 0) // directional
     {
         light.color.xyz *= 1;
+        lightDist = 10000;
         lightDir = -light.dir.xyz;
         light.pos.xyz = lightDir * 10000.0;
     }
     else if (light.type == 1) // point
     {
         lightDir = light.pos.xyz - restirRay.Origin;
-        float lightDist = length(lightDir);// >= 10 ? 10000 : 1;
+        lightDist = length(lightDir);// >= 10 ? 10000 : 1;
         light.color.xyz /= max(0.000001, pow(lightDist + 1, 2));
         lightDir /= lightDist;
     }
     else if (light.type == 2) // spot
     {
         lightDir = light.pos.xyz - restirRay.Origin;
-        float lightDist = length(lightDir);
+        lightDist = length(lightDir);
         light.color.xyz /= max(0.000001, pow(lightDist + 1, 2));
         light.color.xyz *= saturate(dot(light.dir.xyz, lightDir) * 5.0 - light.angle);
         lightDir /= lightDist;
     }
+    lightDir = lerp(lightDir, getCosHemisphereSample(seed, lightDir), light.size);
     
     restirRay.Direction = lightDir;
     
@@ -1384,7 +1507,7 @@ RESTIRRay DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRay 
     ray.Origin = restirRay.Origin;
     ray.Direction = normalize(restirRay.Direction);
     ray.TMin = 0.005;
-    ray.TMax = 10000;
+    ray.TMax = lightDist;
     
     HLSL::HitInfo newPayload;
     newPayload.color = float3(0.0, 0.0, 0.0);
@@ -1398,7 +1521,7 @@ RESTIRRay DirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRay 
     TraceRayCommon(rtParameters, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, newPayload);
     
     // did we hit something ? by knowing if the hit is before or after the light
-    float visible = newPayload.hitDistance >= (length(light.pos.xyz - ray.Origin) * 0.999f) ? 1 : 0;
+    float visible = newPayload.hitDistance >= lightDist ? 1 : 0;
     float3 color = (light.color.xyz * visible);
     
     restirRay.HitRadiance = color;
@@ -1449,7 +1572,7 @@ float3 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
     
     if (depth < HLSL::maxRTDepth)
     {
-        restirRay = DirectLight(rtParameters, s, restirRay, 1000, seed);
+        restirRay = DirectLight(rtParameters, restirRay, 1000, seed);
     }
     
     #if 0
@@ -1977,122 +2100,5 @@ LightComp GetLightComp(in uint globalLightIndex, float3 normal, float3 position,
         l.color *= 1 / (l.dist * l.dist + 0.01);
     }
     return l;
-}
-*/
-// ------------------ DEPTH ----------------------------------
-/*
-// convert a point from post-projection space into view space
-float3 ConvertProjToView(float4 p)
-{
-    p = mul(p, camera.ipMat);
-    return (p / p.w).xyz;
-}
-// convert a depth value from post-projection space into view space
-float ConvertProjDepthToView(float z)
-{
-    return (1.f / (z * camera.ipMat._34 + camera.ipMat._44));
-}
-
-float4 WorldPosFromDepth(float d, float2 uvCoord)
-{
-    float2 screenPos = uvCoord * 2.0 - 1.0;
-
-	// Invert Y for DirectX-style coordinates.
-    screenPos.y = -screenPos.y;
-
-	// Unproject the pixel coordinate into a ray.
-    float4 world = mul(float4(screenPos, d, 1), camera.ipvMat);
-    world.xyz /= world.w;
-    return world;
-}
-//Returns World Position of a pixel from clipspace depth map
-float4 WorldPosFromDepth(Texture2D<float> depth, float2 uvCoord, float2 resolution)
-{
-    float d = depth.SampleLevel(pointSampler, uvCoord, 0);
-    return WorldPosFromDepth(d, uvCoord);
-}
-
-float4 WorldPosFromDepth(RWTexture2D<float> depth, float2 uvCoord)
-{
-    float d = depth.Load(int2(uvCoord));
-    return WorldPosFromDepth(d, uvCoord);
-}
-
-float linearZ(float z, float n, float f)
-{
-    return (n) / (f + z * (n - f));
-}
-
-float linearZ01(float z, float n, float f)
-{
-    return linearZ(z, n, f) / f;
-}
-
-float absolutZ(float z, float n, float f)
-{
-    return (n / z - f) / (n - f);
-}
-*/
-
-// ----------------- FROXEL ---------------------------------------------
-/*
-uint ZToFroxel(float linearZ)
-{
-    float A = linearZ; // 1/(camera.camClipsExt.x* nonLinearZ + camera.camClipsExt.y); // this is to linearize the z but it is already fed
-    float B = -log2(A);
-    float C = B * camera.camClipsExt.z + camera.camClipsExt.w;
-    return uint(max(0.0, C));
-	//return uint(max(0.0, log2(1/(camera.camClipsExt.x * linearZ + camera.camClipsExt.y)) * camera.camClipsExt.z + camera.camClipsExt.w));
-}
-
-float FroxelToZ(float froxelZ, float specialNear, float far, int count)
-{
-    if (froxelZ < 1)
-        return 0;
-    return exp2((froxelZ - count) * (-log2(specialNear / far) / (count - 1)));
-}
-
-float3 FroxelToWorld(float3 froxel)
-{
-    float4 clipPos = float4(froxel / float3(ATMO_VOLUME_SIZE_X, ATMO_VOLUME_SIZE_Y, ATMO_VOLUME_SIZE_Z), 1);
-    clipPos.xy = clipPos.xy * 2 - 1;
-    float4 worldPos = mul(clipPos, camera.ipMat);
-    worldPos = worldPos / worldPos.w;
-    worldPos = mul(worldPos, camera.vMat);
-
-    float3 viewDir = worldPos.xyz - camera.camWorldPos.xyz;
-    float viewDist = length(viewDir);
-    viewDir = viewDir / viewDist;
-
-    viewDist = FroxelToZ(froxel.z, ATMO_VOLUME_SPECIAL_NEAR, camera.camClips.y, ATMO_VOLUME_SIZE_Z) * camera.camClips.y;
-
-    worldPos.xyz = camera.camWorldPos.xyz + viewDir * viewDist;
-
-    return worldPos.xyz;
-}
-
-float3 WorldToFroxel(float3 pixelWorldPos)
-{
-    float4 uvw = mul(float4(pixelWorldPos, 1), camera.ivpMat);
-    uvw = uvw / uvw.w;
-    uvw.xy = uvw.xy * 0.5 + 0.5;
-    //uvw.y = 1 - uvw.y;
-    //uvw.xy *= float2(ATMO_VOLUME_SIZE_X, ATMO_VOLUME_SIZE_Y);
-    float linearDepth = length(pixelWorldPos - camera.camWorldPos.xyz) / camera.camClips.y;
-    uvw.z = ZToFroxel(linearDepth);
-
-    return uvw.xyz;
-}
-
-float3 NDCToFroxel(float3 NDC, float3 pixelWorldPos)
-{
-    float3 uvw = NDC;
-    uvw.xy /= globals.screenResolution.xy;
-    uvw.y = 1 - uvw.y;
-    uvw.xy *= float2(ATMO_VOLUME_SIZE_X, ATMO_VOLUME_SIZE_Y);
-    float linearDepth = length(pixelWorldPos - camera.camWorldPos.xyz) / camera.camClips.y;
-    uvw.z = ZToFroxel(linearDepth);
-
-    return uvw;
 }
 */

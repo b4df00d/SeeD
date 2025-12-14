@@ -223,6 +223,13 @@ public:
         {
             if (ImGui::BeginMenuBar())
             {
+                ImGuiStyle& style = ImGui::GetStyle();
+                float width = 0.0f;
+                width += ImGui::CalcTextSize("Stop").x;
+                width += style.ItemSpacing.x;
+                width += ImGui::CalcTextSize("average %.3f ms/frame (%.1f FPS)").x;
+                AlignForWidth(width);
+
                 if (ImGui::MenuItem(World::instance->playing ? "Stop" : "Play") || IOs::instance->keys.pressed[VK_F2])
                 {
                     World::instance->playing = !World::instance->playing;
@@ -231,6 +238,7 @@ public:
 
                 //duplicate of profiler framerate info
                 ImGui::Text("average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+
                 ImGui::Separator();
 
                 ImGui::EndMainMenuBar();
@@ -301,6 +309,35 @@ public:
         ImGui::Text("average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
 
         ImGui::Text("instances %u | meshlets %u", Profiler::instance->frameData.instancesCount, Profiler::instance->frameData.meshletsCount);
+
+        if (ImGui::Button("Open Tracy"))
+        {
+            // additional information
+            STARTUPINFO si;
+            PROCESS_INFORMATION pi;
+
+            // set the size of the structures
+            ZeroMemory(&si, sizeof(si));
+            si.cb = sizeof(si);
+            ZeroMemory(&pi, sizeof(pi));
+
+            CreateProcess(L"..\\Third\\tracy-master\\profiler\\build\\Release\\tracy-profiler.exe",   // the path
+                nullptr,        // Command line
+                nullptr,           // Process handle not inheritable
+                nullptr,           // Thread handle not inheritable
+                false,          // Set handle inheritance to FALSE
+                0,              // No creation flags
+                nullptr,           // Use parent's environment block
+                nullptr,           // Use parent's starting directory 
+                &si,            // Pointer to STARTUPINFO structure
+                &pi             // Pointer to PROCESS_INFORMATION structure (removed extra parentheses)
+            );
+            /*
+            // Close process and thread handles. 
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            */
+        }
 
         ImGui::Separator();
 
@@ -663,11 +700,137 @@ class GPUResourcesWindow : public EditorWindow
     //bool openDemo;
 public:
     GPUResourcesWindow() : EditorWindow("GPUResources") {}
+private:
+    // Preview resource used to hold a single Z slice of a 3D texture for ImGui display
+    Resource slicePreviewResource;
+    uint slicePreviewWidth = 0;
+    uint slicePreviewHeight = 0;
+    DXGI_FORMAT slicePreviewFormat = DXGI_FORMAT_UNKNOWN;
+
+    // Ensure preview texture exists and matches dimensions/format
+    void EnsureSlicePreview(uint width, uint height, DXGI_FORMAT format)
+    {
+        if (slicePreviewResource.GetResource() == nullptr ||
+            slicePreviewWidth != width ||
+            slicePreviewHeight != height ||
+            slicePreviewFormat != format)
+        {
+            slicePreviewResource.Release(false);
+            slicePreviewWidth = width;
+            slicePreviewHeight = height;
+            slicePreviewFormat = format;
+            // create single-mip 2D texture sized to target mip level
+            slicePreviewResource.CreateTexture(uint3(width, height, 1), format, false, "SlicePreview");
+        }
+    }
+
+    // Copy a single Z slice (at given mip) from a 3D texture into the slicePreviewResource (which is a 2D texture).
+    // Synchronous helper using the copy queue; waits for completion before returning.
+    void Copy3DSliceToPreview(ID3D12Resource* srcResource, const D3D12_RESOURCE_DESC& srcDesc, int mip, int slice)
+    {
+        if (srcResource == nullptr)
+            return;
+
+        // compute mip dimensions
+        uint mipW = max(1u, (uint)(srcDesc.Width >> mip));
+        uint mipH = max(1u, srcDesc.Height >> mip);
+
+        // ensure preview resource matches
+        EnsureSlicePreview(mipW, mipH, srcDesc.Format);
+        ID3D12Resource* dstResource = slicePreviewResource.GetResource();
+        if (dstResource == nullptr)
+            return;
+
+        HRESULT hr = S_OK;
+
+        // Create temporary command allocator + list on COPY queue
+        ID3D12CommandAllocator* alloc = nullptr;
+        ID3D12GraphicsCommandList* cmd = nullptr;
+        hr = GPU::instance->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&alloc));
+        if (FAILED(hr)) { GPU::PrintDeviceRemovedReason(hr); return; }
+        hr = GPU::instance->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, alloc, nullptr, IID_PPV_ARGS(&cmd));
+        if (FAILED(hr)) { GPU::PrintDeviceRemovedReason(hr); alloc->Release(); return; }
+
+        // Transition src -> COPY_SOURCE and dst -> COPY_DEST
+        {
+            D3D12_RESOURCE_BARRIER barriers[2] = {};
+            barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barriers[0].Transition.pResource = srcResource;
+            barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+            barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+
+            barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barriers[1].Transition.pResource = dstResource;
+            barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+            barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+
+            //cmd->ResourceBarrier(2, barriers);
+        }
+
+        // Setup copy locations
+        D3D12_TEXTURE_COPY_LOCATION srcLoc = {};
+        srcLoc.pResource = srcResource;
+        // For 3D textures the subresource index for a given mip is just the mip index
+        srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        srcLoc.SubresourceIndex = mip; // arraySlice = 0, planeSlice = 0
+
+        D3D12_TEXTURE_COPY_LOCATION dstLoc = {};
+        dstLoc.pResource = dstResource;
+        dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dstLoc.SubresourceIndex = 0; // first (and only) subresource in preview texture
+
+        // Define source box to select single Z slice: front = slice, back = slice+1
+        D3D12_BOX srcBox = {};
+        srcBox.left = 0;
+        srcBox.top = 0;
+        srcBox.right = mipW;
+        srcBox.bottom = mipH;
+        srcBox.front = slice;
+        srcBox.back = slice + 1;
+
+        // Perform copy
+        cmd->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
+
+        // Transition resources back to COMMON
+        {
+            D3D12_RESOURCE_BARRIER barriers[2] = {};
+            barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barriers[0].Transition.pResource = srcResource;
+            barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+
+            barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barriers[1].Transition.pResource = dstResource;
+            barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+
+            cmd->ResourceBarrier(2, barriers);
+        }
+
+        hr = cmd->Close();
+        if (FAILED(hr))
+        {
+            GPU::PrintDeviceRemovedReason(hr);
+            cmd->Release();
+            alloc->Release();
+            return;
+        }
+
+        Renderer::instance->ExecuteImmediate(cmd, GPU::instance->copyQueue);
+
+        // cleanup
+        cmd->Release();
+        alloc->Release();
+    }
+
+public:
     void Update() override final
     {
         ZoneScoped;
-
-        //ImGui::ShowDemoWindow(&openDemo);
 
         if (!ImGui::Begin("GPUResources", &isOpen, ImGuiWindowFlags_None))
         {
@@ -675,11 +838,11 @@ public:
             return;
         }
 
-        const std::lock_guard<std::mutex> lock(Resource::lock);
 
         const char* names[] = { "Resources", "Content" };
         static Resource selectedResource = {};
         static int mip = 0;
+        static int slice = 0;
         bool selected;
 
         ImGuiStyle& style = ImGui::GetStyle();
@@ -687,25 +850,28 @@ public:
         const ImGuiWindowFlags child_flags = ImGuiWindowFlags_MenuBar;
         ImGuiID child_id = ImGui::GetID((void*)(intptr_t)0);
         const bool child_is_visible = ImGui::BeginChild(child_id, ImVec2(200, ImGui::GetContentRegionAvail().y), ImGuiChildFlags_Borders, child_flags);
-        for (int i = 0; i < Resource::allResources.size(); i++)
         {
+            const std::lock_guard<std::mutex> lock(Resource::lock);
+            for (int i = 0; i < Resource::allResources.size(); i++)
+            {
 
-            ImGui::PushID(i);
-            selected = selectedResource.allocation != nullptr && selectedResource.allocation == Resource::allResources[i].allocation;
-            if (selected)
-            {
-                ImGui::TextColored(ImVec4(1, 1, 0, 1), Resource::allResourcesNames[i].c_str());
-            }
-            else
-            {
-                ImGui::Selectable(Resource::allResourcesNames[i].c_str(), &selected);
+                ImGui::PushID(i);
+                selected = selectedResource.allocation != nullptr && selectedResource.allocation == Resource::allResources[i].allocation;
                 if (selected)
-                    selectedResource = Resource::allResources[i];
+                {
+                    ImGui::TextColored(ImVec4(1, 1, 0, 1), Resource::allResourcesNames[i].c_str());
+                }
+                else
+                {
+                    ImGui::Selectable(Resource::allResourcesNames[i].c_str(), &selected);
+                    if (selected)
+                        selectedResource = Resource::allResources[i];
+                }
+                ImGui::SameLine();
+                if (Resource::allResources[i].GetResource())
+                    ImGui::Text("%u", Resource::allResources[i].GetResource()->GetDesc().Width);
+                ImGui::PopID();
             }
-            ImGui::SameLine();
-            if(Resource::allResources[i].GetResource())
-                ImGui::Text("%u", Resource::allResources[i].GetResource()->GetDesc().Width);
-            ImGui::PopID();
         }
         ImGui::EndChild();
         ImGui::EndGroup();
@@ -726,50 +892,101 @@ public:
             img_sz.y = img_sz.x / ratio;
             {
                 ImGui::Text("%.0fx%.0f", textureW, textureH);
-                ImGui::SameLine();
-                ImGui::SliderInt("mip", &mip, 0, desc.MipLevels-1);
+                if (desc.MipLevels > 1)
+                {
+                    ImGui::SameLine();
+                    ImGui::SliderInt("mip", &mip, 0, desc.MipLevels - 1);
+                }
+                if (desc.DepthOrArraySize > 1)
+                {
+                    ImGui::SameLine();
+                    ImGui::SliderInt("slice", &slice, 0, desc.DepthOrArraySize - 1);
+                }
 
                 seedAssert(mip < desc.MipLevels);
+
+                bool isBuffer = false;
 
                 // Create texture view
                 D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc;
                 ZeroMemory(&srvDesc, sizeof(srvDesc));
-                srvDesc.Format = desc.Format;
-                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-                srvDesc.Texture2D.MipLevels = -1;// desc.MipLevels;
-                srvDesc.Texture2D.MostDetailedMip = mip;
-                srvDesc.Texture2D.PlaneSlice = 0;
-                srvDesc.Texture2D.ResourceMinLODClamp = 0;
+
                 srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                if (srvDesc.Format == DXGI_FORMAT_D32_FLOAT) srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
-                GPU::instance->device->CreateShaderResourceView(selectedResource.GetResource(), &srvDesc, UI::instance->imgCPUHandle);
+                srvDesc.Format = desc.Format;
+
+                if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
+                {
+                    // Copy requested slice into a 2D preview texture and create a 2D SRV from it for ImGui
+                    // compute mip dims
+                    uint mipW = max(1u, (uint)(desc.Width >> mip));
+                    uint mipH = max(1u, (uint)(desc.Height >> mip));
+
+                    // perform copy (synchronous)
+                    Copy3DSliceToPreview(selectedResource.GetResource(), desc, mip, slice);
+
+                    // Create SRV for preview 2D resource
+                    ID3D12Resource* viewRes = slicePreviewResource.GetResource();
+                    if (viewRes)
+                    {
+                        D3D12_RESOURCE_DESC vdesc = viewRes->GetDesc();
+                        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                        srvDesc.Texture2D.MostDetailedMip = 0;
+                        srvDesc.Texture2D.MipLevels = 1;
+                        srvDesc.Texture2D.PlaneSlice = 0;
+                        srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+
+                        GPU::instance->device->CreateShaderResourceView(viewRes, &srvDesc, UI::instance->imgCPUHandle);
+                    }
+                }
+                else if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+                {
+                    if (srvDesc.Format == DXGI_FORMAT_D32_FLOAT) srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    srvDesc.Texture2D.MostDetailedMip = mip;
+                    //srvDesc.Texture2D.MipLevels = desc.MipLevels - mip;
+                    srvDesc.Texture2D.MipLevels = -1;// desc.MipLevels;
+                    srvDesc.Texture2D.PlaneSlice = 0;
+                    srvDesc.Texture2D.ResourceMinLODClamp = 0;
+                    GPU::instance->device->CreateShaderResourceView(selectedResource.GetResource(), &srvDesc, UI::instance->imgCPUHandle);
+                }
+                else if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
+                {
+                    isBuffer = true;
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+                    GPU::instance->device->CreateShaderResourceView(selectedResource.GetResource(), &srvDesc, UI::instance->imgCPUHandle);
+                }
+
                 ImTextureID my_tex_id = UI::instance->imgGPUHandle.ptr;
 
-                ImVec2 pos = ImGui::GetCursorScreenPos();
-                ImVec2 uv_min = ImVec2(0.0f, 0.0f);                 // Top-left
-                ImVec2 uv_max = ImVec2(1.0f, 1.0f);                 // Lower-right
-                ImVec4 tint_col = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);   // No tint
-                ImVec4 border_col = ImGui::GetStyleColorVec4(ImGuiCol_Border);
-                child_id = ImGui::GetID((void*)(intptr_t)2);
-                ImGui::Image(my_tex_id, img_sz, uv_min, uv_max, tint_col, border_col);
-                if (ImGui::BeginItemTooltip())
+                if (!isBuffer)
                 {
-                    ImVec2 imgPos = ImVec2(pos.x, pos.y);
+                    ImVec2 pos = ImGui::GetCursorScreenPos();
+                    ImVec2 uv_min = ImVec2(0.0f, 0.0f);                 // Top-left
+                    ImVec2 uv_max = ImVec2(1.0f, 1.0f);                 // Lower-right
+                    ImVec4 tint_col = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);   // No tint
+                    ImVec4 border_col = ImGui::GetStyleColorVec4(ImGuiCol_Border);
+                    child_id = ImGui::GetID((void*)(intptr_t)2);
+                    ImGui::Image(my_tex_id, img_sz, uv_min, uv_max, tint_col, border_col);
+                    if (ImGui::BeginItemTooltip())
+                    {
+                        ImVec2 imgPos = ImVec2(pos.x, pos.y);
 
-                    float region_sz = 16.0f;
-                    float region_x = io.MousePos.x - pos.x - region_sz * 0.5f;
-                    float region_y = io.MousePos.y - pos.y - region_sz * 0.5f;
-                    float zoom = 16.0f;
-                    if (region_x < 0.0f) { region_x = 0.0f; }
-                    else if (region_x > img_sz.x - region_sz) { region_x = img_sz.x - region_sz; }
-                    if (region_y < 0.0f) { region_y = 0.0f; }
-                    else if (region_y > img_sz.y - region_sz) { region_y = img_sz.y - region_sz; }
-                    ImGui::Text("Min: (%.2f, %.2f)", region_x, region_y);
-                    ImGui::Text("Max: (%.2f, %.2f)", region_x + region_sz, region_y + region_sz);
-                    ImVec2 uv0 = ImVec2((region_x) / img_sz.x, (region_y) / img_sz.y);
-                    ImVec2 uv1 = ImVec2((region_x + region_sz) / img_sz.x, (region_y + region_sz) / img_sz.y);
-                    ImGui::Image(my_tex_id, ImVec2(region_sz * zoom, region_sz * zoom), uv0, uv1, tint_col, border_col);
-                    ImGui::EndTooltip();
+                        float region_sz = 16.0f;
+                        float region_x = io.MousePos.x - pos.x - region_sz * 0.5f;
+                        float region_y = io.MousePos.y - pos.y - region_sz * 0.5f;
+                        float zoom = 16.0f;
+                        if (region_x < 0.0f) { region_x = 0.0f; }
+                        else if (region_x > img_sz.x - region_sz) { region_x = img_sz.x - region_sz; }
+                        if (region_y < 0.0f) { region_y = 0.0f; }
+                        else if (region_y > img_sz.y - region_sz) { region_y = img_sz.y - region_sz; }
+                        ImGui::Text("Min: (%.2f, %.2f)", region_x, region_y);
+                        ImGui::Text("Max: (%.2f, %.2f)", region_x + region_sz, region_y + region_sz);
+                        ImVec2 uv0 = ImVec2((region_x) / img_sz.x, (region_y) / img_sz.y);
+                        ImVec2 uv1 = ImVec2((region_x + region_sz) / img_sz.x, (region_y + region_sz) / img_sz.y);
+                        ImGui::Image(my_tex_id, ImVec2(region_sz * zoom, region_sz * zoom), uv0, uv1, tint_col, border_col);
+                        ImGui::EndTooltip();
+                    }
                 }
             }
         }
@@ -827,6 +1044,9 @@ public:
             ImGui::End();
             return;
         }
+        ImGui::Text("ATMO");
+        ImGui::SliderFloat("density", &Renderer::instance->mainView.atmospehricScattering.asparams.density, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("luminosity", &Renderer::instance->mainView.atmospehricScattering.asparams.luminosity, 0, 1, "%.6f");
 
         ImGui::Text("EXPO");
         ImGui::SliderFloat("expoMul", &Renderer::instance->mainView.postProcess.ppparams.expoMul, 0, 8);
@@ -1636,11 +1856,6 @@ public:
 
         if (ImGui::BeginMenuBar())
         {
-            if (ImGui::MenuItem(World::instance->playing ? "Stop" : "Play") || IOs::instance->keys.pressed[VK_F2])
-            {
-                World::instance->playing = !World::instance->playing;
-            }
-            ImGui::Separator();
 
             if (ImGui::BeginMenu("File"))
             {
@@ -1666,9 +1881,9 @@ public:
                 {
                     if (ImGui::MenuItem("Empty"))
                     {
-                        // TODO !
                         World::Entity ent;
-                        //editorState.selectedObject = ent.Make(0);
+                        editorState.selectedObject = ent.Make(Components::Entity::mask, "empty");
+                        editorState.dirtyHierarchy = true;
                     }
                     if (ImGui::MenuItem("Light Directional"))
                     {
@@ -1681,6 +1896,8 @@ public:
                         auto& light = ent.Get<Components::Light>();
                         light.color = float4(2, 1.75, 1.5, 1);
                         light.type = 0;
+                        light.size = 0.025f;
+                        editorState.dirtyHierarchy = true;
                     }
                     ImGui::EndMenu();
                 }
@@ -1707,9 +1924,24 @@ public:
                 ImGui::EndMenu();
             }
 
+            ImGuiStyle& style = ImGui::GetStyle();
+            float width = 0.0f;
+            width += ImGui::CalcTextSize("Stop").x;
+            width += style.ItemSpacing.x;
+            width += ImGui::CalcTextSize("average %.3f ms/frame (%.1f FPS)").x;
+            AlignForWidth(width);
+
+            if (ImGui::MenuItem(World::instance->playing ? "Stop" : "Play") || IOs::instance->keys.pressed[VK_F2])
+            {
+                World::instance->playing = !World::instance->playing;
+            }
+            ImGui::Separator();
+
             //duplicate of profiler framerate info
             ImGui::Text("average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+
             ImGui::Separator();
+
 
             ImGui::EndMainMenuBar();
         }
@@ -1746,6 +1978,7 @@ void UIHelpers::DrawHandle(EntityBase& target, Components::Mask dataTemplateType
 }
 
 /*
+ImGui::ShowDemoWindow(&openDemo);
 class AboutWindow : public EditorWindow
 {
 public:

@@ -25,7 +25,6 @@ namespace HLSL
     #define Custom2Register 4
     #define InstanceIndexIndirectRegister 5
     #define meshletIndexIndirectRegister 6
-    /*
 #else
     #define CommonResourcesIndicesRegister b0
     #define ViewContextRegister b1
@@ -34,7 +33,6 @@ namespace HLSL
     #define Custom2Register b4
     #define InstanceIndexIndirectRegister b5
     #define meshletIndexIndirectRegister b6
-    */
 #endif
     
     
@@ -266,7 +264,9 @@ namespace HLSL
     {
         // current
         float4x4 view;
+        float4x4 view_inv;
         float4x4 proj;
+        float4x4 proj_inv;
         float4x4 viewProj;
         float4x4 viewProj_inv;
         float4 planes[6];
@@ -276,7 +276,12 @@ namespace HLSL
         float4x4 previousViewProj;
         float4x4 previousViewProj_inv;
         float4 previousWorldPos;
-    };
+        
+        float sizeCulling;
+        float fovY;
+        float nearClip;
+        float farClip;
+};
 
     struct Light
     {
@@ -285,8 +290,35 @@ namespace HLSL
         float4 color;
         float range;
         float angle;
+        float size;
         uint type;
-        uint pad2;
+    };
+    
+    struct Froxels
+    {
+#ifdef __cplusplus
+        uint resolution[3];
+        uint index;
+#else
+        uint3 resolution;
+        uint index;
+#endif
+    };
+    
+    struct AtmosphericScatteringParameters
+    {
+        uint froxelsIndex;
+        uint currentFroxelIndex;
+        uint historyFroxelIndex;
+        float density;
+        float luminosity;
+    };
+    
+    struct PostProcessHalfResParameters
+    {
+        uint froxelsIndex;
+        uint atmosphericScatteringIndex;
+        uint lightedIndex;
     };
     
     struct TAAParameters

@@ -50,7 +50,7 @@ void RayGen()
     RESTIRRay directRay;
     directRay.Origin = cd.offsetedWorldPos;
     directRay.proba = 1;
-    directRay = DirectLight(rtParameters, s, directRay, 0, seed);
+    directRay = DirectLight(rtParameters, directRay, 0, seed);
     RESTIR(directRay, rtParameters.previousDirectReservoirIndex, rtParameters.directReservoirIndex, cd, seed);
     
     if (editorContext.rays) // daw ray

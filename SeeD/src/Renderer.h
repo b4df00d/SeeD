@@ -406,8 +406,7 @@ struct RayTracingContext
     HLSL::RTParameters rtParameters;
     PerFrame<StructuredUploadBuffer<D3D12_RAYTRACING_INSTANCE_DESC>> instancesRayTracing;
     Resource TLAS;
-    Resource GI;
-    //Resource shadows;
+    //Resource GI;
     PerFrame<Resource> directReservoir;
     PerFrame<Resource> giReservoir;
     PerFrame<Resource> giReservoirSpatial;
@@ -416,9 +415,7 @@ struct RayTracingContext
     void On(uint2 resolution)
     {
         TLAS.CreateAccelerationStructure(1000000, "TLAS");
-        //scratchBuffer.CreateBuffer(1000000, 1, false, "scratchBuffer");
-        GI.CreateTexture(resolution, DXGI_FORMAT_R11G11B10_FLOAT, false, "GI");
-        //shadows.CreateTexture(resolution, DXGI_FORMAT_R8_UNORM, false, "shadows");
+        //GI.CreateTexture(resolution, DXGI_FORMAT_R11G11B10_FLOAT, false, "GI");
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -441,9 +438,7 @@ struct RayTracingContext
             instancesRayTracing.Get(i).Release();
         }
         TLAS.Release();
-        //scratchBuffer.Release();
-        GI.Release();
-        //shadows.Release();
+        //GI.Release();
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -590,8 +585,7 @@ public:
         HLSL::RTParameters rayTracingContextParams;
 
         rayTracingContextParams.BVH = raytracingContext.TLAS.srv.offset;
-        rayTracingContextParams.giIndex = raytracingContext.GI.uav.offset;
-        //rayTracingContextParams.shadowsIndex = raytracingContext.shadows.uav.offset;
+        //rayTracingContextParams.giIndex = raytracingContext.GI.uav.offset;
         rayTracingContextParams.directReservoirIndex = raytracingContext.directReservoir.Get().uav.offset;
         rayTracingContextParams.previousDirectReservoirIndex = raytracingContext.directReservoir.GetPrevious().uav.offset;
         rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get().uav.offset;
@@ -1238,7 +1232,7 @@ public:
             commandBuffer->cmd->DispatchRays(&drd);
         }
 
-        view->raytracingContext.GI.Barrier(commandBuffer.Get());
+        //view->raytracingContext.GI.Barrier(commandBuffer.Get());
 
         Close();
     }
@@ -1334,7 +1328,7 @@ public:
 
 
         // Lighting
-        view->raytracingContext.GI.Barrier(commandBuffer.Get());
+        //view->raytracingContext.GI.Barrier(commandBuffer.Get());
         view->raytracingContext.giReservoirSpatial.Get().Barrier(commandBuffer.Get());
 
         Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
@@ -1470,14 +1464,17 @@ public:
 
 class Forward : public Pass
 {
+    ViewResource lighted;
     ViewResource depth;
     Components::Handle<Components::Shader> meshShader;
+
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         depth.Register("depth", view);
+        lighted.Register("lighted", view);
         meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl");
     }
     void Setup(View* view) override
@@ -1488,6 +1485,180 @@ public:
     {
         ZoneScoped;
         Open();
+
+        Close();
+    }
+};
+
+class AtmosphericScattering : public Pass
+{
+    ViewResource froxelsBuffer;
+    ViewResource atmosphericScatteringFroxels;
+    ViewResource atmosphericScatteringHistoryFroxels;
+    ViewResource depth;
+    Components::Handle<Components::Shader> atmosphericScatteringShader;
+    Components::Handle<Components::Shader> atmosphericScatteringReprojectionShader;
+    Components::Handle<Components::Shader> atmosphericScatteringAccumulationShader;
+
+public:
+    HLSL::AtmosphericScatteringParameters asparams;
+
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        froxelsBuffer.Register("froxelsBuffer", view);
+        froxelsBuffer.Get().CreateBuffer<HLSL::Froxels>(2, "froxelsBuffer");
+        atmosphericScatteringFroxels.Register("atmosphericScatteringFroxels", view);
+        atmosphericScatteringFroxels.Get().CreateTexture(uint3(160, 90, 128), DXGI_FORMAT_R16G16B16A16_FLOAT, false, "atmosphericScatteringFroxels");
+        atmosphericScatteringHistoryFroxels.Register("atmosphericScatteringHistoryFroxels", view);
+        atmosphericScatteringHistoryFroxels.Get().CreateTexture(uint3(160, 90, 128), DXGI_FORMAT_R16G16B16A16_FLOAT, false, "atmosphericScatteringHistoryFroxels");
+        depth.Register("depth", view);
+        atmosphericScatteringShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl");
+        atmosphericScatteringReprojectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScatteringReprojection.hlsl");
+        atmosphericScatteringAccumulationShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScatteringAccumulation.hlsl");
+
+        asparams.density = 1;
+        asparams.luminosity = 1;
+    }
+    virtual void Off() override
+    {
+        Pass::Off();
+        ZoneScoped;
+    }
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        HLSL::Froxels froxelsData[2];
+        froxelsData[0].resolution[0] = 160;
+        froxelsData[0].resolution[1] = 90;
+        froxelsData[0].resolution[2] = 128;
+        froxelsData[0].index = atmosphericScatteringFroxels.Get().uav.offset;
+        froxelsData[1].resolution[0] = 160;
+        froxelsData[1].resolution[1] = 90;
+        froxelsData[1].resolution[2] = 128;
+        froxelsData[1].index = atmosphericScatteringHistoryFroxels.Get().uav.offset;
+        froxelsBuffer.Get().UploadElements(froxelsData, ARRAYSIZE(froxelsData), 0, commandBuffer.Get());
+        froxelsBuffer.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+
+        // Trace atmospheric scattering froxels
+        Shader& atmosphericScattering = *AssetLibrary::instance->Get<Shader>(atmosphericScatteringShader.Get().id, true);
+        commandBuffer->SetRaytracing(atmosphericScattering);
+
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+
+        auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
+
+        uint inputIndex = (GPU::instance->frameIndex + 0) % 2;
+        uint outputIndex = (GPU::instance->frameIndex + 1) % 2;
+        asparams.froxelsIndex = froxelsBuffer.Get().uav.offset;
+        asparams.currentFroxelIndex = 0;
+        asparams.historyFroxelIndex = 1;
+
+        auto atmosphericScatteringAddress = ConstantBuffer::instance->PushConstantBuffer(&asparams);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom2Register, atmosphericScatteringAddress);
+
+        D3D12_DISPATCH_RAYS_DESC drd = atmosphericScattering.GetRTDesc();
+        drd.Width = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width;
+        drd.Height = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height;
+        drd.Depth = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
+
+        commandBuffer->cmd->DispatchRays(&drd);
+
+        atmosphericScatteringFroxels.Get().Barrier(commandBuffer.Get());
+
+
+        // Reproject atmospheric scattering froxels
+        Shader& atmosphericScatteringReprojection = *AssetLibrary::instance->Get<Shader>(atmosphericScatteringReprojectionShader.Get().id, true);
+        commandBuffer->SetCompute(atmosphericScatteringReprojection);
+        commandBuffer->cmd->Dispatch(
+            atmosphericScatteringReprojection.DispatchX(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width),
+            atmosphericScatteringReprojection.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height),
+            atmosphericScatteringReprojection.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize));
+
+        atmosphericScatteringFroxels.Get().Barrier(commandBuffer.Get());
+
+
+        // Accumulate atmospheric scattering froxels
+        Shader& atmosphericScatteringAccumulation = *AssetLibrary::instance->Get<Shader>(atmosphericScatteringAccumulationShader.Get().id, true);
+        commandBuffer->SetCompute(atmosphericScatteringAccumulation);
+        commandBuffer->cmd->Dispatch(
+            atmosphericScatteringAccumulation.DispatchX(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width),
+            atmosphericScatteringAccumulation.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height),
+            1);
+
+        Close();
+    }
+};
+
+class PostProcessHalfRes : public Pass
+{
+    ViewResource lighted;
+    ViewResource albedo;
+    ViewResource normal;
+    ViewResource motion;
+    ViewResource depth;
+    ViewResource history;
+    ViewResource atmosphericScatteringFroxelsBuffer;
+    ViewResource atmosphericScatteringFroxels;
+    Components::Handle<Components::Shader> postProcessHalfResShader;
+
+public:
+    HLSL::PostProcessHalfResParameters pphrparams;
+
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        history.Register("history", view);
+        history.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "history"); // must be the same as Lighted input
+        lighted.Register("lighted", view);
+        albedo.Register("albedo", view);
+        normal.Register("normal", view);
+        motion.Register("motion", view);
+        depth.Register("depth", view);
+        atmosphericScatteringFroxelsBuffer.Register("froxelsBuffer", view);
+        atmosphericScatteringFroxels.Register("atmosphericScatteringFroxels", view);
+        postProcessHalfResShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\PostProcessHalfRes.hlsl");
+    }
+    virtual void Off() override
+    {
+        Pass::Off();
+        ZoneScoped;
+    }
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+
+        pphrparams.froxelsIndex = atmosphericScatteringFroxelsBuffer.Get().uav.offset;
+        pphrparams.atmosphericScatteringIndex = 0;
+        pphrparams.lightedIndex = lighted.Get().uav.offset;
+
+        Shader& postProcessHalfRes = *AssetLibrary::instance->Get<Shader>(postProcessHalfResShader.Get().id, true);
+        commandBuffer->SetCompute(postProcessHalfRes);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&pphrparams));
+        commandBuffer->cmd->Dispatch(postProcessHalfRes.DispatchX(view->renderResolution.x), postProcessHalfRes.DispatchY(view->renderResolution.y), 1);
 
         Close();
     }
@@ -1668,7 +1839,7 @@ public:
             IOs::Log("{}", msg);
             };
 #ifdef _DEBUG
-        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;// NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
 #else
         feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
 #endif
@@ -1918,8 +2089,10 @@ public:
     LightingProbes lightingProbes;
     Lighting lighting;
     Forward forward;
-    PostProcess postProcess;
+    AtmosphericScattering atmospehricScattering;
+    PostProcessHalfRes postProcessHalfRes;
     DLSS dlss;
+    PostProcess postProcess;
     GPUDebug gpuDebug;
     Present present;
 
@@ -1931,21 +2104,23 @@ public:
         View::On(_displayResolution, _renderResolution);
 
         hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr, nullptr);
+        gpuDebugInit.On(this, GPU::instance->graphicQueue, "gpuDebugInit", &hzb.commandBuffer, nullptr);
         skinning.On(this, GPU::instance->computeQueue, "skinning", &AssetLibrary::instance->commandBuffer, nullptr);
         particles.On(this, GPU::instance->computeQueue, "particles", &AssetLibrary::instance->commandBuffer, nullptr);
         spawning.On(this, GPU::instance->computeQueue, "spawning", &AssetLibrary::instance->commandBuffer, nullptr);
         accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &AssetLibrary::instance->commandBuffer, nullptr);
-        gpuDebugInit.On(this, GPU::instance->graphicQueue, "gpuDebugInit", &hzb.commandBuffer, nullptr);
+        lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &accelerationStructure.commandBuffer, nullptr);
+        atmospehricScattering.On(this, GPU::instance->computeQueue, "atmospehricScattering", &accelerationStructure.commandBuffer, nullptr);
         culling.On(this, GPU::instance->graphicQueue, "culling", &hzb.commandBuffer, nullptr);
         zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer, nullptr);
         gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
-        lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &accelerationStructure.commandBuffer, nullptr);
-        lighting.On(this, GPU::instance->graphicQueue, "lighting", &accelerationStructure.commandBuffer, &lightingProbes.commandBuffer);
-        forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer, nullptr);
-        gpuDebug.On(this, GPU::instance->graphicQueue, "gpuDebug", &dlss.commandBuffer, nullptr);
-        postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &forward.commandBuffer, nullptr);
-        dlss.On(this, GPU::instance->graphicQueue, "dlss", &postProcess.commandBuffer, nullptr);
-        present.On(this, GPU::instance->graphicQueue, "present", &dlss.commandBuffer, nullptr);
+        lighting.On(this, GPU::instance->graphicQueue, "lighting", &accelerationStructure.commandBuffer, &gBuffers.commandBuffer);
+        postProcessHalfRes.On(this, GPU::instance->graphicQueue, "postProcessHalfRes", &lighting.commandBuffer, &atmospehricScattering.commandBuffer);
+        forward.On(this, GPU::instance->graphicQueue, "forward", &postProcessHalfRes.commandBuffer, &atmospehricScattering.commandBuffer);
+        dlss.On(this, GPU::instance->graphicQueue, "dlss", &forward.commandBuffer, nullptr);
+        postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &dlss.commandBuffer, nullptr);
+        gpuDebug.On(this, GPU::instance->graphicQueue, "gpuDebug", &postProcess.commandBuffer, nullptr);
+        present.On(this, GPU::instance->graphicQueue, "present", &gpuDebug.commandBuffer, nullptr);
     }
 
     void Off() override
@@ -1956,15 +2131,17 @@ public:
         particles.Off();
         spawning.Off();
         accelerationStructure.Off();
+        lightingProbes.Off();
         culling.Off();
         zPrepass.Off();
         gBuffers.Off();
-        lightingProbes.Off();
         lighting.Off();
         forward.Off();
-        gpuDebug.Off();
-        postProcess.Off();
+        atmospehricScattering.Off();
+        postProcessHalfRes.Off();
         dlss.Off();
+        postProcess.Off();
+        gpuDebug.Off();
         present.Off();
 
         View::Off();
@@ -1988,15 +2165,17 @@ public:
         SUBTASKVIEWPASS(particles);
         SUBTASKVIEWPASS(spawning);
         SUBTASKVIEWPASS(accelerationStructure);
+        SUBTASKVIEWPASS(lightingProbes);
+        SUBTASKVIEWPASS(atmospehricScattering);
         SUBTASKVIEWPASS(culling);
         SUBTASKVIEWPASS(zPrepass);
         SUBTASKVIEWPASS(gBuffers);
-        SUBTASKVIEWPASS(lightingProbes);
         SUBTASKVIEWPASS(lighting);
-        SUBTASKVIEWPASS(forward);
-        SUBTASKVIEWPASS(postProcess);
-        SUBTASKVIEWPASS(dlss);
         SUBTASKVIEWPASS(gpuDebug);
+        SUBTASKVIEWPASS(forward);
+        SUBTASKVIEWPASS(postProcessHalfRes);
+        SUBTASKVIEWPASS(dlss);
+        SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
         reset.precede(updateInstances, updateMaterials, updateLights, updateCameras); // should precede all, user need to check that
@@ -2005,9 +2184,28 @@ public:
         updateMaterials.precede(uploadAndSetup);
         updateCameras.precede(uploadAndSetup);
         updateLights.precede(uploadAndSetup);
-        uploadAndSetup.precede(skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask, dlssTask);
 
-        presentTask.succeed(uploadAndSetup, hzbTask, skinningTask, particlesTask, spawningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, forwardTask, postProcessTask, dlssTask, gpuDebugInitTask, gpuDebugTask);
+        // no need to put unnecessary dependencies on upload and setup (passes that do not use the view world data)
+        uploadAndSetup.precede(skinningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, dlssTask);
+
+        presentTask.succeed(uploadAndSetup, 
+            hzbTask, 
+            skinningTask, 
+            particlesTask, 
+            spawningTask, 
+            accelerationStructureTask, 
+            cullingTask, 
+            zPrepassTask, 
+            gBuffersTask, 
+            lightingProbesTask, 
+            lightingTask, 
+            forwardTask, 
+            atmospehricScatteringTask, 
+            postProcessHalfResTask, 
+            dlssTask, 
+            postProcessTask, 
+            gpuDebugInitTask, 
+            gpuDebugTask);
 
         return presentTask;
     }
@@ -2021,11 +2219,13 @@ public:
         particles.Execute();
         spawning.Execute();
         accelerationStructure.Execute();
+        lightingProbes.Execute();
+        atmospehricScattering.Execute();
         culling.Execute();
         zPrepass.Execute();
         gBuffers.Execute();
-        lightingProbes.Execute();
         lighting.Execute();
+        postProcessHalfRes.Execute();
         forward.Execute();
         dlss.Execute();
         postProcess.Execute();
@@ -2256,6 +2456,7 @@ public:
                     hlsllight.angle = light.angle;
                     hlsllight.range = light.range;
                     hlsllight.type = light.type;
+                    hlsllight.size = light.size;
 
                     this->viewWorld->lights.Add(hlsllight);
                 }
@@ -2343,7 +2544,9 @@ public:
                     HLSL::Camera hlslcam;
 
                     hlslcam.view = inverse(mat.matrix);
+                    hlslcam.view_inv = mat.matrix;
                     hlslcam.proj = proj;
+                    hlslcam.proj_inv = inverse(proj);
                     hlslcam.viewProj = viewProj;
                     hlslcam.viewProj_inv = inverse(hlslcam.viewProj);
                     hlslcam.planes[0] = planes[0];
@@ -2357,6 +2560,17 @@ public:
                     hlslcam.previousViewProj = previousViewProj;
                     hlslcam.previousViewProj_inv = inverse(hlslcam.previousViewProj);
                     hlslcam.previousWorldPos = previousWorldPos;
+
+                    hlslcam.sizeCulling = 1;
+                    hlslcam.fovY = cam.fovY;
+                    hlslcam.nearClip = cam.nearClip;
+                    hlslcam.farClip = cam.farClip;
+                    /*
+                    hlslcam.camClipsExt.x = 1.0f - cam.farClip / cam.nearClip;
+                    hlslcam.camClipsExt.y = cam.farClip / cam.nearClip;
+                    hlslcam.camClipsExt.z = (ATMO_VOLUME_SIZE_Z - 1) / log2(ATMO_VOLUME_SPECIAL_NEAR / farClip);
+                    hlslcam.camClipsExt.w = ATMO_VOLUME_SIZE_Z;
+                    */
 
                     this->viewWorld->cameras.Add(hlslcam);
 
@@ -2524,6 +2738,36 @@ public:
         AssetLibrary::instance->Execute();
         mainView.Execute();
         editorView.Execute();
+    }
+
+    void ExecuteImmediate(ID3D12GraphicsCommandList* cmd, ID3D12CommandQueue* queue)
+    {
+        ZoneScoped;
+
+        WaitFrame();
+        ID3D12CommandList* lists[] = { cmd };
+        queue->ExecuteCommandLists(1, lists);
+
+        // Wait for completion
+        ID3D12Fence* fence = nullptr;
+        UINT64 fenceValue = 0;
+        HRESULT hr = GPU::instance->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+        if (FAILED(hr))
+        {
+            GPU::PrintDeviceRemovedReason(hr);
+            cmd->Release();
+            return;
+        }
+        fenceValue = 1;
+        queue->Signal(fence, fenceValue);
+        HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (event)
+        {
+            fence->SetEventOnCompletion(fenceValue, event);
+            WaitForSingleObject(event, INFINITE);
+            CloseHandle(event);
+        }
+        fence->Release();
     }
 
     void WaitFrame()
