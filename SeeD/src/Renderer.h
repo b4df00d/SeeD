@@ -1518,8 +1518,8 @@ public:
         atmosphericScatteringReprojectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScatteringReprojection.hlsl");
         atmosphericScatteringAccumulationShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScatteringAccumulation.hlsl");
 
-        asparams.density = 1;
-        asparams.luminosity = 1;
+        asparams.density = 0.001;
+        asparams.luminosity = 0.25;
     }
     virtual void Off() override
     {
@@ -1536,13 +1536,13 @@ public:
         Open();
 
         HLSL::Froxels froxelsData[2];
-        froxelsData[0].resolution[0] = 160;
-        froxelsData[0].resolution[1] = 90;
-        froxelsData[0].resolution[2] = 128;
+        froxelsData[0].resolution[0] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width;
+        froxelsData[0].resolution[1] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height;
+        froxelsData[0].resolution[2] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
         froxelsData[0].index = atmosphericScatteringFroxels.Get().uav.offset;
-        froxelsData[1].resolution[0] = 160;
-        froxelsData[1].resolution[1] = 90;
-        froxelsData[1].resolution[2] = 128;
+        froxelsData[1].resolution[0] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Width;
+        froxelsData[1].resolution[1] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Height;
+        froxelsData[1].resolution[2] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
         froxelsData[1].index = atmosphericScatteringHistoryFroxels.Get().uav.offset;
         froxelsBuffer.Get().UploadElements(froxelsData, ARRAYSIZE(froxelsData), 0, commandBuffer.Get());
         froxelsBuffer.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
@@ -2732,7 +2732,6 @@ public:
     void ExecuteFrame()
     {
         ZoneScoped;
-        //HRESULT hr;
 
         AssetLibrary::instance->Close();
         AssetLibrary::instance->Execute();
@@ -2745,6 +2744,7 @@ public:
         ZoneScoped;
 
         WaitFrame();
+
         ID3D12CommandList* lists[] = { cmd };
         queue->ExecuteCommandLists(1, lists);
 

@@ -21,39 +21,49 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
     
     GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
-    SurfaceData s = GetSurfaceData(cd.pixel.xy);
     
-    float hitDistance = 0;
-    float3 direct = RESTIRLight(rtParameters.directReservoirIndex, cd, s, hitDistance);
-    float3 indirect = RESTIRLight(rtParameters.giReservoirIndex, cd, s, hitDistance);
-    
-    float3 result = direct + indirect;
-    
-    lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
-    specularHitDistance[dtid.xy] = hitDistance;
-    
-    if (editorContext.albedo)
+    if(cd.reverseZ > 0)
     {
-        lighted[dtid.xy] = s.albedo;
-        //lighted[dtid.xy] = float4((cd.viewDir * 0.5) + 0.5, 1);
-        //lighted[dtid.xy] = (cd.viewDist - 2) * 0.1;
+        SurfaceData s = GetSurfaceData(cd.pixel.xy);
+    
+        float hitDistance = 0;
+        float3 direct = RESTIRLight(rtParameters.directReservoirIndex, cd, s, hitDistance);
+        float3 indirect = RESTIRLight(rtParameters.giReservoirIndex, cd, s, hitDistance);
+    
+        float3 result = direct + indirect;
+    
+        lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
+        specularHitDistance[dtid.xy] = hitDistance;
+        
+         if (editorContext.albedo)
+        {
+            lighted[dtid.xy] = s.albedo;
+            //lighted[dtid.xy] = float4((cd.viewDir * 0.5) + 0.5, 1);
+            //lighted[dtid.xy] = (cd.viewDist - 2) * 0.1;
 
-    }
-    if (editorContext.lighting)
-    {
-        s.albedo = 1;
+        }
+        if (editorContext.lighting)
+        {
+            s.albedo = 1;
     
-        float h = 0;
-        float3 d = RESTIRLight(rtParameters.directReservoirIndex, cd, s, h);
-        float3 i = RESTIRLight(rtParameters.giReservoirIndex, cd, s, h);
+            float h = 0;
+            float3 d = RESTIRLight(rtParameters.directReservoirIndex, cd, s, h);
+            float3 i = RESTIRLight(rtParameters.giReservoirIndex, cd, s, h);
     
-        RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-        lighted[dtid.xy] = float4(d + i, 1);
+            RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
+            lighted[dtid.xy] = float4(d + i, 1);
+        }
+        if (editorContext.GIprobes)
+        {
+            lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, true).xyz, 1);
+        }
     }
-    if (editorContext.GIprobes)
+    else
     {
-        lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, true).xyz, 1);
+        lighted[dtid.xy] = max(0, float4(Sky(cd.viewDir), 1));
+        specularHitDistance[dtid.xy] = 0;
     }
+   
     int2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
     bool inRange = abs(length(debugPixel - int2(dtid.xy))) <= 0;
     if (inRange)
@@ -74,9 +84,5 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
             float radius = instance.GetScale() * mesh.boundingSphere.w;
             DrawSphere(center, radius);
         }
-    }
-    if(cd.viewDist >= 10000.0f)
-    {
-        lighted[dtid.xy] = float4(Sky(cd.viewDir), 1);
     }
 }

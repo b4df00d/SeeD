@@ -31,7 +31,7 @@ void RayGen()
     //if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y) return;
     
     GBufferCameraData cd = GetGBufferCameraData(dtid);
-    if (cd.viewDist > 5000)
+    if (cd.reverseZ <= 0)
         return;
     
     uint seed = initRand(dtid.xy);

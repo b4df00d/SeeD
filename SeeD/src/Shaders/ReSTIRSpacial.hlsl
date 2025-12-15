@@ -106,7 +106,7 @@ void RayGen()
     HLSL::GIReservoir og = r;
     
     uint spacialReuse = 0;
-    float2 radius = (1.0 + 16.0 * nextRand(seed));// * (viewContext.renderResolution.xy * 0.001);
+    float2 radius = (1.0 + 8.0 * nextRand(seed));// * (viewContext.renderResolution.xy * 0.001);
     for (uint i = 0; i < poissonDiskCount; i++)
     {
         int2 pixel = dtid.xy + (poissonDisk[i]+float2(0.25, 0.5)) * radius;

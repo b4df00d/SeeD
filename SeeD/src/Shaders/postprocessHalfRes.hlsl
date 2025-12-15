@@ -28,11 +28,18 @@ void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchT
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[viewContext.cameraIndex];
-    float3 froUV = WorldToFroxel(cd.worldPos, currentFroxel.resolution.xyz, 0.1, camera);
+    float3 froUV = WorldToFroxelUVW(cd.worldPos, currentFroxel.resolution.xyz, 0.1, camera);
     
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[pphrParameters.lightedIndex];
     float4 input = lighted[renderPixel.xy];
+    if(cd.reverseZ > 0)
+    {
+    }
+    else
+    {
+        froUV.z = 1;
+    }
     float4 atmoData = atmosphericScattering.Sample(samplerLinearClamp, froUV);
-    input.xyz = lerp(input.xyz, atmoData.xyz, atmoData.w);
+    input.xyz = lerp(input.xyz, atmoData.xyz, 1-exp(-atmoData.w));
     lighted[renderPixel.xy] = input;
 }

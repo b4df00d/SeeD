@@ -314,57 +314,57 @@ float absolutZ(float z, float n, float f)
 }
 
 // ----------------- FROXEL ---------------------------------------------
-uint ZToFroxel(float linearZ, uint froxelsZSize, float froxelsNear, float farClip)
+uint ZToFroxel(float linearZ, float froxelsZSize, float froxelsNear, float farClip)
 {
     float B = -log2(linearZ);
     float C = B * ((froxelsZSize - 1) / log2(froxelsNear / farClip)) + froxelsZSize;
     return uint(max(0.0, C));
 }
 
-float FroxelToZ(float froxelZ, int froxelsZSize, float froxelsNear, float farClip)
+float FroxelToZ(float froxelZ, float froxelsZSize, float froxelsNear, float farClip)
 {
     if (froxelZ < 1) return 0;
-    return exp2((froxelZ - froxelsZSize) * (-log2(froxelsNear / farClip) / (froxelsZSize - 1)));
+    return exp2((froxelZ - froxelsZSize) * (-log2(froxelsNear / farClip) / (froxelsZSize - 1))) * farClip;
 }
 
 float3 FroxelToWorld(float3 froxel, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
 {
-    float4 clipPos = float4(froxel / froxelsSize, 1);
+    float4 clipPos = float4((froxel + float3(0.5, 0.5, 0.5)) / froxelsSize, 1);
+    
     clipPos.xy = clipPos.xy * 2 - 1;
-    float4 worldPos = mul(clipPos, camera.proj_inv);
-    worldPos = worldPos / worldPos.w;
-    worldPos = mul(worldPos, camera.view);
+    float4 worldPos = mul(camera.viewProj_inv, float4(clipPos.x, -clipPos.y, clipPos.z, 1));
+    worldPos.xyz /= worldPos.w;
 
     float3 viewDir = worldPos.xyz - camera.worldPos.xyz;
     float viewDist = length(viewDir);
     viewDir = viewDir / viewDist;
 
-    viewDist = FroxelToZ(froxel.z, froxelsNear, camera.farClip, froxelsSize.z) * camera.farClip;
+    viewDist = FroxelToZ(froxel.z, froxelsSize.z, froxelsNear, camera.farClip);
 
     worldPos.xyz = camera.worldPos.xyz + viewDir * viewDist;
 
     return worldPos.xyz;
 }
 
-float3 WorldToFroxel(float3 pixelWorldPos, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
+float3 WorldToFroxelUVW(float3 pixelWorldPos, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
 {
-    float4 uvw = mul(float4(pixelWorldPos, 1), camera.viewProj_inv);
-    uvw = uvw / uvw.w;
+    float4 uvw = mul(camera.viewProj, float4(pixelWorldPos, 1));
+    uvw.xyz = uvw.xyz / uvw.w;
     uvw.xy = uvw.xy * 0.5 + 0.5;
     float linearDepth = length(pixelWorldPos - camera.worldPos.xyz) / camera.farClip;
-    uvw.z = ZToFroxel(linearDepth, froxelsNear, camera.farClip, froxelsSize.z);
-
+    uvw.z = ZToFroxel(linearDepth, froxelsSize.z, froxelsNear, camera.farClip) / froxelsSize.z;
+    uvw.y = 1-uvw.y;
     return uvw.xyz;
 }
 
-float3 WorldTohistoryFroxel(float3 pixelWorldPos, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
+float3 WorldTohistoryFroxelUVW(float3 pixelWorldPos, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
 {
-    float4 uvw = mul(float4(pixelWorldPos, 1), camera.previousViewProj_inv);
-    uvw = uvw / uvw.w;
+    float4 uvw = mul(camera.previousViewProj, float4(pixelWorldPos, 1));
+    uvw.xyz = uvw.xyz / uvw.w;
     uvw.xy = uvw.xy * 0.5 + 0.5;
-    float linearDepth = length(pixelWorldPos - camera.previousWorldPos.xyz) / camera.farClip;
-    uvw.z = ZToFroxel(linearDepth, froxelsNear, camera.farClip, froxelsSize.z);
-
+    float linearDepth = length(pixelWorldPos - camera.worldPos.xyz) / camera.farClip;
+    uvw.z = ZToFroxel(linearDepth, froxelsSize.z, froxelsNear, camera.farClip) / froxelsSize.z;
+    uvw.y = 1-uvw.y;
     return uvw.xyz;
 }
 
@@ -909,6 +909,7 @@ struct GBufferCameraData
     uint2 previousPixel;
     float2 previousUV;
     float previousViewDist;
+    float reverseZ;
 };
 GBufferCameraData GetGBufferCameraData(uint2 pixel)
 {
@@ -922,7 +923,8 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     
     // inverse y depth depth[uint2(launchIndex.x, rtParameters.resolution.y - launchIndex.y)]
     Texture2D<float> depth = ResourceDescriptorHeap[viewContext.depthIndex];
-    float3 clipSpace = float3(pixel * viewContext.renderResolution.zw * 2 - 1, depth[pixel]);
+    cd.reverseZ = depth[pixel];
+    float3 clipSpace = float3(pixel * viewContext.renderResolution.zw * 2 - 1, cd.reverseZ);
     float4 worldSpace = mul(cd.camera.viewProj_inv, float4(clipSpace.x, -clipSpace.y, clipSpace.z, 1));
     worldSpace.xyz /= worldSpace.w;
     

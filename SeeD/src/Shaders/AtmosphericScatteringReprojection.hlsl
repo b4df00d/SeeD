@@ -30,11 +30,12 @@ void AtmosphericScatteringReprojection(uint3 gtid : SV_GroupThreadID, uint3 dtid
     HLSL::Froxels historyFroxel = froxels[asParameters.historyFroxelIndex];
     
     float3 currentWorldPos = FroxelToWorld(dtid.xyz, currentFroxel.resolution.xyz, 0.1, camera);
-    float3 historyFroxelPos = WorldTohistoryFroxel(currentWorldPos, historyFroxel.resolution.xyz, 0.1, camera);
+    float3 historyFroxelPos = WorldTohistoryFroxelUVW(currentWorldPos, historyFroxel.resolution.xyz, 0.1, camera);
     
     Texture3D<float4> historyFroxelData = ResourceDescriptorHeap[historyFroxel.index];
-    float4 previousData = historyFroxelData.Sample(samplerLinearClamp, float3(dtid.xyz) / float3(historyFroxel.resolution.xyz));
+    float4 previousData = historyFroxelData.Sample(samplerLinearClamp, historyFroxelPos);
     
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
-    //froxelData[dtid.xyz] = lerp(previousData, froxelData[dtid.xyz], 1);
+    if (viewContext.frameNumber > 10)
+        froxelData[dtid.xyz] = lerp(previousData, froxelData[dtid.xyz], 0.5);
 }
