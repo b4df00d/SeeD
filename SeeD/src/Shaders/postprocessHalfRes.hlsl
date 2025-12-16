@@ -32,6 +32,9 @@ void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchT
     
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[pphrParameters.lightedIndex];
     float4 input = lighted[renderPixel.xy];
+    RWTexture2D<float4> transparencyLayer = ResourceDescriptorHeap[pphrParameters.transparencyLayerIndex];
+    float4 transp = transparencyLayer[renderPixel.xy];
+    
     if(cd.reverseZ > 0)
     {
     }
@@ -39,7 +42,17 @@ void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchT
     {
         froUV.z = 1;
     }
+    
     float4 atmoData = atmosphericScattering.Sample(samplerLinearClamp, froUV);
-    input.xyz = lerp(input.xyz, atmoData.xyz, 1-exp(-atmoData.w));
-    lighted[renderPixel.xy] = input;
+    
+    if(viewContext.upscaling == HLSL::Upscaling::dlssd)
+    {
+        transp = float4(atmoData.xyz, 1-exp(-atmoData.w));
+        transparencyLayer[renderPixel.xy] = transp;
+    }
+    else
+    {
+        input.xyz = lerp(input.xyz, atmoData.xyz, 1-exp(-atmoData.w));
+        lighted[renderPixel.xy] = input;
+    }
 }

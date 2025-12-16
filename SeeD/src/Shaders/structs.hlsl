@@ -68,12 +68,21 @@ namespace HLSL
         uint instanceGPUCount;
     };
     
+    enum class Upscaling
+    {
+        none,
+        taa,
+        dlss,
+        dlssd
+    };
+    
     struct ViewContext
     {
         float4 renderResolution; //x, y, 1/x, 1/y
         float4 displayResolution; //x, y, 1/x, 1/y
         int4 mousePixel;
         float4 jitter; // current.xy, previous.zw
+        Upscaling upscaling;
         uint frameNumber;
         uint frameTime;
         uint cameraIndex;
@@ -319,6 +328,7 @@ namespace HLSL
         uint froxelsIndex;
         uint atmosphericScatteringIndex;
         uint lightedIndex;
+        uint transparencyLayerIndex;
     };
     
     struct TAAParameters
