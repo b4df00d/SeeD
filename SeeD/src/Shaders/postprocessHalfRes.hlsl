@@ -6,6 +6,12 @@ cbuffer CustomPPHR : register(b3)
 };
 #define CUSTOM_ROOT_BUFFER_1
 
+cbuffer CustomAS : register(b4)
+{
+    HLSL::AtmosphericScatteringParameters asParameters;
+};
+#define CUSTOM_ROOT_BUFFER_2
+
 #include "binding.hlsl"
 #include "common.hlsl"
 
@@ -28,7 +34,7 @@ void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchT
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[viewContext.cameraIndex];
-    float3 froUV = WorldToFroxelUVW(cd.worldPos, currentFroxel.resolution.xyz, 0.1, camera);
+    float3 froUV = WorldToFroxelUVW(cd.worldPos, currentFroxel.resolution.xyz, 0.2, camera);
     
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[pphrParameters.lightedIndex];
     float4 input = lighted[renderPixel.xy];
@@ -48,6 +54,8 @@ void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchT
     if(viewContext.upscaling == HLSL::Upscaling::dlssd)
     {
         transp = float4(atmoData.xyz, 1-exp(-atmoData.w));
+        input *= 1-transp.w;
+        lighted[renderPixel.xy] = input;
         transparencyLayer[renderPixel.xy] = transp;
     }
     else

@@ -406,7 +406,6 @@ struct RayTracingContext
     HLSL::RTParameters rtParameters;
     PerFrame<StructuredUploadBuffer<D3D12_RAYTRACING_INSTANCE_DESC>> instancesRayTracing;
     Resource TLAS;
-    //Resource GI;
     PerFrame<Resource> directReservoir;
     PerFrame<Resource> giReservoir;
     PerFrame<Resource> giReservoirSpatial;
@@ -414,8 +413,7 @@ struct RayTracingContext
 
     void On(uint2 resolution)
     {
-        TLAS.CreateAccelerationStructure(1000000, "TLAS");
-        //GI.CreateTexture(resolution, DXGI_FORMAT_R11G11B10_FLOAT, false, "GI");
+        TLAS.CreateAccelerationStructure(1014*1024*1024, "TLAS");
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -438,7 +436,6 @@ struct RayTracingContext
             instancesRayTracing.Get(i).Release();
         }
         TLAS.Release();
-        //GI.Release();
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -579,7 +576,6 @@ public:
         HLSL::RTParameters rayTracingContextParams;
 
         rayTracingContextParams.BVH = raytracingContext.TLAS.srv.offset;
-        //rayTracingContextParams.giIndex = raytracingContext.GI.uav.offset;
         rayTracingContextParams.directReservoirIndex = raytracingContext.directReservoir.Get().uav.offset;
         rayTracingContextParams.previousDirectReservoirIndex = raytracingContext.directReservoir.GetPrevious().uav.offset;
         rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get().uav.offset;
@@ -868,6 +864,7 @@ public:
         // to be set before the actual build
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS flags = allowUpdate ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE
             : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+        flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
 
         // Describe the work being requested, in this case the construction of a
         // (possibly dynamic) top-level hierarchy, with the given instance descriptors
@@ -909,6 +906,9 @@ public:
         {
             flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
         }
+
+        seedAssert(view->raytracingContext.instancesRayTracing->Size() == view->viewWorld->instances.Size());
+        seedAssert(view->raytracingContext.TLAS.GetResource()->GetDesc().Width >= descriptorsSizeInBytes);
 
         // Create a descriptor of the requested builder work, to generate a top-level
         // AS from the input parameters
@@ -1494,6 +1494,8 @@ class AtmosphericScattering : public Pass
     Components::Handle<Components::Shader> atmosphericScatteringReprojectionShader;
     Components::Handle<Components::Shader> atmosphericScatteringAccumulationShader;
 
+    uint3 atmoSize = float3(160, 90, 256);
+
 public:
     HLSL::AtmosphericScatteringParameters asparams;
 
@@ -1504,9 +1506,9 @@ public:
         froxelsBuffer.Register("froxelsBuffer", view);
         froxelsBuffer.Get().CreateBuffer<HLSL::Froxels>(2, "froxelsBuffer");
         atmosphericScatteringFroxels.Register("atmosphericScatteringFroxels", view);
-        atmosphericScatteringFroxels.Get().CreateTexture(uint3(160, 90, 128), DXGI_FORMAT_R16G16B16A16_FLOAT, false, "atmosphericScatteringFroxels");
+        atmosphericScatteringFroxels.Get().CreateTexture(atmoSize, DXGI_FORMAT_R16G16B16A16_FLOAT, false, "atmosphericScatteringFroxels");
         atmosphericScatteringHistoryFroxels.Register("atmosphericScatteringHistoryFroxels", view);
-        atmosphericScatteringHistoryFroxels.Get().CreateTexture(uint3(160, 90, 128), DXGI_FORMAT_R16G16B16A16_FLOAT, false, "atmosphericScatteringHistoryFroxels");
+        atmosphericScatteringHistoryFroxels.Get().CreateTexture(atmoSize, DXGI_FORMAT_R16G16B16A16_FLOAT, false, "atmosphericScatteringHistoryFroxels");
         depth.Register("depth", view);
         atmosphericScatteringShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl");
         atmosphericScatteringReprojectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScatteringReprojection.hlsl");
@@ -1514,6 +1516,7 @@ public:
 
         asparams.density = 0.001;
         asparams.luminosity = 0.25;
+        asparams.specialNear = 0.25;
     }
     virtual void Off() override
     {
@@ -2321,7 +2324,7 @@ public:
                     // Index of the hit group invoked upon intersection
                     instanceDesc.InstanceContributionToHitGroupIndex = 0;
                     // Instance flags, including backface culling, winding, etc - TODO: should be accessible from outside
-                    instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE | D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
+                    instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE | D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE | D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;
                     // Instance transform matrix
                     worldMatrix = transpose(worldMatrix);
                     memcpy(instanceDesc.Transform, &worldMatrix, sizeof(instanceDesc.Transform));

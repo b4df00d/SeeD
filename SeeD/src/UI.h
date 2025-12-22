@@ -1047,6 +1047,7 @@ public:
         ImGui::Text("ATMO");
         ImGui::SliderFloat("density", &Renderer::instance->mainView.atmospehricScattering.asparams.density, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("luminosity", &Renderer::instance->mainView.atmospehricScattering.asparams.luminosity, 0, 1, "%.6f");
+        ImGui::SliderFloat("specialNear", &Renderer::instance->mainView.atmospehricScattering.asparams.specialNear, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
 
         ImGui::Text("EXPO");
         ImGui::SliderFloat("expoMul", &Renderer::instance->mainView.postProcess.ppparams.expoMul, 0, 8);

@@ -1307,6 +1307,11 @@ void Resource::CreateAccelerationStructure(uint size, String name)
         NULL,
         &allocation,
         IID_NULL, NULL);
+    if (FAILED(hr))
+    {
+        GPU::PrintDeviceRemovedReason(hr);
+        return;
+    }
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
@@ -1834,7 +1839,7 @@ public:
             return;
         if (cpuData.size() <= 0)
             return;
-        if (this->gpuData.allocation == nullptr || this->gpuData.BufferSize() < cpuData.size() * sizeof(T))
+        if (this->gpuData.allocation == nullptr || this->gpuData.BufferSize() <= (cpuData.size() * sizeof(T)))
         {
             this->gpuData.Release(true);
             this->gpuData.CreateUploadBuffer<T>(max(uint1(cpuData.size()), uint1(1)), typeid(T).name());
@@ -2296,6 +2301,11 @@ struct MeshStorage
         nextMeshletTriangleOffset += (uint)meshData.meshlet_triangles.size();
         nextVertexOffset += (uint)meshData.vertices.size();
         nextIndexOffset += (uint)meshData.indices.size();
+
+
+        seedAssert(nextVertexOffset < meshletVertexMaxCount);
+        seedAssert(nextIndexOffset < meshletTrianglesMaxCount);
+
         lock.unlock();
 
         Mesh newMesh;
@@ -2398,7 +2408,7 @@ struct MeshStorage
         buildDesc.DestAccelerationStructureData = mesh.BLAS.GetResource()->GetGPUVirtualAddress();
         buildDesc.ScratchAccelerationStructureData = scratchBLAS.GetResource()->GetGPUVirtualAddress();
         buildDesc.SourceAccelerationStructureData = 0;
-        buildDesc.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+        buildDesc.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
 
         commandBuffer.cmd->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
 

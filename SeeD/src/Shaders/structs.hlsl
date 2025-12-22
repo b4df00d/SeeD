@@ -321,6 +321,7 @@ namespace HLSL
         uint historyFroxelIndex;
         float density;
         float luminosity;
+        float specialNear;
     };
     
     struct PostProcessHalfResParameters

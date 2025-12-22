@@ -314,11 +314,11 @@ float absolutZ(float z, float n, float f)
 }
 
 // ----------------- FROXEL ---------------------------------------------
-uint ZToFroxel(float linearZ, float froxelsZSize, float froxelsNear, float farClip)
+float ZToFroxel(float linearZ, float froxelsZSize, float froxelsNear, float farClip)
 {
     float B = -log2(linearZ);
     float C = B * ((froxelsZSize - 1) / log2(froxelsNear / farClip)) + froxelsZSize;
-    return uint(max(0.0, C));
+    return max(0.0, C);
 }
 
 float FroxelToZ(float froxelZ, float froxelsZSize, float froxelsNear, float farClip)
@@ -1009,7 +1009,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         #else
         s.albedo *= albedo.Sample(samplerLinear, uv);
         #endif
-        //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
+        s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
         //if(length(s.albedo.xyz) < 0.001) s.albedo.xyz = float3(1,0,1);
     }
     //s.albedo.xyz = lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 2);
@@ -1051,11 +1051,15 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         float3 nrm = normals.SampleLevel(samplerLinear, uv, 3).xyz;
         #else
         float3 nrm = normals.Sample(samplerLinear, uv).xyz;
+	    float3x3 tbn = float3x3(normalize(tangent), normalize(binormal), normalize(normal));
+        s.normal = WorldNormal(nrm, tbn, normalStrength); //< c´est fucké avec le RT
         #endif
         
-	    float3x3 tbn = float3x3(normalize(tangent), normalize(binormal), normalize(normal));
-        s.normal = WorldNormal(nrm, tbn, normalStrength);
     }
+    
+    //s.albedo.xyz = 0.25;
+    //s.roughness = 1;
+    //s.metalness = 0;
     
     s.specularTint = 1;
     s._specular = 1;
@@ -1223,9 +1227,9 @@ float3 ComputeLight(HLSL::Light light, float shadow, SurfaceData s, float3 V)
     if (any(light.color.xyz > 0))
     {
         float NdotL = max(dot(s.normal, -light.dir.xyz), 0.0);
-        return NdotL * s.albedo.xyz * light.color.xyz;
+        //return NdotL * s.albedo.xyz * light.color.xyz;
         float3 brdf = BRDF(s, V, light.dir.xyz, light.color.xyz);
-        float3 lighted = brdf;// * NdotL * shadow;
+        float3 lighted = brdf;// * NdotL;// * shadow;
         return lighted;
     }
     return 0;
@@ -1381,6 +1385,7 @@ void RESTIR(RESTIRRay restirRay, uint previousReservoirIndex, uint currentReserv
 
 float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in SurfaceData s, out float hitDistance)
 {
+    
     StructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];   
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x]);
     hitDistance = 0;
@@ -1646,7 +1651,6 @@ void CommonMiss(float3 WorldRayOrigin, float3 WorldRayDirection, float RayTCurre
     Payload.hitDistance = RayTCurrent;
     Payload.hitPos = WorldRayOrigin + WorldRayDirection * RayTCurrent;
     Payload.color = Sky(WorldRayDirection);
-
 }
 
 void TraceRayCommon(HLSL::RTParameters rtParameters,

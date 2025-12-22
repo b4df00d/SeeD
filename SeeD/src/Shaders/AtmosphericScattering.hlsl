@@ -35,20 +35,23 @@ void RayGen()
     
     
     float zRand = nextRand(seed)  - 0.5;
+    //zRand*=0.5;
     float3 froxelPos = DispatchRaysIndex().xyz;
     float3 prevFroxelPos = float3(DispatchRaysIndex().xyz) - (0,0,1);
     froxelPos.z += zRand;
     prevFroxelPos.z += zRand;
-    float3 froxelWorldPos = FroxelToWorld(froxelPos, currentFroxel.resolution.xyz, 0.1, camera);
-    float3 prevFroxelWorldPos = DispatchRaysIndex().z > 0 ? FroxelToWorld(prevFroxelPos, currentFroxel.resolution.xyz, 0.1, camera) : camera.worldPos.xyz;
+    float3 froxelWorldPos = FroxelToWorld(froxelPos, currentFroxel.resolution.xyz, asParameters.specialNear, camera);
+    float3 prevFroxelWorldPos = DispatchRaysIndex().z > 0 ? FroxelToWorld(prevFroxelPos, currentFroxel.resolution.xyz, asParameters.specialNear, camera) : camera.worldPos.xyz;
     float prevFroxelDist = length(froxelWorldPos - prevFroxelWorldPos);
     
     RESTIRRay restirRay;
     restirRay.Origin = froxelWorldPos;
     restirRay = DirectLight(rtParameters, restirRay, 4, seed);
+    restirRay.HitRadiance *= asParameters.luminosity;
+    restirRay.HitRadiance = max(0.25, restirRay.HitRadiance);
     
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
-    froxelData[DispatchRaysIndex().xyz] = float4(restirRay.HitRadiance * asParameters.luminosity, asParameters.density * prevFroxelDist);
+    froxelData[DispatchRaysIndex().xyz] = float4(restirRay.HitRadiance, asParameters.density * prevFroxelDist);
 }
 
 [shader("miss")]
@@ -66,7 +69,7 @@ void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes at
     //CommonHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload)
     payload.hitDistance = RayTCurrent();
     //payload.hitPos = WorldRayOrigin + WorldRayDirection * RayTCurrent;
-    payload.color = 0;
+    payload.color = 0.0;
 }
 
 [shader("anyhit")]
@@ -74,5 +77,5 @@ void AnyHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib
 {
     payload.hitDistance = RayTCurrent();
     //payload.hitPos = WorldRayOrigin + WorldRayDirection * RayTCurrent;
-    payload.color = 0;
+    payload.color = 0.0;
 }
