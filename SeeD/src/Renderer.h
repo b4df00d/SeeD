@@ -413,7 +413,12 @@ struct RayTracingContext
 
     void On(uint2 resolution)
     {
-        TLAS.CreateAccelerationStructure(1014*1024*1024, "TLAS");
+        rtParameters.maxFrameFilteringCount = 6;
+        rtParameters.reservoirRandBias = 0.2;
+        rtParameters.reservoirSpacialRandBias = 0.2;
+        rtParameters.spacialRadius = 0.0f;
+
+        TLAS.CreateAccelerationStructure(64*1024*1024, "TLAS");
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -1301,29 +1306,33 @@ public:
 
         commandBuffer->cmd->DispatchRays(&drd);
 
+        view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
 
         //Spacial
-        Shader& ReSTIRSpacial = *AssetLibrary::instance->Get<Shader>(ReSTIRSpacialShader.Get().id, true);
-        commandBuffer->SetRaytracing(ReSTIRSpacial);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
+        if (view->raytracingContext.rtParameters.spacialRadius > 0)
+        {
+            Shader& ReSTIRSpacial = *AssetLibrary::instance->Get<Shader>(ReSTIRSpacialShader.Get().id, true);
+            commandBuffer->SetRaytracing(ReSTIRSpacial);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
 
-        // Spacial ReSTIR pass 1
-        view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
-        view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoir.Get().uav.offset;
-        view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
-        view->raytracingContext.rtParameters.passNumber = 0;
-        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
-        drd = ReSTIRSpacial.GetRTDesc();
-        drd.Width = view->renderResolution.x;
-        drd.Height = view->renderResolution.y;
-        commandBuffer->cmd->DispatchRays(&drd);
+            // Spacial ReSTIR pass 1
+            view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
+            view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoir.Get().uav.offset;
+            view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
+            view->raytracingContext.rtParameters.passNumber = 0;
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
+            drd = ReSTIRSpacial.GetRTDesc();
+            drd.Width = view->renderResolution.x;
+            drd.Height = view->renderResolution.y;
+            commandBuffer->cmd->DispatchRays(&drd);
+
+            view->raytracingContext.giReservoirSpatial.Get().Barrier(commandBuffer.Get());
+        }
 
 
         // Lighting
-        //view->raytracingContext.GI.Barrier(commandBuffer.Get());
-        view->raytracingContext.giReservoirSpatial.Get().Barrier(commandBuffer.Get());
 
         Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
         commandBuffer->SetCompute(applyLighting);
@@ -1331,7 +1340,7 @@ public:
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
 
-        view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
+        view->raytracingContext.rtParameters.giReservoirIndex = view->raytracingContext.rtParameters.spacialRadius > 0 ? view->raytracingContext.giReservoirSpatial.Get().uav.offset : view->raytracingContext.giReservoir.Get().uav.offset;;
         view->raytracingContext.rtParameters.previousgiReservoirIndex = view->raytracingContext.giReservoirSpatial.Get().uav.offset;
         view->raytracingContext.rtParameters.passNumber = 1;
         commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters));
@@ -1514,8 +1523,8 @@ public:
         atmosphericScatteringReprojectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScatteringReprojection.hlsl");
         atmosphericScatteringAccumulationShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScatteringAccumulation.hlsl");
 
-        asparams.density = 0.001;
-        asparams.luminosity = 0.25;
+        asparams.density = 0.01;
+        asparams.luminosity = 2.0;
         asparams.specialNear = 0.25;
     }
     virtual void Off() override
@@ -2596,7 +2605,12 @@ public:
                 this->viewContext.meshletsInView.Resize(this->viewWorld->meshletsCount);
                 this->viewWorld->commonResourcesIndices = SetupCommonResourcesParams();
                 this->viewContext.viewContext = SetupViewContextParams();
+                HLSL::RTParameters tmp = this->raytracingContext.rtParameters;
                 this->raytracingContext.rtParameters = SetupRayTracingContextParams();
+                this->raytracingContext.rtParameters.maxFrameFilteringCount = tmp.maxFrameFilteringCount;
+                this->raytracingContext.rtParameters.reservoirRandBias = tmp.reservoirRandBias;
+                this->raytracingContext.rtParameters.reservoirSpacialRandBias = tmp.reservoirSpacialRandBias;
+                this->raytracingContext.rtParameters.spacialRadius = tmp.spacialRadius;
                 this->editorContext.editorContext = SetupEditorParams();
             }
         ).name("upload instances buffer");

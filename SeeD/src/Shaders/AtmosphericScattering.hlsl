@@ -22,6 +22,11 @@ GlobalRootSignature SeeDRootSignatureRT =
     SeeDRootSignature
 };
 
+struct SmallHitInfo
+{
+    bool hit;
+};
+
 [shader("raygeneration")]
 void RayGen()
 {
@@ -37,7 +42,7 @@ void RayGen()
     float zRand = nextRand(seed)  - 0.5;
     //zRand*=0.5;
     float3 froxelPos = DispatchRaysIndex().xyz;
-    float3 prevFroxelPos = float3(DispatchRaysIndex().xyz) - (0,0,1);
+    float3 prevFroxelPos = float3(DispatchRaysIndex().xyz) - (0.0,0.0,1.0);
     froxelPos.z += zRand;
     prevFroxelPos.z += zRand;
     float3 froxelWorldPos = FroxelToWorld(froxelPos, currentFroxel.resolution.xyz, asParameters.specialNear, camera);
@@ -48,7 +53,7 @@ void RayGen()
     restirRay.Origin = froxelWorldPos;
     restirRay = DirectLight(rtParameters, restirRay, 4, seed);
     restirRay.HitRadiance *= asParameters.luminosity;
-    restirRay.HitRadiance = max(0.25, restirRay.HitRadiance);
+    restirRay.HitRadiance = max(0.125, restirRay.HitRadiance);
     
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
     froxelData[DispatchRaysIndex().xyz] = float4(restirRay.HitRadiance, asParameters.density * prevFroxelDist);

@@ -41,17 +41,13 @@ void RayGen()
     RESTIRRay indirectRay;
     indirectRay.Origin = cd.offsetedWorldPos;
     indirectRay.Direction = normalize(lerp(reflect(cd.viewDir, s.normal), getCosHemisphereSample(seed, s.normal), s.roughness));
-    indirectRay.proba = 1;
-    //indirectRay.proba = max(0.1, pow(s.roughness, 3));
-    //indirectRay.proba = max(0.00001, s.roughness);
     indirectRay = IndirectLight(rtParameters, s, indirectRay, 0, seed);
-    RESTIR(indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, seed);
+    RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, seed);
     
     RESTIRRay directRay;
     directRay.Origin = cd.offsetedWorldPos;
-    directRay.proba = 1;
     directRay = DirectLight(rtParameters, directRay, 0, seed);
-    RESTIR(directRay, rtParameters.previousDirectReservoirIndex, rtParameters.directReservoirIndex, cd, seed);
+    RESTIR(rtParameters, directRay, rtParameters.previousDirectReservoirIndex, rtParameters.directReservoirIndex, cd, seed);
     
     if (editorContext.rays) // daw ray
     {

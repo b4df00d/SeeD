@@ -29,7 +29,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         float hitDistance = 0;
         float3 direct = RESTIRLight(rtParameters.directReservoirIndex, cd, s, hitDistance);
         float3 indirect = RESTIRLight(rtParameters.giReservoirIndex, cd, s, hitDistance);
-    
+        
         float3 result = direct + indirect;
     
         lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format

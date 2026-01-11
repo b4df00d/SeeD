@@ -387,6 +387,10 @@ namespace HLSL
         //uint shadowsIndex;
         uint lightedIndex;
         uint specularHitDistanceIndex;
+        uint maxFrameFilteringCount;
+        float reservoirRandBias;
+        float reservoirSpacialRandBias;
+        float spacialRadius;
         
         uint passNumber;
         

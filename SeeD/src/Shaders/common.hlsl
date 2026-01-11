@@ -206,6 +206,7 @@ uint xxhash(in uint p)
 uint xxhash(in uint2 pixel)
 {
     uint p = viewContext.frameTime << 24 | pixel.x << 12 | pixel.y;
+    p += viewContext.frameTime;
     //p = 0 << 20 | pixel.x << 10 | pixel.y;
     return xxhash(p);
 }
@@ -265,7 +266,7 @@ float3 getCosHemisphereSample(in uint randSeed, float3 hitNorm)
 float3 ConvertProjToView(float4 p, HLSL::Camera camera)
 {
     p = mul(p, camera.proj_inv);
-    return (p / p.w).xyz;
+    return (p.xyz / p.w);
 }
 // convert a depth value from post-projection space into view space
 float ConvertProjDepthToView(float z, HLSL::Camera camera)
@@ -915,6 +916,8 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
 {
     GBufferCameraData cd;
     
+    cd.pixel = pixel;
+    
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     cd.camera = cameras[0]; //viewContext.cameraIndex];
     
@@ -925,13 +928,24 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     Texture2D<float> depth = ResourceDescriptorHeap[viewContext.depthIndex];
     cd.reverseZ = depth[pixel];
     float3 clipSpace = float3(pixel * viewContext.renderResolution.zw * 2 - 1, cd.reverseZ);
+    #if 1
     float4 worldSpace = mul(cd.camera.viewProj_inv, float4(clipSpace.x, -clipSpace.y, clipSpace.z, 1));
-    worldSpace.xyz /= worldSpace.w;
+    cd.worldPos = worldSpace.xyz / worldSpace.w;
+    #else
+    float4 worldSpace = mul(cd.camera.proj_inv, float4(clipSpace.x, -clipSpace.y, clipSpace.z, 1));
+    worldSpace.xyzw /= worldSpace.w;
+    worldSpace = mul(cd.camera.view_inv, worldSpace);
+    cd.worldPos = worldSpace.xyz;
+    #endif
     
-    float3 rayDir = worldSpace.xyz - cd.camera.worldPos.xyz;
-    float rayLength = length(rayDir);
-    rayDir /= rayLength;
-    //rayDir = normalize(rayDir);
+    float3 rayDir = cd.worldPos.xyz - cd.camera.worldPos.xyz;
+    cd.viewDist = length(rayDir);
+    cd.viewDir = rayDir / cd.viewDist;
+    //cd.viewDist = linearZ(cd.reverseZ, cd.camera.nearClip, cd.camera.farClip);
+    //cd.viewDist = ConvertProjDepthToView(cd.reverseZ, cd.camera) * 0.03;
+    
+    float viewDistSqr = cd.viewDist * cd.viewDist;
+    cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * 0.0001 * viewDistSqr); // -(cd.viewDir * viewDistSqr * 0.0001);
     
     Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];
     float2 motion = motionT[pixel.xy];
@@ -948,19 +962,10 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     
     float3 previousRayDir = previousWorldSpace.xyz - cd.camera.previousWorldPos.xyz;
     float previousRayLength = length(previousRayDir);
-    previousRayDir /= previousRayLength;
+    //previousRayDir /= previousRayLength;
     
-    cd.viewDir = rayDir;
-    cd.viewDist = rayLength;
-    cd.worldPos = worldSpace.xyz;
-    cd.viewDistDiff = abs(rayLength - previousRayLength);
+    cd.viewDistDiff = abs(cd.viewDist - previousRayLength);
     cd.previousViewDist = previousRayLength;
-    
-    float viewDistSqr = cd.viewDist * cd.viewDist;
-    
-    cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * 0.0001 * viewDistSqr); // -(cd.viewDir * viewDistSqr * 0.0001);
-    
-    cd.pixel = pixel;
     
     if(previousClipSpace.z >= 1.0f)
     {
@@ -1289,7 +1294,6 @@ float2 bary)
     return s;
 }
 
-static const uint maxFrameFilteringCount = 3;
 struct RESTIRRay
 {
     float3 Origin;
@@ -1325,9 +1329,13 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
 
 void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    #define PREVIOUS_WEIGHT 0.66
-    if(rand < (current.W / (previous.W * PREVIOUS_WEIGHT + current.W)) || rand == 1)
+    bool accept = false;
+    if(rand == 1 && (current.W > previous.W))
+        accept = true;
+    else if(rand < (current.W / (previous.W + current.W)))
+        accept = true;
     //if(rand <= (current.W / ((previous.Wsum / previous.Wcount) + current.W)))
+    if(accept)
     {
         previous.color = current.color;
         previous.W = current.W;
@@ -1340,7 +1348,7 @@ void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir curre
 
 void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
 {
-    if (r.Wcount >= frameFilteringCount)
+    if (r.Wcount > frameFilteringCount)
     {
         float factor = max(0, float(frameFilteringCount) / max(r.Wcount, 1.0f));
         //r.W *= factor;
@@ -1349,7 +1357,7 @@ void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
     }
 }
 
-void RESTIR(RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, uint seed)
+void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, uint seed)
 {
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[previousReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
@@ -1364,8 +1372,9 @@ void RESTIR(RESTIRRay restirRay, uint previousReservoirIndex, uint currentReserv
         r.Wcount = 0;
     }
         
-    float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.15 - 0.1);
-    uint frameFilteringCount = max(1, blend * maxFrameFilteringCount);
+    //float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.15 - 0.1);
+    float blend = 1.0-saturate(cd.viewDistDiff * 20);
+    uint frameFilteringCount = max(1, blend * rtParameters.maxFrameFilteringCount);
     
     HLSL::GIReservoir newR;
     float W = dot(restirRay.HitRadiance.xyz, float3(0.3, 0.59, 0.11));
@@ -1376,7 +1385,7 @@ void RESTIR(RESTIRRay restirRay, uint previousReservoirIndex, uint currentReserv
     newR.dist = length(restirRay.HitPosition - restirRay.Origin);
     newR.Wsum = W * max(restirRay.proba, 0.001);
         
-    UpdateGIReservoir(r, newR, nextRand(seed));
+    UpdateGIReservoir(r, newR, nextRand(seed) * rtParameters.reservoirRandBias);
     ScaleGIReservoir(r, frameFilteringCount);
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];
@@ -1444,7 +1453,7 @@ float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, SurfaceDat
     StructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
     HLSL::ProbeData probe = probesBuffer[probeIndex];
     float3 result = max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
-    return result * 0.33; // TODO : why probe too bright ?!
+    return result * 0.66; // TODO : why probe too bright ?! because it feeds on the previous result and explode
 }
 
 void TraceRayCommon(HLSL::RTParameters rtParameters,
@@ -1525,7 +1534,9 @@ RESTIRRay DirectLight(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint
     newPayload.seed = seed;
     
     // cant use RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH because of point/spot lights
-    TraceRayCommon(rtParameters, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, newPayload);
+    // wrong ? if TMax is set properly we know that the ray will not hit after the light
+    // so we can use something other than RAY_FLAG_NONE
+    TraceRayCommon(rtParameters, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, newPayload);
     
     // did we hit something ? by knowing if the hit is before or after the light
     float visible = newPayload.hitDistance >= lightDist ? 1 : 0;
@@ -1533,6 +1544,7 @@ RESTIRRay DirectLight(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint
     
     restirRay.HitRadiance = color;
     restirRay.HitPosition = light.pos.xyz;
+    restirRay.proba = 1.0f / commonResourcesIndices.lightCount;
     
     return restirRay;
 }
@@ -1568,6 +1580,7 @@ RESTIRRay IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRa
     restirRay.HitNormal = newPayload.hitNorm;
     restirRay.HitPosition = newPayload.hitPos;
     restirRay.HitRadiance = color;
+    restirRay.proba = lerp(0.001, 1.0, s.roughness);
     
     return restirRay;
 }
@@ -1579,7 +1592,7 @@ float3 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, 
     
     if (depth < HLSL::maxRTDepth)
     {
-        restirRay = DirectLight(rtParameters, restirRay, 1000, seed);
+        restirRay = DirectLight(rtParameters, restirRay, HLSL::maxRTDepth, seed);
     }
     
     #if 0
@@ -1799,8 +1812,8 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
     float distDiff = abs(r.dist - length(restirRay.HitPosition - origin));
     float wDiff = 0;//saturate(abs(W - r.color_W.w));
     float likeness = 1.0f-saturate(distDiff + wDiff);
-    
-    float fail = likeness < 0.66 ? 1 : 0;
+    //likeness = 1;
+    float fail = likeness < 0.8 ? 1 : 0;
     if(fail)
     {
         r = og;
@@ -1813,18 +1826,20 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
         newR.dist = length(restirRay.HitPosition - restirRay.Origin);
         newR.Wsum = r.Wsum;
         
-        UpdateGIReservoir(r, newR, nextRand(seed));
+        UpdateGIReservoir(r, newR, nextRand(seed) * rtParameters.reservoirSpacialRandBias);
     }
     
     // ca sert a rien de scale le spacial... il est temporaire
-    float frameFilteringCount = lerp(2, maxFrameFilteringCount * 64, likeness);
+    float frameFilteringCount = lerp(2, rtParameters.maxFrameFilteringCount * 64, likeness);
     //ScaleGIReservoir(r, frameFilteringCount);
     
+    /*
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     float3 gi = GI[dtid.xy];
     gi = pow(distDiff, 1);
     gi = 1-fail;
-    //GI[dtid.xy] = gi;
+    GI[dtid.xy] = gi;
+    */
     
     return r;
 }

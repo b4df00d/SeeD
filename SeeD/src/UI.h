@@ -1044,10 +1044,17 @@ public:
             ImGui::End();
             return;
         }
+
+        ImGui::Text("RT");
+        ImGui::SliderInt("frameFilter", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.maxFrameFilteringCount, 1, 1024, "%d", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("randBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirRandBias, 0, 1);
+        ImGui::SliderFloat("spacialRandBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirSpacialRandBias, 0, 1);
+        ImGui::SliderFloat("spacialRadius", &Renderer::instance->mainView.raytracingContext.rtParameters.spacialRadius, 0, 128);
+
         ImGui::Text("ATMO");
         ImGui::SliderFloat("density", &Renderer::instance->mainView.atmospehricScattering.asparams.density, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("luminosity", &Renderer::instance->mainView.atmospehricScattering.asparams.luminosity, 0, 1, "%.6f");
-        ImGui::SliderFloat("specialNear", &Renderer::instance->mainView.atmospehricScattering.asparams.specialNear, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("luminosity", &Renderer::instance->mainView.atmospehricScattering.asparams.luminosity, 0, 2, "%.6f");
+        ImGui::SliderFloat("specialNear", &Renderer::instance->mainView.atmospehricScattering.asparams.specialNear, 0.1, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
 
         ImGui::Text("EXPO");
         ImGui::SliderFloat("expoMul", &Renderer::instance->mainView.postProcess.ppparams.expoMul, 0, 8);

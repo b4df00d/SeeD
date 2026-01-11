@@ -9,7 +9,7 @@ cbuffer CustomRT : register(b3)
 #include "binding.hlsl"
 #include "common.hlsl"
 
-static uint poissonDiskCount = 16;
+static uint poissonDiskCount = 32;
 static float2 poissonDisk[64] = 
 {
     float2(-0.613392, 0.617481),
@@ -106,35 +106,39 @@ void RayGen()
     HLSL::GIReservoir og = r;
     
     uint spacialReuse = 0;
-    float2 radius = (1.0 + 8.0 * nextRand(seed));// * (viewContext.renderResolution.xy * 0.001);
-    for (uint i = 0; i < poissonDiskCount; i++)
+    float2 radius = rtParameters.spacialRadius;
+    if(radius.x > 0)
     {
-        int2 pixel = dtid.xy + (poissonDisk[i]+float2(0.25, 0.5)) * radius;
-        if (pixel.x < 0 || pixel.y < 0) continue;
-        if (pixel.x >= viewContext.renderResolution.x || pixel.y >= viewContext.renderResolution.y) continue;
+        for (uint i = 0; i < poissonDiskCount; i++)
         {
-            GBufferCameraData cdNeightbor = GetGBufferCameraData(pixel.xy);
+            int2 pixel = dtid.xy + (poissonDisk[i]) * radius;
+            if (pixel.x < 0 || pixel.y < 0) continue;
+            if (pixel.x >= viewContext.renderResolution.x || pixel.y >= viewContext.renderResolution.y) continue;
+            {
+                GBufferCameraData cdNeightbor = GetGBufferCameraData(pixel.xy);
             
-            if(abs(cd.viewDist - cdNeightbor.viewDist) > (0.5)) continue;
-            if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.8) continue;
+                //if(abs(cd.viewDist - cdNeightbor.viewDist) > (0.0005)) continue;
+                if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.9) continue;
             
-            HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
-            UpdateGIReservoir(r, rNeightbor, 1);//nextRand(seed));
+                HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
+                UpdateGIReservoir(r, rNeightbor, 1);//nextRand(seed));
             
-            spacialReuse++;
+                spacialReuse++;
+            }
         }
+        //r = Validate(rtParameters, s, seed, cd.offsetedWorldPos, r, og, dtid);
     }
-    r = Validate(rtParameters, s, seed, cd.offsetedWorldPos, r, og, dtid);
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
     previousgiReservoir[dtid.x + dtid.y * viewContext.renderResolution.x] = PackGIReservoir(r);
     
-    
+    /*
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     float3 gi = GI[dtid.xy];
     gi = float(spacialReuse) / poissonDiskCount;
     //gi = s.albedo.xyz;
-    //GI[dtid.xy] = gi;
+    GI[dtid.xy] = gi;
+    */
 }
 
 [shader("miss")]

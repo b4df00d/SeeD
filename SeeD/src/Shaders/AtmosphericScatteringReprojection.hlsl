@@ -37,5 +37,5 @@ void AtmosphericScatteringReprojection(uint3 gtid : SV_GroupThreadID, uint3 dtid
     
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
     if (viewContext.frameNumber > 10)
-        froxelData[dtid.xyz] = lerp(previousData, froxelData[dtid.xyz], 0.25);
+        froxelData[dtid.xyz] = lerp(previousData, froxelData[dtid.xyz], 0.2);
 }

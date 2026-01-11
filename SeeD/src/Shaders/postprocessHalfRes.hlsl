@@ -50,17 +50,19 @@ void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchT
     }
     
     float4 atmoData = atmosphericScattering.Sample(samplerLinearClamp, froUV);
+    //atmoData = cd.viewDist * 0.004;
+    transp = float4(atmoData.xyz, 1.0-exp(-atmoData.w));
     
     if(viewContext.upscaling == HLSL::Upscaling::dlssd)
     {
-        transp = float4(atmoData.xyz, 1-exp(-atmoData.w));
-        input *= 1-transp.w;
+        input *= 1.0-transp.w;
         lighted[renderPixel.xy] = input;
         transparencyLayer[renderPixel.xy] = transp;
     }
     else
     {
-        input.xyz = lerp(input.xyz, atmoData.xyz, 1-exp(-atmoData.w));
+        //transp.w = saturate(transp.w * 5);
+        input.xyz = lerp(input.xyz, atmoData.xyz, transp.w);
         lighted[renderPixel.xy] = input;
     }
 }
