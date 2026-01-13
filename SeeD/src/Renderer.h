@@ -429,7 +429,7 @@ struct RayTracingContext
 
         float multiRes = 2;
         float multi = 2;
-        probes[0].On(uint3(8, 8, 8) * multi * multiRes, float3(16, 16, 16) * multi);
+        probes[0].On(uint3(4, 4, 4) * multi * multiRes, float3(8, 8, 8) * multi);
         probes[1].On(uint3(8, 8, 8) * multi * multiRes, float3(32, 32, 32) * multi);
         probes[2].On(uint3(8, 8, 8) * multi * multiRes, float3(128, 128, 128) * multi);
     }
@@ -1062,6 +1062,8 @@ public:
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
         commandBuffer->cmd->Dispatch(1, 1, 1);
 
+        view->viewContext.instancesCounter.GetResource().Barrier(commandBuffer.Get());
+
         Shader& cullingInstances = *AssetLibrary::instance->Get<Shader>(cullingInstancesShader.Get().id, true);
         commandBuffer->SetCompute(cullingInstances);
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
@@ -1130,7 +1132,7 @@ public:
         specularAlbedo.Register("specularAlbedo", view);
         specularAlbedo.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "specularAlbedo");
         normal.Register("normal", view);
-        normal.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R11G11B10_FLOAT, "normal");
+        normal.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "normal");
         metalness.Register("metalness", view);
         metalness.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8_UNORM, "metalness");
         roughness.Register("roughness", view);

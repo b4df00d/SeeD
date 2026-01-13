@@ -8,7 +8,7 @@ struct PS_OUTPUT
 {
     float4 albedo : SV_Target0; //DXGI_FORMAT_R8G8B8A8_UNORM
     float4 specularAlbedo : SV_Target1; //DXGI_FORMAT_R8G8B8A8_UNORM
-    float3 normal : SV_Target2; //DXGI_FORMAT_R11G11B10_FLOAT
+    float4 normal : SV_Target2; //DXGI_FORMAT_R16G16B32A32_FLOAT
     float metalness : SV_Target3; //DXGI_FORMAT_R8_UNORM
     float roughness : SV_Target4; //DXGI_FORMAT_R8_UNORM
     float2 motion : SV_Target5; //DXGI_FORMAT_R16G16_FLOAT
@@ -124,7 +124,7 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         float4 worldPos = mul(worldMatrix, pos);
         float4 clipPos = mul(camera.viewProj, worldPos);
         outVerts[groupThreadId.x].currentPos = clipPos;
-        clipPos.xy += viewContext.jitter.xy;// * clipPos.w;
+        clipPos.xy += viewContext.jitter.xy * clipPos.w;
         outVerts[groupThreadId.x].pos = clipPos;
         
         float4x4 previousWorldMatrix = instance.unpack(instance.previous);
@@ -190,7 +190,7 @@ PS_OUTPUT PixelForward(MSVert inVerts)
     o.specularAlbedo = lerp(1, s.albedo, s.metalness);
     o.roughness = s.roughness;
     o.metalness = s.metalness;
-    o.normal = StoreR11G11B10Normal(normalize(s.normal));
+    o.normal = float4(StoreNormal(normalize(s.normal)), 1);
     
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
     
@@ -220,7 +220,7 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     o.specularAlbedo = lerp(1, s.albedo, s.metalness);
     o.roughness = s.roughness;
     o.metalness = s.metalness;
-    o.normal = StoreR11G11B10Normal(normalize(s.normal));
+    o.normal = float4(StoreNormal(normalize(s.normal)), 1);
     
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
     

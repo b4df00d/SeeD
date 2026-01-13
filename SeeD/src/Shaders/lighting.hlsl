@@ -55,7 +55,24 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         }
         if (editorContext.GIprobes)
         {
-            lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, true).xyz, 1);
+            lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, false).xyz, 1);
+            
+            //lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, false).w/10.0, 0, 0, 1);
+            
+            /*
+            uint probeGridIndex = 0;
+            HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
+            while(probeGridIndex < 3 && (any(cd.worldPos.xyz < probes.probesBBMin.xyz) || any(cd.worldPos.xyz > probes.probesBBMax.xyz)))
+            {
+                probeGridIndex++;
+                probes = rtParameters.probes[probeGridIndex];
+            }
+            if(probeGridIndex >= 3) return;
+            int3 launchIndex = ((cd.worldPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz)) * probes.probesResolution.xyz;
+            uint3 wrapIndex = ModulusUInt(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
+            uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
+            lighted[dtid.xy] = float4(RandUINT(probeIndex), 1);
+            */
         }
     }
     else

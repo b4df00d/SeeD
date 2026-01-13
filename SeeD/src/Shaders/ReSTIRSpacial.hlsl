@@ -117,8 +117,8 @@ void RayGen()
             {
                 GBufferCameraData cdNeightbor = GetGBufferCameraData(pixel.xy);
             
-                //if(abs(cd.viewDist - cdNeightbor.viewDist) > (0.0005)) continue;
-                if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.9) continue;
+                if(abs(cd.viewDist - cdNeightbor.viewDist) > (0.5)) continue;
+                if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.8) continue;
             
                 HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
                 UpdateGIReservoir(r, rNeightbor, 1);//nextRand(seed));
@@ -126,7 +126,7 @@ void RayGen()
                 spacialReuse++;
             }
         }
-        //r = Validate(rtParameters, s, seed, cd.offsetedWorldPos, r, og, dtid);
+        r = Validate(rtParameters, s, seed, cd.offsetedWorldPos, r, og, dtid);
     }
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];

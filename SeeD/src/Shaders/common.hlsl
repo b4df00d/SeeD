@@ -206,7 +206,7 @@ uint xxhash(in uint p)
 uint xxhash(in uint2 pixel)
 {
     uint p = viewContext.frameTime << 24 | pixel.x << 12 | pixel.y;
-    p += viewContext.frameTime;
+    //p += viewContext.frameTime;
     //p = 0 << 20 | pixel.x << 10 | pixel.y;
     return xxhash(p);
 }
@@ -696,9 +696,9 @@ float2 Panini_Generic(float2 view_pos, float d)
     return cyl_pos / (cyl_dist - d);
 }
 
-inline uint3 ModulusI(uint3 a, uint3 b)
+inline uint3 ModulusUInt(uint3 a, uint3 b)
 {
-    return (uint3(a % b) + b) % b;
+    return a % b;
 }
 
 
@@ -800,14 +800,6 @@ float3 Unpack_R11G11B10_FLOAT( uint rgb )
 
 // end microsoft miniengine rip off
 
-float3 StoreR11G11B10Normal(float3 normal)
-{
-    return normal * 0.5 + 0.5;
-}
-float3 ReadR11G11B10Normal(float3 normal)
-{
-    return normal * 2 - 1;
-}
 
 // octahedron encoding
 uint octahedral_32(in float3 nor, uint sh)
@@ -897,6 +889,15 @@ float3 i_octahedral_32(uint data, uint sh)
 }
 // end octahedron encodeing
 
+float3 StoreNormal(float3 normal)
+{
+    return normal;// * 0.5 + 0.5;
+}
+float3 ReadNormal(float3 normal)
+{
+    return normal;// * 2 - 1;
+}
+
 struct GBufferCameraData
 {
     HLSL::Camera camera;
@@ -921,8 +922,8 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     cd.camera = cameras[0]; //viewContext.cameraIndex];
     
-    Texture2D<float3> normalT = ResourceDescriptorHeap[viewContext.normalIndex];
-    cd.worldNorm = ReadR11G11B10Normal(normalT[pixel]);
+    Texture2D<float4> normalT = ResourceDescriptorHeap[viewContext.normalIndex];
+    cd.worldNorm = ReadNormal(normalT[pixel].xyz);
     
     // inverse y depth depth[uint2(launchIndex.x, rtParameters.resolution.y - launchIndex.y)]
     Texture2D<float> depth = ResourceDescriptorHeap[viewContext.depthIndex];
@@ -1083,12 +1084,12 @@ SurfaceData GetSurfaceData(uint2 pixel)
     Texture2D<float4> albedo = ResourceDescriptorHeap[viewContext.albedoIndex];
     Texture2D<float> metalness = ResourceDescriptorHeap[viewContext.metalnessIndex];
     Texture2D<float> roughness = ResourceDescriptorHeap[viewContext.roughnessIndex];
-    Texture2D<float3> normal = ResourceDescriptorHeap[viewContext.normalIndex];
+    Texture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalIndex];
     
     SurfaceData s;
     
     s.albedo = albedo[pixel];
-    s.normal = ReadR11G11B10Normal(normal[pixel]);
+    s.normal = ReadNormal(normal[pixel].xyz);
     //uint seed = initRand(pixel.xy);
     //s.normal = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 0.01));
     s.metalness = metalness[pixel];
@@ -1304,14 +1305,14 @@ struct RESTIRRay
     float proba;
 };
 
-static const uint octahedralPrecision = 8; //per axis
+static const uint octahedralPrecision = 16; //per axis
 HLSL::GIReservoirCompressed PackGIReservoir(HLSL::GIReservoir r)
 {
     HLSL::GIReservoirCompressed result = (HLSL::GIReservoirCompressed) 0;
     result.color = PackRGBE_sqrt(r.color);
     result.Wcount_W = (asuint(f32tof16(r.Wcount)) << 16) | asuint(f32tof16(r.W));
-    result.dist_dir = (asuint(f32tof16(r.dist)) << 16) | octahedral_32(r.dir, octahedralPrecision);
-    result.Wsum = r.Wsum;
+    result.dist_Wsum = (asuint(f32tof16(r.dist)) << 16) | asuint(f32tof16(r.Wsum));
+    result.dir = octahedral_32(r.dir, octahedralPrecision);
     return result;
 }
 
@@ -1321,9 +1322,9 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
     result.color = UnpackRGBE_sqrt(r.color);
     result.W = f16tof32(r.Wcount_W & 0xffff);
     result.Wcount = f16tof32(r.Wcount_W >> 16u);
-    result.dir = i_octahedral_32(r.dist_dir & 0xffff, octahedralPrecision);
-    result.dist = f16tof32(r.dist_dir >> 16u);
-    result.Wsum = r.Wsum;
+    result.dist = f16tof32(r.dist_Wsum >> 16u);
+    result.Wsum = f16tof32(r.dist_Wsum & 0xffff);
+    result.dir = i_octahedral_32(r.dir, octahedralPrecision);
     return result;
 }
 
@@ -1371,22 +1372,21 @@ void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousR
         r.Wsum = 0;
         r.Wcount = 0;
     }
-        
-    //float blend = 1-saturate(cd.viewDistDiff * pow(cd.viewDist, 0.5) * 0.15 - 0.1);
-    float blend = 1.0-saturate(cd.viewDistDiff * 20);
-    uint frameFilteringCount = max(1, blend * rtParameters.maxFrameFilteringCount);
+
+    float blend = 1.0-saturate(cd.viewDistDiff * 5);
+    uint frameFilteringCount = max(0, blend * rtParameters.maxFrameFilteringCount);
     
     HLSL::GIReservoir newR;
-    float W = dot(restirRay.HitRadiance.xyz, float3(0.3, 0.59, 0.11));
+    float W = dot(restirRay.HitRadiance.xyz, float3(0.4, 0.6, 0.3));
     newR.color = restirRay.HitRadiance.xyz;
     newR.W = W;
     newR.dir = restirRay.Direction;
     newR.Wcount = 1;
     newR.dist = length(restirRay.HitPosition - restirRay.Origin);
-    newR.Wsum = W * max(restirRay.proba, 0.001);
+    newR.Wsum = W / max(restirRay.proba, 0.00001);
         
-    UpdateGIReservoir(r, newR, nextRand(seed) * rtParameters.reservoirRandBias);
     ScaleGIReservoir(r, frameFilteringCount);
+    UpdateGIReservoir(r, newR, nextRand(seed) * rtParameters.reservoirRandBias);
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];
     giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x] = PackGIReservoir(r);
@@ -1415,9 +1415,9 @@ float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in Surfa
     return float3(0, 0, 0);
 }
 
-float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, SurfaceData s, bool writeWorldPosAsOffset = false)
+float4 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, SurfaceData s, bool writeWorldPosAsOffset = false)
 {
-    worldPos += s.normal * 0.1;
+    worldPos += s.normal * 0.01;
     uint probeGridIndex = 0;
     HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
     while(probeGridIndex < 3 && (any(worldPos.xyz < probes.probesBBMin.xyz) || any(worldPos.xyz > probes.probesBBMax.xyz)))
@@ -1431,29 +1431,30 @@ float3 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, SurfaceDat
     if(writeWorldPosAsOffset)
     {
         //non jittered sample pos for setting pos offset
-        int3 launchIndex = (worldPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz) * probes.probesResolution.xyz;
-        uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
+        int3 launchIndex = ((worldPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz)) * probes.probesResolution.xyz;
+        uint3 wrapIndex = ModulusUInt(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
         uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
         RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
-        float3 probeCenter = launchIndex * cellSize + probes.probesBBMin.xyz;
+        float3 probeCenter = launchIndex * cellSize + probes.probesBBMin.xyz + cellSize * 0.5;
         float3 probeOffset = worldPos - probeCenter;
         float currentOffsetLength = length(probesBuffer[probeIndex].position_Activation.xyz);
         if (currentOffsetLength == 0 || length(probeOffset) < currentOffsetLength)
             probesBuffer[probeIndex].position_Activation = float4(probeOffset, 10);
+        //probesBuffer[probeIndex].position_Activation = float4(0,0,0, 10);
     }
     
     //with jitter for sampling
     float3 jitteredPos = worldPos + s.normal * cellSize * 0.5;
-    jitteredPos.x += sin(worldPos.z * 25) * cellSize.x * 0.125;
-    jitteredPos.z += sin(worldPos.x * 25) * cellSize.z * 0.125;
-    jitteredPos.y += sin(worldPos.y * 25) * cellSize.y * 0.125;
-    int3 launchIndex = (jitteredPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz) * probes.probesResolution.xyz;
-    uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
+    //jitteredPos.x += sin(worldPos.z * 25) * cellSize.x * 0.125;
+    //jitteredPos.z += sin(worldPos.x * 25) * cellSize.z * 0.125;
+    //jitteredPos.y += sin(worldPos.y * 25) * cellSize.y * 0.125;
+    int3 launchIndex = ((jitteredPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz)) * probes.probesResolution.xyz;
+    uint3 wrapIndex = ModulusUInt(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
     uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
     StructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
     HLSL::ProbeData probe = probesBuffer[probeIndex];
     float3 result = max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
-    return result * 0.66; // TODO : why probe too bright ?! because it feeds on the previous result and explode
+    return float4(result * 0.5, probe.position_Activation.w); // TODO : why probe too bright ?! because it feeds on the previous result and explode
 }
 
 void TraceRayCommon(HLSL::RTParameters rtParameters,
@@ -1580,7 +1581,7 @@ RESTIRRay IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRa
     restirRay.HitNormal = newPayload.hitNorm;
     restirRay.HitPosition = newPayload.hitPos;
     restirRay.HitRadiance = color;
-    restirRay.proba = lerp(0.001, 1.0, s.roughness);
+    restirRay.proba = pow(lerp(1.0, 0.0, s.roughness), 1000) * 100000.0 + 1.0;
     
     return restirRay;
 }
@@ -1813,7 +1814,7 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
     float wDiff = 0;//saturate(abs(W - r.color_W.w));
     float likeness = 1.0f-saturate(distDiff + wDiff);
     //likeness = 1;
-    float fail = likeness < 0.8 ? 1 : 0;
+    float fail = likeness < 0.5 ? 1 : 0;
     if(fail)
     {
         r = og;

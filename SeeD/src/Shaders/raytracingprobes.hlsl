@@ -28,13 +28,15 @@ void RayGen()
     
     HLSL::ProbeGrid probes = rtParameters.probes[rtParameters.probeToCompute];
     
-    float3 t = float3(launchIndex.xyz) / float3(probes.probesResolution.xyz);
+    uint3 probesResolution = probes.probesResolution.xyz;
+    
+    float3 t = float3(launchIndex.xyz) / float3(probesResolution.xyz);
+    float3 cellSize = float3(probes.probesBBMax.xyz - probes.probesBBMin.xyz) / float3(probesResolution.xyz);
     float3 probeWorldPos = lerp(probes.probesBBMin.xyz, probes.probesBBMax.xyz, t);
-    float3 cellSize = float3(probes.probesBBMax.xyz - probes.probesBBMin.xyz) / float3(probes.probesResolution.xyz);
     probeWorldPos += cellSize * 0.5;
     
-    uint3 wrapIndex = ModulusI(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
-    uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
+    uint3 wrapIndex = ModulusUInt(launchIndex.xyz + probes.probesAddressOffset.xyz, probesResolution.xyz);
+    uint probeIndex = wrapIndex.x + wrapIndex.y * probesResolution.x + wrapIndex.z * (probesResolution.x * probesResolution.y);
   
     RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
     
@@ -51,6 +53,8 @@ void RayGen()
     probe.B = shZero();
     
     uint seed = initRand(launchIndex.xy);
+    seed = 123456789;
+    
     // Accumulate coefficients according to surounding direction/color tuples.
     for (float az = 0.5f; az < probes.probesSamplesPerFrame; az += 1.0f)
     {
@@ -59,7 +63,7 @@ void RayGen()
             float3 rayDir = shGetUniformSphereSample(az / probes.probesSamplesPerFrame, ze / probes.probesSamplesPerFrame);
             
             RayDesc ray;
-            float3 randVal = (float3(nextRand(seed), nextRand(seed), nextRand(seed)) * 2.f - 1.f) * cellSize * 0.125f;
+            //float3 randVal = (float3(nextRand(seed), nextRand(seed), nextRand(seed)) * 2.f - 1.f) * cellSize * 0.125f;
             ray.Origin = probeWorldPos + probeData.position_Activation.xyz; //  + randVal;
             ray.Direction = rayDir;
             ray.TMin = 0;
@@ -68,8 +72,8 @@ void RayGen()
             HLSL::HitInfo payload;
             payload.color = float3(0.0, 0.0, 0.0);
             payload.type = 1; //indirect
-            payload.depth = 0;
-            payload.seed = seed;
+            payload.depth = 1;
+            payload.seed = 12345678;
         
             TraceRayCommon(rtParameters, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
             

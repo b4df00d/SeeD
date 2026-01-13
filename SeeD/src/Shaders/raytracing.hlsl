@@ -40,7 +40,7 @@ void RayGen()
     
     RESTIRRay indirectRay;
     indirectRay.Origin = cd.offsetedWorldPos;
-    indirectRay.Direction = normalize(lerp(reflect(cd.viewDir, s.normal), getCosHemisphereSample(seed, s.normal), s.roughness));
+    indirectRay.Direction = normalize(lerp(reflect(cd.viewDir, s.normal), getCosHemisphereSample(seed, s.normal), s.roughness * s.roughness));
     indirectRay = IndirectLight(rtParameters, s, indirectRay, 0, seed);
     RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, seed);
     

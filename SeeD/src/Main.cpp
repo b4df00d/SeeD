@@ -281,15 +281,15 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     Engine engine;
     engine.On(window);
 
-    World::instance->Load("Save.seed");
+    //World::instance->Load("Save.seed");
 
-    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
+    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Mario1\\scene.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Stronghold.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Japanese restaurant\\source\\Inakaya_Cycles2.fbx");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\bridge\\source\\nature-and-cyvilization.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Cabin\\Rural_Cabins.gltf");
+    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Cabin\\Rural_Cabins.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\_Environment.fbx");
     
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\5v5GameMap.fbx");
@@ -316,7 +316,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\ScienceLab\\ScieneLab.gltf");
 
 
-    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets3\\";
+    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets3\\";
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets3\\SpaceJunkyard_NantStudios2.gltf");
 
     engine.Loop();

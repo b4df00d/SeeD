@@ -433,10 +433,10 @@ namespace HLSL
     
     struct GIReservoirCompressed
     {
-        float Wsum;
+        uint dir;
         uint color;
         uint Wcount_W;
-        uint dist_dir;
+        uint dist_Wsum;
     };
  /*
 not packed 220fps
