@@ -40,6 +40,7 @@ public:
 
     void On()
     {
+        ZoneScoped;
         instance = this;
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -52,6 +53,7 @@ public:
 
     void Off()
     {
+        ZoneScoped;
         Save();
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {

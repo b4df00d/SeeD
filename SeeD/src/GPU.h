@@ -1542,9 +1542,6 @@ void Resource::Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb)
 
     uploadAllocation->SetName(L"UploadBuffer");
     lock.lock();
-    //uploadResources.push_back({ GPU::instance->frameNumber, tmpUpRes });
-    //allResources.push_back(tmpUpRes);
-    //allResourcesNames.push_back("UploadBuffer");
     releaseResources.push_back({ GPU::instance->frameNumber, *tmpUpRes });
     lock.unlock();
 

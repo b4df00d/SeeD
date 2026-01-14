@@ -946,7 +946,7 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     //cd.viewDist = ConvertProjDepthToView(cd.reverseZ, cd.camera) * 0.03;
     
     float viewDistSqr = cd.viewDist * cd.viewDist;
-    cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * 0.0001 * viewDistSqr); // -(cd.viewDir * viewDistSqr * 0.0001);
+    cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * (0.000005 * viewDistSqr + 0.001)); // -(cd.viewDir * viewDistSqr * 0.0001);
     
     Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];
     float2 motion = motionT[pixel.xy];

@@ -743,6 +743,15 @@ public:
         commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
+    void ExecuteNow()
+    {
+        ZoneScoped;
+        if (commandBuffer->open)
+            IOs::Log("{} OPEN !!", name.c_str());
+
+        commandBuffer->queue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
+    }
+
     void SetupView(View* view, Resource* RT, uint RTCount, bool clearRT, Resource* depth, bool clearDepth, bool displayResolution)
     {
         ZoneScoped;
@@ -1528,6 +1537,22 @@ public:
         asparams.density = 0.01;
         asparams.luminosity = 2.0;
         asparams.specialNear = 0.25;
+
+        Open();
+        HLSL::Froxels froxelsData[2];
+        froxelsData[0].resolution[0] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width;
+        froxelsData[0].resolution[1] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height;
+        froxelsData[0].resolution[2] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
+        froxelsData[0].index = atmosphericScatteringFroxels.Get().uav.offset;
+        froxelsData[1].resolution[0] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Width;
+        froxelsData[1].resolution[1] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Height;
+        froxelsData[1].resolution[2] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
+        froxelsData[1].index = atmosphericScatteringHistoryFroxels.Get().uav.offset;
+        froxelsBuffer.Get().UploadElements(froxelsData, ARRAYSIZE(froxelsData), 0, commandBuffer.Get());
+        froxelsBuffer.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        Close();
+
+        ExecuteNow();
     }
     virtual void Off() override
     {
@@ -1542,18 +1567,6 @@ public:
     {
         ZoneScoped;
         Open();
-
-        HLSL::Froxels froxelsData[2];
-        froxelsData[0].resolution[0] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width;
-        froxelsData[0].resolution[1] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height;
-        froxelsData[0].resolution[2] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
-        froxelsData[0].index = atmosphericScatteringFroxels.Get().uav.offset;
-        froxelsData[1].resolution[0] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Width;
-        froxelsData[1].resolution[1] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Height;
-        froxelsData[1].resolution[2] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
-        froxelsData[1].index = atmosphericScatteringHistoryFroxels.Get().uav.offset;
-        froxelsBuffer.Get().UploadElements(froxelsData, ARRAYSIZE(froxelsData), 0, commandBuffer.Get());
-        froxelsBuffer.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
 
         // Trace atmospheric scattering froxels
         Shader& atmosphericScattering = *AssetLibrary::instance->Get<Shader>(atmosphericScatteringShader.Get().id, true);
@@ -1832,6 +1845,7 @@ public:
         if (initialized)
             return;
 
+        ZoneScoped;
         view->upscaling = HLSL::Upscaling::taa;
 
         // cant find _nvngx.dll or nvmgx.dll ... copied from some driver repo in the OS (do a global search)
@@ -2106,6 +2120,7 @@ public:
 
     void On(uint2 _displayResolution, uint2 _renderResolution) override
     {
+        ZoneScoped;
         dlss.CreateDLSS(this, _displayResolution, _renderResolution);
 
         View::On(_displayResolution, _renderResolution);
@@ -2132,6 +2147,7 @@ public:
 
     void Off() override
     {
+        ZoneScoped;
         gpuDebugInit.Off();
         hzb.Off();
         skinning.Off();
@@ -2651,6 +2667,7 @@ public:
 
     void On(uint2 _displayResolution, uint2 _renderResolution) override
     {
+        ZoneScoped;
         // avoid creating rt and context buffers for this view
         //View::On(_displayResolution, _renderResolution);
         renderResolution = _renderResolution;
@@ -2661,6 +2678,7 @@ public:
 
     void Off() override
     {
+        ZoneScoped;
         editor.Off();
     }
 
@@ -2693,6 +2711,7 @@ public:
 
     void On(uint2 _displayResolution)
     {
+        ZoneScoped;
         instance = this;
 
         constantBuffer.On();
@@ -2705,6 +2724,7 @@ public:
     
     void Off()
     {
+        ZoneScoped;
         editorView.Off();
         mainView.Off();
         meshStorage.Off();
@@ -2786,6 +2806,7 @@ public:
     {
         ZoneScoped;
 
+        Resource::ReleaseResources();
 
         HRESULT hr;
         // if the current fence value is still less than "fenceValue", then we know the GPU has not finished executing
@@ -2806,8 +2827,6 @@ public:
             // has reached "fenceValue", we know the command queue has finished executing
             WaitForSingleObject(previousFrame.fenceEvent, 10000);
         }
-
-        Resource::ReleaseResources();
     }
 
     void PresentFrame()
