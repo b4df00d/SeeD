@@ -14,6 +14,7 @@ void Reset(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint
     
     RWStructuredBuffer<uint> isntancesCounters = ResourceDescriptorHeap[viewContext.instancesCounterIndex];
     isntancesCounters[0] = 0;
+    isntancesCounters[1] = 0;
     
     RWStructuredBuffer<uint> meshletsCounters = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
     meshletsCounters[0] = 0;

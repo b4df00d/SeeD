@@ -5,7 +5,7 @@
 #pragma compute CullingInstance
 
 [RootSignature(SeeDRootSignature)]
-[numthreads(128, 1, 1)]
+[numthreads(INSTANCE_CULLING_THREADS, 1, 1)]
 void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
     uint instanceIndex = dtid.x;
@@ -22,19 +22,35 @@ void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     HLSL::Mesh mesh = meshes[instance.meshIndex];
     
     RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[viewContext.instancesCounterIndex];
-    RWStructuredBuffer<HLSL::InstanceCullingDispatch> instancesInView = ResourceDescriptorHeap[viewContext.culledInstanceIndex];
+    RWStructuredBuffer<HLSL::InstanceCullingDispatch> instancesCulledArgs = ResourceDescriptorHeap[viewContext.instancesCulledArgsIndex];
     
     float4x4 worldMatrix = instance.unpack(instance.current);
     float3 center = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
     float radius = abs(instance.GetScale() * mesh.boundingSphere.w); // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
     
-    bool culled = false;//FrustumCulling(camera, boundingSphere);
+    bool culled = FrustumCulling(camera, boundingSphere);
     if(!culled) culled = OcclusionCulling(camera, boundingSphere);
     
     if (!culled)
     {
         // we can chose the mesh LOD here also
+        
+        #if GROUPED_CULLING
+        
+        uint meshletIndex = 0;
+        InterlockedAdd(counter[1], mesh.meshletCount, meshletIndex);
+        
+        RWStructuredBuffer<HLSL::GroupedCullingDispatch> meshletsToCull = ResourceDescriptorHeap[viewContext.meshletsToCullIndex];
+        HLSL::GroupedCullingDispatch mdc = (HLSL::GroupedCullingDispatch) 0;
+        mdc.instanceIndex = instanceIndex;
+        for (uint i = 0; i < mesh.meshletCount; i++)
+        {
+            mdc.meshletIndex = mesh.meshletOffset+i;
+            meshletsToCull[meshletIndex+i] = mdc;
+        }
+        
+        #else
         
         uint index = 0;
         InterlockedAdd(counter[0], 1, index);
@@ -44,6 +60,8 @@ void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
         mdc.ThreadGroupCountX = ceil(mesh.meshletCount / (HLSL::cullMeshletThreadCount * 1.0f));
         mdc.ThreadGroupCountY = 1;
         mdc.ThreadGroupCountZ = 1;
-        instancesInView[index] = mdc;
+        instancesCulledArgs[index] = mdc;
+        
+        #endif
     }
 }

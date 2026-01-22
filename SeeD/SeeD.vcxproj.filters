@@ -183,5 +183,8 @@
     <FxCompile Include="src\Shaders\postprocessHalfRes.hlsl">
       <Filter>Source Files\Shaders</Filter>
     </FxCompile>
+    <FxCompile Include="src\Shaders\cullingCountMeshletsDispatch.hlsl">
+      <Filter>Source Files\Shaders</Filter>
+    </FxCompile>
   </ItemGroup>
 </Project>

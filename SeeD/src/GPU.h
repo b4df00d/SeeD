@@ -1138,7 +1138,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D
         IID_NULL, NULL);
     if (FAILED(hr))
     {
-        IOs::Log("Buffer creation failed {}", hr);
+        IOs::Log("Buffer {} creation failed {}", name.c_str(), hr);
     }
 
     std::wstring wname = name.ToWString();
@@ -2241,8 +2241,8 @@ struct MeshStorage
 
     std::recursive_mutex lock;
 
-    uint meshesMaxCount = 10000;
-    uint meshletMaxCount = 1000000;
+    uint meshesMaxCount = 512;
+    uint meshletMaxCount = 200000;
     uint meshletVertexMaxCount = meshletMaxCount * HLSL::max_vertices;
     uint meshletTrianglesMaxCount = meshletMaxCount * HLSL::max_triangles;
     uint vertexMaxCount = meshletVertexMaxCount;

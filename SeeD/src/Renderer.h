@@ -307,8 +307,11 @@ struct ViewContext
 
     StructuredBuffer<HLSL::Camera> camera;
     StructuredBuffer<HLSL::Light> lights;
-    StructuredBuffer<HLSL::InstanceCullingDispatch> instancesInView;
-    StructuredBuffer<HLSL::MeshletDrawCall> meshletsInView;
+    StructuredBuffer<HLSL::InstanceCullingDispatch> instancesCulledArgs;
+#if GROUPED_CULLING
+    StructuredBuffer<HLSL::GroupedCullingDispatch> meshletsToCull;
+#endif
+    StructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs;
     StructuredBuffer<uint> instancesCounter;
     StructuredBuffer<uint> meshletsCounter;
 
@@ -334,9 +337,14 @@ struct ViewContext
 
     void On()
     {
-        instancesInView.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
-        meshletsInView.CreateBuffer(1000, D3D12_RESOURCE_STATE_COMMON);
+        instancesCulledArgs.CreateBuffer(10, D3D12_RESOURCE_STATE_COMMON);
+#if GROUPED_CULLING
+        meshletsToCull.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
+        instancesCounter.CreateBuffer(2, D3D12_RESOURCE_STATE_COMMON);
+#else
         instancesCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
+#endif
+        meshletsCulledArgs.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
         jitterIndex = 0;
     }
@@ -345,8 +353,11 @@ struct ViewContext
     {
         camera.Release();
         lights.Release();
-        instancesInView.Release();
-        meshletsInView.Release();
+        instancesCulledArgs.Release();
+#if GROUPED_CULLING
+        meshletsToCull.Release();
+#endif
+        meshletsCulledArgs.Release();
         instancesCounter.Release();
         meshletsCounter.Release();
     }
@@ -552,9 +563,12 @@ public:
         viewContextParams.frameTime = (uint)Time::instance->currentTicks;
         viewContextParams.cameraIndex = options.stopFrustumUpdate ? 1 : 0;
         viewContextParams.lightsIndex = 0;
-        viewContextParams.culledInstanceIndex = viewContext.instancesInView.GetResource().uav.offset;
-        viewContextParams.culledMeshletsIndex = viewContext.meshletsInView.GetResource().uav.offset;
+        viewContextParams.instancesCulledArgsIndex = viewContext.instancesCulledArgs.GetResource().uav.offset;
+#if GROUPED_CULLING
+        viewContextParams.meshletsToCullIndex = viewContext.meshletsToCull.GetResource().uav.offset;
+#endif
         viewContextParams.instancesCounterIndex = viewContext.instancesCounter.GetResource().uav.offset;
+        viewContextParams.meshletsCulledArgsIndex = viewContext.meshletsCulledArgs.GetResource().uav.offset;
         viewContextParams.meshletsCounterIndex = viewContext.meshletsCounter.GetResource().uav.offset;
         viewContextParams.albedoIndex = GetRegisteredResource("albedo").srv.offset;
         viewContextParams.metalnessIndex = GetRegisteredResource("metalness").srv.offset;
@@ -1036,6 +1050,9 @@ class Culling : public Pass
     ViewResource depth;
     Components::Handle<Components::Shader> cullingResetShader;
     Components::Handle<Components::Shader> cullingInstancesShader;
+#if GROUPED_CULLING
+    Components::Handle<Components::Shader> cullingCountMeshletsDispatchShader;
+#endif
     Components::Handle<Components::Shader> cullingMeshletsShader;
 public:
     virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
@@ -1045,6 +1062,9 @@ public:
         depth.Register("depth", view);
         cullingResetShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingReset.hlsl");
         cullingInstancesShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingInstances.hlsl");
+#if GROUPED_CULLING
+        cullingCountMeshletsDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingCountMeshletsDispatch.hlsl");
+#endif
         cullingMeshletsShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingMeshlets.hlsl");
     }
     void Setup(View* view) override
@@ -1056,8 +1076,11 @@ public:
         ZoneScoped;
         Open();
 
-        view->viewContext.instancesInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
-        view->viewContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+        view->viewContext.instancesCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+#if GROUPED_CULLING
+        //view->viewContext.meshletsToCull.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+#endif
+        view->viewContext.meshletsCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
         view->viewContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
         view->viewContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
 
@@ -1079,16 +1102,30 @@ public:
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
         commandBuffer->cmd->Dispatch(cullingInstances.DispatchX(instances.Size()), 1, 1);
 
-        view->viewContext.instancesInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        view->viewContext.instancesCounter.GetResource().Barrier(commandBuffer.Get());
+        view->viewContext.instancesCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+#if GROUPED_CULLING
+        //view->viewContext.meshletsToCull.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+#endif
         view->viewContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
+#if GROUPED_CULLING
+        Shader& cullingCountMeshletsDispatch = *AssetLibrary::instance->Get<Shader>(cullingCountMeshletsDispatchShader.Get().id, true);
+        commandBuffer->SetCompute(cullingCountMeshletsDispatch);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->Dispatch(1, 1, 1);
+
+        view->viewContext.instancesCulledArgs.GetResource().Barrier(commandBuffer.Get());
+#endif
 
         Shader& cullingMeshlets = *AssetLibrary::instance->Get<Shader>(cullingMeshletsShader.Get().id, true);
         commandBuffer->SetCompute(cullingMeshlets);
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        commandBuffer->cmd->ExecuteIndirect(cullingMeshlets.commandSignature, instances.Size(), view->viewContext.instancesInView.GetResourcePtr(), 0, view->viewContext.instancesCounter.GetResourcePtr(), 0);
+        commandBuffer->cmd->ExecuteIndirect(cullingMeshlets.commandSignature, instances.Size(), view->viewContext.instancesCulledArgs.GetResourcePtr(), 0, view->viewContext.instancesCounter.GetResourcePtr(), 0);
 
-        view->viewContext.meshletsInView.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        view->viewContext.meshletsCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         view->viewContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
         Close();
@@ -1184,8 +1221,8 @@ public:
         commandBuffer->cmd->SetGraphicsRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);
 
-        uint maxDraw = view->viewContext.meshletsInView.Size();
-        commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->viewContext.meshletsInView.GetResourcePtr(), 0, view->viewContext.meshletsCounter.GetResourcePtr(), 0);
+        uint maxDraw = view->viewContext.meshletsCulledArgs.Size();
+        commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->viewContext.meshletsCulledArgs.GetResourcePtr(), 0, view->viewContext.meshletsCounter.GetResourcePtr(), 0);
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
@@ -1847,6 +1884,7 @@ public:
 
         ZoneScoped;
         view->upscaling = HLSL::Upscaling::taa;
+        //return;
 
         // cant find _nvngx.dll or nvmgx.dll ... copied from some driver repo in the OS (do a global search)
         // in faact its not needed it is working fine on the laptop .... why not on the descktop ?
@@ -2619,8 +2657,11 @@ public:
                 this->viewWorld->instances.Upload();
                 this->viewWorld->materials.Upload();
                 this->raytracingContext.instancesRayTracing->Upload();
-                this->viewContext.instancesInView.Resize(this->viewWorld->instances.Size());
-                this->viewContext.meshletsInView.Resize(this->viewWorld->meshletsCount);
+                this->viewContext.instancesCulledArgs.Resize(this->viewWorld->instances.Size());
+#if GROUPED_CULLING
+                this->viewContext.meshletsToCull.Resize(this->viewWorld->meshletsCount);
+#endif
+                this->viewContext.meshletsCulledArgs.Resize(this->viewWorld->meshletsCount);
                 this->viewWorld->commonResourcesIndices = SetupCommonResourcesParams();
                 this->viewContext.viewContext = SetupViewContextParams();
                 HLSL::RTParameters tmp = this->raytracingContext.rtParameters;

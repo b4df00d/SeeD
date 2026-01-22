@@ -2,6 +2,10 @@
 #ifndef __STRUCTS__
 #define __STRUCTS__
 
+#define GROUPED_CULLING 1
+#define GROUPED_CULLING_THREADS 128
+#define INSTANCE_CULLING_THREADS 128
+
 #ifdef __cplusplus // bah c�est surtout pour par avoir ca dans le HLSL
 #define SeeDalign __declspec(align(16))
 #else
@@ -87,8 +91,11 @@ namespace HLSL
         uint frameTime;
         uint cameraIndex;
         uint lightsIndex;
-        uint culledInstanceIndex;
-        uint culledMeshletsIndex;
+        uint instancesCulledArgsIndex;
+#if GROUPED_CULLING
+        uint meshletsToCullIndex;
+#endif
+        uint meshletsCulledArgsIndex;
         uint instancesCounterIndex;
         uint meshletsCounterIndex;
         uint albedoIndex;
@@ -236,6 +243,14 @@ namespace HLSL
 	    //D3D12_GPU_VIRTUAL_ADDRESS cbv;
 	    D3D12_DRAW_ARGUMENTS drawArguments;
     };
+    
+    #if GROUPED_CULLING
+    struct GroupedCullingDispatch
+    {
+        uint instanceIndex;
+        uint meshletIndex;
+    };
+    #endif
     
     static const uint cullMeshletThreadCount = 32;
     struct InstanceCullingDispatch
