@@ -33,82 +33,36 @@ struct MSVert
     nointerpolation uint instanceID : TEXCOORD6;
 };
 
-struct Payload
-{
-    uint instanceIndex[128];
-    uint meshletIndices[128];
-};
-
-groupshared Payload sPayload;
-groupshared uint payloadIndex;
-
-[RootSignature(SeeDRootSignature)]
-[numthreads(1, 1, 1)]
-void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
-{
-    uint instanceIndex = dtid.x;
-    
-    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[instanceIndex];
-    
-    StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
-    HLSL::Mesh mesh = meshes[instance.meshIndex];
-    
-    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[viewContext.cameraIndex];
-    
-    uint meshletCount = min(512, mesh.meshletCount);
-    
-    float4x4 worldMatrix = instance.unpack(instance.current);
-    float4 boundingSphere = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1));
-    boundingSphere.w = mesh.boundingSphere.w;
-    
-    bool culled = FrustumCulling(camera, boundingSphere);
-    
-    if (culled)  meshletCount = 0;
-    
-    
-    payloadIndex = 0;
-    uint index = 0;
-    for (uint i = 0; i < meshletCount; i++)
-    {
-        
-        StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
-        HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset + i];
-        
-        boundingSphere = mul(worldMatrix, float4(meshlet.boundingSphere.xyz, 1));
-        boundingSphere.w = mesh.boundingSphere.w;
-    
-        culled = FrustumCulling(camera, boundingSphere);
-    
-        if (!culled)
-        {
-            InterlockedAdd(payloadIndex, 1, index);
-            if (instanceIndex >= commonResourcesIndices.instanceCount) 
-                instanceIndex = HLSL::invalidUINT;
-            sPayload.instanceIndex[index] = instanceIndex;
-            sPayload.meshletIndices[index] = mesh.meshletOffset + i;
-        }
-    }
-    
-    DispatchMesh(min(256, payloadIndex), 1, 1, sPayload);
-}
+groupshared HLSL::Camera camera;
+groupshared HLSL::Instance instance;
+groupshared HLSL::Meshlet meshlet;
+groupshared float4x4 worldMatrix;
+groupshared float4x4 previousWorldMatrix;
+groupshared float3 color;
 
 [RootSignature(SeeDRootSignature)]
 [outputtopology("triangle")]
 [numthreads(HLSL::max_triangles, 1, 1)]
-void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, in payload Payload payload, out vertices MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])
-{
-    StructuredBuffer<HLSL:: Camera > cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[0]; //viewContext.cameraIndex];
-    
-    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[instanceIndexIndirect];
-    
-    StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
-    HLSL::Meshlet meshlet = meshlets[meshletIndexIndirect];
-    meshlet.vertexCount = min(HLSL::max_vertices, meshlet.vertexCount);
-    meshlet.triangleCount = min(HLSL::max_triangles, meshlet.triangleCount);
+void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, out vertices MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])
+{   
+    if(groupThreadId.x == 0)
+    {
+        StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+        camera = cameras[0]; //viewContext.cameraIndex];
+        
+        StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+        instance = instances[instanceIndexIndirect];
+        worldMatrix = instance.unpack(instance.current);
+        previousWorldMatrix = instance.unpack(instance.previous);
+        
+        StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
+        meshlet = meshlets[meshletIndexIndirect];
+        meshlet.vertexCount = min(HLSL::max_vertices, meshlet.vertexCount);
+        meshlet.triangleCount = min(HLSL::max_triangles, meshlet.triangleCount);
+        
+        color = RandUINT(meshletIndexIndirect);
+    }
+    GroupMemoryBarrierWithGroupSync();
     
     SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
     
@@ -120,14 +74,12 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         uint index = meshletVertices[tmpIndex];
         float4 pos = float4(verticesData[index].pos.xyz, 1);
         
-        float4x4 worldMatrix = instance.unpack(instance.current);
         float4 worldPos = mul(worldMatrix, pos);
         float4 clipPos = mul(camera.viewProj, worldPos);
         outVerts[groupThreadId.x].currentPos = clipPos;
         clipPos.xy += viewContext.jitter.xy * clipPos.w;
         outVerts[groupThreadId.x].pos = clipPos;
         
-        float4x4 previousWorldMatrix = instance.unpack(instance.previous);
         float4 previousWorldPos = mul(previousWorldMatrix, pos);
         float4 previousClipPos = mul(camera.previousViewProj, previousWorldPos);
         outVerts[groupThreadId.x].previousPos = previousClipPos;
@@ -144,7 +96,7 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         float3 worldBinormal = mul((float3x3)worldMatrix, binormal);
         outVerts[groupThreadId.x].binormal = worldBinormal;
         
-        outVerts[groupThreadId.x].color = RandUINT(meshletIndexIndirect);
+        outVerts[groupThreadId.x].color = color;
         outVerts[groupThreadId.x].uv = verticesData[index].uv;
         //outVerts[groupThreadId.x].uv = verticesData[index].uv1;
         
@@ -215,6 +167,12 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     
     o.albedo = s.albedo;
     
+    if (editorContext.clusters)
+    {
+        o.albedo = 1;
+        o.albedo.xyz = inVerts.color;
+    }
+    
     if((o.albedo.a+0.01) < material.parameters[4]) discard;
     
     o.specularAlbedo = lerp(1, s.albedo, s.metalness);
@@ -229,3 +187,67 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     
     return o;
 }
+
+
+/*
+struct Payload
+{
+    uint instanceIndex[128];
+    uint meshletIndices[128];
+};
+
+groupshared Payload sPayload;
+groupshared uint payloadIndex;
+
+[RootSignature(SeeDRootSignature)]
+[numthreads(1, 1, 1)]
+void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
+{
+    uint instanceIndex = dtid.x;
+    
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+    HLSL::Instance instance = instances[instanceIndex];
+    
+    StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
+    HLSL::Mesh mesh = meshes[instance.meshIndex];
+    
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    HLSL::Camera camera = cameras[viewContext.cameraIndex];
+    
+    uint meshletCount = min(512, mesh.meshletCount);
+    
+    float4x4 worldMatrix = instance.unpack(instance.current);
+    float4 boundingSphere = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1));
+    boundingSphere.w = mesh.boundingSphere.w;
+    
+    bool culled = FrustumCulling(camera, boundingSphere);
+    
+    if (culled)  meshletCount = 0;
+    
+    
+    payloadIndex = 0;
+    uint index = 0;
+    for (uint i = 0; i < meshletCount; i++)
+    {
+        
+        StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
+        HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset + i];
+        
+        boundingSphere = mul(worldMatrix, float4(meshlet.boundingSphere.xyz, 1));
+        boundingSphere.w = mesh.boundingSphere.w;
+    
+        culled = FrustumCulling(camera, boundingSphere);
+    
+        if (!culled)
+        {
+            InterlockedAdd(payloadIndex, 1, index);
+            if (instanceIndex >= commonResourcesIndices.instanceCount) 
+                instanceIndex = HLSL::invalidUINT;
+            sPayload.instanceIndex[index] = instanceIndex;
+            sPayload.meshletIndices[index] = mesh.meshletOffset + i;
+        }
+    }
+    
+    DispatchMesh(min(256, payloadIndex), 1, 1, sPayload);
+}
+*/

@@ -135,5 +135,7 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     albedo[dtid.xy].xy += abs(motion.xy);
     */
     
-   // albedo[dtid.xy] = max(cd.viewDistDiff-0.04, 0) * 10;
+   //postProcessed[dtid.xy] = max(cd.viewDistDiff-0.1, 0);
+    
+   //postProcessed[dtid.xy].xyz = cd.worldPos.xyz;
 }

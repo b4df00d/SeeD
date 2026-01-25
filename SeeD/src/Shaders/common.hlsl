@@ -902,16 +902,16 @@ struct GBufferCameraData
 {
     HLSL::Camera camera;
     float3 worldPos;
+    float reverseZ;
     float3 offsetedWorldPos;
+    float previousViewDist;
     float3 worldNorm;
-    float3 viewDir;
     float viewDist;
+    float3 viewDir;
     float viewDistDiff;
     uint2 pixel;
     uint2 previousPixel;
     float2 previousUV;
-    float previousViewDist;
-    float reverseZ;
 };
 GBufferCameraData GetGBufferCameraData(uint2 pixel)
 {
@@ -946,7 +946,7 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     //cd.viewDist = ConvertProjDepthToView(cd.reverseZ, cd.camera) * 0.03;
     
     float viewDistSqr = cd.viewDist * cd.viewDist;
-    cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * (0.000005 * viewDistSqr + 0.001)); // -(cd.viewDir * viewDistSqr * 0.0001);
+    cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * (0.00015 * viewDistSqr + 0.001)); // -(cd.viewDir * viewDistSqr * 0.0001);
     
     Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];
     float2 motion = motionT[pixel.xy];
@@ -1233,7 +1233,7 @@ float3 ComputeLight(HLSL::Light light, float shadow, SurfaceData s, float3 V)
     if (any(light.color.xyz > 0))
     {
         float NdotL = max(dot(s.normal, -light.dir.xyz), 0.0);
-        //return NdotL * s.albedo.xyz * light.color.xyz;
+        //return NdotL * s.albedo.xyz * light.color.xyz * 0.5;
         float3 brdf = BRDF(s, V, light.dir.xyz, light.color.xyz);
         float3 lighted = brdf;// * NdotL;// * shadow;
         return lighted;
@@ -1305,14 +1305,40 @@ struct RESTIRRay
     float proba;
 };
 
+/*
+    struct GIReservoir
+    {
+        float3 dir;
+        float dist;
+        float3 color;
+        float W;
+        float Wsum;
+        float Wcount;
+    };
+    struct GIReservoirCompressed
+    {
+        uint dir;
+        uint color;
+        uint Wcount_W;
+        uint dist_Wsum;
+    };
+*/
+
 static const uint octahedralPrecision = 16; //per axis
 HLSL::GIReservoirCompressed PackGIReservoir(HLSL::GIReservoir r)
 {
     HLSL::GIReservoirCompressed result = (HLSL::GIReservoirCompressed) 0;
     result.color = PackRGBE_sqrt(r.color);
-    result.Wcount_W = (asuint(f32tof16(r.Wcount)) << 16) | asuint(f32tof16(r.W));
-    result.dist_Wsum = (asuint(f32tof16(r.dist)) << 16) | asuint(f32tof16(r.Wsum));
-    result.dir = octahedral_32(r.dir, octahedralPrecision);
+    result.Wcount_W = (asuint(f32tof16(r.Wcount)) << 16) | asuint(f32tof16(log2(r.W)));
+    //result.dist_Wsum = (asuint(f32tof16(r.dist)) << 16) | asuint(f32tof16(r.Wsum));
+    
+    // store dist and Wsum in log2 space before converting to half-float
+    // this preserves orders-of-magnitude differences (common for distances/weights)
+    float distLog = log2(max(r.dist, 1e-6f));
+    float WsumLog = log2(max(r.Wsum, 1e-6f));
+    result.dist_Wsum = (asuint(f32tof16(distLog)) << 16) | asuint(f32tof16(WsumLog));
+    
+    result.dir = octahedral_32P(r.dir, octahedralPrecision);
     return result;
 }
 
@@ -1320,10 +1346,17 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
 {
     HLSL::GIReservoir result = (HLSL::GIReservoir)0;
     result.color = UnpackRGBE_sqrt(r.color);
-    result.W = f16tof32(r.Wcount_W & 0xffff);
     result.Wcount = f16tof32(r.Wcount_W >> 16u);
-    result.dist = f16tof32(r.dist_Wsum >> 16u);
-    result.Wsum = f16tof32(r.dist_Wsum & 0xffff);
+    result.W = exp2(f16tof32(r.Wcount_W & 0xffff));
+    //result.dist = f16tof32(r.dist_Wsum >> 16u);
+    //result.Wsum = f16tof32(r.dist_Wsum & 0xffff);
+    
+    // dist and Wsum were stored in log2 half-floats -> convert back
+    float distLog = f16tof32(r.dist_Wsum >> 16u);
+    float WsumLog = f16tof32(r.dist_Wsum & 0xffff);
+    result.dist = exp2(distLog);
+    result.Wsum = exp2(WsumLog);
+    
     result.dir = i_octahedral_32(r.dir, octahedralPrecision);
     return result;
 }
@@ -1394,7 +1427,6 @@ void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousR
 
 float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in SurfaceData s, out float hitDistance)
 {
-    
     StructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];   
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x]);
     hitDistance = 0;

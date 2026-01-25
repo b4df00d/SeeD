@@ -1891,9 +1891,10 @@ class ConstantBuffer
     std::mutex lock;
     PerFrame<std::vector<Resource>> pages;
     uint count;
-    static constexpr uint pageSize = 128;
-    static constexpr uint pageStride = 512;
+    static constexpr uint ConstantBufferCountInPage = 128;
+    static constexpr uint ConstantBufferStride = 512;
 
+#if _DEBUG
     struct range
     {
         uint start;
@@ -1902,7 +1903,6 @@ class ConstantBuffer
     std::vector<range> ranges;
     void DebugRanges(uint start, uint end)
     {
-#if _DEBUG
         for (uint i = 0; i < ranges.size(); i++)
         {
             if (start >= ranges[i].start && start <= ranges[i].end)
@@ -1910,8 +1910,9 @@ class ConstantBuffer
                 IOs::instance->Log("range overlap start {} end {}, range start {} end {}", start, end, ranges[i].start, ranges[i].end);
             }
         }
-#endif
+        ranges.push_back({ start, end });
     }
+#endif
 
 public:
     static ConstantBuffer* instance;
@@ -1937,35 +1938,39 @@ public:
     void Reset()
     {
         count = 0;
+#if _DEBUG
         ranges.clear();
+#endif
     }
 
     D3D12_GPU_VIRTUAL_ADDRESS PushConstantBuffer(void* data)
     {
         lock.lock();
-        uint page = count / pageSize;
-        uint index = count % pageSize;
+        uint pageIndex = count / ConstantBufferCountInPage;
+        uint indexInPage = count % ConstantBufferCountInPage;
         count++;
-        if (pages->size() <= page)
+        if (pages->size() <= pageIndex)
         {
             auto& newPage = pages->emplace_back();
-            newPage.CreateBuffer((pageSize + 1) * pageStride, pageStride, true, "constant buffer");
+            newPage.CreateBuffer((ConstantBufferCountInPage + 1) * ConstantBufferStride, ConstantBufferStride, true, "constant buffer");
         }
-        auto& pageBuff = pages.Get()[page];
+        auto& pageBuff = pages.Get()[pageIndex];
 
         char* buf;
         D3D12_RANGE rangeRead = { 0 , 0 }; // dont read
-        D3D12_RANGE rangeWrite = { index * pageStride, index * pageStride + pageStride };
         auto hr = pageBuff.GetResource()->Map(0, &rangeRead, (void**)&buf);
         if (SUCCEEDED(hr))
         {
-            DebugRanges((uint)rangeWrite.Begin, (uint)rangeWrite.End);
-            buf += index * pageStride;
-            memcpy(buf, data, pageStride);
+            buf += indexInPage * ConstantBufferStride;
+            memcpy(buf, data, ConstantBufferStride);
+            D3D12_RANGE rangeWrite = { indexInPage * ConstantBufferStride, indexInPage * ConstantBufferStride + ConstantBufferStride };
             pageBuff.GetResource()->Unmap(0, &rangeWrite);
+#if _DEBUG
+            DebugRanges((uint)rangeWrite.Begin + (pageIndex << 16), (uint)rangeWrite.End + (pageIndex << 16) - 1);
+#endif
         }
         lock.unlock();
-        return pageBuff.GetResource()->GetGPUVirtualAddress() + (index * pageStride);
+        return pageBuff.GetResource()->GetGPUVirtualAddress() + (indexInPage * ConstantBufferStride);
     }
 };
 ConstantBuffer* ConstantBuffer::instance;

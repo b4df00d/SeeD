@@ -35,14 +35,15 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
         specularHitDistance[dtid.xy] = hitDistance;
         
-         if (editorContext.albedo)
+        if (editorContext.albedo)
         {
             lighted[dtid.xy] = s.albedo;
-            //lighted[dtid.xy] = float4((cd.viewDir * 0.5) + 0.5, 1);
-            //lighted[dtid.xy] = (cd.viewDist - 2) * 0.1;
-
         }
-        if (editorContext.lighting)
+        else if (editorContext.normals)
+        {
+            lighted[dtid.xy].xyz = s.normal.xyz * 0.5 + 0.5;
+        }
+        else if (editorContext.lighting)
         {
             s.albedo = 1;
     
@@ -53,7 +54,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
             RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
             lighted[dtid.xy] = float4(d + i, 1);
         }
-        if (editorContext.GIprobes)
+        else if (editorContext.GIprobes)
         {
             lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, false).xyz, 1);
             

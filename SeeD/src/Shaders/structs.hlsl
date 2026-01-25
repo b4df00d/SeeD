@@ -474,6 +474,8 @@ packed :
         uint rays : 1;
         uint boundingVolumes : 1;
         uint albedo : 1;
+        uint normals : 1;
+        uint clusters : 1;
         uint lighting : 1;
         uint GIprobes : 1;
         uint debugBufferHeapIndex;

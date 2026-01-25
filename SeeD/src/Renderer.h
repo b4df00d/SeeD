@@ -625,6 +625,8 @@ public:
         editorContextParams.rays = options.debugMode == Options::DebugMode::ray;
         editorContextParams.boundingVolumes = options.debugMode == Options::DebugMode::boundingSphere;
         editorContextParams.albedo = options.debugDraw == Options::DebugDraw::albedo;
+        editorContextParams.normals = options.debugDraw == Options::DebugDraw::normals;
+        editorContextParams.clusters = options.debugDraw == Options::DebugDraw::clusters;
         editorContextParams.lighting = options.debugDraw == Options::DebugDraw::lighting;
         editorContextParams.GIprobes = options.debugDraw == Options::DebugDraw::GIprobes;
         editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
@@ -1214,12 +1216,14 @@ public:
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
 
         Shader& shader = *AssetLibrary::instance->Get<Shader>(meshShader.Get().id, true);
         commandBuffer->SetGraphic(shader);
 
         commandBuffer->cmd->SetGraphicsRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(EditorContextRegister, editorContextAddress);
 
         uint maxDraw = view->viewContext.meshletsCulledArgs.Size();
         commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, view->viewContext.meshletsCulledArgs.GetResourcePtr(), 0, view->viewContext.meshletsCounter.GetResourcePtr(), 0);
@@ -2241,31 +2245,28 @@ public:
 
         reset.precede(updateInstances, updateMaterials, updateLights, updateCameras); // should precede all, user need to check that
 
-        updateInstances.precede(updateMaterials);
-        updateMaterials.precede(uploadAndSetup);
-        updateCameras.precede(uploadAndSetup);
-        updateLights.precede(uploadAndSetup);
-
+        uploadAndSetup.succeed(updateInstances, updateMaterials, updateLights, updateCameras);
         // no need to put unnecessary dependencies on upload and setup (passes that do not use the view world data)
-        uploadAndSetup.precede(skinningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingTask, forwardTask, dlssTask);
+        // weeeelllll for all passes that use the camera need to wait for upload and setup to be sure the camera data is updated (just in case the buffers used are new because they are bigger)
+        uploadAndSetup.precede(skinningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, atmospehricScatteringTask, postProcessHalfResTask, forwardTask, dlssTask, postProcessTask);
 
-        presentTask.succeed(uploadAndSetup, 
-            hzbTask, 
-            skinningTask, 
-            particlesTask, 
-            spawningTask, 
-            accelerationStructureTask, 
-            cullingTask, 
-            zPrepassTask, 
-            gBuffersTask, 
-            lightingProbesTask, 
-            lightingTask, 
-            forwardTask, 
-            atmospehricScatteringTask, 
-            postProcessHalfResTask, 
-            dlssTask, 
-            postProcessTask, 
-            gpuDebugInitTask, 
+        presentTask.succeed(uploadAndSetup,
+            hzbTask,
+            skinningTask,
+            particlesTask,
+            spawningTask,
+            accelerationStructureTask,
+            cullingTask,
+            zPrepassTask,
+            gBuffersTask,
+            lightingProbesTask,
+            lightingTask,
+            forwardTask,
+            atmospehricScatteringTask,
+            postProcessHalfResTask,
+            dlssTask,
+            postProcessTask,
+            gpuDebugInitTask,
             gpuDebugTask);
 
         return presentTask;
@@ -2303,8 +2304,8 @@ public:
             {
                 ZoneScoped;
                 // should call a view method with all that ?
-                viewWorld->instances.Clear();
                 viewWorld->meshletsCount = 0;
+                viewWorld->instances.Clear();
                 viewWorld->lights.Clear();
                 viewWorld->cameras.Clear();
                 raytracingContext.instancesRayTracing->Clear();
@@ -2521,7 +2522,6 @@ public:
 
                     this->viewWorld->lights.Add(hlsllight);
                 }
-                this->viewWorld->lights.Upload();
             }
         ).name("Update lights");
         return task;
@@ -2640,7 +2640,6 @@ public:
                 }
                 this->viewWorld->cameras.Add(hlslcamPrevious);
 
-                this->viewWorld->cameras.Upload();
             }
         ).name("Update cameras");
 
@@ -2654,8 +2653,10 @@ public:
             {
                 ZoneScoped;
                 // put cameras and lights upload here too ?
+                this->viewWorld->cameras.Upload();
                 this->viewWorld->instances.Upload();
                 this->viewWorld->materials.Upload();
+                this->viewWorld->lights.Upload();
                 this->raytracingContext.instancesRayTracing->Upload();
                 this->viewContext.instancesCulledArgs.Resize(this->viewWorld->instances.Size());
 #if GROUPED_CULLING

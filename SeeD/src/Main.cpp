@@ -67,6 +67,8 @@ struct Options
     {
         none,
         albedo,
+        normals,
+        clusters,
         lighting,
         GIprobes,
     };
@@ -311,8 +313,8 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets2\\";
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\BrutalistLevelKit\\brutalist.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\FantasticVillage\\map_village_day.gltf");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Cambodia\\TemplesOfCambodia_01_01_Exterior.gltf");
-    World::instance->Load("Temple.seed");
+    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Cambodia\\TemplesOfCambodia_01_01_Exterior_02.gltf");
+    //World::instance->Load("Temple.seed");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Bazaar\\LV_Bazaar.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\ScienceLab\\ScieneLab.gltf");
 

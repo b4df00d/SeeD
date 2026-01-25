@@ -1023,7 +1023,7 @@ public:
         options.debugMode = (Options::DebugMode)debugModeIndex;
 
         int debugDrawIndex = (int)options.debugDraw;
-        const char* itemsDraw[] = { "none", "albedo", "lighting", "GIprobes" };
+        const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "lighting", "GIprobes"};
         ImGui::Combo("debugDraw", &debugDrawIndex, itemsDraw, IM_ARRAYSIZE(itemsDraw));
         options.debugDraw = (Options::DebugDraw)debugDrawIndex;
 
