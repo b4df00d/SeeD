@@ -28,6 +28,7 @@ void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     float3 center = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
     float radius = abs(instance.GetScale() * mesh.boundingSphere.w); // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
+    float dist = length(camera.worldPos.xyz - center.xyz);
     
     bool culled = FrustumCulling(camera, boundingSphere);
     if(!culled) culled = OcclusionCulling(camera, boundingSphere);
@@ -35,18 +36,21 @@ void CullingInstance(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     if (!culled)
     {
         // we can chose the mesh LOD here also
+        uint lodIndex = max(min(log2(dist * 0.05 / radius  + 1) * 3, 3), 0);
+        
+        HLSL::Mesh::LOD lod = mesh.LODs[lodIndex];
         
         #if GROUPED_CULLING
         
         uint meshletIndex = 0;
-        InterlockedAdd(counter[1], mesh.meshletCount, meshletIndex);
+        InterlockedAdd(counter[1], lod.meshletCount, meshletIndex);
         
         RWStructuredBuffer<HLSL::GroupedCullingDispatch> meshletsToCull = ResourceDescriptorHeap[viewContext.meshletsToCullIndex];
         HLSL::GroupedCullingDispatch mdc = (HLSL::GroupedCullingDispatch) 0;
         mdc.instanceIndex = instanceIndex;
-        for (uint i = 0; i < mesh.meshletCount; i++)
+        for (uint i = 0; i < lod.meshletCount; i++)
         {
-            mdc.meshletIndex = mesh.meshletOffset+i;
+            mdc.meshletIndex = lod.meshletOffset+i;
             meshletsToCull[meshletIndex+i] = mdc;
         }
         

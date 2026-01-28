@@ -825,13 +825,20 @@ public:
         std::ifstream fin(path, std::ios::binary);
         if (fin.is_open())
         {
-#define READ_VECTOR(vector)  { size_t size; fin.read((char*)&size, sizeof(size)); vector.resize(size); fin.read((char*)&vector[0], size * sizeof(vector[0])); }
-            READ_VECTOR(mesh.meshlets);
-            READ_VECTOR(mesh.meshlet_triangles);
-            READ_VECTOR(mesh.meshlet_vertices);
-            READ_VECTOR(mesh.vertices);
-            READ_VECTOR(mesh.indices);
             fin.read((char*)&mesh.boundingSphere, sizeof(mesh.boundingSphere));
+#define READ_VECTOR(vector)  { size_t size; fin.read((char*)&size, sizeof(size)); vector.resize(size); fin.read((char*)&vector[0], size * sizeof(vector[0])); }
+            READ_VECTOR(mesh.vertices);
+            uint lodCount = (uint)mesh.LODs.size();
+            fin.read((char*)&lodCount, sizeof(uint));
+            mesh.LODs.resize(lodCount);
+            for (uint i = 0; i < mesh.LODs.size(); i++)
+            {
+                auto& lod = mesh.LODs[i];
+                READ_VECTOR(lod.meshlets);
+                READ_VECTOR(lod.meshlet_triangles);
+                READ_VECTOR(lod.meshlet_vertices);
+                READ_VECTOR(lod.indices);
+            }
             fin.close();
         }
 
@@ -849,13 +856,19 @@ public:
         std::ofstream fout(path, std::ios::binary);
         if (fout.is_open())
         {
-#define WRITE_VECTOR(vector)  { size_t size = vector.size(); fout.write((char*)&size, sizeof(size)); fout.write((char*)&vector[0], size * sizeof(vector[0])); }
-            WRITE_VECTOR(mesh.meshlets);
-            WRITE_VECTOR(mesh.meshlet_triangles);
-            WRITE_VECTOR(mesh.meshlet_vertices);
-            WRITE_VECTOR(mesh.vertices);
-            WRITE_VECTOR(mesh.indices);
             fout.write((char*)&mesh.boundingSphere, sizeof(mesh.boundingSphere));
+#define WRITE_VECTOR(vector)  { size_t size = vector.size(); fout.write((char*)&size, sizeof(size)); fout.write((char*)&vector[0], size * sizeof(vector[0])); }
+            WRITE_VECTOR(mesh.vertices);
+            uint lodCount = (uint)mesh.LODs.size();
+            fout.write((char*)&lodCount, sizeof(uint));
+            for (uint i = 0; i < mesh.LODs.size(); i++)
+            {
+                auto& lod = mesh.LODs[i];
+                WRITE_VECTOR(lod.meshlets);
+                WRITE_VECTOR(lod.meshlet_triangles);
+                WRITE_VECTOR(lod.meshlet_vertices);
+                WRITE_VECTOR(lod.indices);
+            }
             fout.close();
         }
 
@@ -863,58 +876,72 @@ public:
     }
 
     // also DirectXMesh can do meshlets https://github.com/microsoft/DirectXMesh
-    MeshData Process(MeshOriginal& originalMesh)
+    MeshData Process(MeshOriginal& originalMesh, uint LODLevel)
     {
 		ZoneScoped;
+        MeshData optimizedMesh;
+        optimizedMesh.vertices = originalMesh.vertices;
+        optimizedMesh.boundingSphere = originalMesh.boundingSphere;
+
         const float cone_weight = 0.5f;
 
         //meshopt_generateVertexRemap
 
-        size_t max_meshlets = meshopt_buildMeshletsBound(originalMesh.indices.size(), HLSL::max_vertices, HLSL::max_triangles);
-        std::vector<meshopt_Meshlet> meshopt_meshlets(max_meshlets);
-        std::vector<unsigned int> meshlet_vertices(max_meshlets * HLSL::max_vertices);
-        std::vector<unsigned char> meshlet_triangles(max_meshlets * HLSL::max_triangles * 3);
-
-        size_t meshlet_count = meshopt_buildMeshlets(meshopt_meshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(), originalMesh.indices.data(), originalMesh.indices.size(), &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex), HLSL::max_vertices, HLSL::max_triangles, cone_weight);
-
-
-        std::vector<Meshlet> meshlets(meshlet_count);
-        meshlets.resize(meshlet_count);
-        for (uint i = 0; i < meshlet_count; i++)
+        for (uint lodindex = 0; lodindex < LODLevel; lodindex++)
         {
-            auto& m = meshopt_meshlets[i];
-            meshopt_optimizeMeshlet(&meshlet_vertices[m.vertex_offset], &meshlet_triangles[m.triangle_offset], m.triangle_count, m.vertex_count);
-            meshopt_Bounds bounds = meshopt_computeMeshletBounds(&meshlet_vertices[m.vertex_offset], &meshlet_triangles[m.triangle_offset], m.triangle_count, &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex));
+            auto& lod = optimizedMesh.LODs.emplace_back();
 
-            meshlets[i].triangleCount = m.triangle_count;
-            meshlets[i].triangleOffset = m.triangle_offset;
-            meshlets[i].vertexCount = m.vertex_count;
-            meshlets[i].vertexOffset = m.vertex_offset;
-            meshlets[i].boundingSphere = float4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
-        }
+            float threshold = lodindex == 0 ? 1 : pow(0.25f, lodindex);
+            size_t target_index_count = size_t(originalMesh.indices.size() * threshold);
+            float target_error = 1e-2f;
 
-        const meshopt_Meshlet& last = meshopt_meshlets[meshlet_count - 1];
-        meshlet_vertices.resize(last.vertex_offset + last.vertex_count);
-        meshlet_triangles.resize(last.triangle_offset + ((last.triangle_count * 3 + 3) & ~3));
-        //meshopt_meshlets.resize(meshlet_count);
+            lod.indices.resize(originalMesh.indices.size());
+            float lod_error = 0.f;
+            uint newIndexCount = meshopt_simplify(&lod.indices[0], originalMesh.indices.data(), originalMesh.indices.size(), &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex), target_index_count, target_error, /* options= */ 0, &lod_error);
+            lod.indices.resize(newIndexCount);
 
-        MeshData optimizedMesh;
-        optimizedMesh.meshlets = meshlets;
-        optimizedMesh.meshlet_vertices = meshlet_vertices;
-        optimizedMesh.meshlet_triangles = meshlet_triangles;
-        optimizedMesh.vertices = originalMesh.vertices;
-        optimizedMesh.indices = originalMesh.indices;
-        optimizedMesh.boundingSphere = originalMesh.boundingSphere;
+            size_t max_meshlets = meshopt_buildMeshletsBound(lod.indices.size(), HLSL::max_vertices, HLSL::max_triangles);
+            std::vector<meshopt_Meshlet> meshopt_meshlets(max_meshlets);
+            std::vector<unsigned int> meshlet_vertices(max_meshlets * HLSL::max_vertices);
+            std::vector<unsigned char> meshlet_triangles(max_meshlets * HLSL::max_triangles * 3);
+
+            size_t meshlet_count = meshopt_buildMeshlets(meshopt_meshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(), lod.indices.data(), lod.indices.size(), &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex), HLSL::max_vertices, HLSL::max_triangles, cone_weight);
+
+            std::vector<Meshlet> meshlets(meshlet_count);
+            meshlets.resize(meshlet_count);
+            for (uint i = 0; i < meshlet_count; i++)
+            {
+                auto& m = meshopt_meshlets[i];
+                meshopt_optimizeMeshlet(&meshlet_vertices[m.vertex_offset], &meshlet_triangles[m.triangle_offset], m.triangle_count, m.vertex_count);
+                meshopt_Bounds bounds = meshopt_computeMeshletBounds(&meshlet_vertices[m.vertex_offset], &meshlet_triangles[m.triangle_offset], m.triangle_count, &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex));
+
+                meshlets[i].triangleCount = m.triangle_count;
+                meshlets[i].triangleOffset = m.triangle_offset;
+                meshlets[i].vertexCount = m.vertex_count;
+                meshlets[i].vertexOffset = m.vertex_offset;
+                meshlets[i].boundingSphere = float4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
+            }
+
+            const meshopt_Meshlet& last = meshopt_meshlets[meshlet_count - 1];
+            meshlet_vertices.resize(last.vertex_offset + last.vertex_count);
+            meshlet_triangles.resize(last.triangle_offset + ((last.triangle_count * 3 + 3) & ~3));
+            //meshopt_meshlets.resize(meshlet_count);
+
+            lod.meshlets = meshlets;
+            lod.meshlet_vertices = meshlet_vertices;
+            lod.meshlet_triangles = meshlet_triangles;
+            lod.indices = lod.indices;
         
-        for (uint i = 0; i < optimizedMesh.meshlets.size(); i++)
-        {
-            seedAssert(optimizedMesh.meshlets[i].vertexCount > 0);
-            seedAssert(optimizedMesh.meshlets[i].triangleCount > 0);
-            seedAssert(optimizedMesh.meshlets[i].vertexCount <= HLSL::max_vertices);
-            seedAssert(optimizedMesh.meshlets[i].triangleCount <= HLSL::max_triangles);
-            seedAssert(optimizedMesh.meshlets[i].vertexOffset < optimizedMesh.meshlet_vertices.size());
-            seedAssert(optimizedMesh.meshlets[i].triangleOffset < optimizedMesh.meshlet_triangles.size());
-            //IOs::Log("V {} | T {}", optimizedMesh.meshlets[i].vertexCount, optimizedMesh.meshlets[i].triangleCount);
+            for (uint i = 0; i < lod.meshlets.size(); i++)
+            {
+                seedAssert(lod.meshlets[i].vertexCount > 0);
+                seedAssert(lod.meshlets[i].triangleCount > 0);
+                seedAssert(lod.meshlets[i].vertexCount <= HLSL::max_vertices);
+                seedAssert(lod.meshlets[i].triangleCount <= HLSL::max_triangles);
+                seedAssert(lod.meshlets[i].vertexOffset < lod.meshlet_vertices.size());
+                seedAssert(lod.meshlets[i].triangleOffset < lod.meshlet_triangles.size());
+                //IOs::Log("V {} | T {}", lod.meshlets[i].vertexCount, lod.meshlets[i].triangleCount);
+            }
         }
 
         return optimizedMesh;
@@ -936,6 +963,8 @@ class SceneLoader
     std::vector<World::Entity> animationIndexToEntity;
     std::vector<World::Entity> skeletonIndexToEntity;
     std::vector<World::Entity> textureToEntity;
+
+    uint meshCount = 2; // std mesh(containing lods) + rtmesh
 
 public:
     static SceneLoader* instance;
@@ -1094,7 +1123,8 @@ public:
                 }
 
                 auto& instance = ent.Get<Components::Instance>();
-                instance.mesh = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i]] };
+                instance.mesh = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i] * meshCount + 0] };
+                instance.meshRT = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i] * meshCount + 1] };
                 instance.material = Components::Handle<Components::Material>{ matIndexToEntity[_scene->mMeshes[node->mMeshes[i]]->mMaterialIndex] };
             }
         }
@@ -1181,17 +1211,27 @@ public:
                 originalMesh.boundingSphere = float4(center, radius);
 
                 assetID id = assetID::Invalid;
+                assetID idRT = assetID::Invalid;
                 if (originalMesh.indices.size() != 0)
                 {
-                    MeshData mesh = MeshLoader::instance->Process(originalMesh);
+                    MeshData mesh = MeshLoader::instance->Process(originalMesh, 4);
                     id = MeshLoader::instance->Write(mesh, std::format("{}{}", m->mName.C_Str(), i));
-                }
 
+                    MeshData meshRT = MeshLoader::instance->Process(originalMesh, 1);
+                    idRT = MeshLoader::instance->Write(mesh, std::format("{}{}_RTMesh", m->mName.C_Str(), i));
+                }
                 World::Entity ent;
                 ent.Make(Components::Mesh::mask);
                 ent.Get<Components::Mesh>().id = id;
 
                 meshIndexToEntity.push_back(ent);
+
+
+                World::Entity entRT;
+                entRT.Make(Components::Mesh::mask);
+                entRT.Get<Components::Mesh>().id = idRT;
+
+                meshIndexToEntity.push_back(entRT);
             }
         }
     }
@@ -2286,7 +2326,7 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
         if (ignoreBudget || meshLoaded < meshLoadingLimit)
         {
             MeshData meshData = MeshLoader::instance->Read(map[id].path);
-            if (meshData.meshlets.size() > 0)
+            if (meshData.vertices.size() > 0)
             {
                 Mesh mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get());
                 lock.lock();

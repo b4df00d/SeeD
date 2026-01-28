@@ -145,14 +145,18 @@ namespace HLSL
     struct Mesh
     {
         float4 boundingSphere;
-        uint meshletOffset;
-        uint meshletCount;
+        uint lodCount;
+        uint storageIndex;
         uint vertexOffset;
         uint vertexCount;
-        uint indexOffset;
-        uint indexCount;
-        uint storageIndex;
-        uint pad1;
+        struct LOD
+        {
+            uint meshletOffset;
+            uint meshletCount;
+            uint indexOffset;
+            uint indexCount;
+        };
+        LOD LODs[4];
     };
     
     static const uint MaterialTextureCount = 7;

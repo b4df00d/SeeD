@@ -2202,10 +2202,14 @@ struct Mesh : HLSL::Mesh
 
 struct MeshData
 {
-    std::vector<Meshlet> meshlets;
-    std::vector<unsigned int> meshlet_vertices;
-    std::vector<unsigned char> meshlet_triangles;
-    std::vector<unsigned int> indices;
+    struct LOD
+    {
+        std::vector<Meshlet> meshlets;
+        std::vector<unsigned int> meshlet_vertices;
+        std::vector<unsigned char> meshlet_triangles;
+        std::vector<unsigned int> indices;
+    };
+    std::vector<LOD> LODs;
     std::vector<Vertex> vertices;
     float4 boundingSphere;
 };
@@ -2290,56 +2294,66 @@ struct MeshStorage
         ZoneScoped;
 
         lock.lock();
+        Mesh newMesh;
+
         uint _nextMeshOffset = nextMeshOffset;
-        uint _nextMeshletOffset = nextMeshletOffset;
-        uint _nextMeshletVertexOffset = nextMeshletVertexOffset;
-        uint _nextMeshletTriangleOffset = nextMeshletTriangleOffset;
         uint _nextVertexOffset = nextVertexOffset;
-        uint _nextIndexOffset = nextIndexOffset;
 
         nextMeshOffset += 1;
-        nextMeshletOffset += (uint)meshData.meshlets.size();
-        nextMeshletVertexOffset += (uint)meshData.meshlet_vertices.size();
-        nextMeshletTriangleOffset += (uint)meshData.meshlet_triangles.size();
         nextVertexOffset += (uint)meshData.vertices.size();
-        nextIndexOffset += (uint)meshData.indices.size();
-
-
         seedAssert(nextVertexOffset < meshletVertexMaxCount);
-        seedAssert(nextIndexOffset < meshletTrianglesMaxCount);
 
-        lock.unlock();
-
-        Mesh newMesh;
         newMesh.boundingSphere = meshData.boundingSphere;
-        newMesh.meshletCount = (uint)meshData.meshlets.size();
-        newMesh.meshletOffset = _nextMeshletOffset;
-        newMesh.indexCount = (uint)meshData.indices.size();
-        newMesh.indexOffset = _nextIndexOffset;
+        newMesh.storageIndex = _nextMeshOffset;
         newMesh.vertexCount = (uint)meshData.vertices.size();
         newMesh.vertexOffset = _nextVertexOffset;
-        newMesh.storageIndex = _nextMeshOffset;
-        for (uint i = 0; i < meshData.meshlets.size(); i++)
-        {
-            meshData.meshlets[i].triangleOffset += _nextMeshletTriangleOffset;
-            meshData.meshlets[i].vertexOffset += _nextMeshletVertexOffset;
 
-        }
-        for (uint j = 0; j < meshData.meshlet_vertices.size(); j++)
+        for (uint i = 0; i < min((int)meshData.LODs.size(), 4); i++)
         {
-            meshData.meshlet_vertices[j] += _nextVertexOffset;
+            auto& lod = meshData.LODs[i];
+            auto& newMeshLOD = newMesh.LODs[i];
+
+            uint _nextMeshletOffset = nextMeshletOffset;
+            uint _nextMeshletVertexOffset = nextMeshletVertexOffset;
+            uint _nextMeshletTriangleOffset = nextMeshletTriangleOffset;
+            uint _nextIndexOffset = nextIndexOffset;
+
+            nextMeshletOffset += (uint)lod.meshlets.size();
+            nextMeshletVertexOffset += (uint)lod.meshlet_vertices.size();
+            nextMeshletTriangleOffset += (uint)lod.meshlet_triangles.size();
+            nextIndexOffset += (uint)lod.indices.size();
+
+            seedAssert(nextIndexOffset < meshletTrianglesMaxCount);
+
+            newMeshLOD.meshletCount = (uint)lod.meshlets.size();
+            newMeshLOD.meshletOffset = _nextMeshletOffset;
+            newMeshLOD.indexCount = (uint)lod.indices.size();
+            newMeshLOD.indexOffset = _nextIndexOffset;
+
+            for (uint i = 0; i < lod.meshlets.size(); i++)
+            {
+                lod.meshlets[i].triangleOffset += _nextMeshletTriangleOffset;
+                lod.meshlets[i].vertexOffset += _nextMeshletVertexOffset;
+            }
+            for (uint j = 0; j < lod.meshlet_vertices.size(); j++)
+            {
+                lod.meshlet_vertices[j] += _nextVertexOffset;
+            }
+            for (uint j = 0; j < lod.indices.size(); j++)
+            {
+                lod.indices[j] += _nextVertexOffset;
+            }
+
+            meshlets.UploadElements(lod.meshlets.data(), (uint)lod.meshlets.size(), _nextMeshletOffset, commandBuffer);
+            meshletVertices.UploadElements(lod.meshlet_vertices.data(), (uint)lod.meshlet_vertices.size(), _nextMeshletVertexOffset, commandBuffer);
+            meshletTriangles.UploadElements(lod.meshlet_triangles.data(), (uint)lod.meshlet_triangles.size(), _nextMeshletTriangleOffset, commandBuffer);
+            indices.UploadElements(lod.indices.data(), (uint)lod.indices.size(), _nextIndexOffset, commandBuffer);
         }
-        for (uint j = 0; j < meshData.indices.size(); j++)
-        {
-            meshData.indices[j] += _nextVertexOffset;
-        }
+        lock.unlock();
 
         meshes.UploadElements(&newMesh, 1, _nextMeshOffset, commandBuffer);
-        meshlets.UploadElements(meshData.meshlets.data(), (uint)meshData.meshlets.size(), _nextMeshletOffset, commandBuffer);
-        meshletVertices.UploadElements(meshData.meshlet_vertices.data(), (uint)meshData.meshlet_vertices.size(), _nextMeshletVertexOffset, commandBuffer);
-        meshletTriangles.UploadElements(meshData.meshlet_triangles.data(), (uint)meshData.meshlet_triangles.size(), _nextMeshletTriangleOffset, commandBuffer);
         vertices.UploadElements(meshData.vertices.data(), (uint)meshData.vertices.size(), _nextVertexOffset, commandBuffer);
-        indices.UploadElements(meshData.indices.data(), (uint)meshData.indices.size(), _nextIndexOffset, commandBuffer);
+
 
         meshes.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         meshlets.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
@@ -2367,9 +2381,9 @@ struct MeshStorage
         descriptor.Triangles.VertexBuffer.StrideInBytes = vertices.stride;
         descriptor.Triangles.VertexCount = mesh.vertexCount;
         descriptor.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
-        descriptor.Triangles.IndexBuffer = indices.GetResource()->GetGPUVirtualAddress() + mesh.indexOffset * indices.stride;
+        descriptor.Triangles.IndexBuffer = indices.GetResource()->GetGPUVirtualAddress() + mesh.LODs[0].indexOffset * indices.stride; // TODO : read from meshRT and not LOD 0
         descriptor.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
-        descriptor.Triangles.IndexCount = mesh.indexCount;
+        descriptor.Triangles.IndexCount = mesh.LODs[0].indexCount;
         descriptor.Triangles.Transform3x4 = identityMatrix.GetResourcePtr()->GetGPUVirtualAddress();
         descriptor.Flags = isOpaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
 

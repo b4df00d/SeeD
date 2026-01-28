@@ -1075,6 +1075,26 @@ public:
 };
 PostProcessWindow postProcessWindow;
 
+class MeshStorageWindow : public EditorWindow
+{
+public:
+    MeshStorageWindow() : EditorWindow("MeshStorage") {}
+    void Update() override final
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("MeshStorageWindow", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+
+        // Read buffer occupancy of mesh storage
+
+        ImGui::End();
+    }
+};
+MeshStorageWindow meshStorageWindow;
+
 class HandlePickingWindow : public EditorWindow
 {
     struct HandleEntry

@@ -2380,7 +2380,7 @@ public:
                     // count instances with shader
                     instanceCount++;
 
-                    localMeshletCount += mesh->meshletCount;
+                    localMeshletCount += mesh->LODs[0].meshletCount;
 
                     // if in range (depending on distance and BC size)
                     // Add to TLAS

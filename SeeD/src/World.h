@@ -192,6 +192,7 @@ namespace Components
     struct Instance : ComponentBase<Instance>
     {
         Handle<Mesh> mesh;
+        Handle<Mesh> meshRT;
         Handle<Material> material;
     };
 
