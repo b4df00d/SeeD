@@ -876,7 +876,7 @@ public:
     }
 
     // also DirectXMesh can do meshlets https://github.com/microsoft/DirectXMesh
-    MeshData Process(MeshOriginal& originalMesh, uint LODLevel)
+    MeshData Process(MeshOriginal& originalMesh, uint LODLevelMin, uint LODLevelMax)
     {
 		ZoneScoped;
         MeshData optimizedMesh;
@@ -887,7 +887,7 @@ public:
 
         //meshopt_generateVertexRemap
 
-        for (uint lodindex = 0; lodindex < LODLevel; lodindex++)
+        for (uint lodindex = LODLevelMin; lodindex <= LODLevelMax; lodindex++)
         {
             auto& lod = optimizedMesh.LODs.emplace_back();
 
@@ -1214,10 +1214,10 @@ public:
                 assetID idRT = assetID::Invalid;
                 if (originalMesh.indices.size() != 0)
                 {
-                    MeshData mesh = MeshLoader::instance->Process(originalMesh, 4);
+                    MeshData mesh = MeshLoader::instance->Process(originalMesh, 0, 3);
                     id = MeshLoader::instance->Write(mesh, std::format("{}{}", m->mName.C_Str(), i));
 
-                    MeshData meshRT = MeshLoader::instance->Process(originalMesh, 1);
+                    MeshData meshRT = MeshLoader::instance->Process(originalMesh, 2, 2);
                     idRT = MeshLoader::instance->Write(mesh, std::format("{}{}_RTMesh", m->mName.C_Str(), i));
                 }
                 World::Entity ent;
