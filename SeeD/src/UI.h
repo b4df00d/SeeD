@@ -1023,7 +1023,7 @@ public:
         options.debugMode = (Options::DebugMode)debugModeIndex;
 
         int debugDrawIndex = (int)options.debugDraw;
-        const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "lighting", "GIprobes"};
+        const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "lighting", "GIprobes", "GIBounces" };
         ImGui::Combo("debugDraw", &debugDrawIndex, itemsDraw, IM_ARRAYSIZE(itemsDraw));
         options.debugDraw = (Options::DebugDraw)debugDrawIndex;
 
@@ -1050,6 +1050,11 @@ public:
         ImGui::SliderFloat("randBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirRandBias, 0, 1);
         ImGui::SliderFloat("spacialRandBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirSpacialRandBias, 0, 1);
         ImGui::SliderFloat("spacialRadius", &Renderer::instance->mainView.raytracingContext.rtParameters.spacialRadius, 0, 128);
+        ImGui::SliderFloat("SHARCSceneScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCSceneScale, 0.1, 128, "%f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("SHARCRadianceScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCRadianceScale, 0.1, 10);
+        ImGui::SliderFloat("SHARCRoughnessThreshold", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCRoughnessThreshold, 0, 1);
+        ImGui::SliderInt("SHARCSamplesPerPixel", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.SHARCSamplesPerPixel, 1, 4);
+        ImGui::SliderInt("SHARCAccumulationFrameNum", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.SHARCAccumulationFrameNum, 1, 256, "%d", ImGuiSliderFlags_Logarithmic);
 
         ImGui::Text("ATMO");
         ImGui::SliderFloat("density", &Renderer::instance->mainView.atmospehricScattering.asparams.density, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
@@ -1923,7 +1928,7 @@ public:
                         trans.scale = float3(1);
                         auto& light = ent.Get<Components::Light>();
                         light.color = float4(2, 1.75, 1.5, 1);
-                        light.type = 0;
+                        light.type = HLSL::LightType::Directional;
                         light.size = 0.025f;
                         editorState.dirtyHierarchy = true;
                     }

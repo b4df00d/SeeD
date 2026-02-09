@@ -93,7 +93,7 @@ namespace Components
     template<typename T>
     uint ComponentBase<T>::bucketIndex = GetComponentStride<T>();
     template<typename T>
-    Mask ComponentBase<T>::mask = 1 << ComponentBase<T>::bucketIndex;
+    Mask ComponentBase<T>::mask = (unsigned long long) 1 << ComponentBase<T>::bucketIndex;
     template<typename T>
     uint ComponentBase<T>::stride = sizeof(T);
 
@@ -203,7 +203,7 @@ namespace Components
 
     struct Light : ComponentBase<Light>
     {
-        uint type;
+        HLSL::LightType type;
         float4 color;
         float size;
         float range;

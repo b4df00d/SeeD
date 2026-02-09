@@ -392,26 +392,6 @@ struct EditorContext
     }
 };
 
-struct ProbeGrid
-{
-    Resource probes;
-    uint3 probesResolution;
-    float3 probesBBSize;
-
-    void On(uint3 res, float3 size)
-    {
-        probesResolution = res;
-        probesBBSize = size;
-        uint bufferCount = probesResolution.x * probesResolution.y * probesResolution.z;
-        probes.CreateBuffer<HLSL::ProbeData>(bufferCount, "probes");
-    }
-
-    void Off()
-    {
-        probes.Release();
-    }
-};
-
 struct RayTracingContext
 {
     HLSL::RTParameters rtParameters;
@@ -420,16 +400,14 @@ struct RayTracingContext
     PerFrame<Resource> directReservoir;
     PerFrame<Resource> giReservoir;
     PerFrame<Resource> giReservoirSpatial;
-    ProbeGrid probes[3];
+
+    Resource SHARCHash;
+    Resource SHARCAccumulation;
+    Resource SHARCResolved;
 
     void On(uint2 resolution)
     {
-        rtParameters.maxFrameFilteringCount = 6;
-        rtParameters.reservoirRandBias = 0.2;
-        rtParameters.reservoirSpacialRandBias = 0.2;
-        rtParameters.spacialRadius = 0.0f;
-
-        TLAS.CreateAccelerationStructure(64*1024*1024, "TLAS");
+        TLAS.CreateAccelerationStructure(64 * 1024 * 1024, "TLAS");
 
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
@@ -438,11 +416,36 @@ struct RayTracingContext
             giReservoirSpatial.Get(i).CreateBuffer<HLSL::GIReservoirCompressed>(resolution.x * resolution.y, "GIReservoirSpacial");
         }
 
-        float multiRes = 2;
-        float multi = 2;
-        probes[0].On(uint3(4, 4, 4) * multi * multiRes, float3(8, 8, 8) * multi);
-        probes[1].On(uint3(8, 8, 8) * multi * multiRes, float3(32, 32, 32) * multi);
-        probes[2].On(uint3(8, 8, 8) * multi * multiRes, float3(128, 128, 128) * multi);
+        uint SHARCEntryCount = (uint)pow(2, 22);
+        SHARCHash.CreateBuffer(SHARCEntryCount * 8, 8, false, "SHARCHash");
+        SHARCAccumulation.CreateBuffer(SHARCEntryCount * 16, 16, false, "SHARCAccumulation");
+        SHARCResolved.CreateBuffer(SHARCEntryCount * 16, 16, false, "SHARCResolved");
+
+        rtParameters.maxFrameFilteringCount = 16;
+        rtParameters.reservoirRandBias = 0.5;
+        rtParameters.reservoirSpacialRandBias = 0.2;
+        rtParameters.spacialRadius = 0.0f;
+
+        rtParameters.SHARCSceneScale = 20;
+        rtParameters.SHARCEntriesNum = SHARCEntryCount;
+        rtParameters.SHARCHashEntriesBufferIndex = SHARCHash.uav.offset;
+        rtParameters.SHARCAccumulationBufferIndex = SHARCAccumulation.uav.offset;
+        rtParameters.SHARCResolvedBufferIndex = SHARCResolved.uav.offset;
+        rtParameters.SHARCAccumulationFrameNum = 128;
+        rtParameters.SHARCStaleFrameNum = 256;
+        rtParameters.SHARCEnableAntifirefly = true;
+        rtParameters.SHARCSamplesPerPixel = 1;
+        rtParameters.SHARCRadianceScale = 1;
+        rtParameters.SHARCRoughnessThreshold = 0.5;
+
+        rtParameters.enableBackFaceCull = true;
+        rtParameters.enableLighting = true;
+        rtParameters.enableTransmission = true;
+        rtParameters.bouncesMax = 3;
+        rtParameters.enableRussianRoulette = true;
+        rtParameters.enableSoftShadows = true;
+        rtParameters.throughputThreshold = 0.1f;
+        rtParameters.probeDownsampling = 4.0f;
     }
 
     void Off()
@@ -460,9 +463,9 @@ struct RayTracingContext
             giReservoirSpatial.Get(i).Release();
         }
 
-        probes[0].Off();
-        probes[1].Off();
-        probes[2].Off();
+        SHARCHash.Release();
+        SHARCAccumulation.Release();
+        SHARCResolved.Release();
     }
 
     void Reset()
@@ -592,7 +595,7 @@ public:
 
     HLSL::RTParameters SetupRayTracingContextParams()
     {
-        HLSL::RTParameters rayTracingContextParams;
+        HLSL::RTParameters rayTracingContextParams = raytracingContext.rtParameters;
 
         rayTracingContextParams.BVH = raytracingContext.TLAS.srv.offset;
         rayTracingContextParams.directReservoirIndex = raytracingContext.directReservoir.Get().uav.offset;
@@ -601,19 +604,6 @@ public:
         rayTracingContextParams.previousgiReservoirIndex = raytracingContext.giReservoir.GetPrevious().uav.offset;
         rayTracingContextParams.passNumber = 0;
 
-        for (uint i = 0; i < ARRAYSIZE(raytracingContext.probes); i++)
-        {
-            rayTracingContextParams.probes[i].probesSamplesPerFrame = 2 * (3 - i);
-            rayTracingContextParams.probes[i].probesIndex = raytracingContext.probes[i].probes.uav.offset;
-            rayTracingContextParams.probes[i].probesResolution = uint4(raytracingContext.probes[i].probesResolution, 0);
-            float3 probeCellSize = (raytracingContext.probes[i].probesBBSize / float3(raytracingContext.probes[i].probesResolution));
-            float3 camWorldPos = viewWorld->cameras[0].worldPos.xyz + inverse(viewWorld->cameras[0].view)[2].xyz * raytracingContext.probes[i].probesBBSize * 0.33f;
-            int3 camCellPos = floor(camWorldPos / probeCellSize);
-            camWorldPos = float3(camCellPos) * probeCellSize;
-            rayTracingContextParams.probes[i].probesBBMin = float4(camWorldPos.xyz - raytracingContext.probes[i].probesBBSize * 0.5f, 0);
-            rayTracingContextParams.probes[i].probesBBMax = float4(camWorldPos.xyz + raytracingContext.probes[i].probesBBSize * 0.5f, 0);
-             rayTracingContextParams.probes[i].probesAddressOffset = uint4(ModulusI(camCellPos, int3(raytracingContext.probes[i].probesResolution)), 0);
-        }
 
         return rayTracingContextParams;
     }
@@ -629,6 +619,7 @@ public:
         editorContextParams.clusters = options.debugDraw == Options::DebugDraw::clusters;
         editorContextParams.lighting = options.debugDraw == Options::DebugDraw::lighting;
         editorContextParams.GIprobes = options.debugDraw == Options::DebugDraw::GIprobes;
+        editorContextParams.GIBounces = options.debugDraw == Options::DebugDraw::GIBounces;
         editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
         editorContextParams.debugVerticesHeapIndex = editorContext.indirectDebugVertices.GetResource().uav.offset;
         editorContextParams.debugVerticesCountHeapIndex = editorContext.indirectDebugVerticesCount.GetResource().uav.offset;
@@ -1062,12 +1053,12 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         depth.Register("depth", view);
-        cullingResetShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingReset.hlsl");
-        cullingInstancesShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingInstances.hlsl");
+        cullingResetShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|Reset");
+        cullingInstancesShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|Instances");
 #if GROUPED_CULLING
-        cullingCountMeshletsDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingCountMeshletsDispatch.hlsl");
+        cullingCountMeshletsDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|Count");
 #endif
-        cullingMeshletsShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\cullingMeshlets.hlsl");
+        cullingMeshletsShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|Meshlets");
     }
     void Setup(View* view) override
     {
@@ -1192,7 +1183,7 @@ public:
         objectID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "objectID");
         instanceID.Register("instanceID", view);
         instanceID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "instanceID");
-        meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl");
+        meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl|DefaultG");
     }
     void Setup(View* view) override
     {
@@ -1236,20 +1227,27 @@ public:
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
 
+
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
+
         Close();
     }
 };
 
 class LightingProbes : public Pass
 {
-    Components::Handle<Components::Shader> rayProbesDispatchShader;
+    Components::Handle<Components::Shader> rayDispatchShader;
+    Components::Handle<Components::Shader> resolveShader;
 
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
+
+        rayDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracing2.hlsl|Update");
+        resolveShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\SHARCResolve.hlsl|sharcResolve");
+
         ZoneScoped;
-        rayProbesDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracingprobes.hlsl");
     }
     void Setup(View* view) override
     {
@@ -1262,28 +1260,36 @@ public:
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld->commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
+        auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
 
-        Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayProbesDispatchShader.Get().id, true);
+        // Trace rays (+ temporal ReSTIR)
+        Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
         commandBuffer->SetRaytracing(rayDispatch);
         // global root sig for ray tracing is the same as compute shaders
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
 
-        for (uint i = 0; i < ARRAYSIZE(view->raytracingContext.probes); i++)
-        {
-            view->raytracingContext.rtParameters.probeToCompute = i;
-            auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
-            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
+        D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
+        drd.Width = (uint)((float)view->renderResolution.x / view->raytracingContext.rtParameters.probeDownsampling);
+        drd.Height = (uint)((float)view->renderResolution.y / view->raytracingContext.rtParameters.probeDownsampling);
 
-            D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
-            drd.Width = view->raytracingContext.probes[i].probesResolution.x;
-            drd.Height = view->raytracingContext.probes[i].probesResolution.y;
-            drd.Depth = view->raytracingContext.probes[i].probesResolution.z;
+        commandBuffer->cmd->DispatchRays(&drd);
 
-            commandBuffer->cmd->DispatchRays(&drd);
-        }
 
-        //view->raytracingContext.GI.Barrier(commandBuffer.Get());
+        view->raytracingContext.SHARCAccumulation.Barrier(commandBuffer.Get());
+
+
+        Shader& resolve = *AssetLibrary::instance->Get<Shader>(resolveShader.Get().id, true);
+        commandBuffer->SetCompute(resolve);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
+
+        commandBuffer->cmd->Dispatch(resolve.DispatchX(view->raytracingContext.rtParameters.SHARCEntriesNum), 1, 1);
 
         Close();
     }
@@ -1298,7 +1304,6 @@ class Lighting : public Pass
     ViewResource normal;
     Components::Handle<Components::Shader> rayDispatchShader;
     Components::Handle<Components::Shader> ReSTIRSpacialShader;
-    Components::Handle<Components::Shader> rayValidateDispatchShader;
     Components::Handle<Components::Shader> applyLightingShader;
 
 public:
@@ -1313,15 +1318,9 @@ public:
         albedo.Register("albedo", view);
         depth.Register("depth", view);
         normal.Register("normal", view);
-        rayDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracing.hlsl");
-        ReSTIRSpacialShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\ReSTIRSpacial.hlsl");
-        rayValidateDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracingValidate.hlsl");
-        applyLightingShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\lighting.hlsl");
-
-        Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
-        Shader& ReSTIRSpacial = *AssetLibrary::instance->Get<Shader>(ReSTIRSpacialShader.Get().id, true);
-        Shader& rayValidateDispatch = *AssetLibrary::instance->Get<Shader>(rayValidateDispatchShader.Get().id, true);
-        Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
+        rayDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracing2.hlsl|Query");
+        ReSTIRSpacialShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\ReSTIRSpacial.hlsl|ReSTIRSpacial");
+        applyLightingShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\lighting.hlsl|Lighting");
     }
     void Setup(View* view) override
     {
@@ -1331,9 +1330,6 @@ public:
     {
         ZoneScoped;
         Open();
-
-
-        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
 
         view->raytracingContext.rtParameters.lightedIndex = lighted.Get().uav.offset;
         view->raytracingContext.rtParameters.specularHitDistanceIndex = specularHitDistance.Get().uav.offset;
@@ -1416,7 +1412,7 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        indirectDebugInitShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debugInit.hlsl");
+        indirectDebugInitShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debug.hlsl|DebugInit");
     }
     void Setup(View* view) override
     {
@@ -1456,8 +1452,8 @@ public:
         ZoneScoped;
         postProcessed.Register("postProcessed", view);
         depth.Register("depth", view);
-        indirectDebugShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debug.hlsl");
-        selectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\selection.hlsl");
+        indirectDebugShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debug.hlsl|Debug");
+        selectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\selection.hlsl|Selection");
     }
     void Setup(View* view) override
     {
@@ -1530,7 +1526,7 @@ public:
         ZoneScoped;
         depth.Register("depth", view);
         lighted.Register("lighted", view);
-        meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl");
+        meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl|DefaultF");
     }
     void Setup(View* view) override
     {
@@ -1571,9 +1567,9 @@ public:
         atmosphericScatteringHistoryFroxels.Register("atmosphericScatteringHistoryFroxels", view);
         atmosphericScatteringHistoryFroxels.Get().CreateTexture(atmoSize, DXGI_FORMAT_R16G16B16A16_FLOAT, false, "atmosphericScatteringHistoryFroxels");
         depth.Register("depth", view);
-        atmosphericScatteringShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl");
-        atmosphericScatteringReprojectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScatteringReprojection.hlsl");
-        atmosphericScatteringAccumulationShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScatteringAccumulation.hlsl");
+        atmosphericScatteringShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Update");
+        atmosphericScatteringReprojectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Reprojection");
+        atmosphericScatteringAccumulationShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Accumulation");
 
         asparams.density = 0.01;
         asparams.luminosity = 2.0;
@@ -1581,12 +1577,12 @@ public:
 
         Open();
         HLSL::Froxels froxelsData[2];
-        froxelsData[0].resolution[0] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width;
-        froxelsData[0].resolution[1] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height;
+        froxelsData[0].resolution[0] = (uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width;
+        froxelsData[0].resolution[1] = (uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height;
         froxelsData[0].resolution[2] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
         froxelsData[0].index = atmosphericScatteringFroxels.Get().uav.offset;
-        froxelsData[1].resolution[0] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Width;
-        froxelsData[1].resolution[1] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Height;
+        froxelsData[1].resolution[0] = (uint)atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Width;
+        froxelsData[1].resolution[1] = (uint)atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Height;
         froxelsData[1].resolution[2] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
         froxelsData[1].index = atmosphericScatteringHistoryFroxels.Get().uav.offset;
         froxelsBuffer.Get().UploadElements(froxelsData, ARRAYSIZE(froxelsData), 0, commandBuffer.Get());
@@ -1632,8 +1628,8 @@ public:
         commandBuffer->cmd->SetComputeRootConstantBufferView(Custom2Register, atmosphericScatteringAddress);
 
         D3D12_DISPATCH_RAYS_DESC drd = atmosphericScattering.GetRTDesc();
-        drd.Width = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width;
-        drd.Height = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height;
+        drd.Width = (uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width;
+        drd.Height = (uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height;
         drd.Depth = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
 
         commandBuffer->cmd->DispatchRays(&drd);
@@ -1645,8 +1641,8 @@ public:
         Shader& atmosphericScatteringReprojection = *AssetLibrary::instance->Get<Shader>(atmosphericScatteringReprojectionShader.Get().id, true);
         commandBuffer->SetCompute(atmosphericScatteringReprojection);
         commandBuffer->cmd->Dispatch(
-            atmosphericScatteringReprojection.DispatchX(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width),
-            atmosphericScatteringReprojection.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height),
+            atmosphericScatteringReprojection.DispatchX((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width),
+            atmosphericScatteringReprojection.DispatchY((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height),
             atmosphericScatteringReprojection.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize));
 
         atmosphericScatteringFroxels.Get().Barrier(commandBuffer.Get());
@@ -1656,8 +1652,8 @@ public:
         Shader& atmosphericScatteringAccumulation = *AssetLibrary::instance->Get<Shader>(atmosphericScatteringAccumulationShader.Get().id, true);
         commandBuffer->SetCompute(atmosphericScatteringAccumulation);
         commandBuffer->cmd->Dispatch(
-            atmosphericScatteringAccumulation.DispatchX(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width),
-            atmosphericScatteringAccumulation.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height),
+            atmosphericScatteringAccumulation.DispatchX((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width),
+            atmosphericScatteringAccumulation.DispatchY((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height),
             1);
 
         Close();
@@ -1692,7 +1688,7 @@ public:
         depth.Register("depth", view);
         atmosphericScatteringFroxelsBuffer.Register("froxelsBuffer", view);
         atmosphericScatteringFroxels.Register("atmosphericScatteringFroxels", view);
-        postProcessHalfResShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\PostProcessHalfRes.hlsl");
+        postProcessHalfResShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\PostProcessHalfRes.hlsl|PostProcessHalfRes");
     }
     virtual void Off() override
     {
@@ -1758,8 +1754,8 @@ public:
         motion.Register("motion", view);
         depth.Register("depth", view);
         upscaled.Register("upscaled", view);
-        postProcessShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\PostProcess.hlsl");
-        TAAShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\TAA.hlsl");
+        postProcessShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\PostProcess.hlsl|PostProcess");
+        TAAShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\TAA.hlsl|TAA");
 
         ppparams.P = 1;
         ppparams.a = 1;
@@ -2145,14 +2141,14 @@ public:
     Skinning skinning;
     Particles particles;
     Spawning spawning;
-    AccelerationStructure accelerationStructure;
     Culling culling;
     ZPrepass zPrepass;
+    AccelerationStructure accelerationStructure;
+    AtmosphericScattering atmospehricScattering;
     GBuffers gBuffers;
     LightingProbes lightingProbes;
     Lighting lighting;
     Forward forward;
-    AtmosphericScattering atmospehricScattering;
     PostProcessHalfRes postProcessHalfRes;
     DLSS dlss;
     PostProcess postProcess;
@@ -2172,13 +2168,13 @@ public:
         skinning.On(this, GPU::instance->computeQueue, "skinning", &AssetLibrary::instance->commandBuffer, nullptr);
         particles.On(this, GPU::instance->computeQueue, "particles", &AssetLibrary::instance->commandBuffer, nullptr);
         spawning.On(this, GPU::instance->computeQueue, "spawning", &AssetLibrary::instance->commandBuffer, nullptr);
-        accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &AssetLibrary::instance->commandBuffer, nullptr);
-        lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &accelerationStructure.commandBuffer, nullptr);
-        atmospehricScattering.On(this, GPU::instance->computeQueue, "atmospehricScattering", &accelerationStructure.commandBuffer, nullptr);
         culling.On(this, GPU::instance->graphicQueue, "culling", &hzb.commandBuffer, nullptr);
         zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer, nullptr);
+        accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &AssetLibrary::instance->commandBuffer, nullptr);
+        atmospehricScattering.On(this, GPU::instance->computeQueue, "atmospehricScattering", &accelerationStructure.commandBuffer, nullptr);
         gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
-        lighting.On(this, GPU::instance->graphicQueue, "lighting", &accelerationStructure.commandBuffer, &gBuffers.commandBuffer);
+        lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &gBuffers.commandBuffer, &accelerationStructure.commandBuffer);
+        lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers.commandBuffer, &lightingProbes.commandBuffer);
         postProcessHalfRes.On(this, GPU::instance->graphicQueue, "postProcessHalfRes", &lighting.commandBuffer, &atmospehricScattering.commandBuffer);
         forward.On(this, GPU::instance->graphicQueue, "forward", &postProcessHalfRes.commandBuffer, &atmospehricScattering.commandBuffer);
         dlss.On(this, GPU::instance->graphicQueue, "dlss", &forward.commandBuffer, nullptr);
@@ -2195,14 +2191,14 @@ public:
         skinning.Off();
         particles.Off();
         spawning.Off();
-        accelerationStructure.Off();
-        lightingProbes.Off();
         culling.Off();
         zPrepass.Off();
+        accelerationStructure.Off();
+        atmospehricScattering.Off();
         gBuffers.Off();
+        lightingProbes.Off();
         lighting.Off();
         forward.Off();
-        atmospehricScattering.Off();
         postProcessHalfRes.Off();
         dlss.Off();
         postProcess.Off();
@@ -2229,12 +2225,12 @@ public:
         SUBTASKVIEWPASS(skinning);
         SUBTASKVIEWPASS(particles);
         SUBTASKVIEWPASS(spawning);
-        SUBTASKVIEWPASS(accelerationStructure);
-        SUBTASKVIEWPASS(lightingProbes);
-        SUBTASKVIEWPASS(atmospehricScattering);
         SUBTASKVIEWPASS(culling);
         SUBTASKVIEWPASS(zPrepass);
+        SUBTASKVIEWPASS(accelerationStructure);
+        SUBTASKVIEWPASS(atmospehricScattering);
         SUBTASKVIEWPASS(gBuffers);
+        SUBTASKVIEWPASS(lightingProbes);
         SUBTASKVIEWPASS(lighting);
         SUBTASKVIEWPASS(gpuDebug);
         SUBTASKVIEWPASS(forward);
@@ -2280,12 +2276,12 @@ public:
         skinning.Execute();
         particles.Execute();
         spawning.Execute();
-        accelerationStructure.Execute();
-        lightingProbes.Execute();
-        atmospehricScattering.Execute();
         culling.Execute();
         zPrepass.Execute();
+        accelerationStructure.Execute();
+        atmospehricScattering.Execute();
         gBuffers.Execute();
+        lightingProbes.Execute();
         lighting.Execute();
         postProcessHalfRes.Execute();
         forward.Execute();
@@ -2318,7 +2314,7 @@ public:
     {
         ZoneScoped;
 
-#define UpdateInstancesStepSize 128
+#define UpdateInstancesStepSize 128 
         ViewWorld& frameWorld = viewWorld.Get();
         
         uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::WorldMatrix::mask, 0);
@@ -2328,7 +2324,7 @@ public:
         uint materialsCount = world.CountQuery(Components::Material::mask, 0);
         frameWorld.materials.Reserve(materialsCount);
         
-        tf::Task task = subflow.for_each_index(0, entityCount, UpdateInstancesStepSize,
+        tf::Task task = subflow.for_each_index(uint(0), entityCount, uint(UpdateInstancesStepSize),
             [this, &world, instanceQueryIndex](int i)
             {
                 ZoneScopedN("UpdateInstance");
@@ -2430,7 +2426,7 @@ public:
 #define UpdateMaterialsStepSize 1024
         ViewWorld& frameWorld = viewWorld.Get();
 
-        tf::Task task = subflow.for_each_index(0, entityCount, UpdateMaterialsStepSize,
+        tf::Task task = subflow.for_each_index(uint(0), entityCount, UpdateMaterialsStepSize,
             [&world, &frameWorld, queryIndex](int i)
             {
                 ZoneScopedN("UpdateMaterials");
@@ -2514,7 +2510,7 @@ public:
 
                     hlsllight.pos = float4(worldMatrix[3].xyz, 1);
                     hlsllight.dir = float4(normalize(worldMatrix[2].xyz), 1);
-                    hlsllight.color = light.color;
+                    hlsllight.color = float4(light.color.xyz * light.color.w, light.color.w);
                     hlsllight.angle = light.angle;
                     hlsllight.range = light.range;
                     hlsllight.type = light.type;
@@ -2665,12 +2661,7 @@ public:
                 this->viewContext.meshletsCulledArgs.Resize(this->viewWorld->meshletsCount);
                 this->viewWorld->commonResourcesIndices = SetupCommonResourcesParams();
                 this->viewContext.viewContext = SetupViewContextParams();
-                HLSL::RTParameters tmp = this->raytracingContext.rtParameters;
                 this->raytracingContext.rtParameters = SetupRayTracingContextParams();
-                this->raytracingContext.rtParameters.maxFrameFilteringCount = tmp.maxFrameFilteringCount;
-                this->raytracingContext.rtParameters.reservoirRandBias = tmp.reservoirRandBias;
-                this->raytracingContext.rtParameters.reservoirSpacialRandBias = tmp.reservoirSpacialRandBias;
-                this->raytracingContext.rtParameters.spacialRadius = tmp.spacialRadius;
                 this->editorContext.editorContext = SetupEditorParams();
             }
         ).name("upload instances buffer");

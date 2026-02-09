@@ -309,8 +309,14 @@ namespace HLSL
         float fovY;
         float nearClip;
         float farClip;
-};
-
+    };
+    
+    enum class LightType
+    {
+        Directional,
+        Spot,
+        Point
+    };
     struct Light
     {
         float4 pos;
@@ -319,7 +325,7 @@ namespace HLSL
         float range;
         float angle;
         float size;
-        uint type;
+        LightType type;
     };
     
     struct Froxels
@@ -375,26 +381,8 @@ namespace HLSL
     };
     static const float brightnessClippingAdjust = 1;
     
-    struct ProbeData
-    {
-        HLSL::SHProbe sh;
-        float4 position_Activation; // in w with store if the probe is active or not
-    };
-    
-    struct ProbeGrid
-    {
-        float4 probesBBMin;
-        float4 probesBBMax;
-        uint4 probesResolution;
-        uint4 probesAddressOffset;
-        uint probesIndex;
-        uint probesSamplesPerFrame;
-        uint pad1; // dont use a uint[2] it does some more alignement and thus put pad between probesSamplesPerFrame and our pad
-        uint pad2;
-    };
-    
     // ----------------- RT stuff ------------------
-    static const uint maxRTDepth = 3;
+    static const uint maxRTDepth = 1;
     struct RTParameters
     {
         uint BVH;
@@ -403,41 +391,35 @@ namespace HLSL
         uint previousDirectReservoirIndex;
         uint giReservoirIndex;
         uint previousgiReservoirIndex;
-        //uint shadowsIndex;
         uint lightedIndex;
         uint specularHitDistanceIndex;
         uint maxFrameFilteringCount;
         float reservoirRandBias;
         float reservoirSpacialRandBias;
         float spacialRadius;
-        
         uint passNumber;
         
-        uint probeToCompute;
-        ProbeGrid probes[3];
-    };
-    
-    // Hit information, aka ray payload
-    // Note that the payload should be kept as small as possible,
-    // and that its size must be declared in the corresponding
-    // D3D12_RAYTRACING_SHADER_CONFIG pipeline subobjet.
-    // USE [raypayload] at one point ?
-    struct HitInfo
-    {
-        float3 color;
-        float3 hitPos;
-        float3 hitNorm;
-        float hitDistance;
-        uint type : 4;
-        uint depth : 4;
-        uint seed : 24;
-    };
-    
-    // Attributes output by the raytracing when hitting a surface,
-    // here the barycentric coordinates
-    struct Attributes
-    {
-        float2 bary;
+        float SHARCSceneScale;
+        uint SHARCEntriesNum;
+        uint SHARCHashEntriesBufferIndex;
+        uint SHARCAccumulationBufferIndex;
+        uint SHARCResolvedBufferIndex;
+        uint SHARCAccumulationFrameNum;
+        uint SHARCStaleFrameNum;
+        bool SHARCEnableAntifirefly;
+        uint SHARCSamplesPerPixel;
+        float SHARCRadianceScale;
+        float SHARCRoughnessThreshold;
+        
+        uint bouncesMax;
+        float throughputThreshold;
+        float probeDownsampling;
+        
+        bool enableBackFaceCull;
+        bool enableLighting;
+        bool enableTransmission;
+        bool enableRussianRoulette;
+        bool enableSoftShadows;
     };
     
     struct GIReservoir
@@ -457,24 +439,11 @@ namespace HLSL
         uint Wcount_W;
         uint dist_Wsum;
     };
- /*
-not packed 220fps
-
-packed color only = 270fps
-
-packed : 
-        float4 hit_Wsum;
-        uint dir;
-        uint color;
-        uint Wcount_W;
-        = 318fps
-*/
     // ----------------- End RT stuff ------------------
     
     //----------------------- DEBUG -----------------------
     struct EditorContext
     {
-	    //D3D12_GPU_VIRTUAL_ADDRESS cbv;
         uint rays : 1;
         uint boundingVolumes : 1;
         uint albedo : 1;
@@ -482,6 +451,7 @@ packed :
         uint clusters : 1;
         uint lighting : 1;
         uint GIprobes : 1;
+        uint GIBounces : 1;
         uint debugBufferHeapIndex;
         uint debugVerticesHeapIndex;
         uint debugVerticesCountHeapIndex;

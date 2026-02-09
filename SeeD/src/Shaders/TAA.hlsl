@@ -9,7 +9,7 @@ cbuffer CustomRT : register(b3)
 #include "binding.hlsl"
 #include "common.hlsl"
 
-#pragma compute TAA
+#pragma compute TAA TAA
 
 [RootSignature(SeeDRootSignature)]
 [numthreads(16, 16, 1)]

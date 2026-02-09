@@ -1,4 +1,5 @@
 #include "structs.hlsl"
+#include "SharcCommon.h"
 
 cbuffer CustomRT : register(b3)
 {
@@ -9,7 +10,7 @@ cbuffer CustomRT : register(b3)
 #include "binding.hlsl"
 #include "common.hlsl"
 
-#pragma compute Lighting
+#pragma compute Lighting Lighting
 
 [RootSignature(SeeDRootSignature)]
 [numthreads(16, 16, 1)]
@@ -27,16 +28,22 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         SurfaceData s = GetSurfaceData(cd.pixel.xy);
     
         float hitDistance = 0;
+        /*
         float3 direct = RESTIRLight(rtParameters.directReservoirIndex, cd, s, hitDistance);
         float3 indirect = RESTIRLight(rtParameters.giReservoirIndex, cd, s, hitDistance);
         
         float3 result = direct + indirect;
+*/
+        float3 result = RESTIRLight(rtParameters.giReservoirIndex, cd, s, hitDistance);
+        
+        result = min(result, 1);
     
         lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
         specularHitDistance[dtid.xy] = hitDistance;
         
         if (editorContext.albedo)
         {
+            //s.albedo = saturate(cd.viewDistDiff * 2 - 0.5);
             lighted[dtid.xy] = s.albedo;
         }
         else if (editorContext.normals)
@@ -56,37 +63,74 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         }
         else if (editorContext.GIprobes)
         {
-            lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, false).xyz, 1);
-            
-            //lighted[dtid.xy] = float4(SampleProbes(rtParameters, cd.worldPos, s, false).w/10.0, 0, 0, 1);
+            HashGridParameters gridParameters;
+            gridParameters.cameraPosition = cd.camera.worldPos.xyz;
+            gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
+            gridParameters.sceneScale = rtParameters.SHARCSceneScale;
+            gridParameters.levelBias = SHARC_GRID_LEVEL_BIAS;
+
+            float3 color = HashGridDebugColoredHash(cd.worldPos, cd.worldNorm, gridParameters);
+            lighted[dtid.xy] = float4(color, 1);
             
             /*
-            uint probeGridIndex = 0;
-            HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
-            while(probeGridIndex < 3 && (any(cd.worldPos.xyz < probes.probesBBMin.xyz) || any(cd.worldPos.xyz > probes.probesBBMax.xyz)))
+            // Initialize SHARC parameters
+            SharcParameters sharcParameters;
             {
-                probeGridIndex++;
-                probes = rtParameters.probes[probeGridIndex];
+                sharcParameters.gridParameters.cameraPosition = cd.camera.worldPos.xyz;
+                sharcParameters.gridParameters.sceneScale = rtParameters.SHARCSceneScale;
+                sharcParameters.gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
+                sharcParameters.gridParameters.levelBias = SHARC_GRID_LEVEL_BIAS;
+
+                sharcParameters.hashMapData.capacity = rtParameters.SHARCEntriesNum;
+                sharcParameters.hashMapData.hashEntriesBuffer = ResourceDescriptorHeap[rtParameters.SHARCHashEntriesBufferIndex];
+
+            #if !SHARC_ENABLE_64_BIT_ATOMICS
+                sharcParameters.hashMapData.lockBuffer = u_SharcLockBuffer;
+            #endif // !SHARC_ENABLE_64_BIT_ATOMICS
+
+                sharcParameters.accumulationBuffer = ResourceDescriptorHeap[rtParameters.SHARCAccumulationBufferIndex];
+                sharcParameters.resolvedBuffer = ResourceDescriptorHeap[rtParameters.SHARCResolvedBufferIndex];
+                sharcParameters.radianceScale = rtParameters.SHARCRadianceScale;
+                sharcParameters.enableAntiFireflyFilter = rtParameters.SHARCEnableAntifirefly;
             }
-            if(probeGridIndex >= 3) return;
-            int3 launchIndex = ((cd.worldPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz)) * probes.probesResolution.xyz;
-            uint3 wrapIndex = ModulusUInt(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
-            uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
-            lighted[dtid.xy] = float4(RandUINT(probeIndex), 1);
-            */
+            // Construct SharcHitData structure needed for creating a query point at this hit location
+            SharcHitData sharcHitData;
+            sharcHitData.positionWorld = cd.worldPos;
+            sharcHitData.normalWorld = cd.worldNorm;
+#if SHARC_MATERIAL_DEMODULATION
+            sharcHitData.materialDemodulation = float3(1.0f, 1.0f, 1.0f);
+            if (g_Global.sharcMaterialDemodulation)
+            {
+                float3 specularFAvg = s.specularF0 + (1.0f - s.specularF0) * 0.047619; // 1/21
+                sharcHitData.materialDemodulation = max(s.diffuseAlbedo, 0.05f) + max(s.specularF0, 0.02f) * luminance(specularFAvg);
+            }
+#endif // SHARC_MATERIAL_DEMODULATION
+#if SHARC_SEPARATE_EMISSIVE
+            sharcHitData.emissive = s.emissiveColor;
+#endif // SHARC_SEPARATE_EMISSIVE
+            
+             uint gridLevel = HashGridGetLevel(cd.worldPos, sharcParameters.gridParameters);
+            float voxelSize = HashGridGetVoxelSize(gridLevel, sharcParameters.gridParameters);
+
+            float3 sharcRadiance;
+            if (SharcGetCachedRadiance(sharcParameters, sharcHitData, sharcRadiance, false))
+            {
+                lighted[dtid.xy] = float4(sharcRadiance, 1);
+            }
+*/
         }
     }
     else
     {
-        lighted[dtid.xy] = max(0, float4(Sky(cd.viewDir), 1));
+        //lighted[dtid.xy] = max(0, float4(Sky(cd.viewDir), 1));
         specularHitDistance[dtid.xy] = 0;
     }
    
-    int2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
-    bool inRange = abs(length(debugPixel - int2(dtid.xy))) <= 0;
-    if (inRange)
+    if (editorContext.boundingVolumes) // daw boundingbox
     {
-        if (editorContext.boundingVolumes) // daw boundingbox
+        int2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
+        bool inRange = abs(length(debugPixel - int2(dtid.xy))) <= 0;
+        if (inRange)
         {
             Texture2D<uint> instanceID = ResourceDescriptorHeap[viewContext.instanceIDIndex];
             uint sampleInstanceID = instanceID[debugPixel];

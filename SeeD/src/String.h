@@ -12,7 +12,10 @@ std::wstring CharToWString(const char* ptr)
 std::string WCharToString(const WCHAR* ptr)
 {
 	std::wstring str(ptr);
+#pragma warning( push )
+#pragma warning(disable : 4244)
 	std::string temp(str.begin(), str.end());
+#pragma warning( pop )
 	return temp;
 }
 

@@ -158,7 +158,6 @@ float InterleavedGradientNoise(float2 pixel, int frame)
     return frac(52.9829189f * frac(0.06711056f * float(pixel.x) + 0.00583715f * float(pixel.y)));
 }
 
-
 float RadicalInverse_VdC(uint bits)
 {
     bits = (bits << 16u) | (bits >> 16u);
@@ -175,7 +174,6 @@ float2 Hammersley(uint i, uint N)
     return float2(float(i) / float(N), RadicalInverse_VdC(i));
 }
 
-
 // Generates a seed for a random number generator from 2 inputs plus a backoff
 uint initRand(uint val0, uint val1, uint backoff = 16)
 {
@@ -190,6 +188,7 @@ uint initRand(uint val0, uint val1, uint backoff = 16)
     }
     return v0;
 }
+
 uint xxhash(in uint p)
 {
     const uint PRIME32_2 = 2246822519U, PRIME32_3 = 3266489917U;
@@ -210,6 +209,7 @@ uint xxhash(in uint2 pixel)
     //p = 0 << 20 | pixel.x << 10 | pixel.y;
     return xxhash(p);
 }
+
 // Generates a seed for a random number generator from 2 inputs plus a backoff
 uint initRand(uint2 pixel)
 {
@@ -228,6 +228,81 @@ float nextRand(inout uint s)
     //return RadicalInverse_VdC(s);
     return float(s & 0x00FFFFFF) / float(0x01000000);
 }
+
+inline float Fade(float t)
+{
+    // 6t^5 - 15t^4 + 10t^3
+    return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+}
+
+inline float HashFloat3(in float3 p)
+{
+    // Simple hash -> [0,1)
+    return frac(sin(dot(p, float3(127.1f, 311.7f,  74.7f))) * 43758.5453f);
+}
+
+inline float3 Grad3(in float3 p)
+{
+    // Generate a pseudo-random unit vector from integer corner position
+    float h1 = HashFloat3(p + float3(0.0f, 0.0f, 0.0f));
+    float h2 = HashFloat3(p + float3(12.9898f, 78.233f, 37.719f));
+    float h3 = HashFloat3(p + float3(39.3467f, 11.135f, 83.155f));
+    float3 r = float3(h1, h2, h3) * 2.0f - 1.0f;
+    // Avoid costly normalize for tiny performance gain; normalizing gives slightly better isotropy
+    return normalize(r);
+}
+
+float PerlinNoise3(in float3 p)
+{
+    // Integer lattice points
+    float3 Pi = floor(p);
+    float3 Pf = p - Pi; // fractional part
+
+    // Compute fade curves for each component
+    float3 f = float3(Fade(Pf.x), Fade(Pf.y), Fade(Pf.z));
+
+    // Evaluate gradient dot distance for each of the 8 corners
+    float3 c000 = Pi + float3(0.0f, 0.0f, 0.0f);
+    float3 c100 = Pi + float3(1.0f, 0.0f, 0.0f);
+    float3 c010 = Pi + float3(0.0f, 1.0f, 0.0f);
+    float3 c110 = Pi + float3(1.0f, 1.0f, 0.0f);
+    float3 c001 = Pi + float3(0.0f, 0.0f, 1.0f);
+    float3 c101 = Pi + float3(1.0f, 0.0f, 1.0f);
+    float3 c011 = Pi + float3(0.0f, 1.0f, 1.0f);
+    float3 c111 = Pi + float3(1.0f, 1.0f, 1.0f);
+
+    float n000 = dot(Grad3(c000), Pf - float3(0.0f, 0.0f, 0.0f));
+    float n100 = dot(Grad3(c100), Pf - float3(1.0f, 0.0f, 0.0f));
+    float n010 = dot(Grad3(c010), Pf - float3(0.0f, 1.0f, 0.0f));
+    float n110 = dot(Grad3(c110), Pf - float3(1.0f, 1.0f, 0.0f));
+    float n001 = dot(Grad3(c001), Pf - float3(0.0f, 0.0f, 1.0f));
+    float n101 = dot(Grad3(c101), Pf - float3(1.0f, 0.0f, 1.0f));
+    float n011 = dot(Grad3(c011), Pf - float3(0.0f, 1.0f, 1.0f));
+    float n111 = dot(Grad3(c111), Pf - float3(1.0f, 1.0f, 1.0f));
+
+    // Interpolate along X
+    float nx00 = lerp(n000, n100, f.x);
+    float nx10 = lerp(n010, n110, f.x);
+    float nx01 = lerp(n001, n101, f.x);
+    float nx11 = lerp(n011, n111, f.x);
+
+    // Interpolate along Y
+    float nxy0 = lerp(nx00, nx10, f.y);
+    float nxy1 = lerp(nx01, nx11, f.y);
+
+    // Interpolate along Z
+    float nxyz = lerp(nxy0, nxy1, f.z);
+
+    // Result is approximately in [-1,1]
+    return nxyz;
+}
+
+float PerlinNoise3_Normalized(in float3 p)
+{
+    // Map [-1,1] -> [0,1]
+    return PerlinNoise3(p) * 0.5f + 0.5f;
+}
+
 
 // ----------------- HEMISPHERE ---------------------------------------------
 // Utility function to get a vector perpendicular to an input vector 
@@ -951,7 +1026,7 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];
     float2 motion = motionT[pixel.xy];
     //cd.previousPixel = min(max(1, pixel.xy + int2(motion * (viewContext.renderResolution.xy))), (viewContext.renderResolution.xy-1));
-    float2 previousPixel = ((pixel.xy+0.5)*viewContext.renderResolution.zw) + motion;
+    float2 previousPixel = ((pixel.xy+0.5f)*viewContext.renderResolution.zw) + motion;
     //previousPixel = min(max(1, previousPixel), (viewContext.renderResolution.xy-1));
     cd.previousUV = saturate(previousPixel);
     cd.previousPixel = cd.previousUV * viewContext.renderResolution.xy;
@@ -983,14 +1058,23 @@ float Luminance(float3 color)
     return dot(float3(0.299, 0.587, 0.114), color);
 }
 
+enum class ShadingDomain
+{
+    Standard,
+    AlphaTested,
+    TransmissiveAlphaTested,
+};
 struct SurfaceData
 {
     float4 albedo; //with alpha
     float3 normal;
+    float3 objectNormal;
     float3 tangent;
     float3 binormal;
+    float3 emissiveColor;
     float metalness;
     float roughness;
+    float occlusion;
     float specularTint;
     float _specular;
     float sheen;
@@ -999,10 +1083,13 @@ struct SurfaceData
     float clearcoat;
     float clearcoatGloss;
     float subsurface;
+    float transmission;
+    ShadingDomain shadingDomain;
 };
 SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, float3 tangent, float3 binormal)
 {
     SurfaceData s;
+    s.shadingDomain = ShadingDomain::Standard;
     uint textureIndex = ~0;
     
     s.albedo = float4(material.parameters[0], material.parameters[0], material.parameters[0], 1);
@@ -1015,7 +1102,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         #else
         s.albedo *= albedo.Sample(samplerLinear, uv);
         #endif
-        s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
+        //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
         //if(length(s.albedo.xyz) < 0.001) s.albedo.xyz = float3(1,0,1);
     }
     //s.albedo.xyz = lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 2);
@@ -1045,6 +1132,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     }
     
     s.normal = normal;
+    s.objectNormal = normal;
     s.tangent = tangent;
     s.binormal = binormal;
     textureIndex = material.textures[3];
@@ -1063,10 +1151,9 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         
     }
     
-    //s.albedo.xyz = 0.25;
-    //s.roughness = 1;
-    //s.metalness = 0;
+    s.emissiveColor = 0;
     
+    s.occlusion = 1;
     s.specularTint = 1;
     s._specular = 1;
     s.sheen = 0;
@@ -1075,6 +1162,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     s.clearcoat = 0;
     s.clearcoatGloss = 1;
     s.subsurface = 0;
+    s.transmission = 0;
     
     return s;
 }
@@ -1087,13 +1175,16 @@ SurfaceData GetSurfaceData(uint2 pixel)
     Texture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalIndex];
     
     SurfaceData s;
+    s.shadingDomain = ShadingDomain::Standard;
     
     s.albedo = albedo[pixel];
     s.normal = ReadNormal(normal[pixel].xyz);
+    s.objectNormal = s.normal;
     //uint seed = initRand(pixel.xy);
     //s.normal = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 0.01));
     s.metalness = metalness[pixel];
     s.roughness = roughness[pixel];
+    s.occlusion = 1;
     s.tangent = cross(s.normal, float3(1, 0, 0));
     s.binormal = cross(s.normal, s.tangent);
     s.specularTint = 1;
@@ -1104,6 +1195,7 @@ SurfaceData GetSurfaceData(uint2 pixel)
     s.clearcoat = 0;
     s.clearcoatGloss = 1;
     s.subsurface = 0;
+    s.transmission = 0;
     
     return s;
 }
@@ -1291,6 +1383,7 @@ float2 bary)
     worldNormal = normalize(worldNormal);
 
     SurfaceData s = GetSurfaceData(material, uv, worldNormal, 0, 0);
+    s.objectNormal = worldNormal;
     
     return s;
 }
@@ -1305,32 +1398,12 @@ struct RESTIRRay
     float proba;
 };
 
-/*
-    struct GIReservoir
-    {
-        float3 dir;
-        float dist;
-        float3 color;
-        float W;
-        float Wsum;
-        float Wcount;
-    };
-    struct GIReservoirCompressed
-    {
-        uint dir;
-        uint color;
-        uint Wcount_W;
-        uint dist_Wsum;
-    };
-*/
-
 static const uint octahedralPrecision = 16; //per axis
 HLSL::GIReservoirCompressed PackGIReservoir(HLSL::GIReservoir r)
 {
     HLSL::GIReservoirCompressed result = (HLSL::GIReservoirCompressed) 0;
     result.color = PackRGBE_sqrt(r.color);
     result.Wcount_W = (asuint(f32tof16(r.Wcount)) << 16) | asuint(f32tof16(log2(r.W)));
-    //result.dist_Wsum = (asuint(f32tof16(r.dist)) << 16) | asuint(f32tof16(r.Wsum));
     
     // store dist and Wsum in log2 space before converting to half-float
     // this preserves orders-of-magnitude differences (common for distances/weights)
@@ -1348,8 +1421,6 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
     result.color = UnpackRGBE_sqrt(r.color);
     result.Wcount = f16tof32(r.Wcount_W >> 16u);
     result.W = exp2(f16tof32(r.Wcount_W & 0xffff));
-    //result.dist = f16tof32(r.dist_Wsum >> 16u);
-    //result.Wsum = f16tof32(r.dist_Wsum & 0xffff);
     
     // dist and Wsum were stored in log2 half-floats -> convert back
     float distLog = f16tof32(r.dist_Wsum >> 16u);
@@ -1391,12 +1462,12 @@ void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
     }
 }
 
-void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, uint seed)
+void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, float seed)
 {
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[previousReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
     // if not first time fill with previous frame reservoir
-    if (viewContext.frameNumber == 0)
+    //if (viewContext.frameNumber == 0)
     {
         r.dir = 0;
         r.dist = 0;
@@ -1406,8 +1477,8 @@ void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousR
         r.Wcount = 0;
     }
 
-    float blend = 1.0-saturate(cd.viewDistDiff * 5);
-    uint frameFilteringCount = max(0, blend * rtParameters.maxFrameFilteringCount);
+    float blend = 1.0-saturate(cd.viewDistDiff * 2 - 0.5);
+    uint frameFilteringCount = max(1, blend * rtParameters.maxFrameFilteringCount);
     
     HLSL::GIReservoir newR;
     float W = dot(restirRay.HitRadiance.xyz, float3(0.4, 0.6, 0.3));
@@ -1419,7 +1490,7 @@ void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousR
     newR.Wsum = W / max(restirRay.proba, 0.00001);
         
     ScaleGIReservoir(r, frameFilteringCount);
-    UpdateGIReservoir(r, newR, nextRand(seed) * rtParameters.reservoirRandBias);
+    UpdateGIReservoir(r, newR, seed - rtParameters.reservoirRandBias);
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];
     giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x] = PackGIReservoir(r);
@@ -1442,79 +1513,14 @@ float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in Surfa
         light.color.xyz = r.color / r.W * (r.Wsum / r.Wcount);
         light.range = 1;
         light.angle = 1;
-        return ComputeLight(light, 1, s, cd.viewDir);
+        r.color = r.color / max(0.00001, r.W / (r.Wsum / r.Wcount));
+        return r.color;
+        //return ComputeLight(light, 1, s, cd.viewDir);
     }
     return float3(0, 0, 0);
 }
 
-float4 SampleProbes(HLSL::RTParameters rtParameters, float3 worldPos, SurfaceData s, bool writeWorldPosAsOffset = false)
-{
-    worldPos += s.normal * 0.01;
-    uint probeGridIndex = 0;
-    HLSL::ProbeGrid probes = rtParameters.probes[probeGridIndex];
-    while(probeGridIndex < 3 && (any(worldPos.xyz < probes.probesBBMin.xyz) || any(worldPos.xyz > probes.probesBBMax.xyz)))
-    {
-        probeGridIndex++;
-        probes = rtParameters.probes[probeGridIndex];
-    }
-    if(probeGridIndex >= 3) return 0;
-    float3 cellSize = float3(probes.probesBBMax.xyz - probes.probesBBMin.xyz) / float3(probes.probesResolution.xyz);
-    
-    if(writeWorldPosAsOffset)
-    {
-        //non jittered sample pos for setting pos offset
-        int3 launchIndex = ((worldPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz)) * probes.probesResolution.xyz;
-        uint3 wrapIndex = ModulusUInt(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
-        uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
-        RWStructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
-        float3 probeCenter = launchIndex * cellSize + probes.probesBBMin.xyz + cellSize * 0.5;
-        float3 probeOffset = worldPos - probeCenter;
-        float currentOffsetLength = length(probesBuffer[probeIndex].position_Activation.xyz);
-        if (currentOffsetLength == 0 || length(probeOffset) < currentOffsetLength)
-            probesBuffer[probeIndex].position_Activation = float4(probeOffset, 10);
-        //probesBuffer[probeIndex].position_Activation = float4(0,0,0, 10);
-    }
-    
-    //with jitter for sampling
-    float3 jitteredPos = worldPos + s.normal * cellSize * 0.5;
-    //jitteredPos.x += sin(worldPos.z * 25) * cellSize.x * 0.125;
-    //jitteredPos.z += sin(worldPos.x * 25) * cellSize.z * 0.125;
-    //jitteredPos.y += sin(worldPos.y * 25) * cellSize.y * 0.125;
-    int3 launchIndex = ((jitteredPos - probes.probesBBMin.xyz) / (probes.probesBBMax.xyz - probes.probesBBMin.xyz)) * probes.probesResolution.xyz;
-    uint3 wrapIndex = ModulusUInt(launchIndex.xyz + probes.probesAddressOffset.xyz, probes.probesResolution.xyz);
-    uint probeIndex = wrapIndex.x + wrapIndex.y * probes.probesResolution.x + wrapIndex.z * (probes.probesResolution.x * probes.probesResolution.y);
-    StructuredBuffer<HLSL::ProbeData> probesBuffer = ResourceDescriptorHeap[probes.probesIndex];
-    HLSL::ProbeData probe = probesBuffer[probeIndex];
-    float3 result = max(0.0f, shUnproject(probe.sh.R, probe.sh.G, probe.sh.B, s.normal)); // A "max" is usually recomended to avoid negative values (can happen with SH)
-    return float4(result * 0.5, probe.position_Activation.w); // TODO : why probe too bright ?! because it feeds on the previous result and explode
-}
-
-void TraceRayCommon(HLSL::RTParameters rtParameters,
-    uint RayFlags,
-    uint InstanceInclusionMask,
-    uint RayContributionToHitGroupIndex,
-    uint MultiplierForGeometryContributionToHitGroupIndex,
-    uint MissShaderIndex,
-    RayDesc Ray,
-    inout HLSL::HitInfo Payload);
-struct MyCustomIntersectionAttributes { float4 a; float3 b; };
-bool MyProceduralIntersectionEnumerator(float tHit, MyCustomIntersectionAttributes candidateAttribs, uint candidateInstanceIndex, uint candidatePrimitiveIndex, uint candidateGeometryIndex)
-{
-    return false;
-}
-bool MyProceduralAlphaTestLogic(float tHit, MyCustomIntersectionAttributes candidateAttribs, uint candidateInstanceIndex, uint candidatePrimitiveIndex, uint candidateGeometryIndex)
-{
-    return false;
-}
-bool MyAlphaTestLogic(uint candidateInstanceIndex, uint candidatePrimitiveIndex, uint candidateGeometryIndex, uint candidateTriangleRayT, float2 candidateTriangleBarycentrics, bool candidateTriangleFrontFace)
-{
-    return false;
-}
-bool MyLogicSaysStopSearchingForSomeReason()
-{
-    return false;
-}
-
+/*
 //return color + distance cosine weighted on surface normal
 RESTIRRay DirectLight(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint depth, inout uint seed)
 {
@@ -1616,87 +1622,6 @@ RESTIRRay IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRa
     restirRay.proba = pow(lerp(1.0, 0.0, s.roughness), 1000) * 100000.0 + 1.0;
     
     return restirRay;
-}
-
-float3 PathTrace(HLSL::RTParameters rtParameters, SurfaceData s, float3 hitPos, uint depth, inout uint seed)
-{
-    RESTIRRay restirRay;
-    restirRay.Origin = hitPos;
-    
-    if (depth < HLSL::maxRTDepth)
-    {
-        restirRay = DirectLight(rtParameters, restirRay, HLSL::maxRTDepth, seed);
-    }
-    
-    #if 0
-    if (depth < HLSL::maxRTDepth)
-    {
-        RESTIRRay indirectRay;
-        indirectRay.Origin = hitPos;
-        indirectRay.Direction = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), s.roughness));
-        indirectRay = IndirectLight(rtParameters, s, indirectRay, depth, seed);
-        restirRay.HitRadiance += indirectRay.HitRadiance;
-    }
-    #elif 1
-    restirRay.HitRadiance += SampleProbes(rtParameters, hitPos, s, true).xyz;
-    #else
-    if(nextRand(seed) > 0.5)
-    {
-        if (depth < HLSL::maxRTDepth)
-        {
-            RESTIRRay indirectRay;
-            indirectRay.Origin = hitPos;
-            indirectRay.Direction = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), s.roughness));
-            indirectRay = IndirectLight(rtParameters, s, indirectRay, depth, seed);
-            restirRay.HitRadiance += indirectRay.HitRadiance;
-        }
-    }
-    else
-    {
-        restirRay.HitRadiance += SampleProbes(rtParameters, hitPos, s, true).xyz;
-    }
-    #endif
-    
-    return restirRay.HitRadiance;
-}
-
-void CommonHit(HLSL::RTParameters rtParameters, 
-uint committedInstanceIndex,
-uint committedPrimitiveIndex,
-uint committedGeometryIndex,
-float2 committedTriangleBarycentrics,
-float3 WorldRayOrigin,
-float3 WorldRayDirection,
-float RayTCurrent,
-bool committedTriangleFrontFace,
-inout HLSL::HitInfo payload)
-{
-    payload.hitDistance = RayTCurrent;
-    if(payload.type == 0) // direct / shadow ray hit
-    {
-        payload.color = 0;
-        return;
-    }
-    
-    SurfaceData s = GetRTSurfaceData(committedInstanceIndex, committedPrimitiveIndex, committedGeometryIndex, committedTriangleBarycentrics);
-    if(dot(s.normal, WorldRayDirection) > 0) s.normal = -s.normal; // if we touch the backface, invert the normal ?
-    float3 position = WorldRayOrigin + WorldRayDirection * (RayTCurrent * 0.9999f); 
-    position = position + s.normal * (RayTCurrent * 0.0001f);
-    payload.hitPos = position;
-    payload.hitNorm = s.normal;
-    payload.hitDistance = RayTCurrent;
-   
-    payload.color = PathTrace(rtParameters, s, payload.hitPos, payload.depth + 1, payload.seed);
-}
-void ShadeMyProceduralPrimitiveHit(MyCustomIntersectionAttributes committedCustomAttribs, uint committedInstanceIndex, uint committedPrimitiveIndex, uint committedGeometryIndex, float committedRayT)
-{
-    
-}
-void CommonMiss(float3 WorldRayOrigin, float3 WorldRayDirection, float RayTCurrent, inout HLSL::HitInfo Payload)
-{
-    Payload.hitDistance = RayTCurrent;
-    Payload.hitPos = WorldRayOrigin + WorldRayDirection * RayTCurrent;
-    Payload.color = Sky(WorldRayDirection);
 }
 
 void TraceRayCommon(HLSL::RTParameters rtParameters,
@@ -1831,21 +1756,22 @@ void TraceRayCommon(HLSL::RTParameters rtParameters,
 #endif
 }
 
+*/
 HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint seed, float3 origin, HLSL::GIReservoir r, in HLSL::GIReservoir og, uint2 dtid)
 {
+    return og;
     
+    /*
     RESTIRRay restirRay;
     restirRay.Origin = origin;
-    //restirRay.Direction = normalize(r.hit_Wsum.xyz - origin);
     restirRay.Direction = r.dir;
     restirRay = IndirectLight(rtParameters, s, restirRay, 0, seed);
     
     float W = dot(restirRay.HitRadiance, float3(0.3, 0.59, 0.11));
     
     float distDiff = abs(r.dist - length(restirRay.HitPosition - origin));
-    float wDiff = 0;//saturate(abs(W - r.color_W.w));
+    float wDiff = 0;
     float likeness = 1.0f-saturate(distDiff + wDiff);
-    //likeness = 1;
     float fail = likeness < 0.5 ? 1 : 0;
     if(fail)
     {
@@ -1864,17 +1790,9 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
     
     // ca sert a rien de scale le spacial... il est temporaire
     float frameFilteringCount = lerp(2, rtParameters.maxFrameFilteringCount * 64, likeness);
-    //ScaleGIReservoir(r, frameFilteringCount);
-    
-    /*
-    RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    float3 gi = GI[dtid.xy];
-    gi = pow(distDiff, 1);
-    gi = 1-fail;
-    GI[dtid.xy] = gi;
-    */
     
     return r;
+*/
 }
 
 // ----------------------------- DEBUG ----------------------------------
@@ -1882,6 +1800,7 @@ HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint 
 #ifdef RAY_DISPATCH
 void DebugSurfaceData(float3 pos, float3 dir)
 {
+/*
     RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
     
     RayDesc ray;
@@ -1905,6 +1824,7 @@ void DebugSurfaceData(float3 pos, float3 dir)
     
     RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
     GI[launchIndex] = payload.color;
+*/
 }
 #endif
 

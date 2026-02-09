@@ -9,8 +9,7 @@ cbuffer CustomRT : register(b3)
 #include "binding.hlsl"
 #include "common.hlsl"
 
-#pragma compute PostProcess
-
+#pragma compute PostProcess PostProcess
 
 static const float e = 2.71828;
 

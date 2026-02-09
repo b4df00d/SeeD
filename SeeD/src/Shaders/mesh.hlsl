@@ -16,8 +16,8 @@ struct PS_OUTPUT
     uint instanceID : SV_Target7; //DXGI_FORMAT_R32_UINT
 };
 
-#pragma gBuffer AmplificationMain MeshMain PixelgBuffer
-//#pragma forward AmplificationMain MeshMain PixelgBuffer
+#pragma gBuffer DefaultG MeshMain PixelgBuffer
+#pragma forward DefaultF MeshMain PixelForward
 
 struct MSVert
 {

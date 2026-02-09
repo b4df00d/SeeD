@@ -15,7 +15,7 @@ cbuffer CustomAS : register(b4)
 #include "binding.hlsl"
 #include "common.hlsl"
 
-#pragma compute PostProcessHalfRes
+#pragma compute PostProcessHalfRes PostProcessHalfRes
 
 
 [RootSignature(SeeDRootSignature)]

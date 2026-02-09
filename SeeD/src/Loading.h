@@ -184,9 +184,9 @@ public:
         int extentionStart = (uint)path.find_last_of('.') + 1;
         String extenstion = path.substr(extentionStart);
         AssetLibrary::AssetType type;
-        if (extenstion == "mesh") type = AssetLibrary::AssetType::mesh;
-        else if (extenstion == "hlsl") type = AssetLibrary::AssetType::shader;
-        else if (extenstion == "tex") type = AssetLibrary::AssetType::texture;
+        if (extenstion.starts_with("mesh")) type = AssetLibrary::AssetType::mesh;
+        else if (extenstion.starts_with("hlsl")) type = AssetLibrary::AssetType::shader;
+        else if (extenstion.starts_with("tex")) type = AssetLibrary::AssetType::texture;
 
         return type;
     }
@@ -891,13 +891,13 @@ public:
         {
             auto& lod = optimizedMesh.LODs.emplace_back();
 
-            float threshold = lodindex == 0 ? 1 : pow(0.25f, lodindex);
+            float threshold = lodindex == 0 ? 1.0f : (float)pow(0.25f, lodindex);
             size_t target_index_count = size_t(originalMesh.indices.size() * threshold);
             float target_error = 1e-2f;
 
             lod.indices.resize(originalMesh.indices.size());
             float lod_error = 0.f;
-            uint newIndexCount = meshopt_simplify(&lod.indices[0], originalMesh.indices.data(), originalMesh.indices.size(), &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex), target_index_count, target_error, /* options= */ 0, &lod_error);
+            uint newIndexCount = (uint)meshopt_simplify(&lod.indices[0], originalMesh.indices.data(), originalMesh.indices.size(), &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex), target_index_count, target_error, /* options= */ 0, &lod_error);
             lod.indices.resize(newIndexCount);
 
             size_t max_meshlets = meshopt_buildMeshletsBound(lod.indices.size(), HLSL::max_vertices, HLSL::max_triangles);
@@ -1321,7 +1321,7 @@ public:
 
         World::Entity shader;
         shader.Make(Components::Shader::mask);
-        shader.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl", "src\\Shaders\\mesh.hlsl");
+        shader.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl|DefaultG", "src\\Shaders\\mesh.hlsl|DefaultG");
 
         IOs::Log("  materials : {}", _scene->mNumMaterials);
         for (unsigned int i = 0; i < _scene->mNumMaterials; i++)
@@ -1415,21 +1415,22 @@ public:
             float lightIntensity = 1 / (l->mAttenuationConstant + l->mAttenuationLinear * d + l->mAttenuationQuadratic * d * d);
             lightIntensity = min(lightIntensity, 10.0f);
             light.color *= lightIntensity;
+            light.color.a = 1;
             light.range = lightIntensity * 20;
 
             switch (l->mType)
             {
             case aiLightSourceType::aiLightSource_DIRECTIONAL :
-                light.type = 0;
+                light.type = HLSL::LightType::Directional;
                 break;
             case aiLightSourceType::aiLightSource_POINT:
-                light.type = 1;
+                light.type = HLSL::LightType::Point;
                 break;
             case aiLightSourceType::aiLightSource_SPOT:
-                light.type = 2;
+                light.type = HLSL::LightType::Spot;
                 break;
             default:
-                light.type = 1;
+                light.type = HLSL::LightType::Point;
                 break;
             }
             
@@ -1473,7 +1474,7 @@ public :
         instance = nullptr;
 	}
 
-    D3D12_SHADER_BYTECODE Compile(String file, String entry, String type, Shader* shader = nullptr)
+    D3D12_SHADER_BYTECODE Compile(String file, String entry, String type, Shader* shader, std::vector<String>* defines)
     {
 		ZoneScoped;
         bool compiled = false;
@@ -1482,6 +1483,14 @@ public :
         auto includePath = std::wstring(L"src\\Shaders\\");
         auto entryName = std::wstring(entry.ToWString());
         auto typeName = std::wstring(type.ToWString());
+        std::vector<std::wstring> wdefines;
+        if (defines != nullptr)
+        {
+            for (auto& def : *defines)
+            {
+                wdefines.push_back(def.ToWString());
+            }
+        }
 
         //HRESULT hr;
         ID3DBlob* errorBuff = NULL; // a buffer holding the error data if any
@@ -1510,12 +1519,17 @@ public :
         vArgs.push_back(typeName.c_str());
         vArgs.push_back(L"-rootsig-define");
         vArgs.push_back(L"SeeDRootSignature");
-        //vArgs.push_back(DXC_ARG_ALL_RESOURCES_BOUND);
-        //vArgs.push_back(L"-no-warnings");
+        vArgs.push_back(L"-enable-16bit-types");
         if (shader != nullptr && shader->type == Shader::Type::Raytracing)
         {
+            vArgs.push_back(L"-enable-payload-qualifiers");
             vArgs.push_back(L"-D");
             vArgs.push_back(L"RAY_DISPATCH");
+        }
+        for (auto& def : wdefines)
+        {
+            vArgs.push_back(L"-D");
+            vArgs.push_back(def.c_str());
         }
 #ifdef _DEBUG
         vArgs.push_back(L"-Zi");
@@ -1532,7 +1546,9 @@ public :
         //vArgs.push_back(L"-Qstrip_reflect");
         //vArgs.push_back(L"-remove-unused-functions");
         //vArgs.push_back(L"-remove-unused-globals");
+        //vArgs.push_back(L"-no-warnings");
 #endif
+        //vArgs.push_back(DXC_ARG_ALL_RESOURCES_BOUND);
 
         // Compile it with specified arguments.
         IDxcResult* pResults;
@@ -1730,92 +1746,161 @@ public :
 
     }
 
+    class RTPSOHelper
+    {
+    public:
+        RTPSOHelper(Shader* _shader)
+        {
+            shader = _shader;
+            payloadConfigMax = { 0, 0 };
+        }
+
+        void AddPayloadConfig(uint maxPayloadSize, uint maxAttributeSize)
+        {
+            D3D12_RAYTRACING_SHADER_CONFIG payloadConfig = {};
+            payloadConfig.MaxPayloadSizeInBytes = maxPayloadSize;
+            payloadConfig.MaxAttributeSizeInBytes = maxAttributeSize;
+            payloadConfigs.push_back(payloadConfig);
+            payloadAssociation.resize(payloadConfigs.size());
+            exportsPerPayloadConfig.resize(payloadConfigs.size());
+        }
+
+        void AddRaygen(std::wstring name)
+        {
+            shader->rayGen.push_back(name);
+
+            allExportsStr.push_back(GetCachedStr(name));
+            raygenExportsStr.push_back(GetCachedStr(name));
+            raygenAndMissExportsStr.push_back(GetCachedStr(name));
+        }
+
+        void AddMiss(std::wstring name, uint payloadIndex)
+        {
+            shader->miss.push_back(name);
+
+            allExportsStr.push_back(GetCachedStr(name));
+            raygenAndMissExportsStr.push_back(GetCachedStr(name));
+            exportsPerPayloadConfig[payloadIndex].push_back(GetCachedStr(name));
+        }
+
+        void AddHitGroup(std::wstring name, std::wstring closestHit, std::wstring anyHit, uint payloadIndex)
+        {
+            shader->hitGroups.push_back(name);
+
+            //allExportsStr.push_back(GetCachedStr(name));
+            allExportsStr.push_back(GetCachedStr(closestHit));
+            allExportsStr.push_back(GetCachedStr(anyHit));
+            
+            exportsPerPayloadConfig[payloadIndex].push_back(GetCachedStr(closestHit));
+            exportsPerPayloadConfig[payloadIndex].push_back(GetCachedStr(anyHit));
+            hitGroups.push_back({ GetCachedStr(name), D3D12_HIT_GROUP_TYPE_TRIANGLES, GetCachedStr(anyHit), GetCachedStr(closestHit), nullptr /*intersection name*/ });
+        }
+
+        uint Build()
+        {
+            for (uint i = 0; i < allExportsStr.size(); i++)
+            {
+                allExportsDesc.push_back({ allExportsStr[i], nullptr, D3D12_EXPORT_FLAG_NONE});
+            }
+
+            for (uint i = 0; i < payloadConfigs.size(); i++)
+            {
+                payloadConfigMax.MaxPayloadSizeInBytes = max(payloadConfigMax.MaxPayloadSizeInBytes, payloadConfigs[i].MaxPayloadSizeInBytes);
+                payloadConfigMax.MaxAttributeSizeInBytes = max(payloadConfigMax.MaxAttributeSizeInBytes, payloadConfigs[i].MaxAttributeSizeInBytes);
+            }
+
+            return
+                1 +                                     // payloadconfig (only the max from all the configs)
+                3 +                                     // Raygen and miss shaders : declaration + shader payload association
+                (uint)hitGroups.size() * 2 +                  // Hit group : declarations + shader payload association
+                1 +                                     // Empty global root signatures <- real root sig !!
+                1 +                                     // Empty local root signatures <- can be use for some local param for each hit group. juste one empty local dummy for now
+                1;                                      // Final pipeline subobject
+        }
+
+        Shader* shader;
+
+        LPCWSTR GetCachedStr(std::wstring str)
+        {
+            for (uint i = 0; i < strCacheIndex; i++)
+            {
+                if (strCache[i] == str)
+                    return strCache[i].c_str();
+            }
+            if (strCacheIndex < 128)
+            {
+                strCache[strCacheIndex] = str;
+                return strCache[strCacheIndex++].c_str();
+            }
+            else
+            {
+                seedAssert(false); // too many unique strings, increase cache size or use a better system
+                return L"";
+            }
+        }
+        std::wstring strCache[128];
+        uint strCacheIndex = 0;
+
+        std::vector<D3D12_RAYTRACING_SHADER_CONFIG> payloadConfigs;
+        D3D12_RAYTRACING_SHADER_CONFIG payloadConfigMax;
+        std::vector<D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION> payloadAssociation;
+        std::vector<LPCWSTR> allExportsStr;
+        std::vector<D3D12_EXPORT_DESC> allExportsDesc;
+        std::vector<LPCWSTR> raygenExportsStr;
+        std::vector<LPCWSTR> raygenAndMissExportsStr;
+        std::vector<std::vector<LPCWSTR>> exportsPerPayloadConfig;
+        std::vector<D3D12_HIT_GROUP_DESC> hitGroups;
+    };
+
+    // https://www.realtimerendering.com/raytracinggems/unofficial_RayTracingGems_v1.5.pdf
+    // https://www.willusher.io/graphics/2019/11/20/the-sbt-three-ways/
+    // https://computergraphics.stackexchange.com/questions/10151/hit-group-export-already-defined
     void CreateRTShaderLibrary(Shader* shader, IDxcResult* pResults)
     {
         if (shader->type != Shader::Type::Raytracing)
             return;
 
-        // https://www.realtimerendering.com/raytracinggems/unofficial_RayTracingGems_v1.5.pdf
-
-        IDxcBlob* rtLibrary;
-        pResults->GetResult(&rtLibrary);
-
-        shader->rayGen.push_back("RayGen");
-        shader->miss.push_back("Miss");
-        shader->hit.push_back("ClosestHit");
-        shader->hit.push_back("AnyHit");
-        shader->hitGroup.push_back("HitGroup");
-
-        D3D12_EXPORT_DESC exports[] = { 
-            {L"RayGen", 0, D3D12_EXPORT_FLAG_NONE}, 
-            {L"Miss", 0, D3D12_EXPORT_FLAG_NONE},
-            {L"ClosestHit", 0, D3D12_EXPORT_FLAG_NONE},
-            {L"AnyHit", 0, D3D12_EXPORT_FLAG_NONE} };
-
-        D3D12_DXIL_LIBRARY_DESC libDesc;
-        libDesc.DXILLibrary.BytecodeLength = rtLibrary->GetBufferSize();
-        libDesc.DXILLibrary.pShaderBytecode = rtLibrary->GetBufferPointer();
-        libDesc.NumExports = ARRAYSIZE(exports);
-        libDesc.pExports = exports;
-
-        D3D12_HIT_GROUP_DESC hitGroups[] = { {L"HitGroup", D3D12_HIT_GROUP_TYPE_TRIANGLES, L"AnyHit", L"ClosestHit", nullptr /*intersection name*/}};
-
-        D3D12_RAYTRACING_SHADER_CONFIG shaderDesc = {};
-        shaderDesc.MaxPayloadSizeInBytes = sizeof(HLSL::HitInfo);
-        shaderDesc.MaxAttributeSizeInBytes = 8;
-
-        const WCHAR* exportSymboles[] = { L"RayGen", L"Miss", L"HitGroup", L"AnyHit", L"ClosestHit" }; // all synboles from lib + hit group name + hit shader name (must be unique, may be created from a std::set)
-
+        RTPSOHelper rtShader(shader);
+        rtShader.AddPayloadConfig(sizeof(uint) * 6, sizeof(uint) * 2); // full payload for primary rays
+        rtShader.AddPayloadConfig(sizeof(uint) * 3, sizeof(uint) * 2); // smaller payload for shadow rays
+        rtShader.AddRaygen(L"RayGen");
+        rtShader.AddHitGroup(L"HitGroup", L"ClosestHit", L"AnyHit", 0);
+        rtShader.AddHitGroup(L"HitGroupShadow", L"ClosestHitShadow", L"AnyHitShadow", 1);
+        rtShader.AddMiss(L"Miss", 0);
+        rtShader.AddMiss(L"MissShadow", 1);
+        UINT64 subobjectCount = rtShader.Build();
 
         // The pipeline is made of a set of sub-objects, representing the DXIL libraries, hit group
         // declarations, root signature associations, plus some configuration objects
-        UINT64 subobjectCount =
-            1 + //ARRAYSIZE(exports) +                     // DXIL libraries
-            ARRAYSIZE(hitGroups) +                                      // Hit group declarations
-            1 +                                      // Shader configuration
-            1 +                                      // Shader payload
-            //2 * m_rootSignatureAssociations.size() + // Root signature declaration + association
-            1 +                                      // Empty global root signatures <- real root sig !!
-            1 +                                      // Empty local root signatures
-            1;                                       // Final pipeline subobject
-
         // Initialize a vector with the target object count. It is necessary to make the allocation before
         // adding subobjects as some subobjects reference other subobjects by pointer. Using push_back may
         // reallocate the array and invalidate those pointers.
         std::vector<D3D12_STATE_SUBOBJECT> subobjects(subobjectCount);
-
         UINT currentIndex = 0;
-
-        // Add all the DXIL libraries
-        //for (uint i = 0; i < ARRAYSIZE(exports); i++)
-        {
-            D3D12_STATE_SUBOBJECT libSubobject = {};
-            libSubobject.Type = D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY;
-            libSubobject.pDesc = &libDesc;
-            subobjects[currentIndex++] = libSubobject;
-        }
-
-        // Add all the hit group declarations
-        for (uint i = 0; i < ARRAYSIZE(hitGroups); i++)
-        {
-            D3D12_STATE_SUBOBJECT hitGroup = {};
-            hitGroup.Type = D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP;
-            hitGroup.pDesc = &hitGroups[i];
-            subobjects[currentIndex++] = hitGroup;
-        }
 
         // Add a subobject for the shader payload configuration
         D3D12_STATE_SUBOBJECT shaderConfigObject = {};
         shaderConfigObject.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_SHADER_CONFIG;
-        shaderConfigObject.pDesc = &shaderDesc;
+        shaderConfigObject.pDesc = &rtShader.payloadConfigMax;
         subobjects[currentIndex++] = shaderConfigObject;
 
-        // Add a subobject for the association between shaders and the payload
-        // Associate the set of shaders with the payload defined in the previous subobject
+        IDxcBlob* rtLibrary;
+        pResults->GetResult(&rtLibrary);
+        D3D12_DXIL_LIBRARY_DESC libDesc;
+        libDesc.DXILLibrary.BytecodeLength = rtLibrary->GetBufferSize();
+        libDesc.DXILLibrary.pShaderBytecode = rtLibrary->GetBufferPointer();
+        libDesc.NumExports = (uint)rtShader.allExportsDesc.size();
+        libDesc.pExports = rtShader.allExportsDesc.data();
+        // Add all the DXIL libraries
+        D3D12_STATE_SUBOBJECT libSubobject = {};
+        libSubobject.Type = D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY;
+        libSubobject.pDesc = &libDesc;
+        subobjects[currentIndex++] = libSubobject;
+
         D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION shaderPayloadAssociation = {};
-        shaderPayloadAssociation.NumExports = ARRAYSIZE(exportSymboles);
-        shaderPayloadAssociation.pExports = exportSymboles;
-        shaderPayloadAssociation.pSubobjectToAssociate = &subobjects[(currentIndex - 1)];
+        shaderPayloadAssociation.NumExports = (uint)rtShader.raygenExportsStr.size();
+        shaderPayloadAssociation.pExports = rtShader.raygenExportsStr.data();
+        shaderPayloadAssociation.pSubobjectToAssociate = &subobjects[0];
 
         // Create and store the payload association object
         D3D12_STATE_SUBOBJECT shaderPayloadAssociationObject = {};
@@ -1823,12 +1908,34 @@ public :
         shaderPayloadAssociationObject.pDesc = &shaderPayloadAssociation;
         subobjects[currentIndex++] = shaderPayloadAssociationObject;
 
+        // Add all the hit group declarations
+        for (uint i = 0; i < rtShader.hitGroups.size(); i++)
+        {
+            D3D12_STATE_SUBOBJECT hitGroup = {};
+            hitGroup.Type = D3D12_STATE_SUBOBJECT_TYPE_HIT_GROUP;
+            hitGroup.pDesc = &rtShader.hitGroups[i];
+            subobjects[currentIndex++] = hitGroup;
+        }
+
+        for (uint i = 0; i < rtShader.exportsPerPayloadConfig.size(); i++)
+        {
+            D3D12_SUBOBJECT_TO_EXPORTS_ASSOCIATION& shaderPayloadAssociation = rtShader.payloadAssociation[i];
+            shaderPayloadAssociation.NumExports = (uint)rtShader.exportsPerPayloadConfig[i].size();
+            shaderPayloadAssociation.pExports = rtShader.exportsPerPayloadConfig[i].data();
+            shaderPayloadAssociation.pSubobjectToAssociate = &subobjects[0];
+
+            // Create and store the payload association object
+            D3D12_STATE_SUBOBJECT shaderPayloadAssociationObject = {};
+            shaderPayloadAssociationObject.Type = D3D12_STATE_SUBOBJECT_TYPE_SUBOBJECT_TO_EXPORTS_ASSOCIATION;
+            shaderPayloadAssociationObject.pDesc = &shaderPayloadAssociation;
+            subobjects[currentIndex++] = shaderPayloadAssociationObject;
+        }
+
         // The pipeline construction always requires an empty global root signature <- NOT A DUMMY ! I have a real global rootsig
         D3D12_STATE_SUBOBJECT globalRootSig;
         globalRootSig.Type = D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE;
         ID3D12RootSignature* dgSig = shader->rootSignature;
         globalRootSig.pDesc = &dgSig;
-
         subobjects[currentIndex++] = globalRootSig;
 
 #if 0 // no local sigroot
@@ -1871,7 +1978,6 @@ public :
         D3D12_STATE_SUBOBJECT pipelineConfigObject = {};
         pipelineConfigObject.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;
         pipelineConfigObject.pDesc = &pipelineConfig;
-
         subobjects[currentIndex++] = pipelineConfigObject;
 
         // Describe the ray tracing pipeline state object
@@ -2116,7 +2222,7 @@ public :
         */
     }
 
-    bool Parse(Shader& shader, String file)
+    bool Parse(Shader& shader, String& file, String& shaderName)
     {
 		ZoneScoped;
         bool compiled = false;
@@ -2140,7 +2246,7 @@ public :
 					{
 						// open include file
 						String includeFile = String(("src\\Shaders\\" + line.substr(index + 1, line.find_last_of("\"") - 1 - index)).c_str());
-                        compiled = Parse(shader, includeFile);
+                        compiled = Parse(shader, includeFile, shaderName);
 					}
 				}
 
@@ -2158,128 +2264,142 @@ public :
 				else if (line._Starts_with("#pragma "))
 				{
 					auto tokens = line.Split(" ");
-
-					// add empty strings for shaders passes names to avoid checking if a token is there
-					for (uint i = (uint)tokens.size(); i < 5; i++)
-					{
-						tokens.push_back(" ");
-					}
-
-					if (tokens[1] == "gBuffer")
-					{
-                        shader.type = Shader::Type::Mesh;
-                        //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6");
-                        D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader);
-                        PipelineStateStream stream{};
-                        D3D12_RT_FORMAT_ARRAY RTVFormats = {};
-                        RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
-                        for (uint i = 0; i < (uint)shader.outputs.size(); i++)
-                        {
-                            RTVFormats.RTFormats[i] = shader.outputs[i];
-                        }
-                        for (uint i = (uint)shader.outputs.size(); i < 8; i++)
-                        {
-                            RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
-                        }
-                        stream.RTFormats = RTVFormats;
-                        //stream.AS = amplificationShaderBytecode;
-                        stream.MS = meshShaderBytecode;
-                        stream.PS = bufferShaderBytecode;
-                        /*
-                        // per shader depth desc ?
-                        D3D12_DEPTH_STENCIL_DESC1& desc = stream.DepthStencil;
-                        desc.DepthEnable = false;
-                        desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-                        desc.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
-                        desc.StencilEnable = false;
-                        desc.FrontFace.StencilFailOp = desc.FrontFace.StencilDepthFailOp = desc.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
-                        desc.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-                        desc.BackFace = desc.FrontFace;
-                        */
-
-                        shader.pso = CreatePSO(stream);
-                        compiled = shader.pso != nullptr;
-					}
-					else if (tokens[1] == "zPrepass")
-					{
-                        shader.type = Shader::Type::Mesh;
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[2], "ms_6_6", &shader);
-                        PipelineStateStream stream{};
-                        stream.MS = meshShaderBytecode;
-                        shader.pso = CreatePSO(stream);
-                        compiled = shader.pso != nullptr;
-					}
-                    else if (tokens[1] == "forward")
+                    // add empty strings for shaders passes names to avoid checking if a token is there
+                    for (uint i = (uint)tokens.size(); i < 10; i++)
                     {
-                        shader.type = Shader::Type::Mesh;
-                        //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
-                        D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6");
-                        D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader);
-                        PipelineStateStream stream;
-                        D3D12_RT_FORMAT_ARRAY RTVFormats = {};
-                        RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
-                        for (uint i = 0; i < (uint)shader.outputs.size(); i++)
-                        {
-                            RTVFormats.RTFormats[i] = shader.outputs[i];
-                        }
-                        for (uint i = (uint)shader.outputs.size(); i < 8; i++)
-                        {
-                            RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
-                        }
-                        stream.RTFormats = RTVFormats;
-                        //stream.AS = amplificationShaderBytecode;
-                        stream.MS = meshShaderBytecode;
-                        stream.PS = forwardShaderBytecode;
-                        shader.pso = CreatePSO(stream);
-                        compiled = shader.pso != nullptr;
+                        tokens.push_back("");
                     }
-                    else if (tokens[1] == "debug")
+
+                    if (tokens[2] == shaderName) // only compile the requested shader
                     {
-                        shader.type = Shader::Type::Graphic;
-                        D3D12_SHADER_BYTECODE vertexShaderBytecode = Compile(file, tokens[2], "vs_6_6");
-                        D3D12_SHADER_BYTECODE pixelShaderBytecode = Compile(file, tokens[3], "ps_6_6", &shader);
-                        PipelineStateStream stream{};
-                        D3D12_RT_FORMAT_ARRAY RTVFormats = {};
-                        RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
-                        for (uint i = 0; i < (uint)shader.outputs.size(); i++)
+                        if (tokens[1] == "gBuffer")
                         {
-                            RTVFormats.RTFormats[i] = shader.outputs[i];
+                            auto defines = tokens[5].Split(",");
+
+                            shader.type = Shader::Type::Mesh;
+                            //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
+                            D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", nullptr, &defines);
+                            D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader, &defines);
+                            PipelineStateStream stream{};
+                            D3D12_RT_FORMAT_ARRAY RTVFormats = {};
+                            RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
+                            for (uint i = 0; i < (uint)shader.outputs.size(); i++)
+                            {
+                                RTVFormats.RTFormats[i] = shader.outputs[i];
+                            }
+                            for (uint i = (uint)shader.outputs.size(); i < 8; i++)
+                            {
+                                RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
+                            }
+                            stream.RTFormats = RTVFormats;
+                            //stream.AS = amplificationShaderBytecode;
+                            stream.MS = meshShaderBytecode;
+                            stream.PS = bufferShaderBytecode;
+                            /*
+                            // per shader depth desc ?
+                            D3D12_DEPTH_STENCIL_DESC1& desc = stream.DepthStencil;
+                            desc.DepthEnable = false;
+                            desc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+                            desc.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+                            desc.StencilEnable = false;
+                            desc.FrontFace.StencilFailOp = desc.FrontFace.StencilDepthFailOp = desc.FrontFace.StencilPassOp = D3D12_STENCIL_OP_KEEP;
+                            desc.FrontFace.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+                            desc.BackFace = desc.FrontFace;
+                            */
+
+                            shader.pso = CreatePSO(stream);
+                            compiled = shader.pso != nullptr;
                         }
-                        for (uint i = (uint)shader.outputs.size(); i < 8; i++)
+                        else if (tokens[1] == "zPrepass")
                         {
-                            RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
+                            auto defines = tokens[4].Split(",");
+
+                            shader.type = Shader::Type::Mesh;
+                            D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader, &defines);
+                            PipelineStateStream stream{};
+                            stream.MS = meshShaderBytecode;
+                            shader.pso = CreatePSO(stream);
+                            compiled = shader.pso != nullptr;
                         }
-                        stream.RTFormats = RTVFormats;
-                        stream.DSVFormat = DXGI_FORMAT_UNKNOWN;
-                        stream.VS = vertexShaderBytecode;
-                        stream.PS = pixelShaderBytecode;
-                        stream.PrimitiveTopology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
-                        shader.pso = CreatePSO(stream);
-                        shader.primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
-                        compiled = shader.pso != nullptr;
-                    }
-                    else if (tokens[1] == "compute")
-                    {
-                        shader.type = Shader::Type::Compute;
-                        D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, tokens[2], "cs_6_6", &shader);
-                        PipelineStateStream stream;
-                        stream.CS = computeShaderBytecode;
-                        stream.pRootSignature = shader.rootSignature;
-                        shader.pso = nullptr;
-                        shader.pso = CreatePSO(stream);
-                        compiled = shader.pso != nullptr;
-                    }
-                    else if (tokens[1] == "raytracing")
-                    {
-                        shader.type = Shader::Type::Raytracing;
-                        D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, "", "lib_6_6", &shader);
-                        PipelineStateStream stream = {};
-                        stream.pRootSignature = shader.rootSignature;
-                        shader.pso = nullptr;
-                        //shader.pso = CreatePSO(stream);
-                        //compiled = shader.pso != nullptr;
-                        compiled = true;
+                        else if (tokens[1] == "forward")
+                        {
+                            auto defines = tokens[5].Split(",");
+
+                            shader.type = Shader::Type::Mesh;
+                            //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
+                            D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", nullptr, &defines);
+                            D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader, &defines);
+                            PipelineStateStream stream;
+                            D3D12_RT_FORMAT_ARRAY RTVFormats = {};
+                            RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
+                            for (uint i = 0; i < (uint)shader.outputs.size(); i++)
+                            {
+                                RTVFormats.RTFormats[i] = shader.outputs[i];
+                            }
+                            for (uint i = (uint)shader.outputs.size(); i < 8; i++)
+                            {
+                                RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
+                            }
+                            stream.RTFormats = RTVFormats;
+                            //stream.AS = amplificationShaderBytecode;
+                            stream.MS = meshShaderBytecode;
+                            stream.PS = forwardShaderBytecode;
+                            shader.pso = CreatePSO(stream);
+                            compiled = shader.pso != nullptr;
+                        }
+                        else if (tokens[1] == "debug")
+                        {
+                            auto defines = tokens[5].Split(",");
+
+                            shader.type = Shader::Type::Graphic;
+                            D3D12_SHADER_BYTECODE vertexShaderBytecode = Compile(file, tokens[3], "vs_6_6", nullptr, &defines);
+                            D3D12_SHADER_BYTECODE pixelShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader, &defines);
+                            PipelineStateStream stream{};
+                            D3D12_RT_FORMAT_ARRAY RTVFormats = {};
+                            RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
+                            for (uint i = 0; i < (uint)shader.outputs.size(); i++)
+                            {
+                                RTVFormats.RTFormats[i] = shader.outputs[i];
+                            }
+                            for (uint i = (uint)shader.outputs.size(); i < 8; i++)
+                            {
+                                RTVFormats.RTFormats[i] = DXGI_FORMAT_UNKNOWN;
+                            }
+                            stream.RTFormats = RTVFormats;
+                            stream.DSVFormat = DXGI_FORMAT_UNKNOWN;
+                            stream.VS = vertexShaderBytecode;
+                            stream.PS = pixelShaderBytecode;
+                            stream.PrimitiveTopology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+                            shader.pso = CreatePSO(stream);
+                            shader.primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
+                            compiled = shader.pso != nullptr;
+                        }
+                        else if (tokens[1] == "compute")
+                        {
+                            auto defines = tokens[4].Split(",");
+
+                            shader.type = Shader::Type::Compute;
+                            D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, tokens[3], "cs_6_6", &shader, &defines);
+                            PipelineStateStream stream;
+                            stream.CS = computeShaderBytecode;
+                            stream.pRootSignature = shader.rootSignature;
+                            shader.pso = nullptr;
+                            shader.pso = CreatePSO(stream);
+                            compiled = shader.pso != nullptr;
+                        }
+                        else if (tokens[1] == "raytracing")
+                        {
+                            auto defines = tokens[3].Split(",");
+
+                            shader.type = Shader::Type::Raytracing;
+                            D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, "", "lib_6_6", &shader, &defines);
+                            PipelineStateStream stream = {};
+                            stream.pRootSignature = shader.rootSignature;
+                            shader.pso = nullptr;
+                            //shader.pso = CreatePSO(stream);
+                            //compiled = shader.pso != nullptr;
+                            compiled = true;
+                        }
                     }
 				}
 			}
@@ -2287,9 +2407,9 @@ public :
         return compiled;
     }
 
-    bool Load(Shader& shader, String file)
+    bool Load(Shader& shader, String file, String shaderName)
     {
-        bool compiled = Parse(shader, file);
+        bool compiled = Parse(shader, file, shaderName);
         if (compiled)
             IOs::Log("compiled {}", file.c_str());
         return compiled;
@@ -2331,7 +2451,6 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
                 Mesh mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get());
                 lock.lock();
                 map[id].data = new Mesh(mesh);
-                //*(Mesh*)map[id].data = mesh;
                 meshLoaded++;
                 lock.unlock();
             }
@@ -2342,8 +2461,10 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
     {
         if (ignoreBudget || shaderLoaded < shaderLoadingLimit)
         {
+            auto tokens = map[id].path.Split("|");
+
             Shader shader;
-            bool compiled = ShaderLoader::instance->Load(shader, map[id].path);
+            bool compiled = ShaderLoader::instance->Load(shader, tokens[0], tokens[1]);
             if (compiled)
             {
                 lock.lock();
@@ -2367,7 +2488,6 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             {
                 lock.lock();
                 map[id].data = new Resource(texture);
-                //*(Resource*)map[id].data = texture;
                 textureLoaded++;
                 lock.unlock();
             }

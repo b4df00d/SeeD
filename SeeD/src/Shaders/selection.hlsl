@@ -2,7 +2,7 @@
 #include "binding.hlsl"
 #include "common.hlsl"
 
-#pragma compute Selection
+#pragma compute Selection Selection
 
 [RootSignature(SeeDRootSignature)]
 [numthreads(1, 1, 1)]

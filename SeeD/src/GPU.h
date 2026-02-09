@@ -227,16 +227,13 @@ struct Shader
     std::vector<DXGI_FORMAT> outputs;
 
     // for raytracing
+    // no parameters, just have one global root sig ?
     ID3D12StateObject* rtStateObject;
     ID3D12StateObjectProperties* rtStateObjectProps;
-    //StructuredUploadBuffer<byte> shaderBindingTable;
     Resource shaderBindingTable;
-    //std::vector<std::pair<String, std::vector<void*>>> entries;
-     // no parameters, just have one global root sig ?
-    std::vector<String> rayGen;
-    std::vector<String> miss;
-    std::vector<String> hit;
-    std::vector<String> hitGroup;
+    std::vector<std::wstring> rayGen;
+    std::vector<std::wstring> miss;
+    std::vector<std::wstring> hitGroups;
     static constexpr uint progIdSize = D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT;
 
     std::map<String, __time64_t> creationTime;
@@ -278,7 +275,7 @@ struct Shader
     {
         uint rayGenSize = ROUND_UP(progIdSize, D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
         uint missSize = ROUND_UP(progIdSize * miss.size(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
-        uint hitGroupSize = ROUND_UP(progIdSize * hitGroup.size(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
+        uint hitGroupSize = ROUND_UP(progIdSize * hitGroups.size(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
 
         uint bufferSize = rayGenSize + missSize + hitGroupSize;
         bufferSize *= 100;
@@ -315,22 +312,24 @@ struct Shader
         CopyRTShaderData(sbt, miss);
         sbt += drd.MissShaderTable.SizeInBytes;
 
-        CopyRTShaderData(sbt, hitGroup);
+        CopyRTShaderData(sbt, hitGroups);
+        sbt += drd.HitGroupTable.SizeInBytes;
 
         shaderBindingTable.GetResource()->Unmap(0, nullptr);
 
         return drd;
     }
-    uint CopyRTShaderData(uint8_t* outputData, const std::vector<String>& shaders)
+    uint CopyRTShaderData(uint8_t* outputData, const std::vector<std::wstring>& shaders)
     {
         uint8_t* pData = outputData;
         for (const auto& shader : shaders)
         {
             // Get the shader identifier, and check whether that identifier is known
-            void* id = rtStateObjectProps->GetShaderIdentifier(shader.ToWString().c_str());
+            void* id = rtStateObjectProps->GetShaderIdentifier(shader.c_str());
             if (!id)
             {
-                IOs::Log("Unknown shader identifier used in the SBT: {}", shader.c_str());
+                String shaderName = WCharToString(shader.c_str());
+                IOs::Log("Unknown shader identifier used in the SBT: {}", shaderName.c_str());
                 seedAssert(!id);
             }
             // Copy the shader identifier
@@ -2308,7 +2307,7 @@ struct MeshStorage
         newMesh.vertexCount = (uint)meshData.vertices.size();
         newMesh.vertexOffset = _nextVertexOffset;
 
-        for (uint i = 0; i < min((int)meshData.LODs.size(), 4); i++)
+        for (int i = 0; i < min((int)meshData.LODs.size(), 4); i++)
         {
             auto& lod = meshData.LODs[i];
             auto& newMeshLOD = newMesh.LODs[i];

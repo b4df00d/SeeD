@@ -1,7 +1,10 @@
 #pragma once
-
+#pragma warning( push )
+#pragma warning(disable : 4244)
+#pragma warning(disable : 4267)
 #include "../../Third/taskflow-master/taskflow/taskflow.hpp"
 #include "../../Third/taskflow-master/taskflow/algorithm/for_each.hpp"
+#pragma warning( pop )
 
 static tf::Executor executor;
 static tf::Taskflow taskflow;
