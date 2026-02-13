@@ -34,9 +34,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         
         float3 result = direct + indirect;
 */
-        float3 result = RESTIRLight(rtParameters.giReservoirIndex, cd, s, hitDistance);
-        
-        result = min(result, 1);
+        float3 result = RESTIRLight(rtParameters.giReservoirIndex, cd, s, hitDistance);// * s.albedo.xyz;
     
         lighted[dtid.xy] = float4(result / HLSL::brightnessClippingAdjust, 1); // scale down the result to avoid clipping the buffer format
         specularHitDistance[dtid.xy] = hitDistance;
@@ -70,9 +68,8 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
             gridParameters.levelBias = SHARC_GRID_LEVEL_BIAS;
 
             float3 color = HashGridDebugColoredHash(cd.worldPos, cd.worldNorm, gridParameters);
-            lighted[dtid.xy] = float4(color, 1);
+            //lighted[dtid.xy] = float4(color, 1);
             
-            /*
             // Initialize SHARC parameters
             SharcParameters sharcParameters;
             {
@@ -117,13 +114,12 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
             {
                 lighted[dtid.xy] = float4(sharcRadiance, 1);
             }
-*/
         }
     }
     else
     {
-        //lighted[dtid.xy] = max(0, float4(Sky(cd.viewDir), 1));
-        specularHitDistance[dtid.xy] = 0;
+        lighted[dtid.xy] = max(0, float4(Sky(cd.viewDir), 1));
+        //specularHitDistance[dtid.xy] = 0;
     }
    
     if (editorContext.boundingVolumes) // daw boundingbox

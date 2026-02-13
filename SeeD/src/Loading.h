@@ -1995,7 +1995,13 @@ public :
             assert(true);
         }
 
-        shader->rtStateObject->QueryInterface(&shader->rtStateObjectProps);
+        hr = shader->rtStateObject->QueryInterface(&shader->rtStateObjectProps);
+        if (FAILED(hr))
+        {
+            //throw std::logic_error("Could not create the raytracing state object");
+            std::cout << " !! Could not create the raytracing state object !! \n";
+            assert(true);
+        }
     }
     ID3D12RootSignature* CreateDummyRootSignatures()
     {
@@ -2398,7 +2404,7 @@ public :
                             shader.pso = nullptr;
                             //shader.pso = CreatePSO(stream);
                             //compiled = shader.pso != nullptr;
-                            compiled = true;
+                            compiled = computeShaderBytecode.BytecodeLength != 0;
                         }
                     }
 				}

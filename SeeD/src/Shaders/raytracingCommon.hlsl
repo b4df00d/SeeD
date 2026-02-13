@@ -300,6 +300,7 @@ float3 CastShadowRay(RaytracingAccelerationStructure accelerationStructure, floa
     payload.visibility = float3(1.0f, 1.0f, 1.0f);
 
     uint rayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH;
+    //rayFlags &= (~RAY_FLAG_FORCE_OPAQUE);
     TraceRay(accelerationStructure, rayFlags, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
 
     return payload.visibility;

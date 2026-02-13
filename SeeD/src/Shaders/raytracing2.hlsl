@@ -144,8 +144,11 @@ void PathTraceRays()
     AccumulatedSampleData accumulatedSampleData = (AccumulatedSampleData) 0;
     float3 debugColor = float3(0.0f, 0.0f, 0.0f);
     
+    uint2 pixel = launchIndex;
+#if (SHARC_UPDATE)
     float2 rand2 = float2(RNG(rngState), RNG(rngState));
-    uint2 pixel = (float2) launchIndex / (float2) launchDimensions * (float2) viewContext.renderResolution + (rand2 * rtParameters.probeDownsampling);
+    pixel = pixel / (float2)launchDimensions * (float2)viewContext.renderResolution + (rand2 * rtParameters.probeDownsampling);
+#endif
     GBufferCameraData cd = GetGBufferCameraData(pixel);
     RaytracingAccelerationStructure AccelerationStructure = ResourceDescriptorHeap[rtParameters.BVH];
     
@@ -233,7 +236,7 @@ void PathTraceRays()
                 payload.primitiveIndex = ~0U;
                 payload.geometryIndex = ~0U;
                 payload.barycentrics = 0;
-                hitPos = cd.worldPos.xyz - cd.viewDir * 0.001 * cd.viewDist + cd.worldNorm * 0.001 * cd.viewDist;
+                hitPos = cd.worldPos.xyz - cd.viewDir * 0.002 * cd.viewDist + cd.worldNorm * 0.002 * cd.viewDist;
                 
                 s = GetSurfaceData(pixel);
             }
@@ -244,6 +247,7 @@ void PathTraceRays()
 #if DISABLE_BACK_FACE_CULLING
                 rayFlags &= (~RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
 #endif // DISABLE_BACK_FACE_CULLING
+                //rayFlags &= (~RAY_FLAG_FORCE_OPAQUE);
                 
                 TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
                 hitPos = ray.Origin + ray.Direction * payload.hitDistance;
@@ -267,7 +271,7 @@ void PathTraceRays()
             if (!payload.Hit())
             {
                 float3 skyValue = Sky(ray.Direction);
-
+                
                 SharcUpdateMiss(sharcParameters, sharcState, skyValue);
 
                 sampleRadiance += skyValue * throughput;

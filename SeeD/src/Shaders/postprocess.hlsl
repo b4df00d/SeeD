@@ -105,7 +105,7 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     
     //HDR = lerp(HDR, 0.5, saturate(1-exp(-cd.viewDist * 0.0025)));
     
-#if 1
+#if 0
     float r = GranTurismoTonemapper(HDR.r);
     float g = GranTurismoTonemapper(HDR.g);
     float b = GranTurismoTonemapper(HDR.b);
@@ -113,6 +113,8 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
 #else
     float4 SDR = float4(ACESFilm(HDR.xyz), HDR.w);
 #endif
+    
+    SDR = pow(SDR, 2.2f);
     
     //if(any(HDR.xyz>=2.0)) SDR = float4(1, 0, 0, 0);
     

@@ -441,11 +441,11 @@ struct RayTracingContext
         rtParameters.enableBackFaceCull = true;
         rtParameters.enableLighting = true;
         rtParameters.enableTransmission = true;
-        rtParameters.bouncesMax = 3;
+        rtParameters.bouncesMax = 5;
         rtParameters.enableRussianRoulette = true;
         rtParameters.enableSoftShadows = true;
-        rtParameters.throughputThreshold = 0.1f;
-        rtParameters.probeDownsampling = 4.0f;
+        rtParameters.throughputThreshold = 0.01f;
+        rtParameters.probeDownsampling = 8.0f;
     }
 
     void Off()

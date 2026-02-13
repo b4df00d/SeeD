@@ -1338,8 +1338,7 @@ float3 Sky(float3 direction)
     float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))), 0.5));
     float dotDown = saturate(pow(saturate(dot(direction, float3(0, -1, 0)) * 20), 1));
     float3 sky = normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
-    sky = lerp(sky, float3(0, 0, 0), dotDown);
-    sky *= 2;
+    sky = lerp(sky, float3(0, 0, 0), dotDown) * 10;
     return sky;
 }
 
@@ -1467,7 +1466,7 @@ void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousR
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[previousReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
     // if not first time fill with previous frame reservoir
-    //if (viewContext.frameNumber == 0)
+    if (viewContext.frameNumber == 0)
     {
         r.dir = 0;
         r.dist = 0;
@@ -1489,8 +1488,9 @@ void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousR
     newR.dist = length(restirRay.HitPosition - restirRay.Origin);
     newR.Wsum = W / max(restirRay.proba, 0.00001);
         
-    ScaleGIReservoir(r, frameFilteringCount);
-    UpdateGIReservoir(r, newR, seed - rtParameters.reservoirRandBias);
+    //ScaleGIReservoir(r, frameFilteringCount);
+    //UpdateGIReservoir(r, newR, seed - rtParameters.reservoirRandBias);
+    r = newR;
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];
     giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x] = PackGIReservoir(r);

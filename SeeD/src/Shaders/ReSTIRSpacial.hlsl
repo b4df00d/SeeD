@@ -9,7 +9,18 @@ cbuffer CustomRT : register(b3)
 #include "binding.hlsl"
 #include "common.hlsl"
 
-static uint poissonDiskCount = 32;
+
+#define SHARC_ENABLE_64_BIT_ATOMICS 1
+#define TRACING_DISTANCE                10000.0f
+#define BOUNCES_MIN                     3
+#define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
+#define SHADOW_RAY_IN_RIS               0 // Enable this to cast shadow rays for each candidate during resampling. This is expensive but increases quality
+#define ENABLE_SPECULAR_LOBE            1 // Enable to use the specular lobe for splitting between diffuse and specular BRDFs
+#define SHARC_SEPARATE_EMISSIVE         1
+
+#include "raytracingCommon.hlsl"
+
+static uint poissonDiskCount = 16;
 static float2 poissonDisk[64] = 
 {
     float2(-0.613392, 0.617481),
@@ -79,7 +90,7 @@ static float2 poissonDisk[64] =
 };
 
 
-#pragma raytracing 
+#pragma raytracing ReSTIRSpacial
 
 GlobalRootSignature SeeDRootSignatureRT =
 {
@@ -126,7 +137,7 @@ void RayGen()
                 spacialReuse++;
             }
         }
-        r = Validate(rtParameters, s, seed, cd.offsetedWorldPos, r, og, dtid);
+        //r = Validate(rtParameters, s, seed, cd.offsetedWorldPos, r, og, dtid);
     }
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[rtParameters.previousgiReservoirIndex];
@@ -142,19 +153,82 @@ void RayGen()
 }
 
 [shader("miss")]
-void Miss(inout HLSL::HitInfo payload : SV_RayPayload)
+void Miss(inout RayPayload payload : SV_RayPayload)
 {
-    CommonMiss(WorldRayOrigin(), WorldRayDirection(), RayTCurrent(), payload);
+    payload.hitDistance = -1.0f;
 }
 
 [shader("closesthit")]
-void ClosestHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
+void ClosestHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
 {
-    CommonHit(rtParameters, InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.bary, WorldRayOrigin(),  WorldRayDirection(), RayTCurrent(), 254/*ReportHit()*/, payload);
+    payload.instanceID = InstanceID();
+    payload.primitiveIndex = PrimitiveIndex();
+    payload.geometryIndex = GeometryIndex();
+    payload.barycentrics = attrib.uv;
+
+    uint packedDistance = asuint(RayTCurrent()) & (~0x1u);
+    packedDistance |= HitKind() == HIT_KIND_TRIANGLE_FRONT_FACE ? 0x1 : 0x0;
+    payload.hitDistance = asfloat(packedDistance);
 }
 
 [shader("anyhit")]
-void AnyHit(inout HLSL::HitInfo payload : SV_RayPayload, HLSL::Attributes attrib)
+void AnyHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
 {
-    payload.hitDistance = RayTCurrent();
+    SurfaceData s = GetRTSurfaceData(InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.uv);
+
+    switch (s.shadingDomain)
+    {
+        case ShadingDomain::AlphaTested:
+        case ShadingDomain::TransmissiveAlphaTested:
+        {
+            if (s.albedo.a < 0.5)
+                IgnoreHit();
+
+            break;
+        }
+
+        default:
+            break;
+    }
+    // AcceptHit but continue looking for the closest hit
+}
+
+
+// TODO: Delete this
+[shader("miss")]
+void MissShadow(inout ShadowRayPayload payload : SV_RayPayload)
+{
+}
+
+[shader("closesthit")]
+void ClosestHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
+{
+    payload.visibility = float3(0.0f, 0.0f, 0.0f);
+}
+
+[shader("anyhit")]
+void AnyHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
+{
+    SurfaceData s = GetRTSurfaceData(InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.uv);
+
+    switch (s.shadingDomain)
+    {
+        case ShadingDomain::AlphaTested:
+        case ShadingDomain::TransmissiveAlphaTested:
+        {
+            if (s.albedo.a < 0.5)
+                IgnoreHit();
+
+            break;
+        }
+
+        default:
+            // Modulate the visiblity by the material's transmission
+            payload.visibility *= (1.0f - s.albedo.a) * s.albedo.rgb;
+            if (dot(payload.visibility, 0.333f) > 0.001f)
+                IgnoreHit();
+
+            break;
+    }
+    AcceptHitAndEndSearch();
 }

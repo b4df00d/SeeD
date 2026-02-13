@@ -2017,6 +2017,8 @@ struct Profiler
     };
     FrameData frameData;
 
+    std::recursive_mutex lock;
+
     void On()
     {
         ZoneScoped;
@@ -2030,6 +2032,10 @@ struct Profiler
         {
             auto& prof = queueProfile[i];
             prof.entries.reserve(PerQueueData::maxProfiles);
+            for (UINT64 i = 0; i < prof.entries.size(); ++i)
+            {
+                prof.entries[i].name = "";
+            }
             prof.buffer.CreateBuffer<UINT64>((UINT)(PerQueueData::maxProfiles), "Profile");
         }
 
@@ -2039,6 +2045,7 @@ struct Profiler
     UINT64 StartProfile(CommandBuffer& cb, const LPCSTR name)
     {
         ZoneScoped;
+        lock.lock();
 
         uint queueIndex = 0;
         if (cb.queue == GPU::instance->graphicQueue)
@@ -2078,6 +2085,8 @@ struct Profiler
         // Insert the start timestamp
         cb.cmd->EndQuery(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, (uint)profileIdx * 2);
         cb.profileIdx = (uint)profileIdx;
+
+        lock.unlock();
 
         return profileIdx;
     }
@@ -2250,7 +2259,7 @@ struct MeshStorage
     std::recursive_mutex lock;
 
     uint meshesMaxCount = 512;
-    uint meshletMaxCount = 200000;
+    uint meshletMaxCount = 400000;
     uint meshletVertexMaxCount = meshletMaxCount * HLSL::max_vertices;
     uint meshletTrianglesMaxCount = meshletMaxCount * HLSL::max_triangles;
     uint vertexMaxCount = meshletVertexMaxCount;

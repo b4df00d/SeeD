@@ -180,5 +180,8 @@
     <FxCompile Include="src\Shaders\raytracingCommon.hlsl">
       <Filter>Source Files\Shaders</Filter>
     </FxCompile>
+    <FxCompile Include="src\Shaders\ReSTIRSpacial.hlsl">
+      <Filter>Source Files\Shaders</Filter>
+    </FxCompile>
   </ItemGroup>
 </Project>
