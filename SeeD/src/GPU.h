@@ -228,8 +228,8 @@ struct Shader
 
     // for raytracing
     // no parameters, just have one global root sig ?
-    ID3D12StateObject* rtStateObject;
-    ID3D12StateObjectProperties* rtStateObjectProps;
+    ID3D12StateObject* rtStateObject = 0;
+    ID3D12StateObjectProperties* rtStateObjectProps = 0;
     Resource shaderBindingTable;
     std::vector<std::wstring> rayGen;
     std::vector<std::wstring> miss;
@@ -237,6 +237,17 @@ struct Shader
     static constexpr uint progIdSize = D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT;
 
     std::map<String, __time64_t> creationTime;
+
+    void Release()
+    {
+        if (commandSignature) commandSignature->Release();
+        if (rootSignature) rootSignature->Release();
+        if (pso) pso->Release();
+        if (rtStateObject) rtStateObject->Release();
+        if (rtStateObjectProps) rtStateObjectProps->Release();
+        shaderBindingTable.Release();
+    }
+
     bool NeedReload()
     {
         if (options.shaderReload)
@@ -599,6 +610,17 @@ public:
         }
 
         allocator->Release();
+
+#if defined(_DEBUG)
+        ID3D12DebugDevice* debugController = nullptr;
+        device->QueryInterface(IID_PPV_ARGS(&debugController));
+        if (debugController != nullptr)
+        {
+            debugController->ReportLiveDeviceObjects(D3D12_RLDO_DETAIL | D3D12_RLDO_IGNORE_INTERNAL);
+            debugController->Release();
+        }
+#endif
+
         //swapChain->Release();
         device->Release();
         adapter->Release();

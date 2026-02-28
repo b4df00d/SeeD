@@ -71,7 +71,7 @@ public:
                 }
                 else if (item.second.type == AssetLibrary::AssetType::shader)
                 {
-                    ((Shader*)item.second.data)->shaderBindingTable.Release();
+                    ((Shader*)item.second.data)->Release();
                 }
                 else if (item.second.type == AssetLibrary::AssetType::texture)
                 {
@@ -129,8 +129,7 @@ public:
 
         if (endOfLastFrame != nullptr)
         {
-            uint lastFrameIndex = GPU::instance->frameIndex ? 0 : 1;
-            commandBuffer->queue->Wait(endOfLastFrame->Get(lastFrameIndex).passEnd.fence, endOfLastFrame->Get(lastFrameIndex).passEnd.fenceValue);
+            commandBuffer->queue->Wait(endOfLastFrame->GetPrevious().passEnd.fence, endOfLastFrame->GetPrevious().passEnd.fenceValue);
         }
         commandBuffer->queue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
         commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
@@ -374,6 +373,9 @@ public:
     {
 		ZoneScoped;
         wicFactory->Release();
+        queue->Release();
+        compression->Release();
+        factory->Release();
         instance = nullptr;
     }
 
@@ -2481,6 +2483,10 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
                 *(Shader*)map[id].data = shader;
                 shaderLoaded++;
                 lock.unlock();
+            }
+            else
+            {
+                shader.Release();
             }
         }
     }

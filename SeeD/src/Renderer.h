@@ -1135,6 +1135,11 @@ public:
         ZoneScoped;
         depth.Register("depth", view);
         depth.Get().CreateDepthTarget(view->renderResolution, "depth");
+
+        Open();
+        commandBuffer.Get().cmd->DiscardResource(depth.Get().GetResource(), nullptr);
+        Close();
+        ExecuteNow();
     }
     void Setup(View* view) override
     {
@@ -1184,6 +1189,34 @@ public:
         instanceID.Register("instanceID", view);
         instanceID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "instanceID");
         meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl|DefaultG");
+
+        Open();
+        albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        commandBuffer.Get().cmd->DiscardResource(albedo.Get().GetResource(), nullptr);
+        commandBuffer.Get().cmd->DiscardResource(specularAlbedo.Get().GetResource(), nullptr);
+        commandBuffer.Get().cmd->DiscardResource(normal.Get().GetResource(), nullptr);
+        commandBuffer.Get().cmd->DiscardResource(metalness.Get().GetResource(), nullptr);
+        commandBuffer.Get().cmd->DiscardResource(roughness.Get().GetResource(), nullptr);
+        commandBuffer.Get().cmd->DiscardResource(motion.Get().GetResource(), nullptr);
+        commandBuffer.Get().cmd->DiscardResource(objectID.Get().GetResource(), nullptr);
+        commandBuffer.Get().cmd->DiscardResource(instanceID.Get().GetResource(), nullptr);
+        albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        Close();
+        ExecuteNow();
     }
     void Setup(View* view) override
     {
@@ -1201,6 +1234,7 @@ public:
         roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         Resource rts[] = { albedo.Get(), specularAlbedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get(), objectID.Get(), instanceID.Get()};
         SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true, false);
@@ -1226,6 +1260,7 @@ public:
         roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
 
 
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
@@ -1747,7 +1782,7 @@ public:
         postProcessed.Register("postProcessed", view);
         postProcessed.Get().CreateRenderTarget(view->displayResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "postProcessed"); // must be same as backbuffer for a resource copy at end of frame 
         history.Register("history", view);
-        history.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "history"); // must be the same as Lighted input
+        history.Get().CreateTexture(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, false, "history"); // must be the same as Lighted input
         lighted.Register("lighted", view);
         albedo.Register("albedo", view);
         normal.Register("normal", view);
@@ -1765,6 +1800,14 @@ public:
         ppparams.b = 0.0;
         ppparams.expoAdd = 0;
         ppparams.expoMul = 1;
+
+
+        Open();
+        postProcessed.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        commandBuffer.Get().cmd->DiscardResource(postProcessed.Get().GetResource(), nullptr);
+        postProcessed.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Close();
+        ExecuteNow();
     }
     virtual void Off() override
     {
@@ -1871,6 +1914,7 @@ public:
     {
         Pass::Off();
         ZoneScoped;
+        NVSDK_NGX_D3D12_Shutdown1(GPU::instance->device);
     }
     void Setup(View* view) override
     {
@@ -1974,6 +2018,7 @@ public:
 
         upscalingPreviousSetting = HLSL::Upscaling::none;
     }
+
     void Render(View* view) override
     {
         ZoneScoped;
@@ -2814,25 +2859,24 @@ public:
         queue->ExecuteCommandLists(1, lists);
 
         // Wait for completion
-        ID3D12Fence* fence = nullptr;
-        UINT64 fenceValue = 0;
-        HRESULT hr = GPU::instance->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence));
+        Fence fence;
+        HRESULT hr = GPU::instance->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence.fence));
         if (FAILED(hr))
         {
             GPU::PrintDeviceRemovedReason(hr);
             cmd->Release();
             return;
         }
-        fenceValue = 1;
-        queue->Signal(fence, fenceValue);
+        fence.fenceValue = 1;
+        queue->Signal(fence.fence, fence.fenceValue);
         HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         if (event)
         {
-            fence->SetEventOnCompletion(fenceValue, event);
+            fence.fence->SetEventOnCompletion(fence.fenceValue, event);
             WaitForSingleObject(event, INFINITE);
             CloseHandle(event);
         }
-        fence->Release();
+        fence.fence->Release();
     }
 
     void WaitFrame()
