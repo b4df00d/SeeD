@@ -823,6 +823,7 @@ GPU* GPU::instance;
 
 void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name)
 {
+    Release(true);
     D3D12MA::ALLOCATION_DESC allocationDesc = {};
     allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
 
@@ -884,6 +885,7 @@ void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, St
 void Resource::CreateTexture(uint3 resolution, DXGI_FORMAT format, bool mips, String name)
 { 
     //ZoneScoped;
+    Release(true);
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = resolution.z > 1 ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     resourceDesc.Alignment = 0;
@@ -960,6 +962,7 @@ void Resource::CreateTexture(uint3 resolution, DXGI_FORMAT format, bool mips, St
 void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String name)
 {
     //ZoneScoped;
+    Release(true);
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     resourceDesc.Alignment = 0;
@@ -1041,6 +1044,7 @@ void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String n
 void Resource::CreateDepthTarget(uint2 resolution, String name)
 {
     //ZoneScoped;
+    Release(true);
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     resourceDesc.Alignment = 0;
@@ -1122,6 +1126,7 @@ void Resource::CreateDepthTarget(uint2 resolution, String name)
 void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D3D12_RESOURCE_STATES initialState)
 {
     //ZoneScoped;
+    Release(true);
 
     stride = _stride;
 
@@ -1247,6 +1252,7 @@ void Resource::CreateAppendBuffer(uint count, String name)
 void Resource::CreateReadBackBuffer(uint size, String name)
 {
     //ZoneScoped;
+    Release(true);
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     resourceDesc.Alignment = 0;
@@ -1305,6 +1311,7 @@ void Resource::CreateReadBackBuffer(uint size, String name)
 void Resource::CreateAccelerationStructure(uint size, String name)
 {
     //ZoneScoped;
+    Release(true);
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     resourceDesc.Alignment = 0;
@@ -1698,6 +1705,95 @@ void CommandBuffer::Off()
 }
 // end of definitions of CommandBuffer
 
+class ConstantBuffer
+{
+    std::mutex lock;
+    PerFrame<std::vector<Resource>> pages;
+    uint count;
+    static constexpr uint ConstantBufferCountInPage = 128;
+    static constexpr uint ConstantBufferStride = 512;
+
+#if _DEBUG
+    struct range
+    {
+        uint start;
+        uint end;
+    };
+    std::vector<range> ranges;
+    void DebugRanges(uint start, uint end)
+    {
+        for (uint i = 0; i < ranges.size(); i++)
+        {
+            if (start >= ranges[i].start && start <= ranges[i].end)
+            {
+                IOs::instance->Log("range overlap start {} end {}, range start {} end {}", start, end, ranges[i].start, ranges[i].end);
+            }
+        }
+        ranges.push_back({ start, end });
+    }
+#endif
+
+public:
+    static ConstantBuffer* instance;
+
+    void On()
+    {
+        instance = this;
+        count = 0;
+    }
+
+    void Off()
+    {
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            auto& res = pages.Get(i);
+            for (uint j = 0; j < res.size(); j++)
+            {
+                res[j].Release();
+            }
+        }
+    }
+
+    void Reset()
+    {
+        count = 0;
+#if _DEBUG
+        ranges.clear();
+#endif
+    }
+
+    D3D12_GPU_VIRTUAL_ADDRESS PushConstantBuffer(void* data)
+    {
+        lock.lock();
+        uint pageIndex = count / ConstantBufferCountInPage;
+        uint indexInPage = count % ConstantBufferCountInPage;
+        count++;
+        if (pages->size() <= pageIndex)
+        {
+            auto& newPage = pages->emplace_back();
+            newPage.CreateBuffer((ConstantBufferCountInPage + 1) * ConstantBufferStride, ConstantBufferStride, true, "constant buffer");
+        }
+        auto& pageBuff = pages.Get()[pageIndex];
+
+        char* buf;
+        D3D12_RANGE rangeRead = { 0 , 0 }; // dont read
+        auto hr = pageBuff.GetResource()->Map(0, &rangeRead, (void**)&buf);
+        if (SUCCEEDED(hr))
+        {
+            buf += indexInPage * ConstantBufferStride;
+            memcpy(buf, data, ConstantBufferStride);
+            D3D12_RANGE rangeWrite = { indexInPage * ConstantBufferStride, indexInPage * ConstantBufferStride + ConstantBufferStride };
+            pageBuff.GetResource()->Unmap(0, &rangeWrite);
+#if _DEBUG
+            DebugRanges((uint)rangeWrite.Begin + (pageIndex << 16), (uint)rangeWrite.End + (pageIndex << 16) - 1);
+#endif
+        }
+        lock.unlock();
+        return pageBuff.GetResource()->GetGPUVirtualAddress() + (indexInPage * ConstantBufferStride);
+    }
+};
+ConstantBuffer* ConstantBuffer::instance;
+
 template <class T>
 class StructuredBuffer
 {
@@ -1707,7 +1803,6 @@ public:
 
     void CreateBuffer(uint elementCount, D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON)
     {
-        gpuData.Release(true);
         elementCount = max(uint1(1), uint1(elementCount));
         gpuData.CreateBuffer(sizeof(T) * elementCount, sizeof(T), false, typeid(T).name(), initialState);
     }
@@ -1751,18 +1846,20 @@ public:
         return gpuData.GetResource()->GetGPUVirtualAddress() + (index * sizeof(T));
     }
 
-    void ReadBack(CommandBuffer& cb)
+    uint ReadBack(CommandBuffer& cb)
     {
         ZoneScoped;
-        if (readbackgpuData.GetResource() == nullptr)
+        auto descsource = gpuData.GetResource()->GetDesc();
+        uint readbackSize = (uint)descsource.Width;
+        if (readbackgpuData.GetResource() == nullptr || readbackgpuData.GetResource()->GetDesc().Width < readbackSize)
         {
             // can�t use resource.allocation->GetSize().... it give the entire DMA page size ?
-            auto descsource = gpuData.GetResource()->GetDesc();
-            readbackgpuData.CreateReadBackBuffer((uint)descsource.Width);
+            readbackgpuData.CreateReadBackBuffer(readbackSize);
         }
         gpuData.Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
         cb.cmd->CopyResource(readbackgpuData.GetResource(), gpuData.GetResource());
         gpuData.Transition(cb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+        return readbackSize / sizeof(T);
     }
 
     void ReadBackMap(void** data)
@@ -1857,144 +1954,251 @@ public:
             return;
         if (cpuData.size() <= 0)
             return;
-        if (this->gpuData.allocation == nullptr || this->gpuData.BufferSize() <= (cpuData.size() * sizeof(T)))
+        if (this->gpuData.allocation == nullptr || this->gpuData.BufferSize() < (cpuData.size() * sizeof(T)))
         {
-            this->gpuData.Release(true);
+            ZoneScopedN("Creation");
             this->gpuData.CreateUploadBuffer<T>(max(uint1(cpuData.size()), uint1(1)), typeid(T).name());
         }
-        void* buf;
-        auto hr = this->GetResourcePtr()->Map(0, nullptr, &buf);
-        if (SUCCEEDED(hr))
         {
-            memcpy(buf, cpuData.data(), sizeof(T) * cpuData.size());
-            this->GetResourcePtr()->Unmap(0, nullptr);
+            ZoneScopedN("Map");
+            void* buf;
+            auto hr = this->GetResourcePtr()->Map(0, nullptr, &buf);
+            if (SUCCEEDED(hr))
+            {
+                memcpy(buf, cpuData.data(), sizeof(T) * cpuData.size());
+                this->GetResourcePtr()->Unmap(0, nullptr);
+            }
         }
     }
 };
 
-// deprecated
-class ReadBackBuffer
+// A GPU-backed instance buffer where updates are submitted as commands (add, modify, remove).
+// Instances are kept contiguous in memory. Removal does a swap-remove (order not preserved)
+// All GPU updates are issued via a provided CommandBuffer to keep operations on the GPU side.
+template <class T>
+class CommandStructuredBuffer : private StructuredBuffer<T>
 {
 public:
-    Resource gpuData;
+    struct Command
+    {
+        enum Type : uint { Add, Modify, Remove } type;
+        uint index;    // used for Modify/Remove (index in the contiguous array)
+        uint pad1;     // could put data stride here
+        uint pad2;
+        T data;        // used for Add/Modify
+    };
 
-    Resource& GetResource()
-    {
-        return gpuData;
-    }
-    ID3D12Resource* GetResourcePtr()
-    {
-        return gpuData.GetResource();
-    }
-    // resource must be in common state. Always ?
-    void ReadBack(Resource& resource, CommandBuffer& cb)
-    {
-        ZoneScoped;
-        if (gpuData.GetResource() == nullptr)
-        {
-            // can�t use resource.allocation->GetSize().... it give the entire DMA page size ?
-            auto descsource = resource.GetResource()->GetDesc();
-            gpuData.CreateReadBackBuffer((uint)descsource.Width);
-        }
-        resource.Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        cb.cmd->CopyResource(GetResourcePtr(), resource.GetResource());
-        resource.Transition(cb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
-    }
+    Resource gpuDataCounter;
+
+    PerFrame<StructuredUploadBuffer<Command>> commands;
+
+    std::vector<T> cpuData;
+
+    bool initialized = false;
+    std::mutex lock;
 
     void Release()
     {
-        gpuData.Release();
-    }
-};
-
-class ConstantBuffer
-{
-    std::mutex lock;
-    PerFrame<std::vector<Resource>> pages;
-    uint count;
-    static constexpr uint ConstantBufferCountInPage = 128;
-    static constexpr uint ConstantBufferStride = 512;
-
-#if _DEBUG
-    struct range
-    {
-        uint start;
-        uint end;
-    };
-    std::vector<range> ranges;
-    void DebugRanges(uint start, uint end)
-    {
-        for (uint i = 0; i < ranges.size(); i++)
-        {
-            if (start >= ranges[i].start && start <= ranges[i].end)
-            {
-                IOs::instance->Log("range overlap start {} end {}, range start {} end {}", start, end, ranges[i].start, ranges[i].end);
-            }
-        }
-        ranges.push_back({ start, end });
-    }
-#endif
-
-public:
-    static ConstantBuffer* instance;
-
-    void On()
-    {
-        instance = this;
-        count = 0;
-    }
-
-    void Off()
-    {
+        StructuredBuffer<T>::Release();
+        gpuDataCounter.Release();
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            auto& res = pages.Get(i);
-            for (uint j = 0; j < res.size(); j++)
+            commands.Get(i).Release();
+        }
+    }
+
+    uint Size()
+    {
+        return (uint)this->cpuData.size();
+    }
+
+    void Reserve(uint size)
+    {
+        this->cpuData.reserve(size);
+    }
+
+    Resource& GetResource()
+    {
+        return StructuredBuffer<T>::GetResource();
+    }
+
+    uint ReadBack(CommandBuffer& cb)
+    {
+        return StructuredBuffer<T>::ReadBack(cb);
+    }
+
+    void ReadBackMap(void** data)
+    {
+        StructuredBuffer<T>::ReadBackMap(data);
+    }
+
+    void ReadBackUnMap()
+    {
+        StructuredBuffer<T>::ReadBackUnMap();
+    }
+
+    // Enqueue commands
+    void AddCommand(const T& value)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        Command c;
+        c.type = Command::Add;
+        c.data = value;
+        c.index = UINT_MAX;
+        commands->Add(c);
+    }
+    void ModifyCommand(uint index, const T& value)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        Command c;
+        c.type = Command::Modify;
+        c.data = value;
+        c.index = index;
+        commands->Add(c);
+    }
+    void RemoveCommand(uint index)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        Command c;
+        c.type = Command::Remove;
+        c.index = index;
+        commands->Add(c);
+    }
+
+    void ExecuteCommands(CommandBuffer& cb, Shader& init, Shader& update)
+    {
+        ZoneScoped;
+        std::lock_guard<std::mutex> lk(lock);
+
+
+        if (gpuDataCounter.GetResource() == nullptr)
+            gpuDataCounter.CreateBuffer<uint>(1, "bufferCounter");
+
+        // Ensure GPU buffer large enough for worst-case (all adds applied)
+        uint adds = 0;
+        for (uint i = 0; i < commands->cpuData.size(); i++)
+        {
+            auto& c = commands->cpuData[i];
+            if (c.type == Command::Add)
+                adds++;
+        }
+        uint needed = (uint)this->cpuData.size() + adds;
+
+        if (this->GetResource().GetResource() != nullptr && this->GetResource().BufferSize() < needed * sizeof(T))
+        {
+            auto previousGPUData = this->gpuData;
+            this->CreateBuffer(needed);
+            this->gpuData.Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+            cb.cmd->CopyResource(this->gpuData.GetResource(), previousGPUData.GetResource());
+            this->gpuData.Transition(cb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+        }
+        if (this->GetResource().GetResource() == nullptr)
+        {
+            this->CreateBuffer(needed);
+        }
+        if (commands->Size() == 0) return;
+
+        commands->Upload();
+        
+        // execute a compute shader to apply the commands on GPU side. The shader will read the current instance buffer, the commands and their count, and write the updated instance buffer and count. 
+        // It will use append/consume buffers or atomic counters to keep track of the current count while processing commands.
+        // and will have only 1 thread to guarantee that we have the same buffer state as on CPU side
+        //auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
+        //auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        //auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
+        HLSL::StructuredCommandBufferParameters commandParameters;
+        commandParameters.commandIndex = commands->GetResource().srv.offset;
+        commandParameters.commandCount = commands->Size();
+        commandParameters.commandStride = sizeof(Command);
+        commandParameters.bufferIndex = this->gpuData.uav.offset;
+        commandParameters.bufferCounterIndex = gpuDataCounter.uav.offset;
+        commandParameters.bufferStride = sizeof(T);
+        auto commandParametersAddress = ConstantBuffer::instance->PushConstantBuffer(&commandParameters);
+
+        if(!initialized)
+        {
+            cb.SetCompute(init);
+            cb.cmd->SetComputeRootConstantBufferView(Custom1Register, commandParametersAddress);
+            cb.cmd->Dispatch(1, 1, 1);
+            initialized = true;
+        }
+
+        cb.SetCompute(update);
+        //commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        //commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        cb.cmd->SetComputeRootConstantBufferView(Custom1Register, commandParametersAddress);
+        cb.cmd->Dispatch(1, 1, 1);
+
+        // do the same on CPU side to keep cpuData in sync with GPU buffer
+        for (uint i = 0; i < commands->cpuData.size(); i++)
+        {
+            auto& c = commands->cpuData[i];
+            if (c.type == Command::Add)
             {
-                res[j].Release();
+                uint index = (uint)this->cpuData.size();
+                this->cpuData.push_back(c.data);
+            }
+            else if (c.type == Command::Modify)
+            {
+                if (c.index < this->cpuData.size())
+                {
+                    this->cpuData[c.index] = c.data;
+                }
+            }
+            else if (c.type == Command::Remove)
+            {
+                if (c.index < this->cpuData.size())
+                {
+                    uint last = (uint)this->cpuData.size() - 1;
+                    if (c.index != last)
+                    {
+                        // move last into removed slot on CPU and upload that slot
+                        this->cpuData[c.index] = this->cpuData[last];
+                    }
+                    this->cpuData.pop_back();
+                }
             }
         }
-    }
 
-    void Reset()
-    {
-        count = 0;
-#if _DEBUG
-        ranges.clear();
-#endif
-    }
-
-    D3D12_GPU_VIRTUAL_ADDRESS PushConstantBuffer(void* data)
-    {
-        lock.lock();
-        uint pageIndex = count / ConstantBufferCountInPage;
-        uint indexInPage = count % ConstantBufferCountInPage;
-        count++;
-        if (pages->size() <= pageIndex)
-        {
-            auto& newPage = pages->emplace_back();
-            newPage.CreateBuffer((ConstantBufferCountInPage + 1) * ConstantBufferStride, ConstantBufferStride, true, "constant buffer");
-        }
-        auto& pageBuff = pages.Get()[pageIndex];
-
-        char* buf;
-        D3D12_RANGE rangeRead = { 0 , 0 }; // dont read
-        auto hr = pageBuff.GetResource()->Map(0, &rangeRead, (void**)&buf);
-        if (SUCCEEDED(hr))
-        {
-            buf += indexInPage * ConstantBufferStride;
-            memcpy(buf, data, ConstantBufferStride);
-            D3D12_RANGE rangeWrite = { indexInPage * ConstantBufferStride, indexInPage * ConstantBufferStride + ConstantBufferStride };
-            pageBuff.GetResource()->Unmap(0, &rangeWrite);
-#if _DEBUG
-            DebugRanges((uint)rangeWrite.Begin + (pageIndex << 16), (uint)rangeWrite.End + (pageIndex << 16) - 1);
-#endif
-        }
-        lock.unlock();
-        return pageBuff.GetResource()->GetGPUVirtualAddress() + (indexInPage * ConstantBufferStride);
+        commands->Clear();
     }
 };
-ConstantBuffer* ConstantBuffer::instance;
+/*
+template <class K, class T>
+class MappedStructuredBuffer : private CommandStructuredBuffer<T>
+{
+public:
+    std::unordered_map<K, uint> keyToIndex;
+
+    void AddCommand(const K& key, const T& value)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        Command c;
+        c.type = Command::Add;
+        c.data = value;
+        c.index = UINT_MAX;
+        commands->Add(c);
+    }
+    void ModifyCommand(const K& key, const T& value)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        Command c;
+        c.type = Command::Modify;
+        c.data = value;
+        c.index = index;
+        commands->Add(c);
+    }
+    void RemoveCommand(const K& key)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        Command c;
+        c.type = Command::Remove;
+        c.index = index;
+        commands->Add(c);
+    }
+};
+*/
+
 
 // https://github.com/TheRealMJP/DeferredTexturing/blob/experimental/SampleFramework12/v1.01/Graphics/Profiler.cpp
 // use https://github.com/Raikiri/LegitProfiler for display ?
@@ -2025,8 +2229,7 @@ struct Profiler
     {
         static constexpr UINT64 queueCount = 3;
         static constexpr UINT64 maxProfiles = 128;
-        Resource buffer;
-        ReadBackBuffer readbackBuffer;
+        StructuredBuffer<UINT64> profileBuffer;
         std::vector<ProfileData> entries;
     };
     PerQueueData queueProfile[3];
@@ -2058,7 +2261,7 @@ struct Profiler
             {
                 prof.entries[i].name = "";
             }
-            prof.buffer.CreateBuffer<UINT64>((UINT)(PerQueueData::maxProfiles), "Profile");
+            prof.profileBuffer.CreateBuffer((UINT)(PerQueueData::maxProfiles));
         }
 
         instance = this;
@@ -2136,7 +2339,7 @@ struct Profiler
 
             // Resolve the data
             const UINT64 dstOffset = (cb.profileIdx * 2) * sizeof(UINT64);
-            cb.cmd->ResolveQueryData(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, cb.profileIdx * 2, 2, prof.buffer.GetResource(), dstOffset);
+            cb.cmd->ResolveQueryData(queryHeap, D3D12_QUERY_TYPE_TIMESTAMP, cb.profileIdx * 2, 2, prof.profileBuffer.GetResource().GetResource(), dstOffset);
         }
     }
 
@@ -2183,17 +2386,16 @@ struct Profiler
         for (uint i = 0; i < ARRAYSIZE(queueProfile); i++)
         {
             auto& prof = queueProfile[i];
-            prof.readbackBuffer.ReadBack(prof.buffer, cb);
+            prof.profileBuffer.ReadBack(cb);
 
             UINT64* queryData = NULL;
-            ID3D12Resource* res = prof.readbackBuffer.gpuData.GetResource();
-            res->Map(0, nullptr, (void**)&queryData);
+            prof.profileBuffer.ReadBackMap((void**)&queryData);
 
             // Iterate over all of the profiles
             for (UINT64 profileIdx = 0; profileIdx < prof.entries.size(); ++profileIdx)
                 UpdateProfile(prof.entries[profileIdx], profileIdx, gpuFrequency, queryData);
 
-            res->Unmap(0, nullptr);
+            prof.profileBuffer.ReadBackUnMap();
         }
 
     }
@@ -2204,8 +2406,7 @@ struct Profiler
         for (uint i = 0; i < ARRAYSIZE(queueProfile); i++)
         {
             auto& prof = queueProfile[i];
-            prof.buffer.Release();
-            prof.readbackBuffer.Release();
+            prof.profileBuffer.Release();
         }
         queryHeap->Release();
     }
@@ -2276,12 +2477,12 @@ struct MeshStorage
     // could we just store BLASes in big bulk resources like above ?
     std::vector<Mesh> allMeshes;
     Resource scratchBLAS;
-    uint maxScratchSizeInBytes = 150000000;
+    uint maxScratchSizeInBytes = 150 * 1024 * 1024; // 150 MB of wasted mem for BLAS compute ? a little much na ?
 
     std::recursive_mutex lock;
 
     uint meshesMaxCount = 512;
-    uint meshletMaxCount = 400000;
+    uint meshletMaxCount = meshesMaxCount * 128;
     uint meshletVertexMaxCount = meshletMaxCount * HLSL::max_vertices;
     uint meshletTrianglesMaxCount = meshletMaxCount * HLSL::max_triangles;
     uint vertexMaxCount = meshletVertexMaxCount;

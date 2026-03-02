@@ -25,6 +25,7 @@ public:
     String file = "..\\assetLibrary.txt";
     String assetsPath = "..\\Assets\\";
     std::unordered_map<assetID, Asset> map;
+    std::vector<assetID> assetsAlive;
     String importPath = "..\\Assets\\";
     std::unordered_map<assetID, String> allAssetsInImportPath;
     std::unordered_map<assetID, uint> loadingRequest;
@@ -138,41 +139,38 @@ public:
     void CheckAssetsLifeTime()
     {
         ZoneScoped;
-        for (auto& item : map)
+        for (uint i=0; i<assetsAlive.size(); i++)
         {
-            if (item.second.type == AssetLibrary::AssetType::shader)
+            assetID ID = assetsAlive[i];
+            auto& item = map[ID];
+            if (item.type == AssetLibrary::AssetType::shader)
             {
-                if (map[item.first].data != nullptr)
+                if (Get<Shader>(ID)->NeedReload())
                 {
-                    if (Get<Shader>(item.first)->NeedReload())
-                    {
-                        LoadAsset(item.first, false);
-                    }
+                    LoadAsset(ID, false);
                 }
             }
-            else if (item.second.type == AssetLibrary::AssetType::mesh || item.second.type == AssetLibrary::AssetType::texture)
+            else if (item.type == AssetLibrary::AssetType::mesh || item.type == AssetLibrary::AssetType::texture)
             {
-                if (item.second.data != nullptr)
+                if (item.lastGetFrameCount > 100)
                 {
-                    if (item.second.lastGetFrameCount > 100)
+                    if (item.type == AssetLibrary::AssetType::mesh)
                     {
-                        if (item.second.type == AssetLibrary::AssetType::mesh)
-                        {
-                            // TODO : a real release in meshStorage
-                            ((Mesh*)item.second.data)->BLAS.Release();
-                        }
-                        else if (item.second.type == AssetLibrary::AssetType::shader)
-                        {
-                            ((Shader*)item.second.data)->shaderBindingTable.Release();
-                        }
-                        else if (item.second.type == AssetLibrary::AssetType::texture)
-                        {
-                            ((Resource*)item.second.data)->allocation->Release();
-                        }
-                        item.second.data = nullptr;
+                        // TODO : a real release in meshStorage
+                        //((Mesh*)item.second.data)->BLAS.Release();
                     }
-                    item.second.lastGetFrameCount++;
+                    else if (item.type == AssetLibrary::AssetType::texture)
+                    {
+                        ((Resource*)item.data)->allocation->Release();
+                        item.data = nullptr;
+
+                        // factorize with mesh release when done
+                        assetsAlive[i] = assetsAlive.back();
+                        assetsAlive.pop_back();
+                        i--;
+                    }
                 }
+                item.lastGetFrameCount++;
             }
         }
     }
@@ -2445,6 +2443,7 @@ inline void AssetLibrary::LoadAssets()
     loadingRequest.clear();
     CheckAssetsLifeTime();
 }
+
 inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
 {
     switch (map[id].type)
@@ -2459,6 +2458,8 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
                 Mesh mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get());
                 lock.lock();
                 map[id].data = new Mesh(mesh);
+                map[id].lastGetFrameCount = 0;
+                assetsAlive.push_back(id);
                 meshLoaded++;
                 lock.unlock();
             }
@@ -2479,8 +2480,10 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
                 if (map[id].data == nullptr)
                 {
                     map[id].data = new Shader();
+                    assetsAlive.push_back(id);
                 }
                 *(Shader*)map[id].data = shader;
+                map[id].lastGetFrameCount = 0;
                 shaderLoaded++;
                 lock.unlock();
             }
@@ -2500,6 +2503,8 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             {
                 lock.lock();
                 map[id].data = new Resource(texture);
+                map[id].lastGetFrameCount = 0;
+                assetsAlive.push_back(id);
                 textureLoaded++;
                 lock.unlock();
             }

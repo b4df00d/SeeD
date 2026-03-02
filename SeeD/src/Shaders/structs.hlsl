@@ -2,7 +2,6 @@
 #ifndef __STRUCTS__
 #define __STRUCTS__
 
-#define GROUPED_CULLING 1
 #define GROUPED_CULLING_THREADS 128
 #define INSTANCE_CULLING_THREADS 128
 
@@ -39,6 +38,69 @@ namespace HLSL
     #define meshletIndexIndirectRegister b6
 #endif
     
+    // Data structure to match the command signature used for ExecuteIndirect.
+    #ifdef __cplusplus // bah c�est surtout pour par avoir ca dans le HLSL
+    #else
+    typedef uint64_t D3D12_GPU_VIRTUAL_ADDRESS;
+    struct D3D12_DRAW_ARGUMENTS 
+    {
+      uint VertexCountPerInstance;
+      uint InstanceCount;
+      uint StartVertexLocation;
+      uint StartInstanceLocation;
+    };
+    struct D3D12_DRAW_INDEXED_ARGUMENTS
+    {
+	    uint IndexCountPerInstance;
+	    uint InstanceCount;
+	    uint StartIndexLocation;
+	    int BaseVertexLocation;
+	    uint StartInstanceLocation;
+    };
+    struct D3D12_GPU_VIRTUAL_ADDRESS_RANGE
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS StartAddress;
+        uint64_t SizeInBytes;
+    };
+    struct D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS StartAddress;
+        uint64_t SizeInBytes;
+        uint64_t StrideInBytes;
+    };
+    struct D3D12_DISPATCH_RAYS_DESC
+    {
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE RayGenerationShaderRecord;
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE MissShaderTable;
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE HitGroupTable;
+        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE CallableShaderTable;
+        uint Width;
+        uint Height;
+        uint Depth;
+    };
+    
+    struct D3D12_RAYTRACING_INSTANCE_DESC
+    {
+        float Transform[ 3 ][ 4 ];
+        uint InstanceID	: 24;
+        uint InstanceMask : 8;
+        uint InstanceContributionToHitGroupIndex : 24;
+        uint Flags : 8;
+        D3D12_GPU_VIRTUAL_ADDRESS AccelerationStructure;
+    };
+    
+    enum D3D12_RAYTRACING_INSTANCE_FLAGS
+    {
+        D3D12_RAYTRACING_INSTANCE_FLAG_NONE	= 0,
+        D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE	= 0x1,
+        D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE	= 0x2,
+        D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE	= 0x4,
+        D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE	= 0x8,
+        D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OMM_2_STATE	= 0x10,
+        D3D12_RAYTRACING_INSTANCE_FLAG_DISABLE_OMMS	= 0x20
+    };
+    #endif
+    
     
     static const bool reverseZ = true;
     
@@ -68,8 +130,6 @@ namespace HLSL
         uint materialCount;
         uint instancesHeapIndex;
         uint instanceCount;
-        uint instancesGPUHeapIndex; // only for instances created on GPU
-        uint instanceGPUCount;
     };
     
     enum class Upscaling
@@ -92,9 +152,7 @@ namespace HLSL
         uint cameraIndex;
         uint lightsIndex;
         uint instancesCulledArgsIndex;
-#if GROUPED_CULLING
         uint meshletsToCullIndex;
-#endif
         uint meshletsCulledArgsIndex;
         uint instancesCounterIndex;
         uint meshletsCounterIndex;
@@ -175,7 +233,10 @@ namespace HLSL
         uint meshIndex;
         uint materialIndex;
         uint objectID; // map to entityBase
-        uint instanceID;
+        uint pad1;
+        D3D12_GPU_VIRTUAL_ADDRESS rayTracingBLAS;
+        uint pad2;
+        uint pad3;
         
         float3 GetPosition()
         {
@@ -187,58 +248,34 @@ namespace HLSL
             return abs(max(max(length(current[0].xyz), length(current[1].xyz)), length(current[2].xyz)));
         }
         
+        #ifdef __cplusplus // bah c�est surtout pour par avoir ca dans le HLSL
+        float4x4 unpack(float4x4& mat)
+        #else
         float4x4 unpack(float4x4 mat)
+        #endif
         {
             return mat;
         }
-        
+        #ifdef __cplusplus // bah c�est surtout pour par avoir ca dans le HLSL
+        float4x4 pack(float4x4& mat)
+        #else
         float4x4 pack(float4x4 mat)
+        #endif
         {
             return mat;
         }
     };
     
-    // Data structure to match the command signature used for ExecuteIndirect.
-    #ifdef __cplusplus // bah c�est surtout pour par avoir ca dans le HLSL
-    #else
-    typedef uint2 D3D12_GPU_VIRTUAL_ADDRESS;
-    struct D3D12_DRAW_ARGUMENTS 
+    struct StructuredCommandBufferParameters
     {
-      uint VertexCountPerInstance;
-      uint InstanceCount;
-      uint StartVertexLocation;
-      uint StartInstanceLocation;
+        uint commandIndex;
+        uint commandCount;
+        uint commandStride;
+        uint bufferIndex;
+        uint bufferCounterIndex;
+        uint bufferStride;
     };
-    struct D3D12_DRAW_INDEXED_ARGUMENTS
-    {
-	    uint IndexCountPerInstance;
-	    uint InstanceCount;
-	    uint StartIndexLocation;
-	    int BaseVertexLocation;
-	    uint StartInstanceLocation;
-    };
-    struct D3D12_GPU_VIRTUAL_ADDRESS_RANGE
-    {
-        D3D12_GPU_VIRTUAL_ADDRESS StartAddress;
-        uint64_t SizeInBytes;
-    };
-    struct D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE
-    {
-        D3D12_GPU_VIRTUAL_ADDRESS StartAddress;
-        uint64_t SizeInBytes;
-        uint64_t StrideInBytes;
-    };
-    struct D3D12_DISPATCH_RAYS_DESC
-    {
-        D3D12_GPU_VIRTUAL_ADDRESS_RANGE RayGenerationShaderRecord;
-        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE MissShaderTable;
-        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE HitGroupTable;
-        D3D12_GPU_VIRTUAL_ADDRESS_RANGE_AND_STRIDE CallableShaderTable;
-        uint Width;
-        uint Height;
-        uint Depth;
-    };
-    #endif
+    
 
     struct IndirectCommand
     {
@@ -248,13 +285,11 @@ namespace HLSL
 	    D3D12_DRAW_ARGUMENTS drawArguments;
     };
     
-    #if GROUPED_CULLING
     struct GroupedCullingDispatch
     {
         uint instanceIndex;
         uint meshletIndex;
     };
-    #endif
     
     static const uint cullMeshletThreadCount = 32;
     struct InstanceCullingDispatch
@@ -382,13 +417,14 @@ namespace HLSL
     static const float brightnessClippingAdjust = 1;
     
     // ----------------- RT stuff ------------------
+    
     static const uint maxRTDepth = 1;
     struct RTParameters
     {
         uint BVH;
-        uint giIndex;
-        uint directReservoirIndex;
-        uint previousDirectReservoirIndex;
+        uint instancesRaytracingHeapIndex;
+        uint instancesRaytracingCountHeapIndex;
+        
         uint giReservoirIndex;
         uint previousgiReservoirIndex;
         uint lightedIndex;
@@ -397,7 +433,6 @@ namespace HLSL
         float reservoirRandBias;
         float reservoirSpacialRandBias;
         float spacialRadius;
-        uint passNumber;
         
         float SHARCSceneScale;
         uint SHARCEntriesNum;

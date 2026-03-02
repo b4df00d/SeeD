@@ -236,7 +236,7 @@ void PathTraceRays()
                 payload.primitiveIndex = ~0U;
                 payload.geometryIndex = ~0U;
                 payload.barycentrics = 0;
-                hitPos = cd.worldPos.xyz - cd.viewDir * 0.002 * cd.viewDist + cd.worldNorm * 0.002 * cd.viewDist;
+                hitPos = cd.offsetedWorldPos.xyz;
                 
                 s = GetSurfaceData(pixel);
             }
@@ -275,6 +275,17 @@ void PathTraceRays()
                 SharcUpdateMiss(sharcParameters, sharcState, skyValue);
 
                 sampleRadiance += skyValue * throughput;
+                
+                hitPos = ray.Origin + ray.Direction * 10000.0f;
+                
+                if(bounce == 1)
+                {
+                    indirectRay.Origin = ray.Origin;
+                    indirectRay.Direction = ray.Direction;
+                    indirectRay.HitPosition = hitPos;
+                    indirectRay.HitNormal = s.normal;
+                    indirectRay.proba = 1;
+                }
 
                 break;
             }

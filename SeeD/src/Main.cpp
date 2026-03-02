@@ -50,10 +50,11 @@ void operator delete(void* ptr) noexcept
 
 struct Options
 {
-    bool stopFrustumUpdate;
-    bool stopBufferUpload;
-    bool stepMotion;
-    bool shaderReload;
+    bool stopFrustumUpdate = false;
+    bool stopBufferUpload = false;
+    bool enableStructuredCommandBuffersReadback = false;
+    bool stepMotion = false;
+    bool shaderReload = true;
 
     enum class DebugMode
     {
@@ -61,7 +62,7 @@ struct Options
         ray,
         boundingSphere,
     };
-    DebugMode debugMode;
+    DebugMode debugMode = DebugMode::none;
 
     enum class DebugDraw
     {
@@ -73,7 +74,7 @@ struct Options
         GIprobes,
         GIBounces,
     };
-    DebugDraw debugDraw;
+    DebugDraw debugDraw = DebugDraw::none;
 } options;
 
 
@@ -166,7 +167,7 @@ public:
             world.DeferredRelease(); // thread this ?
 
             if (options.stepMotion)
-                Sleep(500);
+                Sleep(250);
 
             FrameMark;
         }
@@ -194,8 +195,6 @@ public:
         ios.Off();
         time.Off();
         EditorWindow::Save();
-
-        
     }
 
     void ScheduleInputs(tf::Subflow& subflow)

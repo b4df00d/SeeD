@@ -1,5 +1,11 @@
-
 #include "structs.hlsl"
+
+cbuffer CustomRT : register(b3)
+{
+    HLSL::RTParameters rtParameters;
+};
+#define CUSTOM_ROOT_BUFFER_1
+
 #include "binding.hlsl"
 #include "common.hlsl"
 
@@ -17,6 +23,9 @@ void CullingReset(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadI
     
     RWStructuredBuffer<uint> meshletsCounters = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
     meshletsCounters[0] = 0;
+    
+    RWStructuredBuffer<uint> instanceRaytracingCounter = ResourceDescriptorHeap[rtParameters.instancesRaytracingCountHeapIndex];
+    instanceRaytracingCounter[0] = 0;
 }
 
 #pragma compute Instances CullingInstances
@@ -46,6 +55,37 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
     float radius = abs(instance.GetScale() * mesh.boundingSphere.w); // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
     float dist = length(camera.worldPos.xyz - center.xyz);
+  
+    {
+        // RT instances
+        RWStructuredBuffer<uint> instanceRaytracingCounter = ResourceDescriptorHeap[rtParameters.instancesRaytracingCountHeapIndex];
+        RWStructuredBuffer<HLSL::D3D12_RAYTRACING_INSTANCE_DESC> instanceRaytracing = ResourceDescriptorHeap[rtParameters.instancesRaytracingHeapIndex];
+    
+        HLSL::D3D12_RAYTRACING_INSTANCE_DESC instanceDesc;
+        instanceDesc.InstanceID = instanceIndex;
+        instanceDesc.InstanceContributionToHitGroupIndex = 0;
+        instanceDesc.Flags = HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_NONE 
+                           | HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE 
+                           | HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;
+        instanceDesc.Transform[0][0] = worldMatrix[0][0];
+        instanceDesc.Transform[0][1] = worldMatrix[0][1];
+        instanceDesc.Transform[0][2] = worldMatrix[0][2];
+        instanceDesc.Transform[0][3] = worldMatrix[0][3];
+        instanceDesc.Transform[1][0] = worldMatrix[1][0];
+        instanceDesc.Transform[1][1] = worldMatrix[1][1];
+        instanceDesc.Transform[1][2] = worldMatrix[1][2];
+        instanceDesc.Transform[1][3] = worldMatrix[1][3];
+        instanceDesc.Transform[2][0] = worldMatrix[2][0];
+        instanceDesc.Transform[2][1] = worldMatrix[2][1];
+        instanceDesc.Transform[2][2] = worldMatrix[2][2];
+        instanceDesc.Transform[2][3] = worldMatrix[2][3];
+        instanceDesc.InstanceMask = 0xFF;
+        instanceDesc.AccelerationStructure = instance.rayTracingBLAS;
+        
+        uint instanceRTIndex = 0;
+        InterlockedAdd(instanceRaytracingCounter[0], 1, instanceRTIndex);
+        instanceRaytracing[instanceRTIndex] = instanceDesc;
+    }
     
     bool culled = FrustumCulling(camera, boundingSphere);
     if(!culled) culled = OcclusionCulling(camera, boundingSphere);
@@ -56,8 +96,6 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
         uint lodIndex = max(min(log2(dist * 0.05 / radius  + 1) * 3, 3), 0);
         
         HLSL::Mesh::LOD lod = mesh.LODs[lodIndex];
-        
-        #if GROUPED_CULLING
         
         uint meshletIndex = 0;
         InterlockedAdd(counter[1], lod.meshletCount, meshletIndex);
@@ -70,20 +108,6 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
             mdc.meshletIndex = lod.meshletOffset+i;
             meshletsToCull[meshletIndex+i] = mdc;
         }
-        
-        #else
-        
-        uint index = 0;
-        InterlockedAdd(counter[0], 1, index);
-        HLSL::InstanceCullingDispatch mdc = (HLSL::InstanceCullingDispatch) 0;
-        mdc.instanceIndex = instanceIndex;
-        mdc.meshletIndex = mesh.meshletOffset;
-        mdc.ThreadGroupCountX = ceil(mesh.meshletCount / (HLSL::cullMeshletThreadCount * 1.0f));
-        mdc.ThreadGroupCountY = 1;
-        mdc.ThreadGroupCountZ = 1;
-        instancesCulledArgs[index] = mdc;
-        
-        #endif
     }
 }
 
@@ -110,7 +134,6 @@ void CountMeshletsDispatch(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_Dispat
 
 #pragma compute Meshlets CullingMeshlets
 
-#if GROUPED_CULLING
 [RootSignature(SeeDRootSignature)]
 [numthreads(GROUPED_CULLING_THREADS, 1, 1)]
 void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
@@ -156,58 +179,3 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
         meshletsCulledArgs[index] = mdc;
     }
 }
-#else
-groupshared HLSL::Instance instance;
-groupshared HLSL::Mesh mesh;
-groupshared HLSL::Camera camera;
-[RootSignature(SeeDRootSignature)]
-[numthreads(HLSL::cullMeshletThreadCount, 1, 1)]
-void CullingMeshlet(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
-{
-    if(gtid.x == 0)
-    {
-        StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-        instance = instances[instanceIndexIndirect];
-        
-        StructuredBuffer<HLSL:: Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
-        mesh = meshes[instance.meshIndex];
-        
-        StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-        camera = cameras[viewContext.cameraIndex];
-    }
-    GroupMemoryBarrierWithGroupSync();
-    
-    uint localMeshletIndex = dtid.x;
-    if (localMeshletIndex >= mesh.meshletCount)
-        return;
-    
-    uint meshletIndex = mesh.meshletOffset + localMeshletIndex;
-    
-    StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
-    HLSL::Meshlet meshlet = meshlets[meshletIndex];
-    
-    
-    float4x4 worldMatrix = instance.unpack(instance.current);
-    float3 center = mul(worldMatrix, float4(meshlet.boundingSphere.xyz, 1)).xyz;
-    float radius = abs(max(max(length(worldMatrix[0].xyz), length(worldMatrix[1].xyz)), length(worldMatrix[2].xyz)) * meshlet.boundingSphere.w); // assume uniform scaling
-    float4 boundingSphere = float4(center, radius);
-    
-    bool culled = FrustumCulling(camera, boundingSphere);
-    if (!culled)  culled = OcclusionCulling(camera, boundingSphere);
-    
-    if (!culled)
-    {
-        RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
-        RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
-        uint index = 0;
-        InterlockedAdd(counter[0], 1, index);
-        HLSL::MeshletDrawCall mdc = (HLSL::MeshletDrawCall) 0;
-        mdc.instanceIndex = instanceIndexIndirect;
-        mdc.meshletIndex = meshletIndex;
-        mdc.ThreadGroupCountX = 1;
-        mdc.ThreadGroupCountY = 1;
-        mdc.ThreadGroupCountZ = 1;
-        meshletsCulledArgs[index] = mdc;
-    }
-}
-#endif

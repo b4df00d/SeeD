@@ -998,6 +998,87 @@ public:
 };
 GPUResourcesWindow gpuResourcesWindow;
 
+
+class InstancesWindow : public EditorWindow
+{
+public:
+    InstancesWindow() : EditorWindow("Instances") {}
+    void Update() override final
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("InstancesWindow", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+
+        uint width = ImGui::GetContentRegionAvail().x * 0.5f - ImGui::GetStyle().ItemSpacing.x * 0.5f;
+
+        if (ImGui::BeginTable("cpuTable", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_HighlightHoveredColumn, ImVec2(width, 0)))
+        {
+            ImGui::TableHeader("CPU Data");
+            ImGui::TableSetupColumn("meshIndex");
+            ImGui::TableSetupColumn("materialIndex");
+            ImGui::TableSetupColumn("objectID");
+            ImGui::TableSetupColumn("rayTracingBLAS");
+            ImGui::TableSetupColumn("current");
+            ImGui::TableSetupColumn("previous");
+            ImGui::TableHeadersRow();
+            for (auto& item : Renderer::instance->mainView.viewWorld.instances.cpuData)
+            {
+                ImGui::TableNextRow();
+                uint col = 0;
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", item.meshIndex);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", item.materialIndex);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", item.objectID);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", item.rayTracingBLAS);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%4.1f %4.1f %4.1f", item.current[3][0], item.current[3][1], item.current[3][2]);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%4.1f %4.1f %4.1f", item.previous[3][0], item.previous[3][1], item.previous[3][2]);
+            }
+            ImGui::EndTable();
+        }
+        ImGui::SameLine();
+        if (ImGui::BeginTable("readbackTable", 6, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_HighlightHoveredColumn, ImVec2(width, 0)))
+        {
+            ImGui::TableHeader("GPU Readback");
+            ImGui::TableSetupColumn("meshIndex");
+            ImGui::TableSetupColumn("materialIndex");
+            ImGui::TableSetupColumn("objectID");
+            ImGui::TableSetupColumn("rayTracingBLAS");
+            ImGui::TableSetupColumn("current");
+            ImGui::TableSetupColumn("previous");
+            ImGui::TableHeadersRow();
+            for (auto& item : Renderer::instance->mainView.viewWorld.instancesReadBackDebug)
+            {
+                ImGui::TableNextRow();
+                uint col = 0;
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", item.meshIndex);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", item.materialIndex);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", item.objectID);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", item.rayTracingBLAS);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%4.1f %4.1f %4.1f", item.current[3][0], item.current[3][1], item.current[3][2]);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%4.1f %4.1f %4.1f", item.previous[3][0], item.previous[3][1], item.previous[3][2]);
+            }
+            ImGui::EndTable();
+        }
+
+        ImGui::End();
+    }
+};
+InstancesWindow instancesWindow;
+
 #include "Shaders/structs.hlsl"
 class OptionWindow : public EditorWindow
 {
@@ -1014,6 +1095,7 @@ public:
 
         ImGui::Checkbox("stopFrustumUpdate", &options.stopFrustumUpdate);
         ImGui::Checkbox("stopBufferUpload", &options.stopBufferUpload);
+        ImGui::Checkbox("enableStructuredCommandBuffersReadback", &options.enableStructuredCommandBuffersReadback);
         ImGui::Checkbox("stepMotion", &options.stepMotion);
         ImGui::Checkbox("shaderHotReload", &options.shaderReload);
 
@@ -1539,6 +1621,20 @@ public:
                 editorState.dirtyHierarchy = true;
             }
             ImGui::SameLine();
+            if (ImGui::Button("Clone lot"))
+            {
+                for (uint i = 0; i < 100000; i++)
+                {
+                    World::Entity clone = editorState.selectedObject.Clone("dup", false);
+                    auto& trans = clone.Get<Components::Transform>();
+                    trans.position.x = Rand01() * 100.0f - 50.0f;
+                    trans.position.y = Rand01() * 100.0f - 50.0f;
+                    trans.position.z = Rand01() * 100.0f - 50.0f;
+                    editorState.selectedObject = clone;
+                }
+                editorState.dirtyHierarchy = true;
+            }
+            ImGui::SameLine();
             if (ImGui::Button("Delete"))
             {
                 editorState.selectedObject.Release();
@@ -1722,6 +1818,9 @@ public:
         t.position = position;
         t.rotation = rotation;
         t.scale = scale;
+
+        auto& state = ent.Get<Components::State>();
+        state.flags |= Components::State::Flags::dirty;
     }
 
     void EditTransform(const float4x4& cameraView, const float4x4& cameraProj, World::Entity selectedObject)

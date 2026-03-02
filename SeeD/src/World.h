@@ -196,6 +196,17 @@ namespace Components
         Handle<Material> material;
     };
 
+    struct State : ComponentBase<State>
+    {
+        enum class Flags : uint
+        {
+            loaded = 1 << 0,
+            dirty = 1 << 1,
+            BLAS = 1 << 2
+        };
+        BitFlags<Flags> flags;
+    };
+
     struct Parent : ComponentBase<Parent>
     {
         Handle<Entity> entity;
@@ -203,11 +214,11 @@ namespace Components
 
     struct Light : ComponentBase<Light>
     {
-        HLSL::LightType type;
         float4 color;
         float size;
         float range;
         float angle;
+        HLSL::LightType type;
     };
 
     struct Camera : ComponentBase<Camera>
@@ -340,6 +351,7 @@ public:
         Entity Make(Components::Mask mask, String name = "", bool permanent = false)
         {
             mask |= Components::Entity::mask;
+            mask |= Components::State::mask;
 
             if (!name.empty())
                 mask |= Components::Name::mask;
@@ -370,6 +382,9 @@ public:
             {
                 strcpy(Get<Components::Name>().name, name.c_str());
             }
+
+            auto& state = Get<Components::State>();
+            state.flags.Clear();
 
             return *this;
         }
@@ -497,7 +512,7 @@ public:
             Pool poolTo = World::instance->components[to.pool];
             for (uint i = 0; i < poolFrom.data.size(); i++)
             {
-                if (poolFrom.data[i] != nullptr && poolTo.data[i] != nullptr)
+                if (poolFrom.data[i] != nullptr && poolTo.data[i] != nullptr && (i != Components::State::bucketIndex))
                 {
                     memcpy(to.Get(i), from.Get(i), Components::strides[i]);
                 }
@@ -699,6 +714,11 @@ public:
                     // read component bytes for 'count' entries into beginning of allocated block
                     fin.read((char*)pool.data[i], bytes);
                     if (!fin) { IOs::Log("Corrupted world file (component data) {}", name.c_str()); return; }
+
+                    if (i == Components::State::bucketIndex)
+                    {
+                        memset(pool.data[i], 0, bytes);
+                    }
                 }
                 else
                 {

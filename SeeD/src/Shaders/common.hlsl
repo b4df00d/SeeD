@@ -3,6 +3,8 @@
 #include "binding.hlsl"
 #include "structs.hlsl"
 
+#define PI 3.14159265358979323846f
+
 static float4 complexity[10] =
 {
 #if 0
@@ -326,7 +328,7 @@ float3 getCosHemisphereSample(in uint randSeed, float3 hitNorm)
     float3 bitangent = getPerpendicularVector(hitNorm);
     float3 tangent = cross(bitangent, hitNorm);
     float r = sqrt(randVal.x);
-    float phi = 2.0f * 3.14159265f * randVal.y;
+    float phi = 2.0f * PI * randVal.y;
 
     // Get our cosine-weighted hemisphere lobe sample direction
     float3 dir = normalize(tangent * (r * cos(phi)) + bitangent * (r * sin(phi)) + hitNorm.xyz * sqrt(1 - randVal.x));
@@ -1020,8 +1022,8 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     //cd.viewDist = linearZ(cd.reverseZ, cd.camera.nearClip, cd.camera.farClip);
     //cd.viewDist = ConvertProjDepthToView(cd.reverseZ, cd.camera) * 0.03;
     
-    float viewDistSqr = cd.viewDist * cd.viewDist;
-    cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * (0.00015 * viewDistSqr + 0.001)); // -(cd.viewDir * viewDistSqr * 0.0001);
+    //float viewDistSqr = cd.viewDist * cd.viewDist;
+    //cd.offsetedWorldPos = cd.worldPos + (cd.worldNorm * (0.0015 * viewDistSqr + 0.001)); // -(cd.viewDir * viewDistSqr * 0.0001);
     
     Texture2D<float2> motionT = ResourceDescriptorHeap[viewContext.motionIndex];
     float2 motion = motionT[pixel.xy];
@@ -1049,6 +1051,8 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
         cd.viewDist = backgroundDist;
         cd.worldPos = cd.camera.worldPos.xyz + cd.viewDir * backgroundDist;
     }
+    
+    cd.offsetedWorldPos = cd.worldPos.xyz - cd.viewDir * 0.002 * cd.viewDist + cd.worldNorm * 0.002 * cd.viewDist;
     
     return cd;
 }
@@ -1205,133 +1209,8 @@ SurfaceData GetSurfaceData(uint2 pixel)
 // raytraced https://www.shadertoy.com/view/cll3R4
 //https://seblagarde.wordpress.com/wp-content/uploads/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf
 // simple stuff http://filmicworlds.com/blog/optimizing-ggx-shaders-with-dotlh/
-
-
 // copy past from https://discussions.unity.com/t/disney-principled-brdf-shader/742743
-static const float PI = 3.14159265358979323846;
 
-float sqr(float x) { return x*x; }
-
-float SchlickFresnel(float u)
-{
-    float m = saturate(1.0-u);
-    float m2 = m*m;
-    return m2*m2*m; // pow(m,5)
-}
-
-float GTR1(float NdotH, float a)
-{
-    if (a >= 1) return 1/PI;
-    float a2 = a*a;
-    float t = 1 + (a2-1)*NdotH*NdotH;
-    return (a2-1) / (PI*log(a2)*t);
-}
-
-float GTR2(float NdotH, float a)
-{
-    float a2 = a*a;
-    float t = 1 + (a2-1)*NdotH*NdotH;
-    return a2 / (PI * t*t);
-}
-
-float GTR2_aniso(float NdotH, float HdotX, float HdotY, float ax, float ay)
-{
-    return 1 / (PI * ax*ay * sqr( sqr(HdotX/ax) + sqr(HdotY/ay) + NdotH*NdotH ));
-}
-
-float smithG_GGX(float NdotV, float alphaG)
-{
-    float a = alphaG*alphaG;
-    float b = NdotV*NdotV;
-    return 1 / (NdotV + sqrt(a + b - a*b));
-}
-
-float smithG_GGX_aniso(float NdotV, float VdotX, float VdotY, float ax, float ay)
-{
-    return 1 / (NdotV + sqrt( sqr(VdotX*ax) + sqr(VdotY*ay) + sqr(NdotV) ));
-}
-
-float3 mon2lin(float3 x)
-{
-    return float3(pow(x[0], 2.2), pow(x[1], 2.2), pow(x[2], 2.2));
-}
-
-float3 BRDF(SurfaceData s, float3 V, float3 L, float3 LColor)
-{
-    s.normal = normalize(s.normal);
-    L = normalize(-L);
-    V = normalize(-V);
-    
-    
-    float NdotL = max(dot(s.normal,L),0.0);
-    float NdotV = max(dot(s.normal,V),0.0);
-    
-
-    float3 H = normalize(L+V);
-    float NdotH = max(dot(s.normal,H),0.0);
-    float LdotH = max(dot(L,H),0.0);
-
-    float3 Cdlin = mon2lin(s.albedo.xyz);
-    float Cdlum = .3*Cdlin[0] + .6*Cdlin[1]  + .1*Cdlin[2]; // luminance approx.
-
-    float3 Ctint = Cdlum > 0 ? Cdlin/Cdlum : float3(1,1,1); // normalize lum. to isolate hue+sat
-    float3 Cspec0 = lerp(s._specular*.08*lerp(float3(1,1,1), Ctint, s.specularTint), Cdlin, s.metalness);
-    float3 Csheen = lerp(float3(1,1,1), Ctint, s.sheenTint);
-
-    // Diffuse fresnel - go from 1 at normal incidence to .5 at grazing
-    // and lerp in diffuse retro-reflection based on roughness
-    float FL = SchlickFresnel(NdotL);
-    float FV = SchlickFresnel(NdotV);
-    float Fd90 = 0.5 + 2 * LdotH*LdotH*s.roughness;
-    float Fd = lerp(1.0, Fd90, FL) * lerp(1.0, Fd90, FV);
-
-    // Based on Hanrahan-Krueger brdf approximation of isotropic bssrdf
-    // 1.25 scale is used to (roughly) preserve albedo
-    // Fss90 used to "flatten" retroreflection based on roughness
-    float Fss90 = LdotH*LdotH*s.roughness;
-    float Fss = lerp(1.0, Fss90, FL) * lerp(1.0, Fss90, FV);
-    float ss = 1.25 * (Fss * (1 / (NdotL + NdotV) - .5) + .5);
-
-    // specular
-    float aspect = sqrt(1-s.anisotropic*.9);
-    aspect = 1;
-    float ax = max(.001, sqr(s.roughness)/aspect);
-    float ay = max(.001, sqr(s.roughness)*aspect);
-    //float Ds = GTR2_aniso(NdotH, dot(H, s.tangent), dot(H, s.binormal), ax, ay);
-    float Ds = GTR2(NdotH, ax);
-    float FH = SchlickFresnel(LdotH);
-    float3 Fs = lerp(Cspec0, float3(1,1,1), FH);
-    //float Gs  = smithG_GGX_aniso(NdotL, dot(L, s.tangent), dot(L, s.binormal), ax, ay);
-    //Gs *= smithG_GGX_aniso(NdotV, dot(V, s.tangent), dot(V, s.binormal), ax, ay);
-    float Gs  = smithG_GGX(NdotL, ax);
-    Gs *= smithG_GGX(NdotV, ax);
-
-    // sheen
-    float3 Fsheen = FH * s.sheen * Csheen;
-
-    // clearcoat (ior = 1.5 -> F0 = 0.04)
-    float Dr = GTR1(NdotH, lerp(.1,.001,s.clearcoatGloss));
-    float Fr = lerp(.04, 1.0, FH);
-    float Gr = smithG_GGX(NdotL, .25) * smithG_GGX(NdotV, .25);
-
-    float3 result = ((1/PI) * lerp(Fd, ss, s.subsurface)*Cdlin + Fsheen) * (1-s.metalness) + Gs*Fs*Ds + .25*s.clearcoat*Gr*Fr*Dr;
-    result *= LColor;
-    result *= NdotL;
-    return result;
-}
-
-float3 ComputeLight(HLSL::Light light, float shadow, SurfaceData s, float3 V)
-{
-    if (any(light.color.xyz > 0))
-    {
-        float NdotL = max(dot(s.normal, -light.dir.xyz), 0.0);
-        //return NdotL * s.albedo.xyz * light.color.xyz * 0.5;
-        float3 brdf = BRDF(s, V, light.dir.xyz, light.color.xyz);
-        float3 lighted = brdf;// * NdotL;// * shadow;
-        return lighted;
-    }
-    return 0;
-}
 
 float3 Sky(float3 direction)
 {
@@ -1348,6 +1227,12 @@ uint committedPrimitiveIndex,
 uint committedGeometryIndex,
 float2 bary)
 {
+    /*
+    SurfaceData s = (SurfaceData)0;
+    s.albedo = float4(1, 0, 1, 1);
+    return s;
+    */
+    
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[committedInstanceIndex];
     
@@ -1757,43 +1642,6 @@ void TraceRayCommon(HLSL::RTParameters rtParameters,
 }
 
 */
-HLSL::GIReservoir Validate(HLSL::RTParameters rtParameters, SurfaceData s, uint seed, float3 origin, HLSL::GIReservoir r, in HLSL::GIReservoir og, uint2 dtid)
-{
-    return og;
-    
-    /*
-    RESTIRRay restirRay;
-    restirRay.Origin = origin;
-    restirRay.Direction = r.dir;
-    restirRay = IndirectLight(rtParameters, s, restirRay, 0, seed);
-    
-    float W = dot(restirRay.HitRadiance, float3(0.3, 0.59, 0.11));
-    
-    float distDiff = abs(r.dist - length(restirRay.HitPosition - origin));
-    float wDiff = 0;
-    float likeness = 1.0f-saturate(distDiff + wDiff);
-    float fail = likeness < 0.5 ? 1 : 0;
-    if(fail)
-    {
-        r = og;
-        
-        HLSL::GIReservoir newR;
-        newR.color = restirRay.HitRadiance;
-        newR.W = W;
-        newR.dir = restirRay.Direction;
-        newR.Wcount = r.Wcount;
-        newR.dist = length(restirRay.HitPosition - restirRay.Origin);
-        newR.Wsum = r.Wsum;
-        
-        UpdateGIReservoir(r, newR, nextRand(seed) * rtParameters.reservoirSpacialRandBias);
-    }
-    
-    // ca sert a rien de scale le spacial... il est temporaire
-    float frameFilteringCount = lerp(2, rtParameters.maxFrameFilteringCount * 64, likeness);
-    
-    return r;
-*/
-}
 
 // ----------------------------- DEBUG ----------------------------------
 

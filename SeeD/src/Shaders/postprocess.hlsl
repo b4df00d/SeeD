@@ -105,7 +105,7 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     
     //HDR = lerp(HDR, 0.5, saturate(1-exp(-cd.viewDist * 0.0025)));
     
-#if 0
+#if 1
     float r = GranTurismoTonemapper(HDR.r);
     float g = GranTurismoTonemapper(HDR.g);
     float b = GranTurismoTonemapper(HDR.b);
@@ -115,8 +115,6 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
 #endif
     
     SDR = pow(SDR, 2.2f);
-    
-    //if(any(HDR.xyz>=2.0)) SDR = float4(1, 0, 0, 0);
     
     RWTexture2D<float4> postProcessed = ResourceDescriptorHeap[ppParameters.postProcessedIndex];
     postProcessed[dtid.xy] = SDR; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
