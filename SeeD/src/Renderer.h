@@ -285,7 +285,7 @@ struct ViewWorld
     PerFrame<StructuredUploadBuffer<HLSL::Camera>> cameras;
     PerFrame<StructuredUploadBuffer<HLSL::Light>> lights;
     PerFrame<Map<World::Entity, HLSL::Material>> materials;
-    CommandStructuredBuffer<HLSL::Instance> instances;
+    DirtyTrackingStructuredBuffer<World::Entity, HLSL::Instance> instances;
     std::vector<HLSL::Instance> instancesReadBackDebug;
 
     std::atomic<uint> meshletsCount;
@@ -797,17 +797,12 @@ public:
 
 class StructuredCommandBufferUpdate : public Pass
 {
-    Components::Handle<Components::Shader> initShader;
-    Components::Handle<Components::Shader> updateShader;
 
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-
-        initShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\StructuredCommandBuffer.hlsl|Init");
-        updateShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\StructuredCommandBuffer.hlsl|Update");
     }
     void Setup(View* view) override
     {
@@ -818,9 +813,7 @@ public:
         ZoneScoped;
         Open();
 
-        Shader& init = *AssetLibrary::instance->Get<Shader>(initShader.Get().id, true);
-        Shader& update = *AssetLibrary::instance->Get<Shader>(updateShader.Get().id, true);
-
+        view->viewWorld.instances.Upload(commandBuffer.Get());
         if (options.enableStructuredCommandBuffersReadback && view->viewWorld.instances.GetResource().GetResource() != nullptr)
         {
             uint elementCount = view->viewWorld.instances.ReadBack(commandBuffer.Get());
@@ -831,8 +824,6 @@ public:
             view->viewWorld.instancesReadBackDebug = instances;
             view->viewWorld.instances.ReadBackUnMap();
         }
-        // executing commands must be after the readback because the instances.size can change and the readback needs to be done on the right buffer size
-        view->viewWorld.instances.ExecuteCommands(commandBuffer.Get(), init, update);
 
         Close();
     }
@@ -972,10 +963,8 @@ public:
         buildDesc.SourceAccelerationStructureData = pSourceAS;
         buildDesc.Inputs.Flags = flags;
 
-        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postBuildDesc = {};
-
         // Build the top-level AS
-        commandBuffer->cmd->BuildRaytracingAccelerationStructure(&buildDesc, 1, &postBuildDesc);
+        commandBuffer->cmd->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
 
         // Wait for the builder to complete by setting a barrier on the resulting
         // buffer. This can be important in case the rendering is triggered
@@ -2342,7 +2331,7 @@ public:
             {
                 ZoneScoped;
                 // should call a view method with all that ?
-                viewWorld.meshletsCount = 0;
+                //viewWorld.meshletsCount = 0;
                 //viewWorld.instances->Clear();
                 viewWorld.lights->Clear();
                 viewWorld.cameras->Clear();
@@ -2359,7 +2348,7 @@ public:
 #define UpdateInstancesStepSize 512 
         ViewWorld& frameWorld = viewWorld;
         
-        uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::WorldMatrix::mask, 0);
+        uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::InstanceGPUIndex::mask | Components::WorldMatrix::mask, 0);
         uint entityCount = (uint)world.frameQueries[instanceQueryIndex].size();
         frameWorld.instances.Reserve(entityCount);
 
@@ -2389,6 +2378,7 @@ public:
                         continue;
 
                     Components::Instance& instanceCmp = slot.Get<Components::Instance>();
+                    Components::InstanceGPUIndex& instanceGPUIndexCmp = slot.Get<Components::InstanceGPUIndex>();
 
                     World::Entity ent = World::Entity(slot.Get<Components::Entity>());
                     Components::Mesh& meshCmp = instanceCmp.mesh.Get();
@@ -2424,11 +2414,12 @@ public:
                     instance.objectID = ent.ToUInt();
                     instance.rayTracingBLAS = mesh->BLAS.GetResource()->GetGPUVirtualAddress();
 
-                    viewWorld.instances.AddCommand(instance);
+                    viewWorld.instances.Add(ent, instance);
+                    localMeshletCount += mesh->LODs[0].meshletCount;
+
                     // count instances with shader
                     instanceCount++;
 
-                    localMeshletCount += mesh->LODs[0].meshletCount;
                 }
 
                 viewWorld.meshletsCount += localMeshletCount;

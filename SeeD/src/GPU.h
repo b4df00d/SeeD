@@ -1972,235 +1972,271 @@ public:
     }
 };
 
-// A GPU-backed instance buffer where updates are submitted as commands (add, modify, remove).
-// Instances are kept contiguous in memory. Removal does a swap-remove (order not preserved)
-// All GPU updates are issued via a provided CommandBuffer to keep operations on the GPU side.
-template <class T>
-class CommandStructuredBuffer : private StructuredBuffer<T>
+// A GPU-backed array where only modified/added entries are uploaded each frame.
+// Instances are kept contiguous in memory. Removal does a swap-remove (order not preserved).
+// Thread-safe Add/Modify/Remove with dirty tracking minimizes GPU copies.
+// Template parameter K is a key type for identifying entries.
+template <class K, class T>
+class DirtyTrackingStructuredBuffer : public StructuredBuffer<T>
 {
 public:
-    struct Command
-    {
-        enum Type : uint { Add, Modify, Remove } type;
-        uint index;    // used for Modify/Remove (index in the contiguous array)
-        uint pad1;     // could put data stride here
-        uint pad2;
-        T data;        // used for Add/Modify
-    };
-
-    Resource gpuDataCounter;
-
-    PerFrame<StructuredUploadBuffer<Command>> commands;
-
-    std::vector<T> cpuData;
-
-    bool initialized = false;
     std::mutex lock;
+    std::vector<T> cpuData;
+    std::vector<uint> dirtyIndices;
+    std::unordered_map<K, uint> keyToIndex;
 
-    void Release()
-    {
-        StructuredBuffer<T>::Release();
-        gpuDataCounter.Release();
-        for (uint i = 0; i < FRAMEBUFFERING; i++)
-        {
-            commands.Get(i).Release();
-        }
-    }
+    // Cached upload buffer (reused if size < 10MB)
+    PerFrame<Resource> cachedUploadAllocation;
+    static constexpr uint MAX_CACHED_UPLOAD_SIZE = 65536;
 
-    uint Size()
+    // Option to batch contiguous indices to reduce CopyBufferRegion calls
+    bool batchContiguousUploads = true;
+
+    void Clear()
     {
-        return (uint)this->cpuData.size();
+        cpuData.clear();
+        dirtyIndices.clear();
+        keyToIndex.clear();
     }
 
     void Reserve(uint size)
     {
-        this->cpuData.reserve(size);
+        cpuData.reserve(size);
     }
 
-    Resource& GetResource()
+    uint Size()
     {
-        return StructuredBuffer<T>::GetResource();
+        return (uint)cpuData.size();
     }
 
-    uint ReadBack(CommandBuffer& cb)
+    void Release()
     {
-        return StructuredBuffer<T>::ReadBack(cb);
+        StructuredBuffer<T>::Release();
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            cachedUploadAllocation.Get(i).Release();
+        }
     }
 
-    void ReadBackMap(void** data)
-    {
-        StructuredBuffer<T>::ReadBackMap(data);
-    }
-
-    void ReadBackUnMap()
-    {
-        StructuredBuffer<T>::ReadBackUnMap();
-    }
-
-    // Enqueue commands
-    void AddCommand(const T& value)
+    uint Add(const K& key, const T& value)
     {
         std::lock_guard<std::mutex> lk(lock);
-        Command c;
-        c.type = Command::Add;
-        c.data = value;
-        c.index = UINT_MAX;
-        commands->Add(c);
-    }
-    void ModifyCommand(uint index, const T& value)
-    {
-        std::lock_guard<std::mutex> lk(lock);
-        Command c;
-        c.type = Command::Modify;
-        c.data = value;
-        c.index = index;
-        commands->Add(c);
-    }
-    void RemoveCommand(uint index)
-    {
-        std::lock_guard<std::mutex> lk(lock);
-        Command c;
-        c.type = Command::Remove;
-        c.index = index;
-        commands->Add(c);
+        if (keyToIndex.find(key) != keyToIndex.end())
+        {
+            return UINT_MAX;
+        }
+        uint index = (uint)cpuData.size();
+        cpuData.push_back(value);
+        keyToIndex[key] = index;
+        dirtyIndices.push_back(index);
+        return index;
     }
 
-    void ExecuteCommands(CommandBuffer& cb, Shader& init, Shader& update)
+    void Modify(const K& key, const T& value)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        auto it = keyToIndex.find(key);
+        if (it != keyToIndex.end())
+        {
+            uint index = it->second;
+            cpuData[index] = value;
+            dirtyIndices.push_back(index);
+        }
+    }
+
+    void Remove(const K& key)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        auto it = keyToIndex.find(key);
+        if (it != keyToIndex.end())
+        {
+            uint index = it->second;
+            keyToIndex.erase(it);
+
+            uint lastIndex = (uint)cpuData.size() - 1;
+            if (index != lastIndex)
+            {
+                cpuData[index] = cpuData[lastIndex];
+                dirtyIndices.push_back(index);
+
+                // could we do another map of index to key to avoid this loop ? only if we have a lot of removals tho, otherwise it will be more cache friendly to do this loop
+                for (auto& pair : keyToIndex)
+                {
+                    if (pair.second == lastIndex)
+                    {
+                        pair.second = index;
+                        break;
+                    }
+                }
+            }
+            cpuData.pop_back();
+        }
+    }
+
+    uint maxSize = 0;
+    void Upload(CommandBuffer& cb)
     {
         ZoneScoped;
+        if (options.stopBufferUpload)
+            return;
+
         std::lock_guard<std::mutex> lk(lock);
 
+        if (dirtyIndices.empty())
+            return;
 
-        if (gpuDataCounter.GetResource() == nullptr)
-            gpuDataCounter.CreateBuffer<uint>(1, "bufferCounter");
-
-        // Ensure GPU buffer large enough for worst-case (all adds applied)
-        uint adds = 0;
-        for (uint i = 0; i < commands->cpuData.size(); i++)
+        if (cpuData.empty())
         {
-            auto& c = commands->cpuData[i];
-            if (c.type == Command::Add)
-                adds++;
+            dirtyIndices.clear();
+            return;
         }
-        uint needed = (uint)this->cpuData.size() + adds;
 
-        if (this->GetResource().GetResource() != nullptr && this->GetResource().BufferSize() < needed * sizeof(T))
+        if (this->GetResource().GetResource() != nullptr && this->GetResource().BufferSize() < this->cpuData.size() * sizeof(T))
         {
+            ZoneScopedN("Creation");
             auto previousGPUData = this->gpuData;
-            this->CreateBuffer(needed);
+            uint size = previousGPUData.BufferSize();
+            this->CreateBuffer(this->cpuData.size());
             this->gpuData.Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-            cb.cmd->CopyResource(this->gpuData.GetResource(), previousGPUData.GetResource());
+            cb.cmd->CopyBufferRegion(this->gpuData.GetResource(), 0, previousGPUData.GetResource(), 0, size);
             this->gpuData.Transition(cb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         }
         if (this->GetResource().GetResource() == nullptr)
         {
-            this->CreateBuffer(needed);
+            this->CreateBuffer(this->cpuData.size());
         }
-        if (commands->Size() == 0) return;
+        if(maxSize > this->cpuData.size())
+            IOs::Log("Buffer resized from {} to {} entries", maxSize, this->cpuData.size());
+        maxSize = this->cpuData.size();
 
-        commands->Upload();
-        
-        // execute a compute shader to apply the commands on GPU side. The shader will read the current instance buffer, the commands and their count, and write the updated instance buffer and count. 
-        // It will use append/consume buffers or atomic counters to keep track of the current count while processing commands.
-        // and will have only 1 thread to guarantee that we have the same buffer state as on CPU side
-        //auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
-        //auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
-        //auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
-        HLSL::StructuredCommandBufferParameters commandParameters;
-        commandParameters.commandIndex = commands->GetResource().srv.offset;
-        commandParameters.commandCount = commands->Size();
-        commandParameters.commandStride = sizeof(Command);
-        commandParameters.bufferIndex = this->gpuData.uav.offset;
-        commandParameters.bufferCounterIndex = gpuDataCounter.uav.offset;
-        commandParameters.bufferStride = sizeof(T);
-        auto commandParametersAddress = ConstantBuffer::instance->PushConstantBuffer(&commandParameters);
-
-        if(!initialized)
         {
-            cb.SetCompute(init);
-            cb.cmd->SetComputeRootConstantBufferView(Custom1Register, commandParametersAddress);
-            cb.cmd->Dispatch(1, 1, 1);
-            initialized = true;
-        }
+            ZoneScopedN("Upload");
 
-        cb.SetCompute(update);
-        //commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-        //commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        cb.cmd->SetComputeRootConstantBufferView(Custom1Register, commandParametersAddress);
-        cb.cmd->Dispatch(1, 1, 1);
+            // Allocate single upload buffer for all dirty entries
+            uint totalUploadSize = (uint)dirtyIndices.size() * sizeof(T);
 
-        // do the same on CPU side to keep cpuData in sync with GPU buffer
-        for (uint i = 0; i < commands->cpuData.size(); i++)
-        {
-            auto& c = commands->cpuData[i];
-            if (c.type == Command::Add)
+            // Check if cached allocation can be reused
+            if (cachedUploadAllocation->GetResource() && cachedUploadAllocation->GetResource()->GetDesc().Width > totalUploadSize)
             {
-                uint index = (uint)this->cpuData.size();
-                this->cpuData.push_back(c.data);
             }
-            else if (c.type == Command::Modify)
+            else if (totalUploadSize > MAX_CACHED_UPLOAD_SIZE)
             {
-                if (c.index < this->cpuData.size())
-                {
-                    this->cpuData[c.index] = c.data;
-                }
+                cachedUploadAllocation->CreateUploadBuffer<T>(dirtyIndices.size(), "dirtyUpload");
             }
-            else if (c.type == Command::Remove)
+            else
             {
-                if (c.index < this->cpuData.size())
+                cachedUploadAllocation->CreateUploadBuffer<T>(MAX_CACHED_UPLOAD_SIZE / sizeof(T), "dirtyUpload");
+            }
+
+            if (cachedUploadAllocation->GetResource())
+            {
+                // Issue CopyBufferRegion calls - either batched or individual
+                Resource::lock.lock();
+
+                if (batchContiguousUploads && dirtyIndices.size() > 1)
                 {
-                    uint last = (uint)this->cpuData.size() - 1;
-                    if (c.index != last)
+                    // Sort dirty indices to batch contiguous ranges
+                    std::vector<uint> sortedIndices = dirtyIndices;
+                    std::sort(sortedIndices.begin(), sortedIndices.end());
+
+
+                    // Copy all dirty entries into upload buffer
+                    void* uploadBuf;
+                    cachedUploadAllocation->GetResource()->Map(0, nullptr, &uploadBuf);
+
+                    uint uploadOffset = 0;
+                    for (uint dirtyIdx : sortedIndices)
                     {
-                        // move last into removed slot on CPU and upload that slot
-                        this->cpuData[c.index] = this->cpuData[last];
+                        if (dirtyIdx < cpuData.size())
+                        {
+                            memcpy((char*)uploadBuf + uploadOffset, &cpuData[dirtyIdx], sizeof(T));
+                            uploadOffset += sizeof(T);
+                        }
                     }
-                    this->cpuData.pop_back();
+
+                    cachedUploadAllocation->GetResource()->Unmap(0, nullptr);
+
+
+                    // Find and copy contiguous ranges
+                    uint rangeStart = sortedIndices[0];
+                    uint rangeEnd = rangeStart;
+                    uint uploadRangeStart = 0;
+
+                    for (uint i = 1; i <= sortedIndices.size(); ++i)
+                    {
+                        uint currentIdx = (i < sortedIndices.size()) ? sortedIndices[i] : UINT_MAX;
+
+                        // Check if current index is contiguous with range
+                        if (i < sortedIndices.size() && currentIdx == rangeEnd + 1)
+                        {
+                            rangeEnd = currentIdx;
+                        }
+                        else
+                        {
+                            // Copy the completed range
+                            uint rangeSize = rangeEnd - rangeStart + 1;
+                            cb.cmd->CopyBufferRegion(
+                                this->gpuData.GetResource(),
+                                rangeStart * sizeof(T),
+                                cachedUploadAllocation->GetResource(),
+                                uploadRangeStart * sizeof(T),
+                                rangeSize * sizeof(T));
+
+                            // Prepare for next range
+                            uploadRangeStart += rangeSize;
+                            if (i < sortedIndices.size())
+                            {
+                                rangeStart = currentIdx;
+                                rangeEnd = currentIdx;
+                            }
+                        }
+                    }
                 }
+                else
+                {
+                    // No batching - individual CopyBufferRegion per dirty index
+
+                // Copy all dirty entries into upload buffer
+                    void* uploadBuf;
+                    cachedUploadAllocation->GetResource()->Map(0, nullptr, &uploadBuf);
+
+                    uint uploadOffset = 0;
+                    for (uint dirtyIdx : dirtyIndices)
+                    {
+                        if (dirtyIdx < cpuData.size())
+                        {
+                            memcpy((char*)uploadBuf + uploadOffset, &cpuData[dirtyIdx], sizeof(T));
+                            uploadOffset += sizeof(T);
+                        }
+                    }
+
+                    cachedUploadAllocation->GetResource()->Unmap(0, nullptr);
+
+                    uploadOffset = 0;
+                    for (uint dirtyIdx : dirtyIndices)
+                    {
+                        if (dirtyIdx < cpuData.size())
+                        {
+                            cb.cmd->CopyBufferRegion(
+                                this->gpuData.GetResource(), 
+                                dirtyIdx * sizeof(T),
+                                cachedUploadAllocation->GetResource(),
+                                uploadOffset, 
+                                sizeof(T));
+                            uploadOffset += sizeof(T);
+                        }
+                    }
+                }
+
+                Resource::lock.unlock();
             }
         }
 
-        commands->Clear();
+        dirtyIndices.clear();
     }
 };
-/*
-template <class K, class T>
-class MappedStructuredBuffer : private CommandStructuredBuffer<T>
-{
-public:
-    std::unordered_map<K, uint> keyToIndex;
 
-    void AddCommand(const K& key, const T& value)
-    {
-        std::lock_guard<std::mutex> lk(lock);
-        Command c;
-        c.type = Command::Add;
-        c.data = value;
-        c.index = UINT_MAX;
-        commands->Add(c);
-    }
-    void ModifyCommand(const K& key, const T& value)
-    {
-        std::lock_guard<std::mutex> lk(lock);
-        Command c;
-        c.type = Command::Modify;
-        c.data = value;
-        c.index = index;
-        commands->Add(c);
-    }
-    void RemoveCommand(const K& key)
-    {
-        std::lock_guard<std::mutex> lk(lock);
-        Command c;
-        c.type = Command::Remove;
-        c.index = index;
-        commands->Add(c);
-    }
-};
-*/
-
-
-// https://github.com/TheRealMJP/DeferredTexturing/blob/experimental/SampleFramework12/v1.01/Graphics/Profiler.cpp
+//github.com/TheRealMJP/DeferredTexturing/blob/experimental/SampleFramework12/v1.01/Graphics/Profiler.cpp
 // use https://github.com/Raikiri/LegitProfiler for display ?
 struct Profiler
 {

@@ -76,7 +76,7 @@ public:
                 }
                 else if (item.second.type == AssetLibrary::AssetType::texture)
                 {
-                    ((Resource*)item.second.data)->allocation->Release();
+                    ((Resource*)item.second.data)->Release();
                 }
                 item.second.data = nullptr;
             }
@@ -152,12 +152,13 @@ public:
             }
             else if (item.type == AssetLibrary::AssetType::mesh || item.type == AssetLibrary::AssetType::texture)
             {
+                /*
                 if (item.lastGetFrameCount > 100)
                 {
                     if (item.type == AssetLibrary::AssetType::mesh)
                     {
                         // TODO : a real release in meshStorage
-                        //((Mesh*)item.second.data)->BLAS.Release();
+                        ((Mesh*)item.second.data)->BLAS.Release();
                     }
                     else if (item.type == AssetLibrary::AssetType::texture)
                     {
@@ -171,6 +172,7 @@ public:
                     }
                 }
                 item.lastGetFrameCount++;
+                */
             }
         }
     }
@@ -377,7 +379,7 @@ public:
         instance = nullptr;
     }
 
-    Resource Read(String path)
+    Resource Read(String path, String name)
     {
         ZoneScoped;
         Resource resource = {};
@@ -392,7 +394,7 @@ public:
             fin.close();
         }
 
-        resource.Create(metadata.resourceDesc, path);
+        resource.Create(metadata.resourceDesc, name);
 
         IDStorageFile* fileHandle = nullptr;
         factory->OpenFile(path.ToWString().c_str(), IID_PPV_ARGS(&fileHandle));
@@ -1102,6 +1104,7 @@ public:
         else
         {
             mask |= Components::Instance::mask;
+            mask |= Components::InstanceGPUIndex::mask;
 
             // if node has meshes, create a new scene object for it
             for (unsigned int i = 0; i < node->mNumMeshes; i++)
@@ -1126,6 +1129,9 @@ public:
                 instance.mesh = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i] * meshCount + 0] };
                 instance.meshRT = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i] * meshCount + 1] };
                 instance.material = Components::Handle<Components::Material>{ matIndexToEntity[_scene->mMeshes[node->mMeshes[i]]->mMaterialIndex] };
+
+                auto& instanceGPUTIndex = ent.Get<Components::InstanceGPUIndex>();
+                instanceGPUTIndex.index = 0;
             }
         }
 
@@ -2498,7 +2504,7 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
     {
         if (ignoreBudget || textureLoaded < textureLoadingLimit)
         {
-            Resource texture = TextureLoader::instance->Read(map[id].path);
+            Resource texture = TextureLoader::instance->Read(map[id].path, map[id].originalFilePath);
             if (texture.allocation != nullptr)
             {
                 lock.lock();

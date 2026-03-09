@@ -61,18 +61,20 @@ namespace Components
     static uint masksIndex = 0;
     static std::array<String, componentMaxCount> names;
     static std::array<uint, componentMaxCount> strides;
+    static std::array<bool, componentMaxCount> transient;
 
     template<typename T>
     static uint GetComponentStride()
     {
+        transient[masksIndex] = T::transient;
         strides[masksIndex] = sizeof(T);
         String name = typeid(T).name();
         names[masksIndex] = name.substr(name.find_last_of("::") + 1);
-        masksIndex++;
         std::stringstream ss;
-        ss << names[masksIndex] << " " << masksIndex - 1 << " " << sizeof(T) << "\n";
+        ss << names[masksIndex] << " " << masksIndex << " " << sizeof(T) << "\n";
         std::string debugInfo(ss.str());
         OutputDebugStringA(debugInfo.c_str());
+        masksIndex++;
         return masksIndex - 1;
     }
 
@@ -89,6 +91,7 @@ namespace Components
         static uint bucketIndex;
         static Mask mask;
         static uint stride;
+        static bool transient;
     };
     template<typename T>
     uint ComponentBase<T>::bucketIndex = GetComponentStride<T>();
@@ -96,6 +99,8 @@ namespace Components
     Mask ComponentBase<T>::mask = (unsigned long long) 1 << ComponentBase<T>::bucketIndex;
     template<typename T>
     uint ComponentBase<T>::stride = sizeof(T);
+    template<typename T>
+    bool ComponentBase<T>::transient = false;
 
     template<typename T>
     concept IsComponent = std::is_base_of<Components::ComponentBase<T>, T>::value;
@@ -196,6 +201,12 @@ namespace Components
         Handle<Material> material;
     };
 
+    struct InstanceGPUIndex : ComponentBase<InstanceGPUIndex>
+    {
+        uint index;
+    };
+    bool InstanceGPUIndex::transient = true;
+
     struct State : ComponentBase<State>
     {
         enum class Flags : uint
@@ -206,6 +217,7 @@ namespace Components
         };
         BitFlags<Flags> flags;
     };
+    bool State::transient = true;
 
     struct Parent : ComponentBase<Parent>
     {
@@ -351,7 +363,7 @@ public:
         Entity Make(Components::Mask mask, String name = "", bool permanent = false)
         {
             mask |= Components::Entity::mask;
-            mask |= Components::State::mask;
+            mask |= Components::State::mask; // remove this mandatory state ?
 
             if (!name.empty())
                 mask |= Components::Name::mask;
@@ -512,9 +524,12 @@ public:
             Pool poolTo = World::instance->components[to.pool];
             for (uint i = 0; i < poolFrom.data.size(); i++)
             {
-                if (poolFrom.data[i] != nullptr && poolTo.data[i] != nullptr && (i != Components::State::bucketIndex))
+                if (poolFrom.data[i] != nullptr && poolTo.data[i] != nullptr)
                 {
-                    memcpy(to.Get(i), from.Get(i), Components::strides[i]);
+                    if(Components::transient[i] == false)
+                        memcpy(to.Get(i), from.Get(i), Components::strides[i]);
+                    else
+                        memset(to.Get(i), 0, Components::strides[i]);
                 }
             }
         }
@@ -715,7 +730,7 @@ public:
                     fin.read((char*)pool.data[i], bytes);
                     if (!fin) { IOs::Log("Corrupted world file (component data) {}", name.c_str()); return; }
 
-                    if (i == Components::State::bucketIndex)
+                    if (Components::transient[i] == true)
                     {
                         memset(pool.data[i], 0, bytes);
                     }
