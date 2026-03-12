@@ -1104,7 +1104,6 @@ public:
         else
         {
             mask |= Components::Instance::mask;
-            mask |= Components::InstanceGPUIndex::mask;
 
             // if node has meshes, create a new scene object for it
             for (unsigned int i = 0; i < node->mNumMeshes; i++)
@@ -1129,9 +1128,6 @@ public:
                 instance.mesh = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i] * meshCount + 0] };
                 instance.meshRT = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i] * meshCount + 1] };
                 instance.material = Components::Handle<Components::Material>{ matIndexToEntity[_scene->mMeshes[node->mMeshes[i]]->mMaterialIndex] };
-
-                auto& instanceGPUTIndex = ent.Get<Components::InstanceGPUIndex>();
-                instanceGPUTIndex.index = 0;
             }
         }
 

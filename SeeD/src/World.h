@@ -63,9 +63,15 @@ namespace Components
     static std::array<uint, componentMaxCount> strides;
     static std::array<bool, componentMaxCount> transient;
 
+    using CallbackT = void(*)(EntityBase);
+    static std::array<CallbackT, componentMaxCount> AddCallback;
+    static std::array<CallbackT, componentMaxCount> RemoveCallback;
+
     template<typename T>
-    static uint GetComponentStride()
+    static uint InitComponentStaticData()
     {
+        AddCallback[masksIndex] = nullptr;
+        RemoveCallback[masksIndex] = nullptr;
         transient[masksIndex] = T::transient;
         strides[masksIndex] = sizeof(T);
         String name = typeid(T).name();
@@ -94,7 +100,7 @@ namespace Components
         static bool transient;
     };
     template<typename T>
-    uint ComponentBase<T>::bucketIndex = GetComponentStride<T>();
+    uint ComponentBase<T>::bucketIndex = InitComponentStaticData<T>();
     template<typename T>
     Mask ComponentBase<T>::mask = (unsigned long long) 1 << ComponentBase<T>::bucketIndex;
     template<typename T>
@@ -200,12 +206,6 @@ namespace Components
         Handle<Mesh> meshRT;
         Handle<Material> material;
     };
-
-    struct InstanceGPUIndex : ComponentBase<InstanceGPUIndex>
-    {
-        uint index;
-    };
-    bool InstanceGPUIndex::transient = true;
 
     struct State : ComponentBase<State>
     {
@@ -421,6 +421,18 @@ public:
         {
             seedAssert(IsValid());
             World::instance->deferredRelease.push_back(*this);
+
+            auto mask = GetMask();
+            for (uint i = 0; i < Components::componentMaxCount; i++)
+            {
+                if (mask[i])
+                {
+                    if(Components::RemoveCallback[i])
+                    {
+                        Components::RemoveCallback[i](*this);
+                    }
+                }
+            }
         }
 
         Components::Mask GetMask()

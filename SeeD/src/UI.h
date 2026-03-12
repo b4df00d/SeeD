@@ -444,6 +444,9 @@ class HierarchyWindow : public EditorWindow
 
     int componentFilterIndex = 0;
     ImGuiSelectionBasicStorage selection;
+
+    char filterName[256] = "";
+    bool showUnname = false;
     
     void TreeNodeSetOpen(TreeNode* node, bool open)
     {
@@ -476,25 +479,40 @@ class HierarchyWindow : public EditorWindow
         ImGuiTreeNodeFlags tree_node_flags = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
         tree_node_flags |= ImGuiTreeNodeFlags_NavLeftJumpsBackHere; // Enable pressing left to jump to parent
         if (node->childs.size() == 0)
-            tree_node_flags |= ImGuiTreeNodeFlags_Bullet | ImGuiTreeNodeFlags_Leaf;
+            tree_node_flags |= ImGuiTreeNodeFlags_Leaf;
         if (selection->Contains(node->entity.ToUInt()))
             tree_node_flags |= ImGuiTreeNodeFlags_Selected;
         if(node == &world)
             tree_node_flags |= ImGuiTreeNodeFlags_DefaultOpen;
 
-        // Using SetNextItemStorageID() to specify storage id, so we can easily peek into
-        // the storage holding open/close stage, using our TreeNodeGetOpen/TreeNodeSetOpen() functions.
-        ImGui::SetNextItemSelectionUserData((ImGuiSelectionUserData)(intptr_t)node);
-        ImGui::SetNextItemStorageID(node->entity.ToUInt());
-        if (ImGui::TreeNodeEx(node->name.c_str(), tree_node_flags))
-        {
-            for (TreeNode* child : node->childs)
-                DrawNode(child, selection);
-            ImGui::TreePop();
+        bool usingFilter = strlen(filterName) > 0;
+        bool filtered = true;
+        if(usingFilter)
+        { 
+            filtered = node->name.ToLower().find(filterName) != std::string::npos;
         }
-        else if (ImGui::IsItemToggledOpen())
+        //else
         {
-            TreeCloseAndUnselectChildNodes(node, selection);
+            // Using SetNextItemStorageID() to specify storage id, so we can easily peek into
+            // the storage holding open/close stage, using our TreeNodeGetOpen/TreeNodeSetOpen() functions.
+            ImGui::SetNextItemSelectionUserData((ImGuiSelectionUserData)(intptr_t)node);
+            ImGui::SetNextItemStorageID(node->entity.ToUInt());
+            bool isOpen = false;
+            if(filtered)
+                isOpen = ImGui::TreeNodeEx(node->name.c_str(), tree_node_flags);
+            if (isOpen || (usingFilter && node->childs.size() > 0))
+            {
+                ImGui::Indent(10);
+                for (TreeNode* child : node->childs)
+                    DrawNode(child, selection);
+                if(isOpen && filtered)
+                    ImGui::TreePop();
+                ImGui::Unindent(10);
+            }
+            else if (ImGui::IsItemToggledOpen())
+            {
+                TreeCloseAndUnselectChildNodes(node, selection);
+            }
         }
     }
 
@@ -575,7 +593,8 @@ public:
             {
                 TreeNode newNode;
                 newNode.entity = { result[i].Get<Components::Entity>() };
-                if (result[i].Has<Components::Name>())
+                bool hasName = result[i].Has<Components::Name>();
+                if (hasName)
                 {
                     newNode.name = std::format("{}{}", result[i].Get<Components::Name>().name, i);
                 }
@@ -584,7 +603,8 @@ public:
                     newNode.name = std::format("{}{}", "un-name", i);
                 }
                 newNode.parent = &world;
-                nodes.push_back(newNode);
+                if(showUnname || hasName)
+                    nodes.push_back(newNode);
             }
 
             for (uint i = 0; i < nodes.size(); i++)
@@ -606,7 +626,7 @@ public:
                     else
                     {
                         World::Entity parent = { pent.Get() };
-                        for (uint j = 0; j < result.size(); j++)
+                        for (uint j = 0; j < nodes.size(); j++)
                         {
                             TreeNode& nodeParent = nodes[j];
                             if (nodeParent.entity == parent)
@@ -636,6 +656,10 @@ public:
             ent.Make(knownComponents[componentFilterIndex].mask);
             editorState.dirtyHierarchy |= true;
         }
+
+        ImGui::InputText("filter", filterName, 256);
+        ImGui::Checkbox("show un-names", &showUnname);
+
         {
             //ImGuiSelectionBasicStorage previousSelection = selection;
             if (editorState.selectedObject == entityInvalid)

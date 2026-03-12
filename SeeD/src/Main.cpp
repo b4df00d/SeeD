@@ -52,7 +52,7 @@ struct Options
 {
     bool stopFrustumUpdate = false;
     bool stopBufferUpload = false;
-    bool enableStructuredCommandBuffersReadback = true;
+    bool enableStructuredCommandBuffersReadback = false;
     bool stepMotion = false;
     bool shaderReload = true;
 

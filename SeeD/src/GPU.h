@@ -2018,12 +2018,16 @@ public:
         }
     }
 
-    uint Add(const K& key, const T& value)
+    uint AddOrUpdate(const K& key, const T& value)
     {
         std::lock_guard<std::mutex> lk(lock);
-        if (keyToIndex.find(key) != keyToIndex.end())
+        auto it = keyToIndex.find(key);
+        if (it != keyToIndex.end())
         {
-            return UINT_MAX;
+            uint index = it->second;
+            cpuData[index] = value;
+            dirtyIndices.push_back(index);
+            return index;
         }
         uint index = (uint)cpuData.size();
         cpuData.push_back(value);
@@ -2032,6 +2036,31 @@ public:
         return index;
     }
 
+    T& Get(const K& key)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        auto it = keyToIndex.find(key);
+        if (it != keyToIndex.end())
+        {
+            return cpuData[it->second];
+        }
+        IOs::Log("Key not found");
+        return nullptr;
+    }
+
+    uint GetIndex(const K& key)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        auto it = keyToIndex.find(key);
+        if (it != keyToIndex.end())
+        {
+            return it->second;
+        }
+        IOs::Log("Key not found");
+        return UINT_MAX;
+    }
+
+    /*
     void Modify(const K& key, const T& value)
     {
         std::lock_guard<std::mutex> lk(lock);
@@ -2043,6 +2072,7 @@ public:
             dirtyIndices.push_back(index);
         }
     }
+    */
 
     void Remove(const K& key)
     {
@@ -2073,7 +2103,6 @@ public:
         }
     }
 
-    uint maxSize = 0;
     void Upload(CommandBuffer& cb)
     {
         ZoneScoped;
@@ -2105,9 +2134,6 @@ public:
         {
             this->CreateBuffer(this->cpuData.size());
         }
-        if(maxSize > this->cpuData.size())
-            IOs::Log("Buffer resized from {} to {} entries", maxSize, this->cpuData.size());
-        maxSize = this->cpuData.size();
 
         {
             ZoneScopedN("Upload");

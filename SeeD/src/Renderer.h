@@ -194,105 +194,36 @@ public:
 };
 UI* UI::instance;
 
-static constexpr uint invalidMapIndex = UINT_MAX;
-// is this is thread safe only because we allocate the max number of stuff we will find before the MT part
-// with the reserve in the lock this should now be ok ?
-template<typename keyType, typename gpuType>
-class Map
-{
-    std::unordered_map<keyType, uint> keys;
-    StructuredUploadBuffer<gpuType> gpuData;
-public:
-    std::atomic_uint32_t count = 0;
-    std::recursive_mutex lock;
-
-    Map()
-    {
-        keys.reserve(262144);
-    }
-
-    void Release()
-    {
-        gpuData.Release();
-    }
-
-    bool Contains(keyType key, uint& index)
-    {
-        if (keys.contains(key))
-        {
-            index = keys[key];
-            return true;
-        }
-        return false;
-    }
-    bool Add(keyType key, uint& index)
-    {
-        if (!Contains(key, index))
-        {
-            // Adding without lock it baaaaadd !
-            lock.lock();
-            if (!Contains(key, index))
-            {
-                index = count++;
-                keys[key] = index;
-                Reserve(count);
-            }
-            lock.unlock();
-            return true;
-        }
-        return false;
-    }
-    void Reserve(uint size)
-    {
-        if (gpuData.Size() < size)
-        {
-            lock.lock();
-            gpuData.Resize(size);
-            lock.unlock();
-        }
-    }
-    gpuType& GetGPUData(uint index)
-    {
-        return gpuData[index];
-    }
-    gpuType& GetGPUData(keyType key)
-    {
-        uint index;
-        bool present = Contains(key, index);
-        seedAssert(present);
-        return GetGPUData(index);
-    }
-    Resource& GetResource()
-    {
-        return gpuData.GetResource();
-    }
-    uint Size()
-    {
-        return (uint)gpuData.Size();
-    }
-    void Upload()
-    {
-        gpuData.Upload();
-    }
-    auto begin() { return keys.begin(); }
-    auto end() { return keys.end(); }
-};
-
 // life time : frame
 struct ViewWorld
 {
     HLSL::CommonResourcesIndices commonResourcesIndices;
     PerFrame<StructuredUploadBuffer<HLSL::Camera>> cameras;
     PerFrame<StructuredUploadBuffer<HLSL::Light>> lights;
-    PerFrame<Map<World::Entity, HLSL::Material>> materials;
+    DirtyTrackingStructuredBuffer<World::Entity, HLSL::Material> materials;
     DirtyTrackingStructuredBuffer<World::Entity, HLSL::Instance> instances;
     std::vector<HLSL::Instance> instancesReadBackDebug;
 
     std::atomic<uint> meshletsCount;
 
+    // Static instance used by the callback function pointer (non-capturing lambda)
+    static ViewWorld* instance;
+
     void On()
     {
+        ZoneScoped;
+        // store instance pointer so we can use a non-capturing lambda (convertible to function pointer)
+        instance = this;
 
+        // Assign a non-capturing lambda that uses the static instance pointer.
+        // Non-capturing lambdas can convert to function pointers of the appropriate type.
+        Components::RemoveCallback[Components::Instance::bucketIndex] = [](EntityBase entity)
+        {
+            if (ViewWorld::instance)
+            {
+                ViewWorld::instance->instances.Remove(World::Entity(entity));
+            }
+        };
     }
 
     void Off()
@@ -301,11 +232,14 @@ struct ViewWorld
         {
             cameras.Get(i).Release();
             lights.Get(i).Release();
-            materials.Get(i).Release();
         }
+        materials.Release();
         instances.Release();
     }
 };
+
+// Define the static instance
+ViewWorld* ViewWorld::instance = nullptr;
 
 // life time : view (only updated on GPU)
 struct ViewContext
@@ -525,8 +459,8 @@ public:
         commonResourcesIndices.cameraCount = viewWorld.cameras->Size();
         commonResourcesIndices.lightsHeapIndex = viewWorld.lights->gpuData.srv.offset;
         commonResourcesIndices.lightCount = viewWorld.lights->Size();
-        commonResourcesIndices.materialsHeapIndex = viewWorld.materials->GetResource().srv.offset;
-        commonResourcesIndices.materialCount = viewWorld.materials->Size();
+        commonResourcesIndices.materialsHeapIndex = viewWorld.materials.GetResource().srv.offset;
+        commonResourcesIndices.materialCount = viewWorld.materials.Size();
         commonResourcesIndices.instancesHeapIndex = viewWorld.instances.GetResource().uav.offset;
         commonResourcesIndices.instanceCount = viewWorld.instances.Size();
 
@@ -813,6 +747,7 @@ public:
         ZoneScoped;
         Open();
 
+        view->viewWorld.materials.Upload(commandBuffer.Get());
         view->viewWorld.instances.Upload(commandBuffer.Get());
         if (options.enableStructuredCommandBuffersReadback && view->viewWorld.instances.GetResource().GetResource() != nullptr)
         {
@@ -2333,9 +2268,9 @@ public:
                 // should call a view method with all that ?
                 //viewWorld.meshletsCount = 0;
                 //viewWorld.instances->Clear();
+                //raytracingContext.instancesRayTracing->Clear();
                 viewWorld.lights->Clear();
                 viewWorld.cameras->Clear();
-                //raytracingContext.instancesRayTracing->Clear();
             }
         ).name("Reset");
         return task;
@@ -2348,12 +2283,12 @@ public:
 #define UpdateInstancesStepSize 512 
         ViewWorld& frameWorld = viewWorld;
         
-        uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::InstanceGPUIndex::mask | Components::WorldMatrix::mask, 0);
+        uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::WorldMatrix::mask, 0);
         uint entityCount = (uint)world.frameQueries[instanceQueryIndex].size();
         frameWorld.instances.Reserve(entityCount);
 
         uint materialsCount = world.CountQuery(Components::Material::mask, 0);
-        frameWorld.materials.Get().Reserve(materialsCount);
+        frameWorld.materials.Reserve(materialsCount);
         
         tf::Task task = subflow.for_each_index(uint(0), entityCount, uint(UpdateInstancesStepSize),
             [this, &world, instanceQueryIndex](int i)
@@ -2378,7 +2313,6 @@ public:
                         continue;
 
                     Components::Instance& instanceCmp = slot.Get<Components::Instance>();
-                    Components::InstanceGPUIndex& instanceGPUIndexCmp = slot.Get<Components::InstanceGPUIndex>();
 
                     World::Entity ent = World::Entity(slot.Get<Components::Entity>());
                     Components::Mesh& meshCmp = instanceCmp.mesh.Get();
@@ -2395,8 +2329,7 @@ public:
 
                     state.flags |= Components::State::Flags::loaded;
 
-                    uint materialIndex;
-                    bool materialAdded = viewWorld.materials.Get().Contains(World::Entity(instanceCmp.material), materialIndex);
+                    uint materialIndex = viewWorld.materials.GetIndex(World::Entity(instanceCmp.material));
 
                     // everything should be loaded to be able to draw the instance
 
@@ -2414,7 +2347,7 @@ public:
                     instance.objectID = ent.ToUInt();
                     instance.rayTracingBLAS = mesh->BLAS.GetResource()->GetGPUVirtualAddress();
 
-                    viewWorld.instances.Add(ent, instance);
+                    viewWorld.instances.AddOrUpdate(ent, instance);
                     localMeshletCount += mesh->LODs[0].meshletCount;
 
                     // count instances with shader
@@ -2454,11 +2387,9 @@ public:
                     if (i + subQuery > queryResult.size() - 1) 
                         return;
 
-                    uint materialIndex;
-                    if (frameWorld.materials.Get().Add(World::Entity(queryResult[i + subQuery].Get<Components::Entity>()), materialIndex))
+                    HLSL::Material material;
                     {
                         Components::Material& materialCmp = queryResult[i + subQuery].Get<Components::Material>();
-                        HLSL::Material& material = frameWorld.materials.Get().GetGPUData(materialIndex);
 
                         material.shaderIndex = 0; // not used ?
                         for (uint paramIndex = 0; paramIndex < HLSL::MaterialParametersCount; paramIndex++)
@@ -2485,6 +2416,7 @@ public:
                                 material.textures[texIndex] = ~0;
                         }
                     }
+                    frameWorld.materials.AddOrUpdate(World::Entity(queryResult[i + subQuery].Get<Components::Entity>()), material);
                 }
             }
         );
@@ -2667,7 +2599,6 @@ public:
             {
                 ZoneScoped;
                 this->viewWorld.cameras.Get().Upload();
-                this->viewWorld.materials.Get().Upload();
                 this->viewWorld.lights.Get().Upload();
                 this->viewContext.instancesCulledArgs.Resize(this->viewWorld.instances.Size());
                 this->viewContext.meshletsToCull.Resize(this->viewWorld.meshletsCount);
