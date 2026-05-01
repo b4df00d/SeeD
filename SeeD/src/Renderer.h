@@ -351,8 +351,8 @@ struct RayTracingContext
         SHARCAccumulation.CreateBuffer(SHARCEntryCount * 16, 16, false, "SHARCAccumulation");
         SHARCResolved.CreateBuffer(SHARCEntryCount * 16, 16, false, "SHARCResolved");
 
-        rtParameters.maxFrameFilteringCount = 16;
-        rtParameters.reservoirRandBias = 0.5;
+        rtParameters.maxFrameFilteringCount = 2;
+        rtParameters.reservoirRandBias = 0.0;
         rtParameters.reservoirSpacialRandBias = 0.2;
         rtParameters.spacialRadius = 0.0f;
 
@@ -371,7 +371,7 @@ struct RayTracingContext
         rtParameters.enableBackFaceCull = true;
         rtParameters.enableLighting = true;
         rtParameters.enableTransmission = true;
-        rtParameters.bouncesMax = 3;
+        rtParameters.bouncesMax = 5;
         rtParameters.enableRussianRoulette = true;
         rtParameters.enableSoftShadows = true;
         rtParameters.throughputThreshold = 0.01f;
@@ -479,7 +479,7 @@ public:
         viewContextParams.frameNumber = frame;
         if (IOs::instance->keys.pressed[VK_R])
             viewContextParams.frameNumber = 0;
-        viewContextParams.frameTime = (uint)Time::instance->currentTicks;
+        viewContextParams.frameTime = (uint)(Time::instance->currentTicks);
         viewContextParams.cameraIndex = options.stopFrustumUpdate ? 1 : 0;
         viewContextParams.lightsIndex = 0;
         viewContextParams.instancesCulledArgsIndex = viewContext.instancesCulledArgs.GetResource().uav.offset;
@@ -498,6 +498,7 @@ public:
         viewContextParams.reverseZ = true;
         viewContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
         viewContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
+        viewContextParams.textureLODBias = -1.0f;
         viewContextParams.mousePixel = int4(IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1], IOs::instance->mouse.mousePos[2], IOs::instance->mouse.mousePos[3]);
         float2 previousJit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy);
         viewContext.jitterIndex = (viewContextParams.frameNumber) % ARRAYSIZE(viewContext.jitter);
@@ -534,6 +535,8 @@ public:
         editorContextParams.lighting = options.debugDraw == Options::DebugDraw::lighting;
         editorContextParams.GIprobes = options.debugDraw == Options::DebugDraw::GIprobes;
         editorContextParams.GIBounces = options.debugDraw == Options::DebugDraw::GIBounces;
+        editorContextParams.GIAlbedo = options.debugDraw == Options::DebugDraw::GIAlbedo;
+        editorContextParams.GINormals = options.debugDraw == Options::DebugDraw::GINormals;
         editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
         editorContextParams.debugVerticesHeapIndex = editorContext.indirectDebugVertices.GetResource().uav.offset;
         editorContextParams.debugVerticesCountHeapIndex = editorContext.indirectDebugVerticesCount.GetResource().uav.offset;
@@ -1707,13 +1710,13 @@ public:
         TAAShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\TAA.hlsl|TAA");
 
         ppparams.P = 1;
-        ppparams.a = 1;
+        ppparams.a = 0.33;
         ppparams.m = 0.22;
         ppparams.l = 0.4;
         ppparams.c = 1.33;
         ppparams.b = 0.0;
         ppparams.expoAdd = 0;
-        ppparams.expoMul = 1;
+        ppparams.expoMul = 4;
 
 
         Open();
@@ -1803,7 +1806,7 @@ public:
     NVSDK_NGX_Parameter* ngx_parameters = nullptr;
     NVSDK_NGX_Handle* dlss_feature = nullptr;
     NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_Balanced;// NVSDK_NGX_PerfQuality_Value_MaxQuality;// NVSDK_NGX_PerfQuality_Value_MaxPerf;
-    float sharpness = 0.33f;
+    float sharpness = 0.033f;
     bool initialized = false;
     bool created = false;
     HLSL::Upscaling upscalingPreviousSetting;

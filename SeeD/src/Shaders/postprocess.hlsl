@@ -99,7 +99,6 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     
     Texture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
     float4 HDR = float4(lighted[inputPixel.xy].xyz * HLSL::brightnessClippingAdjust, 1);
-    HDR -= ppParameters.expoAdd;
     HDR *= ppParameters.expoMul;
     HDR += ppParameters.expoAdd;
     
@@ -114,10 +113,15 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     float4 SDR = float4(ACESFilm(HDR.xyz), HDR.w);
 #endif
     
-    SDR = pow(SDR, 2.2f);
+    //SDR = pow(SDR, 2.2f);
     
     RWTexture2D<float4> postProcessed = ResourceDescriptorHeap[ppParameters.postProcessedIndex];
     postProcessed[dtid.xy] = SDR; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
+    
+    /*
+    float blend = 1.0-saturate((cd.viewDistDiff - 0.01) * 100);
+    postProcessed[dtid.xy] = blend; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
+    */
     
     /*
     if(dtid.x > viewContext.displayResolution.x * 0.5)

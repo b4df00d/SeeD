@@ -1129,7 +1129,7 @@ public:
         options.debugMode = (Options::DebugMode)debugModeIndex;
 
         int debugDrawIndex = (int)options.debugDraw;
-        const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "lighting", "GIprobes", "GIBounces" };
+        const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "lighting", "GIprobes", "GIBounces", "GIAlbedo", "GINormals"};
         ImGui::Combo("debugDraw", &debugDrawIndex, itemsDraw, IM_ARRAYSIZE(itemsDraw));
         options.debugDraw = (Options::DebugDraw)debugDrawIndex;
 
@@ -1152,15 +1152,15 @@ public:
         }
 
         ImGui::Text("RT");
-        ImGui::SliderInt("frameFilter", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.maxFrameFilteringCount, 1, 1024, "%d", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderInt("frameFilter", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.maxFrameFilteringCount, 1, 32, "%d", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("randBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirRandBias, 0, 1);
         ImGui::SliderFloat("spacialRandBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirSpacialRandBias, 0, 1);
-        ImGui::SliderFloat("spacialRadius", &Renderer::instance->mainView.raytracingContext.rtParameters.spacialRadius, 0, 128);
+        ImGui::SliderFloat("spacialRadius", &Renderer::instance->mainView.raytracingContext.rtParameters.spacialRadius, 0, 32);
         ImGui::SliderFloat("SHARCSceneScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCSceneScale, 1, 64, "%f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("SHARCRadianceScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCRadianceScale, 0.1, 10);
         ImGui::SliderFloat("SHARCRoughnessThreshold", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCRoughnessThreshold, 0, 1);
         ImGui::SliderInt("SHARCSamplesPerPixel", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.SHARCSamplesPerPixel, 1, 8);
-        ImGui::SliderInt("SHARCAccumulationFrameNum", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.SHARCAccumulationFrameNum, 1, 1024, "%d", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderInt("SHARCAccumulationFrameNum", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.SHARCAccumulationFrameNum, 1, 512, "%d", ImGuiSliderFlags_Logarithmic);
 
         ImGui::Text("ATMO");
         ImGui::SliderFloat("density", &Renderer::instance->mainView.atmospehricScattering.asparams.density, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);

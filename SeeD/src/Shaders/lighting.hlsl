@@ -109,9 +109,14 @@ void RayGen()
     lighted[dtid.xy] = float4(0,0,0,1);
     specularHitDistance[dtid.xy] = 0;
     
-    GBufferCameraData cd = GetGBufferCameraData(dtid);
-    if(cd.reverseZ <= 0.0) return;
     
+    GBufferCameraData cd = GetGBufferCameraData(dtid);
+    if(cd.reverseZ <= 0.0)
+    {
+        lighted[dtid.xy] = float4(Sky(cd.viewDir), 1) * 0.1;
+        specularHitDistance[dtid.xy] = 10000 * 100;
+        return;
+    }
     SurfaceData s = GetSurfaceData(dtid.xy);
     
     uint seed = initRand(dtid.xy);
@@ -121,14 +126,14 @@ void RayGen()
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
-    HLSL::GIReservoir candidateReservoir = r;
     
-    float3 success = float3(0, 0, 1);
-    uint spacialReuse = 0;
     float2 radius = rtParameters.spacialRadius;
-    float3 candidateRayOrigin = cd.offsetedWorldPos;
+    float3 success = float3(0, 0, 1);
     if(radius.x > 0)
     {
+        uint spacialReuse = 0;
+        HLSL::GIReservoir candidateReservoir = r;
+        float3 candidateRayOrigin = cd.offsetedWorldPos;
         for (uint i = 0; i < poissonDiskCount; i++)
         {
             int2 pixel = dtid.xy + poissonDisk[i+poissonIndexRng] * radius * (i / float(poissonDiskCount));
@@ -198,8 +203,10 @@ void RayGen()
         }
     }
     
-    float4 result = 1;
-    result.xyz = r.color / max(0.00001, r.W / (r.Wsum / r.Wcount));
+    r.color = r.color / max(0.00001, r.W / (r.Wsum / r.Wcount));
+    //r.color = saturate(evalCombinedBRDF(cd.worldNorm, r.dir, -cd.viewDir, s)) * r.color;
+    
+    float4 result = float4(r.color, 1);
     if (editorContext.rays) // daw ray
     {
         uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
@@ -212,6 +219,9 @@ void RayGen()
     
     lighted[dtid.xy] = result;
     specularHitDistance[dtid.xy] = r.dist;
+    
+    RWTexture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalIndex];
+    normal[dtid.xy] = float4(cd.worldNorm, 1); // store the normal in full fp16 and not only 0-1 range
     
 }
 

@@ -203,7 +203,7 @@ void PathTraceRays()
         RayDesc ray;
         ray.Origin = cd.camera.worldPos.xyz;
         ray.Direction = cd.viewDir;
-        ray.TMin = 0.0f;
+        ray.TMin = 0.01f;
         ray.TMax = TRACING_DISTANCE;
 
         float3 sampleRadiance = float3(0.0f, 0.0f, 0.0f);
@@ -231,14 +231,17 @@ void PathTraceRays()
             
             if (bounce == 0) // Primary ray use GBuffer surface attributes
             {
-                payload.hitDistance = cd.viewDist * 0.995f;
+                payload.hitDistance = cd.viewDist;
                 payload.instanceID = ~0U;
                 payload.primitiveIndex = ~0U;
                 payload.geometryIndex = ~0U;
                 payload.barycentrics = 0;
+                //hitPos = OffsetRay(cd.worldPos.xyz, s.objectNormal);
+                //hitPos = cd.worldPos.xyz;
                 hitPos = cd.offsetedWorldPos.xyz;
                 
                 s = GetSurfaceData(pixel);
+                //s.albedo = 1;
             }
             else
             {
@@ -264,7 +267,11 @@ void PathTraceRays()
 
             if (bounce == 1)
             {
-                hitDistance = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE;
+                hitDistance = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE * 100;
+            }
+            else
+            {
+                hitDistance = payload.hitDistance;
             }
 
             // On a miss, load the sky value and break out of the ray tracing loop
@@ -276,9 +283,9 @@ void PathTraceRays()
 
                 sampleRadiance += skyValue * throughput;
                 
-                hitPos = ray.Origin + ray.Direction * 10000.0f;
+                hitPos = ray.Origin + ray.Direction * TRACING_DISTANCE * 100;
                 
-                if(bounce == 1)
+                if(bounce == 0)
                 {
                     indirectRay.Origin = ray.Origin;
                     indirectRay.Direction = ray.Direction;
@@ -324,7 +331,8 @@ void PathTraceRays()
             s.roughness = max(rtParameters.SHARCRoughnessThreshold, s.roughness);
 #endif // SHARC_UPDATE
 
-#if SHARC_QUERY
+//#if SHARC_QUERY
+#ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
             
             if(bounce == 1)
             {
@@ -339,6 +347,7 @@ void PathTraceRays()
                 uint gridLevel = HashGridGetLevel(hitPos, sharcParameters.gridParameters);
                 float voxelSize = HashGridGetVoxelSize(gridLevel, sharcParameters.gridParameters);
                 bool isValidHit = payload.hitDistance > voxelSize * sqrt(3.0f);
+                //isValidHit = false;
 
                 materialRoughnessPrev = min(materialRoughnessPrev, 0.99f);
                 float alpha = materialRoughnessPrev * materialRoughnessPrev;
@@ -390,14 +399,20 @@ void PathTraceRays()
                     {
                         // If light is not in shadow, evaluate BRDF and accumulate its contribution into radiance
                         // This is an entry point for evaluation of all other BRDFs based on selected configuration (for direct light)
-                        float3 lightContribution = evalCombinedBRDF(shadingNormal, vectorToLight, viewVector, s) * light.color.xyz * irradiance * lightWeight * lightVisibility;
+                        float3 lightContribution = light.color.xyz * irradiance * lightWeight * lightVisibility;
+                        
+                        //if(bounce != 0)
+                        {
+                            lightContribution *= evalCombinedBRDF(shadingNormal, vectorToLight, viewVector, s);
+                        }
+                        
                         sampleRadiance += lightContribution * throughput;
                     }
                 }
             }
 
             // Terminate the loop early on the last bounce (we don't need to sample the BRDF)
-            if (bounce == rtParameters.bouncesMax - 1)
+            if (bounce >= rtParameters.bouncesMax - 1)
             {
                 break;
             }
@@ -451,7 +466,8 @@ void PathTraceRays()
                 throughput /= (1.0f - specularBrdfProbability);
             }
 
-#if SHARC_QUERY
+//#if SHARC_QUERY
+#ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
             materialRoughnessPrev += brdfType == DIFFUSE_TYPE ? 1.0f : s.roughness;
 #endif // SHARC_QUERY
 
@@ -464,6 +480,7 @@ void PathTraceRays()
             float2 rand2 = float2(RNG(rngState), RNG(rngState));
             if (!evalIndirectCombinedBRDF(rand2, shadingNormal, geometryNormal, viewVector, s, brdfType, refractiveIndex, ray.Direction, brdfWeight, brdfPdf))
             {
+                //accumulatedSampleData.radiance = float3(10, 0, 0);
                 break; // Ray was eaten by the surface :(
             }
 
@@ -511,6 +528,45 @@ void PathTraceRays()
     
     if (editorContext.GIBounces)// Bounce Heatmap
         color = float4(debugColor, 1);
+    if (editorContext.GIAlbedo || editorContext.GINormals)
+    {
+        RayDesc ray;
+        ray.Origin = cd.camera.worldPos.xyz;
+        ray.Direction = cd.viewDir;
+        ray.TMin = 0.01f;
+        ray.TMax = TRACING_DISTANCE;
+        
+        RayPayload payload;
+        payload.hitDistance = -1.0f;
+        payload.instanceID = ~0U;
+        payload.primitiveIndex = ~0U;
+        payload.geometryIndex = ~0U;
+        payload.barycentrics = 0;
+        
+        uint rayFlags = (!rtParameters.enableBackFaceCull) ? RAY_FLAG_NONE : RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+
+#if DISABLE_BACK_FACE_CULLING
+    rayFlags &= (~RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
+#endif // DISABLE_BACK_FACE_CULLING
+    //rayFlags &= (~RAY_FLAG_FORCE_OPAQUE);
+                
+        TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
+                
+        SurfaceData s = GetRTSurfaceData(payload.instanceID, payload.primitiveIndex, payload.geometryIndex, payload.barycentrics);
+        
+        //s = GetSurfaceData(pixel);
+        
+        float2 rand2 = float2(RNG(rngState), RNG(rngState));
+        float brdfPdf;
+        float3 brdfWeight;
+        float3 sampleDir;
+        evalIndirectCombinedBRDF(rand2, s.normal, s.objectNormal, -cd.viewDir, s, DIFFUSE_TYPE, 1, sampleDir, brdfWeight, brdfPdf);
+        
+        if (editorContext.GIAlbedo)
+            color = float4(s.albedo.xyz, 1);
+        if (editorContext.GINormals)
+            color = float4(sampleDir * 0.5 + 0.5, 1);
+    }
     
     indirectRay.HitRadiance = color.xyz;
     RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, RNG(rngState));
@@ -522,9 +578,10 @@ void PathTraceRays()
     giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x] = res;
     */
     
+    
     /*
     // Debug output calculation
-    if (g_Global.debugOutputMode != 0)
+    if (editorContext.GIAlbedo)
     {
         float2 pixel = float2(DispatchRaysIndex().xy) + 0.5.xx;
         RayDesc ray = GeneratePinholeCameraRay(pixel / float2(launchDimensions), g_Lighting.view.matViewToWorld, g_Lighting.view.matViewToClip);
@@ -573,7 +630,7 @@ void PathTraceRays()
 
         u_Output[launchIndex] = float4(debugColor, 1.0f);
     }
-    */
+*/
 }
 
 [shader("raygeneration")]

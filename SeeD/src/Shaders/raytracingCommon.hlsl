@@ -226,7 +226,7 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
             float angle = rand2.x * 2.0f * M_PI;
             float distance = sqrt(rand2.y);
 
-            incidentVector = light.dir.xyz + (bitangent * sin(angle) + tangent * cos(angle)) * tan(light.size * 0.5f) * distance;
+            incidentVector = light.dir.xyz + (bitangent * sin(angle) + tangent * cos(angle)) * tan(light.size) * distance;
             incidentVector = normalize(incidentVector);
         }
         else
@@ -804,7 +804,6 @@ bool evalIndirectCombinedBRDF(float2 u,
     }
     else if (brdfType == DIFFUSE_TYPE)
     {
-
         // Sample diffuse ray using cosine-weighted hemisphere sampling
         rayDirectionLocal = sampleHemisphere(u);
         const BrdfData data = prepareBRDFData(Nlocal, rayDirectionLocal, Vlocal, material);
@@ -830,7 +829,7 @@ bool evalIndirectCombinedBRDF(float2 u,
         setBRDFDataLightDirection(data, rayDirectionLocal);
         pdf = sampleGGXVNDFReflectionPdf(data.alpha, data.alphaSquared, data.NdotH, data.NdotV, data.LdotH);
     }
-
+    
     // Prevent tracing direction with no contribution
     if (luminance(sampleWeight) == 0.0f)
     {
@@ -843,6 +842,7 @@ bool evalIndirectCombinedBRDF(float2 u,
     // Prevent tracing direction "under" the hemisphere (behind the triangle)
     if (dot(geometryNormal, rayDirection) <= 0.0f)
     {
+        rayDirection = float3(10, 0, 10);
         return false;
     }
 

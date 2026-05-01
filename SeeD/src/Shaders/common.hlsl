@@ -968,11 +968,11 @@ float3 i_octahedral_32(uint data, uint sh)
 
 float3 StoreNormal(float3 normal)
 {
-    return normal;// * 0.5 + 0.5;
+    return normal * 0.5 + 0.5;
 }
 float3 ReadNormal(float3 normal)
 {
-    return normal;// * 2 - 1;
+    return normal * 2 - 1;
 }
 
 struct GBufferCameraData
@@ -1092,6 +1092,7 @@ struct SurfaceData
 };
 SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, float3 tangent, float3 binormal)
 {
+    normal = normalize(normal);
     SurfaceData s;
     s.shadingDomain = ShadingDomain::Standard;
     uint textureIndex = ~0;
@@ -1102,9 +1103,9 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     {
         Texture2D<float4> albedo = ResourceDescriptorHeap[textureIndex];
         #ifdef RAY_DISPATCH
-        s.albedo *= albedo.SampleLevel(samplerLinear, uv, 3);
+        s.albedo *= albedo.SampleLevel(samplerLinear, uv, 1);
         #else
-        s.albedo *= albedo.Sample(samplerLinear, uv);
+        s.albedo *= albedo.SampleBias(samplerLinear, uv, -1);
         #endif
         //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
         //if(length(s.albedo.xyz) < 0.001) s.albedo.xyz = float3(1,0,1);
@@ -1119,11 +1120,11 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         #ifdef RAY_DISPATCH
         s.roughness *= roughtness.SampleLevel(samplerLinear, uv, 3).x;
         #else
-        s.roughness *= roughtness.Sample(samplerLinear, uv).x;
+        s.roughness *= roughtness.SampleBias(samplerLinear, uv, -1).x;
         #endif
     }
     
-    s.metalness = material.parameters[2];
+    s.metalness = min(material.parameters[2], 0.995);
     textureIndex = material.textures[2];
     if(textureIndex != ~0)
     {
@@ -1131,7 +1132,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         #ifdef RAY_DISPATCH
         s.metalness = metalness.SampleLevel(samplerLinear, uv, 3).x;
         #else
-        s.metalness = metalness.Sample(samplerLinear, uv).x;
+        s.metalness = metalness.SampleBias(samplerLinear, uv, -1).x;
         #endif
     }
     
@@ -1148,7 +1149,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         #ifdef RAY_DISPATCH
         float3 nrm = normals.SampleLevel(samplerLinear, uv, 3).xyz;
         #else
-        float3 nrm = normals.Sample(samplerLinear, uv).xyz;
+        float3 nrm = normals.SampleBias(samplerLinear, uv, -1).xyz;
 	    float3x3 tbn = float3x3(normalize(tangent), normalize(binormal), normalize(normal));
         s.normal = WorldNormal(nrm, tbn, normalStrength); //< c´est fucké avec le RT
         #endif
@@ -1268,6 +1269,8 @@ float2 bary)
 
     SurfaceData s = GetSurfaceData(material, uv, worldNormal, 0, 0);
     s.objectNormal = worldNormal;
+    //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
+    //s.albedo.xyz = 1;
     
     return s;
 }
@@ -1360,9 +1363,10 @@ void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousR
         r.Wsum = 0;
         r.Wcount = 0;
     }
-
-    float blend = 1.0-saturate(cd.viewDistDiff * 2 - 0.5);
-    uint frameFilteringCount = max(1, blend * rtParameters.maxFrameFilteringCount);
+    
+    float blend = 1.0-saturate((cd.viewDistDiff - 0.01) * 10);
+    //blend = seed > 0.5 ? seed : 0;
+    uint frameFilteringCount = max(0, blend * rtParameters.maxFrameFilteringCount-1);
     
     HLSL::GIReservoir newR;
     float W = dot(restirRay.HitRadiance.xyz, float3(0.4, 0.6, 0.3));
@@ -1372,10 +1376,14 @@ void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousR
     newR.Wcount = 1;
     newR.dist = length(restirRay.HitPosition - restirRay.Origin);
     newR.Wsum = W / max(restirRay.proba, 0.00001);
-        
-    //ScaleGIReservoir(r, frameFilteringCount);
-    //UpdateGIReservoir(r, newR, seed - rtParameters.reservoirRandBias);
-    r = newR;
+    
+    if(frameFilteringCount == 0)
+        r = newR;
+    else
+    {
+        ScaleGIReservoir(r, frameFilteringCount);
+        UpdateGIReservoir(r, newR, seed - rtParameters.reservoirRandBias);
+    }
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];
     giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x] = PackGIReservoir(r);

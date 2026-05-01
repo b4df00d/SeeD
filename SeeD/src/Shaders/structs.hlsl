@@ -167,6 +167,7 @@ namespace HLSL
         uint reverseZ;
         uint HZB;
         uint HZBMipCount;
+        float textureLODBias;
     };
     
     struct Shader
@@ -487,6 +488,8 @@ namespace HLSL
         uint lighting : 1;
         uint GIprobes : 1;
         uint GIBounces : 1;
+        uint GIAlbedo : 1;
+        uint GINormals : 1;
         uint debugBufferHeapIndex;
         uint debugVerticesHeapIndex;
         uint debugVerticesCountHeapIndex;
