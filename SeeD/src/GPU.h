@@ -834,6 +834,10 @@ void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name)
         NULL,
         &allocation,
         IID_NULL, NULL);
+    if (FAILED(hr) || allocation->GetResource() == nullptr)
+    {
+        IOs::Log("Buffer {} creation failed {}", name.c_str(), hr);
+    }
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
@@ -909,6 +913,10 @@ void Resource::CreateTexture(uint3 resolution, DXGI_FORMAT format, bool mips, St
         NULL,
         &allocation,
         IID_NULL, NULL);
+    if (FAILED(hr) || allocation->GetResource() == nullptr)
+    {
+        IOs::Log("Buffer {} creation failed {}", name.c_str(), hr);
+    }
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
@@ -993,6 +1001,10 @@ void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String n
         &clearValue,
         &allocation,
         IID_NULL, NULL);
+    if (FAILED(hr) || allocation->GetResource() == nullptr)
+    {
+        IOs::Log("Buffer {} creation failed {}", name.c_str(), hr);
+    }
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
@@ -1073,6 +1085,10 @@ void Resource::CreateDepthTarget(uint2 resolution, String name)
         &clear,
         &allocation,
         IID_NULL, NULL);
+    if (FAILED(hr) || allocation->GetResource() == nullptr)
+    {
+        IOs::Log("Buffer {} creation failed {}", name.c_str(), hr);
+    }
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
@@ -1162,7 +1178,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D
         NULL,
         &allocation,
         IID_NULL, NULL);
-    if (FAILED(hr))
+    if (FAILED(hr) || allocation->GetResource() == nullptr)
     {
         IOs::Log("Buffer {} creation failed {}", name.c_str(), hr);
     }
@@ -1276,6 +1292,10 @@ void Resource::CreateReadBackBuffer(uint size, String name)
         NULL,
         &allocation,
         IID_NULL, NULL);
+    if (FAILED(hr) || allocation->GetResource() == nullptr)
+    {
+        IOs::Log("Buffer {} creation failed {}", name.c_str(), hr);
+    }
 
     std::wstring wname = name.ToWString();
     allocation->SetName(wname.c_str());
@@ -1335,7 +1355,7 @@ void Resource::CreateAccelerationStructure(uint size, String name)
         NULL,
         &allocation,
         IID_NULL, NULL);
-    if (FAILED(hr))
+    if (FAILED(hr) || allocation->GetResource() == nullptr)
     {
         GPU::PrintDeviceRemovedReason(hr);
         return;
@@ -1418,37 +1438,54 @@ void Resource::Release(bool deferred)
 {
     if (allocation)
     {
+        if (allocation->GetResource() == nullptr)
+        {
+            IOs::Log("Allocation resource is null");
+        }
         if (deferred)
         {
             lock.lock();
+            bool found = false;
             for (int j = (int)allResources.size() - 1; j >= 0; j--)
             {
                 if (allResources[j].allocation == this->allocation)
                 {
                     allResources.erase(allResources.begin() + j);
                     allResourcesNames.erase(allResourcesNames.begin() + j);
+                    found = true;
                 }
             }
-            releaseResources.push_back({ GPU::instance->frameNumber , *this });
+            if(found)
+                releaseResources.push_back({ GPU::instance->frameNumber , *this });
+            else
+                IOs::Log("You want to release a resource that is not in allresources anymore (deferred)");
+
             lock.unlock();
         }
         else
         {
             lock.lock();
+            bool found = false;
             for (int j = (int)allResources.size() - 1; j >= 0; j--)
             {
                 if (allResources[j].allocation == this->allocation)
                 {
                     allResources.erase(allResources.begin() + j);
                     allResourcesNames.erase(allResourcesNames.begin() + j);
+                    found = true;
                 }
             }
             lock.unlock();
-            allocation->Release();
-            GPU::instance->descriptorHeap.FreeGlobalSlot(srv);
-            GPU::instance->descriptorHeap.FreeGlobalSlot(uav);
-            GPU::instance->descriptorHeap.FreeRTVSlot(rtv);
-            GPU::instance->descriptorHeap.FreeDSVSlot(dsv);
+            if(found)
+            {
+                allocation->Release();
+                GPU::instance->descriptorHeap.FreeGlobalSlot(srv);
+                GPU::instance->descriptorHeap.FreeGlobalSlot(uav);
+                GPU::instance->descriptorHeap.FreeRTVSlot(rtv);
+                GPU::instance->descriptorHeap.FreeDSVSlot(dsv);
+            }
+            else
+                IOs::Log("You want to release a resource that is not in allresources anymore (not deferred)");
         }
     }
     allocation = { 0 };
@@ -2543,12 +2580,24 @@ struct MeshStorage
 
     std::recursive_mutex lock;
 
-    uint meshesMaxCount = 512;
+    // Initial capacity (will grow dynamically as needed)
+    uint meshesMaxCount = 256;
     uint meshletMaxCount = meshesMaxCount * 128;
     uint meshletVertexMaxCount = meshletMaxCount * HLSL::max_vertices;
     uint meshletTrianglesMaxCount = meshletMaxCount * HLSL::max_triangles;
     uint vertexMaxCount = meshletVertexMaxCount;
     uint indexMaxCount = meshletTrianglesMaxCount;
+
+    // Current allocated sizes (may exceed initial max counts)
+    uint meshesAllocatedCount = 0;
+    uint meshletsAllocatedCount = 0;
+    uint meshletVerticesAllocatedCount = 0;
+    uint meshletTrianglesAllocatedCount = 0;
+    uint verticesAllocatedCount = 0;
+    uint indicesAllocatedCount = 0;
+
+    // Growth factor for dynamic reallocation (1.5x growth)
+    static constexpr float GROWTH_FACTOR = 1.5f;
 
     StructuredUploadBuffer<float4x4> identityMatrix;
 
@@ -2556,11 +2605,17 @@ struct MeshStorage
     {
         instance = this;
         meshes.CreateBuffer<HLSL::Mesh>(meshesMaxCount, "meshes");
+        meshesAllocatedCount = meshesMaxCount;
         meshlets.CreateBuffer<HLSL::Meshlet>(meshletMaxCount, "meshlets");
+        meshletsAllocatedCount = meshletMaxCount;
         meshletVertices.CreateBuffer<unsigned int>(meshletVertexMaxCount, "meshlet vertices");
+        meshletVerticesAllocatedCount = meshletVertexMaxCount;
         meshletTriangles.CreateBuffer<unsigned char>(meshletTrianglesMaxCount, "meshlet triangles");
+        meshletTrianglesAllocatedCount = meshletTrianglesMaxCount;
         vertices.CreateBuffer<Vertex>(vertexMaxCount, "vertices");
+        verticesAllocatedCount = vertexMaxCount;
         indices.CreateBuffer<unsigned int>(indexMaxCount, "indices");
+        indicesAllocatedCount = indexMaxCount;
 
         scratchBLAS.CreateBuffer(maxScratchSizeInBytes, 4, false, "RayTracingScratch", D3D12_RESOURCE_STATE_COMMON);
 
@@ -2582,6 +2637,67 @@ struct MeshStorage
         instance = nullptr;
     }
 
+    // Helper function to grow a buffer if needed
+    void EnsureBufferCapacity(Resource& resource, uint& allocatedCount, uint requiredCount, uint elementStride, const String& bufferName, CommandBuffer& commandBuffer)
+    {
+        if (allocatedCount < requiredCount)
+        {
+            // Calculate new size with growth factor
+            uint newCount = (uint)ceil(requiredCount * GROWTH_FACTOR);
+            uint oldByteSize = allocatedCount * elementStride;
+            uint newByteSize = newCount * elementStride;
+
+            IOs::Log("Growing {} buffer from {} to {} elements ({} MB -> {} MB)", 
+                     bufferName.c_str(), allocatedCount, newCount,
+                     oldByteSize / (1024 * 1024), newByteSize / (1024 * 1024));
+
+            // Save old resource for copying
+            Resource oldResource = resource;
+
+            // Create new larger buffer
+            if (elementStride == 1)
+            {
+                // For byte buffers like meshletTriangles
+                resource.CreateBuffer(newCount, elementStride, false, bufferName);
+            }
+            else
+            {
+                // For other element types
+                resource.CreateBuffer(newCount * elementStride, elementStride, false, bufferName);
+            }
+
+            // If old resource exists, copy old data to new resource via GPU
+            if (oldResource.GetResource() != nullptr && allocatedCount > 0)
+            {
+                IOs::Log("  Copying {} existing elements ({} bytes) to new buffer", allocatedCount, oldByteSize);
+
+                // Transition both buffers for copy operation
+                oldResource.Transition(commandBuffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                resource.Transition(commandBuffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+
+                // Copy all old data to new buffer
+                commandBuffer.cmd->CopyBufferRegion(
+                    resource.GetResource(),      // destination
+                    0,                            // destination offset
+                    oldResource.GetResource(),    // source
+                    0,                            // source offset
+                    oldByteSize                   // size to copy
+                );
+
+                // Transition new buffer back to common state for usage
+                resource.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+
+                // Old resource will be released after transitions
+                // Release deferred so it's not freed until a few frames later
+                oldResource.Release(true);
+            }
+
+            allocatedCount = newCount;
+
+            IOs::Log("  Buffer {} growth complete", bufferName.c_str());
+        }
+    }
+
     Mesh Load(MeshData& meshData, CommandBuffer& commandBuffer)
     {
         ZoneScoped;
@@ -2594,7 +2710,10 @@ struct MeshStorage
 
         nextMeshOffset += 1;
         nextVertexOffset += (uint)meshData.vertices.size();
-        seedAssert(nextVertexOffset < meshletVertexMaxCount);
+
+        // Ensure mesh buffer has capacity
+        EnsureBufferCapacity(meshes, meshesAllocatedCount, nextMeshOffset, sizeof(HLSL::Mesh), "meshes", commandBuffer);
+        EnsureBufferCapacity(vertices, verticesAllocatedCount, nextVertexOffset, sizeof(Vertex), "vertices", commandBuffer);
 
         newMesh.boundingSphere = meshData.boundingSphere;
         newMesh.storageIndex = _nextMeshOffset;
@@ -2616,7 +2735,11 @@ struct MeshStorage
             nextMeshletTriangleOffset += (uint)lod.meshlet_triangles.size();
             nextIndexOffset += (uint)lod.indices.size();
 
-            seedAssert(nextIndexOffset < meshletTrianglesMaxCount);
+            // Ensure LOD buffers have capacity before allocation
+            EnsureBufferCapacity(meshlets, meshletsAllocatedCount, nextMeshletOffset, sizeof(HLSL::Meshlet), "meshlets", commandBuffer);
+            EnsureBufferCapacity(meshletVertices, meshletVerticesAllocatedCount, nextMeshletVertexOffset, sizeof(unsigned int), "meshlet vertices", commandBuffer);
+            EnsureBufferCapacity(meshletTriangles, meshletTrianglesAllocatedCount, nextMeshletTriangleOffset, sizeof(unsigned char), "meshlet triangles", commandBuffer);
+            EnsureBufferCapacity(indices, indicesAllocatedCount, nextIndexOffset, sizeof(unsigned int), "indices", commandBuffer);
 
             newMeshLOD.meshletCount = (uint)lod.meshlets.size();
             newMeshLOD.meshletOffset = _nextMeshletOffset;
