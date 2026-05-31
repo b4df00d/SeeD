@@ -2,7 +2,7 @@
 
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define TRACING_DISTANCE                10000.0f
-#define BOUNCES_MIN                     3
+#define BOUNCES_MIN                     1
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
 #define SHADOW_RAY_IN_RIS               0 // Enable this to cast shadow rays for each candidate during resampling. This is expensive but increases quality
 #define ENABLE_SPECULAR_LOBE            1 // Enable to use the specular lobe for splitting between diffuse and specular BRDFs
@@ -236,12 +236,9 @@ void PathTraceRays()
                 payload.primitiveIndex = ~0U;
                 payload.geometryIndex = ~0U;
                 payload.barycentrics = 0;
-                //hitPos = OffsetRay(cd.worldPos.xyz, s.objectNormal);
-                //hitPos = cd.worldPos.xyz;
                 hitPos = cd.offsetedWorldPos.xyz;
                 
                 s = GetSurfaceData(pixel);
-                //s.albedo = 1;
             }
             else
             {
@@ -264,15 +261,18 @@ void PathTraceRays()
             sampleRadiance = float3(0.0f, 0.0f, 0.0f);
             throughput = float3(1.0f, 1.0f, 1.0f);
 #endif // SHARC_UPDATE
-
-            if (bounce == 1)
+            
+            if(bounce == 1)
             {
-                hitDistance = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE * 100;
+                indirectRay.Origin = ray.Origin;
+                indirectRay.Direction = ray.Direction;
+                indirectRay.HitPosition = hitPos;
+                indirectRay.HitNormal = s.normal;
+                indirectRay.proba = 1;
+                indirectRay.HitRadiance = sampleRadiance;
             }
-            else
-            {
-                hitDistance = payload.hitDistance;
-            }
+            
+            hitDistance = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE * 100;
 
             // On a miss, load the sky value and break out of the ray tracing loop
             if (!payload.Hit())
@@ -285,15 +285,6 @@ void PathTraceRays()
                 
                 hitPos = ray.Origin + ray.Direction * TRACING_DISTANCE * 100;
                 
-                if(bounce == 0)
-                {
-                    indirectRay.Origin = ray.Origin;
-                    indirectRay.Direction = ray.Direction;
-                    indirectRay.HitPosition = hitPos;
-                    indirectRay.HitNormal = s.normal;
-                    indirectRay.proba = 1;
-                }
-
                 break;
             }
 
@@ -334,14 +325,6 @@ void PathTraceRays()
 //#if SHARC_QUERY
 #ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
             
-            if(bounce == 1)
-            {
-                indirectRay.Origin = ray.Origin;
-                indirectRay.Direction = ray.Direction;
-                indirectRay.HitPosition = hitPos;
-                indirectRay.HitNormal = s.normal;
-                indirectRay.proba = 1;
-            }
             
             {
                 uint gridLevel = HashGridGetLevel(hitPos, sharcParameters.gridParameters);
@@ -509,6 +492,8 @@ void PathTraceRays()
             if (!isUpdatePass && luminance(throughput) < rtParameters.throughputThreshold)
                 break;
         }
+        
+        indirectRay.HitRadiance = sampleRadiance - indirectRay.HitRadiance; // remove the direct lighting contribution added at the first bounce
 
         if (!isUpdatePass)
         {
@@ -522,9 +507,16 @@ void PathTraceRays()
     // Don't write any output when we're just updating a radiance cache
     if (isUpdatePass)
         return;
+    
+    RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, RNG(rngState));
 
     // Write radiance to output buffer
     float4 color = ResolveSampleData(accumulatedSampleData, rtParameters.SHARCSamplesPerPixel, rtParameters.SHARCRadianceScale);
+    
+    
+    RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
+    RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
+    lighted[pixel] = color;
     
     if (editorContext.GIBounces)// Bounce Heatmap
         color = float4(debugColor, 1);
@@ -567,9 +559,6 @@ void PathTraceRays()
         if (editorContext.GINormals)
             color = float4(sampleDir * 0.5 + 0.5, 1);
     }
-    
-    indirectRay.HitRadiance = color.xyz;
-    RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, RNG(rngState));
 
     /*
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];

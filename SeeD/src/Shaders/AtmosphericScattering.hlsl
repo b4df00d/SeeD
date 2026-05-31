@@ -16,7 +16,7 @@ cbuffer CustomAS : register(b4)
 #include "common.hlsl"
 
 #define TRACING_DISTANCE                1000.0f
-#define BOUNCES_MIN                     3
+#define BOUNCES_MIN                     1
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
 #define SHADOW_RAY_IN_RIS               0 // Enable this to cast shadow rays for each candidate during resampling. This is expensive but increases quality
 #define ENABLE_SPECULAR_LOBE            1 // Enable to use the specular lobe for splitting between diffuse and specular BRDFs
@@ -83,7 +83,7 @@ void RayGen()
         }
     }
     
-    float density = min(exp(-froxelWorldPos.y * 0.02), 1) * asParameters.density * prevFroxelDist * PerlinNoise3_Normalized(froxelWorldPos * 0.005);
+    float density = min(exp(-froxelWorldPos.y * 0.02), 1) * asParameters.density * prevFroxelDist * PerlinNoise3_Normalized(froxelWorldPos * 0.05);
     
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
     froxelData[DispatchRaysIndex().xyz] = float4(sampleRadiance, density);
@@ -224,6 +224,6 @@ void AtmosphericScatteringReprojection(uint3 gtid : SV_GroupThreadID, uint3 dtid
     
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
     if (viewContext.frameNumber > 10)
-        froxelData[dtid.xyz] = lerp(previousData, froxelData[dtid.xyz], 0.2);
+        froxelData[dtid.xyz] = lerp(previousData, froxelData[dtid.xyz], 0.1);
 }
 #endif

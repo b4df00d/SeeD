@@ -106,7 +106,7 @@ void RayGen()
     
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
-    lighted[dtid.xy] = float4(0,0,0,1);
+    //lighted[dtid.xy] = float4(0,0,0,1);
     specularHitDistance[dtid.xy] = 0;
     
     
@@ -217,8 +217,8 @@ void RayGen()
         result.xyz *= success;
     }
     
-    lighted[dtid.xy] = result;
-    specularHitDistance[dtid.xy] = r.dist;
+    //lighted[dtid.xy] = result;
+    //specularHitDistance[dtid.xy] = r.dist;
     
     RWTexture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalIndex];
     normal[dtid.xy] = float4(cd.worldNorm, 1); // store the normal in full fp16 and not only 0-1 range
