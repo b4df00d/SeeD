@@ -429,6 +429,7 @@ namespace HLSL
         uint giReservoirIndex;
         uint previousgiReservoirIndex;
         uint lightedIndex;
+        uint directlightIndex;
         uint specularHitDistanceIndex;
         uint maxFrameFilteringCount;
         float reservoirRandBias;

@@ -516,6 +516,7 @@ public:
         rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get().uav.offset;
         rayTracingContextParams.previousgiReservoirIndex = raytracingContext.giReservoir.GetPrevious().uav.offset;
         rayTracingContextParams.lightedIndex = GetRegisteredResource("lighted").uav.offset;
+        rayTracingContextParams.directlightIndex = GetRegisteredResource("directlight").uav.offset;
         rayTracingContextParams.specularHitDistanceIndex = GetRegisteredResource("specularHitDistance").uav.offset;
         rayTracingContextParams.instancesRaytracingHeapIndex = raytracingContext.instancesRayTracing.GetResource().uav.offset;
         rayTracingContextParams.instancesRaytracingCountHeapIndex = raytracingContext.instancesRayTracingCount.GetResource().uav.offset;
@@ -1284,6 +1285,7 @@ public:
 class Lighting : public Pass
 {
     ViewResource lighted;
+    ViewResource directlight;
     ViewResource specularHitDistance;
     ViewResource albedo;
     ViewResource depth;
@@ -1298,6 +1300,8 @@ public:
         ZoneScoped;
         lighted.Register("lighted", view);
         lighted.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "lighted");
+        directlight.Register("directlight", view);
+        directlight.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "directlight");
         specularHitDistance.Register("specularHitDistance", view);
         specularHitDistance.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16_FLOAT, "specularHitDistance");
         albedo.Register("albedo", view);

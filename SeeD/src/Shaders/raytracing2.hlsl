@@ -54,7 +54,7 @@ void ClosestHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib :
 void AnyHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
 {
     SurfaceData s = GetRTSurfaceData(InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.uv);
-
+    
     switch (s.shadingDomain)
     {
         case ShadingDomain::AlphaTested:
@@ -192,6 +192,10 @@ void PathTraceRays()
         // Initialize SHARC state
         SharcState sharcState;
         SharcInit(sharcState);
+    
+    float3 directLight = 0;
+    float3 indirectLight = 0;
+    float primaryRoughtness = 1;
 
         /*
         float2 pixel = float2(launchIndex);
@@ -239,6 +243,8 @@ void PathTraceRays()
                 hitPos = cd.offsetedWorldPos.xyz;
                 
                 s = GetSurfaceData(pixel);
+                
+                primaryRoughtness = s.roughness;
             }
             else
             {
@@ -248,6 +254,7 @@ void PathTraceRays()
                 rayFlags &= (~RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
 #endif // DISABLE_BACK_FACE_CULLING
                 //rayFlags &= (~RAY_FLAG_FORCE_OPAQUE);
+                //rayFlags &= (~RAY_FLAG_FORCE_NON_OPAQUE);
                 
                 TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
                 hitPos = ray.Origin + ray.Direction * payload.hitDistance;
@@ -383,13 +390,14 @@ void PathTraceRays()
                         // If light is not in shadow, evaluate BRDF and accumulate its contribution into radiance
                         // This is an entry point for evaluation of all other BRDFs based on selected configuration (for direct light)
                         float3 lightContribution = light.color.xyz * irradiance * lightWeight * lightVisibility;
+                        lightContribution *= evalCombinedBRDF(shadingNormal, vectorToLight, viewVector, s);
                         
-                        //if(bounce != 0)
-                        {
-                            lightContribution *= evalCombinedBRDF(shadingNormal, vectorToLight, viewVector, s);
-                        }
-                        
-                        sampleRadiance += lightContribution * throughput;
+#ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
+                        if (bounce == 0)
+                            directLight += lightContribution;
+                        else
+#endif // !(SHARC_UPDATE)
+                            sampleRadiance += lightContribution * throughput;
                     }
                 }
             }
@@ -493,8 +501,17 @@ void PathTraceRays()
                 break;
         }
         
-        indirectRay.HitRadiance = sampleRadiance - indirectRay.HitRadiance; // remove the direct lighting contribution added at the first bounce
-
+        indirectRay.HitRadiance = sampleRadiance;
+        bool accept = RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, RNG(rngState), 1-primaryRoughtness);
+        if (!accept)
+        {
+            sampleRadiance = indirectRay.HitRadiance;
+        }
+        
+        sampleRadiance += directLight;
+        RWTexture2D<float4> directlight = ResourceDescriptorHeap[rtParameters.directlightIndex];
+        directlight[pixel] = float4(directLight, 1);
+        
         if (!isUpdatePass)
         {
             UpdateSampleData(accumulatedSampleData, sampleRadiance, isDiffusePath, hitDistance);
@@ -507,16 +524,14 @@ void PathTraceRays()
     // Don't write any output when we're just updating a radiance cache
     if (isUpdatePass)
         return;
-    
-    RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, RNG(rngState));
 
     // Write radiance to output buffer
     float4 color = ResolveSampleData(accumulatedSampleData, rtParameters.SHARCSamplesPerPixel, rtParameters.SHARCRadianceScale);
     
-    
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
     lighted[pixel] = color;
+    
     
     if (editorContext.GIBounces)// Bounce Heatmap
         color = float4(debugColor, 1);

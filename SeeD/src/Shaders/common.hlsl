@@ -1112,6 +1112,13 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     }
     //s.albedo.xyz = lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 2);
     
+    if(s.albedo.a < 0.99)
+    {
+        //s.albedo.xyz = float3(1, 0, 0);
+        s.shadingDomain = ShadingDomain::TransmissiveAlphaTested;
+        //s.albedo.a *= material.parameters[4];
+    }
+    
     s.roughness = material.parameters[1];
     textureIndex = material.textures[1];
     if(textureIndex != ~0)
@@ -1319,7 +1326,7 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
     return result;
 }
 
-void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
+bool UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
     bool accept = false;
     if(rand == 1 && (current.W > previous.W))
@@ -1336,6 +1343,7 @@ void UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir curre
     }
     previous.Wsum += current.Wsum;
     previous.Wcount += current.Wcount;
+    return accept;
 }
 
 void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
@@ -1349,7 +1357,7 @@ void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
     }
 }
 
-void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, float seed)
+bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, float seed, float bias)
 {
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[previousReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
@@ -1364,8 +1372,7 @@ void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousR
         r.Wcount = 0;
     }
     
-    float blend = 1.0-saturate((cd.viewDistDiff - 0.01) * 10);
-    //blend = seed > 0.5 ? seed : 0;
+    float blend = 1.0-saturate((cd.viewDistDiff - 0.001) * 10 + bias);
     uint frameFilteringCount = max(0, blend * rtParameters.maxFrameFilteringCount-1);
     
     HLSL::GIReservoir newR;
@@ -1377,16 +1384,26 @@ void RESTIR(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint previousR
     newR.dist = length(restirRay.HitPosition - restirRay.Origin);
     newR.Wsum = W / max(restirRay.proba, 0.00001);
     
+    bool accept = true;
     if(frameFilteringCount == 0)
         r = newR;
     else
     {
         ScaleGIReservoir(r, frameFilteringCount);
-        UpdateGIReservoir(r, newR, seed - rtParameters.reservoirRandBias);
+        accept = UpdateGIReservoir(r, newR, seed - rtParameters.reservoirRandBias);
+    }
+    
+    if(!accept)
+    {
+        restirRay.HitRadiance = r.color / max(0.00001, r.W / (r.Wsum / r.Wcount));
+        restirRay.Direction = r.dir;
+        restirRay.HitPosition = restirRay.Origin + r.dir * r.dist;
     }
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];
     giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x] = PackGIReservoir(r);
+    
+    return accept;
 }
 
 float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in SurfaceData s, out float hitDistance)
