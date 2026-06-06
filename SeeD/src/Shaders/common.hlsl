@@ -306,6 +306,52 @@ float PerlinNoise3_Normalized(in float3 p)
 }
 
 
+// Jenkins's "one at a time" hash function
+uint JenkinsHash(uint x)
+{
+    x += x << 10;
+    x ^= x >> 6;
+    x += x << 3;
+    x ^= x >> 11;
+    x += x << 15;
+    return x;
+}
+
+// Maps integers to colors using the hash function (generates pseudo-random colors)
+float3 HashAndColor(int i)
+{
+    uint hash = JenkinsHash(i);
+    float r = ((hash >> 0) & 0xFF) / 255.0f;
+    float g = ((hash >> 8) & 0xFF) / 255.0f;
+    float b = ((hash >> 16) & 0xFF) / 255.0f;
+    return float3(r, g, b);
+}
+
+uint InitRNG(uint2 pixel, uint2 resolution, uint frame)
+{
+    uint rngState = dot(pixel, uint2(1, resolution.x)) ^ JenkinsHash(frame);
+    return JenkinsHash(rngState);
+}
+
+float UintToFloat(uint x)
+{
+    return asfloat(0x3f800000 | (x >> 9)) - 1.f;
+}
+
+uint XorShift(inout uint rngState)
+{
+    rngState ^= rngState << 13;
+    rngState ^= rngState >> 17;
+    rngState ^= rngState << 5;
+    return rngState;
+}
+
+float RNG(inout uint rngState)
+{
+    return UintToFloat(XorShift(rngState));
+}
+
+
 // ----------------- HEMISPHERE ---------------------------------------------
 // Utility function to get a vector perpendicular to an input vector 
 //    (from "Efficient Construction of Perpendicular Vectors Without Branching")
@@ -1225,7 +1271,7 @@ float3 Sky(float3 direction)
     float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))), 0.5));
     float dotDown = saturate(pow(saturate(dot(direction, float3(0, -1, 0)) * 20), 1));
     float3 sky = normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
-    sky = lerp(sky, float3(0, 0, 0), dotDown) * 10;
+    sky = lerp(sky, float3(0, 0, 0), dotDown) * 5;
     return sky;
 }
 
@@ -1357,10 +1403,18 @@ void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
     }
 }
 
-bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, float seed, float bias)
+bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, uint seed, float bias)
 {
+    float blend = 1.0-saturate((cd.viewDistDiff - 0.001) * 10 + bias);
+    uint frameFilteringCount = max(0, blend * rtParameters.maxFrameFilteringCount-1);
+    
+    //uint prevXJitter = clamp(cd.previousPixel.x + (RNG(seed) * 2.0f - 1.0f) + 0.5f, 0, viewContext.renderResolution.x);
+    //uint prevYJitter = clamp(cd.previousPixel.y + (RNG(seed) * 2.0f - 1.0f) + 0.5f, 0, viewContext.renderResolution.y);
+    uint prevXJitter = cd.previousPixel.x;
+    uint prevYJitter = cd.previousPixel.y;
+    
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[previousReservoirIndex];
-    HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[cd.previousPixel.x + cd.previousPixel.y * viewContext.renderResolution.x]);
+    HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[prevXJitter + prevYJitter * viewContext.renderResolution.x]);
     // if not first time fill with previous frame reservoir
     if (viewContext.frameNumber == 0)
     {
@@ -1371,9 +1425,6 @@ bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint pre
         r.Wsum = 0;
         r.Wcount = 0;
     }
-    
-    float blend = 1.0-saturate((cd.viewDistDiff - 0.001) * 10 + bias);
-    uint frameFilteringCount = max(0, blend * rtParameters.maxFrameFilteringCount-1);
     
     HLSL::GIReservoir newR;
     float W = dot(restirRay.HitRadiance.xyz, float3(0.4, 0.6, 0.3));
@@ -1390,7 +1441,7 @@ bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint pre
     else
     {
         ScaleGIReservoir(r, frameFilteringCount);
-        accept = UpdateGIReservoir(r, newR, seed - rtParameters.reservoirRandBias);
+        accept = UpdateGIReservoir(r, newR, RNG(seed) - rtParameters.reservoirRandBias);
     }
     
     if(!accept)

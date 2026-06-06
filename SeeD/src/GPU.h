@@ -2790,7 +2790,7 @@ struct MeshStorage
     void LoadBLAS(Mesh& mesh, CommandBuffer& commandBuffer)
     {
         lock.lock();
-        bool isOpaque = true;
+        bool isOpaque = false;
         D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};
         descriptor.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
         descriptor.Triangles.VertexBuffer.StartAddress = vertices.GetResource()->GetGPUVirtualAddress();

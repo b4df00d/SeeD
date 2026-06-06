@@ -502,10 +502,13 @@ void PathTraceRays()
         }
         
         indirectRay.HitRadiance = sampleRadiance;
-        bool accept = RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, RNG(rngState), 1-primaryRoughtness);
-        if (!accept)
+        if (rtParameters.maxFrameFilteringCount > 1)
         {
-            sampleRadiance = indirectRay.HitRadiance;
+            bool accept = RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, rngState, 1-primaryRoughtness);
+            if (!accept)
+            {
+                sampleRadiance = indirectRay.HitRadiance;
+            }
         }
         
         sampleRadiance += directLight;

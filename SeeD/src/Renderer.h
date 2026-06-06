@@ -1527,8 +1527,8 @@ public:
         atmosphericScatteringReprojectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Reprojection");
         atmosphericScatteringAccumulationShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Accumulation");
 
-        asparams.density = 0.01;
-        asparams.luminosity = 2.0;
+        asparams.density = 0.001;
+        asparams.luminosity = 0.1;
         asparams.specialNear = 0.25;
 
         Open();

@@ -113,7 +113,7 @@ void RayGen()
     GBufferCameraData cd = GetGBufferCameraData(dtid);
     if(cd.reverseZ <= 0.0)
     {
-        lighted[dtid.xy] = float4(Sky(cd.viewDir), 1) * 0.1;
+        lighted[dtid.xy] = float4(Sky(cd.viewDir), 1);
         specularHitDistance[dtid.xy] = 10000 * 100;
         return;
     }

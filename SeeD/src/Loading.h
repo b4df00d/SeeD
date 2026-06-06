@@ -1372,6 +1372,7 @@ public:
             newMat.parameters[0] = { 1 }; // albedo
             newMat.parameters[1] = { 1 }; // roughness
             newMat.parameters[2] = { 0 }; // metalness
+            newMat.parameters[4] = { 0 }; // cutout
 
             float normalScale = 1;
             m->Get(AI_MATKEY_BUMPSCALING, normalScale); // normal
@@ -1757,6 +1758,11 @@ public :
             payloadConfigMax = { 0, 0 };
         }
 
+        void Reserve(uint numHitGroups, uint numMissShaders)
+        {
+            hitGroups.reserve(numHitGroups);
+        }
+
         void AddPayloadConfig(uint maxPayloadSize, uint maxAttributeSize)
         {
             D3D12_RAYTRACING_SHADER_CONFIG payloadConfig = {};
@@ -1863,6 +1869,7 @@ public :
             return;
 
         RTPSOHelper rtShader(shader);
+        rtShader.Reserve(2, 2);  // Pre-reserve space for 2 hit groups and 2 miss shaders
         rtShader.AddPayloadConfig(sizeof(uint) * 6, sizeof(uint) * 2); // full payload for primary rays
         rtShader.AddPayloadConfig(sizeof(uint) * 3, sizeof(uint) * 2); // smaller payload for shadow rays
         rtShader.AddRaygen(L"RayGen");
