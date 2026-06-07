@@ -1505,6 +1505,7 @@ class AtmosphericScattering : public Pass
     ViewResource depth;
     Components::Handle<Components::Shader> atmosphericScatteringShader;
     Components::Handle<Components::Shader> atmosphericScatteringReprojectionShader;
+    Components::Handle<Components::Shader> atmosphericScatteringBlurShader;
     Components::Handle<Components::Shader> atmosphericScatteringAccumulationShader;
 
     uint3 atmoSize = float3(160, 90, 256);
@@ -1525,11 +1526,17 @@ public:
         depth.Register("depth", view);
         atmosphericScatteringShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Update");
         atmosphericScatteringReprojectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Reprojection");
+        atmosphericScatteringBlurShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Blur");
         atmosphericScatteringAccumulationShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Accumulation");
 
         asparams.density = 0.001;
         asparams.luminosity = 0.1;
         asparams.specialNear = 0.25;
+        asparams.heightFalloff = 0.02;
+        asparams.noiseFrequency = 0.2;
+        asparams.noiseThresholdLow = 0.5;
+        asparams.noiseThresholdHigh = 0.6;
+        asparams.animationSpeed = 0.00000002;
 
         Open();
         HLSL::Froxels froxelsData[2];
@@ -1602,6 +1609,17 @@ public:
             atmosphericScatteringReprojection.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize));
 
         atmosphericScatteringFroxels.Get().Barrier(commandBuffer.Get());
+
+
+        // Blur atmospheric scattering froxels (XY box filter, ping-pong into history buffer)
+        Shader& atmosphericScatteringBlur = *AssetLibrary::instance->Get<Shader>(atmosphericScatteringBlurShader.Get().id, true);
+        commandBuffer->SetCompute(atmosphericScatteringBlur);
+        commandBuffer->cmd->Dispatch(
+            atmosphericScatteringBlur.DispatchX((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width),
+            atmosphericScatteringBlur.DispatchY((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height),
+            atmosphericScatteringBlur.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize));
+
+        atmosphericScatteringHistoryFroxels.Get().Barrier(commandBuffer.Get());
 
 
         // Accumulate atmospheric scattering froxels
@@ -2465,13 +2483,16 @@ public:
 
                     HLSL::Light hlsllight;
 
+                    float tableMultiplier = lightUnitTable[options.lightUnitsIndex].multiplier;
+                    float unitMul = tableMultiplier > 0.0f ? tableMultiplier : options.customLightMultiplier;
                     hlsllight.pos = float4(worldMatrix[3].xyz, 1);
                     hlsllight.dir = float4(normalize(worldMatrix[2].xyz), 1);
-                    hlsllight.color = float4(light.color.xyz * light.color.w, light.color.w);
+                    hlsllight.color = float4(light.color.xyz * light.color.w * unitMul, light.color.w);
                     hlsllight.angle = light.angle;
                     hlsllight.range = light.range;
                     hlsllight.type = light.type;
                     hlsllight.size = light.size;
+                    hlsllight.castShadow = light.castShadow ? 1u : 0u;
 
                     this->viewWorld.lights.Get().Add(hlsllight);
                 }

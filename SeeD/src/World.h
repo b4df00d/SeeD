@@ -231,6 +231,7 @@ namespace Components
         float range;
         float angle;
         HLSL::LightType type;
+        bool castShadow;
     };
 
     struct Camera : ComponentBase<Camera>

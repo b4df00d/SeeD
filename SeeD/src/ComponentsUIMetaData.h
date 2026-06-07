@@ -78,6 +78,7 @@ knownComponents.push_back(
 			{ "size", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, size) },
 			{ "range", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, range) },
 			{ "angle", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, angle) },
+			{ "castShadow", PropertyTypes::_bool, NULL, 1, offsetof(Components::Light, castShadow) },
 		}
  	}); 
 knownComponents.push_back(

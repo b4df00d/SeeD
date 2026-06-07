@@ -48,6 +48,23 @@ void operator delete(void* ptr) noexcept
 #include "String.h"
 
 
+struct LightUnitEntry
+{
+    const char* name;
+    float multiplier;
+};
+static constexpr LightUnitEntry lightUnitTable[] = {
+    { "Candela (cd)",         1.0f        },
+    { "Kilolux (klx)",        1000.0f     },
+    { "Megalux (Mlx)",        1000000.0f  },
+    { "Watts (680 lm/W)",     680.0f      },
+    { "EV 0  (x1)",           1.0f        },
+    { "EV 6  (x64)",          64.0f       },
+    { "EV 10 (x1024)",        1024.0f     },
+    { "EV 14 (x16384)",       16384.0f    },
+    { "Custom",               0.0f        },
+};
+
 struct Options
 {
     bool stopFrustumUpdate = false;
@@ -55,6 +72,8 @@ struct Options
     bool enableStructuredCommandBuffersReadback = false;
     bool stepMotion = false;
     bool shaderReload = true;
+    int lightUnitsIndex = 0;
+    float customLightMultiplier = 1.0f;
 
     enum class DebugMode
     {
@@ -314,16 +333,16 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\caldera-main\\map_source\\prefabs\\br\\wz_vg\\mp_wz_island\\commercial\\hotel_01.usd");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\appart-vincent-03-v03.fbx");
 
-    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets2\\";
+    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets2\\";
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\BrutalistLevelKit\\brutalist.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\FantasticVillage\\map_village_day.gltf");
-    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Cambodia\\TemplesOfCambodia_01_01_Exterior_02.gltf");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Cambodia\\TemplesOfCambodia_01_01_Exterior_02.gltf");
     //World::instance->Load("Temple.seed");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Bazaar\\LV_Bazaar.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\ScienceLab\\ScieneLab.gltf");
 
-    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets3\\";
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets3\\SpaceJunkyard_NantStudios2.gltf");
+    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets3\\";
+    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets3\\SpaceJunkyard_NantStudios2.gltf");
     //World::instance->Load("Cave.seed");
 
     //World::instance->Load("Save.seed");

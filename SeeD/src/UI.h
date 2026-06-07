@@ -12,7 +12,8 @@ enum class PropertyTypes : int
     _quaternion,
     _float4x4,
     _assetID,
-    _Handle
+    _Handle,
+    _bool
 };
 bool KnownType(String typeName)
 {
@@ -35,6 +36,8 @@ bool KnownType(String typeName)
     else if (typeName == "assetID")
         return true;
     else if (typeName == "Handle")
+        return true;
+    else if (typeName == "bool")
         return true;
     return false;
 }
@@ -1166,6 +1169,11 @@ public:
         ImGui::SliderFloat("density", &Renderer::instance->mainView.atmospehricScattering.asparams.density, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("luminosity", &Renderer::instance->mainView.atmospehricScattering.asparams.luminosity, 0, 2, "%.6f");
         ImGui::SliderFloat("specialNear", &Renderer::instance->mainView.atmospehricScattering.asparams.specialNear, 0.1, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("heightFalloff", &Renderer::instance->mainView.atmospehricScattering.asparams.heightFalloff, 0, 0.2f, "%.6f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("noiseFrequency", &Renderer::instance->mainView.atmospehricScattering.asparams.noiseFrequency, 0.001f, 2, "%.6f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("noiseThresholdLow", &Renderer::instance->mainView.atmospehricScattering.asparams.noiseThresholdLow, 0, 1, "%.3f");
+        ImGui::SliderFloat("noiseThresholdHigh", &Renderer::instance->mainView.atmospehricScattering.asparams.noiseThresholdHigh, 0, 1, "%.3f");
+        ImGui::SliderFloat("animationSpeed", &Renderer::instance->mainView.atmospehricScattering.asparams.animationSpeed, 0, 0.0001f, "%.10f", ImGuiSliderFlags_Logarithmic);
 
         ImGui::Text("EXPO");
         ImGui::SliderFloat("expoMul", &Renderer::instance->mainView.postProcess.ppparams.expoMul, 0, 8);
@@ -1766,6 +1774,9 @@ public:
                                         UIHelpers::DrawHandle(((EntityBase*)data)[dc], m.dataTemplateType);
                                     }
                                     break;
+                                    case PropertyTypes::_bool:
+                                        ImGui::Checkbox("", &((bool*)data)[dc]);
+                                    break;
                                     default:
                                         break;
                                     }
@@ -2002,6 +2013,113 @@ public:
 };
 ECSWindow ecsWindow;
 
+class LightsWindow : public EditorWindow
+{
+public:
+    LightsWindow() : EditorWindow("Lights") {}
+    void Update() override final
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("Lights", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+
+        // Light units header
+        ImGui::Text("Light Units");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(180);
+        ImGui::Combo("##LightUnits", &options.lightUnitsIndex,
+            [](void*, int n) -> const char* { return lightUnitTable[n].name; },
+            nullptr, IM_ARRAYSIZE(lightUnitTable));
+        ImGui::SameLine();
+        if (lightUnitTable[options.lightUnitsIndex].multiplier > 0.0f)
+            ImGui::TextDisabled("x %.6g", lightUnitTable[options.lightUnitsIndex].multiplier);
+        else
+        {
+            ImGui::SetNextItemWidth(120);
+            ImGui::DragFloat("##customMul", &options.customLightMultiplier, 0.01f, 0.0f, 0.0f, "x %.6g", ImGuiSliderFlags_Logarithmic);
+        }
+
+        ImGui::Separator();
+
+        uint queryIndex = World::instance->Query(Components::Light::mask, 0);
+        auto& result = World::instance->frameQueries[queryIndex];
+
+        if (result.empty())
+        {
+            ImGui::TextDisabled("No lights in scene.");
+            ImGui::End();
+            return;
+        }
+
+        if (ImGui::BeginTable("lightsTable", 5,
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY))
+        {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableSetupColumn("Name",      ImGuiTableColumnFlags_WidthStretch, 1.0f);
+            ImGui::TableSetupColumn("Type",      ImGuiTableColumnFlags_WidthFixed,   110.0f);
+            ImGui::TableSetupColumn("Color",     ImGuiTableColumnFlags_WidthFixed,   200.0f);
+            ImGui::TableSetupColumn("Intensity", ImGuiTableColumnFlags_WidthFixed,   90.0f);
+            ImGui::TableSetupColumn("Shadow",    ImGuiTableColumnFlags_WidthFixed,   55.0f);
+            ImGui::TableHeadersRow();
+
+            for (uint i = 0; i < (uint)result.size(); i++)
+            {
+                ImGui::PushID((int)i);
+                ImGui::TableNextRow();
+
+                auto& light = result[i].Get<Components::Light>();
+
+                // Name
+                ImGui::TableSetColumnIndex(0);
+                if (result[i].Has<Components::Name>())
+                    ImGui::TextUnformatted(result[i].Get<Components::Name>().name);
+                else
+                    ImGui::Text("Light %u", i);
+
+                // Type
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(-1);
+                int typeIdx = (int)light.type;
+                const char* typeNames[] = { "Directional", "Spot", "Point" };
+                if (ImGui::Combo("##type", &typeIdx, typeNames, 3))
+                    light.type = (HLSL::LightType)typeIdx;
+
+                // Color (HDR float RGB)
+                ImGui::TableSetColumnIndex(2);
+                ImGui::SetNextItemWidth(-1);
+                float col[3] = { light.color.x, light.color.y, light.color.z };
+                if (ImGui::ColorEdit3("##color", col,
+                    ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR))
+                {
+                    light.color.x = col[0];
+                    light.color.y = col[1];
+                    light.color.z = col[2];
+                }
+
+                // Intensity (color.w)
+                ImGui::TableSetColumnIndex(3);
+                ImGui::SetNextItemWidth(-1);
+                ImGui::DragFloat("##intensity", &light.color.w,
+                    0.05f, 0.0f, 1000000.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+
+                // Cast shadow
+                ImGui::TableSetColumnIndex(4);
+                ImGui::Checkbox("##castShadow", &light.castShadow);
+
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+
+        ImGui::End();
+    }
+};
+LightsWindow lightsWindow;
+
 class MainMenu : public EditorWindow
 {
 public:
@@ -2053,6 +2171,7 @@ public:
                         light.color = float4(2, 1.75, 1.5, 1);
                         light.type = HLSL::LightType::Directional;
                         light.size = 0.025f;
+                        light.castShadow = true;
                         editorState.dirtyHierarchy = true;
                     }
                     ImGui::EndMenu();

@@ -384,7 +384,7 @@ void PathTraceRays()
                     float3 vectorToLight = -incidentVector;
 
                     // Cast shadow ray towards the selected light
-                    float3 lightVisibility = CastShadowRay(AccelerationStructure, hitPos, geometryNormal, vectorToLight, lightDistance);
+                    float3 lightVisibility = light.castShadow ? CastShadowRay(AccelerationStructure, hitPos, geometryNormal, vectorToLight, lightDistance) : float3(1, 1, 1);
                     if (any(lightVisibility > 0.0f))
                     {
                         // If light is not in shadow, evaluate BRDF and accumulate its contribution into radiance

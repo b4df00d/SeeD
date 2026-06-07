@@ -48,7 +48,7 @@ void RayGen()
     float zRand = nextRand(seed)  - 0.5;
     //zRand*=0.5;
     float3 froxelPos = DispatchRaysIndex().xyz;
-    float3 prevFroxelPos = float3(DispatchRaysIndex().xyz) - (0.0,0.0,1.0);
+    float3 prevFroxelPos = float3(DispatchRaysIndex().xyz) - float3(0.0,0.0,1.0);
     froxelPos.z += zRand;
     prevFroxelPos.z += zRand;
     float3 froxelWorldPos = FroxelToWorld(froxelPos, currentFroxel.resolution.xyz, asParameters.specialNear, camera);
@@ -61,7 +61,7 @@ void RayGen()
     HLSL::Light light;
     float lightWeight;
     
-    uint rngState = InitRNG(launchIndex, launchDimensions, viewContext.frameTime);
+    uint rngState = InitRNG(launchIndex, launchDimensions, viewContext.frameTime ^ JenkinsHash(DispatchRaysIndex().z));
     if (SampleLightRIS(rngState, froxelWorldPos, 0, light, lightWeight, AccelerationStructure))
     {
         // Prepare data needed to evaluate the light
@@ -73,7 +73,7 @@ void RayGen()
         float3 vectorToLight = -incidentVector;
 
         // Cast shadow ray towards the selected light
-        float3 lightVisibility = CastShadowRay(AccelerationStructure, froxelWorldPos, 0, vectorToLight, lightDistance);
+        float3 lightVisibility = light.castShadow ? CastShadowRay(AccelerationStructure, froxelWorldPos, 0, vectorToLight, lightDistance) : float3(1, 1, 1);
         if (any(lightVisibility > 0.0f))
         {
             // If light is not in shadow, evaluate BRDF and accumulate its contribution into radiance
@@ -83,7 +83,7 @@ void RayGen()
         }
     }
     
-    float density = min(exp(-froxelWorldPos.y * 0.02), 1) * asParameters.density * prevFroxelDist * PerlinNoise3_Normalized(froxelWorldPos * 0.05);
+    float density = min(exp(-froxelWorldPos.y * asParameters.heightFalloff), 1) * asParameters.density * prevFroxelDist * smoothstep(asParameters.noiseThresholdLow, asParameters.noiseThresholdHigh, PerlinNoise3_Normalized(froxelWorldPos * asParameters.noiseFrequency + viewContext.frameTime * asParameters.animationSpeed));
     
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
     froxelData[DispatchRaysIndex().xyz] = float4(sampleRadiance, density);
@@ -171,30 +171,56 @@ void AnyHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attributes 
 }
 
 #ifndef RAY_DISPATCH
+#pragma compute Blur AtmosphericScatteringBlur
+
+[RootSignature(SeeDRootSignature)]
+[numthreads(8, 8, 8)]
+void AtmosphericScatteringBlur(uint3 dtid : SV_DispatchThreadID)
+{
+    StructuredBuffer<HLSL::Froxels> froxels = ResourceDescriptorHeap[asParameters.froxelsIndex];
+    HLSL::Froxels currentFroxel = froxels[asParameters.currentFroxelIndex];
+    HLSL::Froxels historyFroxel = froxels[asParameters.historyFroxelIndex];
+
+    RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
+    RWTexture3D<float4> blurredData = ResourceDescriptorHeap[historyFroxel.index];
+
+    int2 res = (int2)currentFroxel.resolution.xy;
+    float4 sum = 0;
+    float weight = 0;
+
+    [unroll] for (int dx = -1; dx <= 1; dx++)
+    [unroll] for (int dy = -1; dy <= 1; dy++)
+    {
+        int3 neighbor = int3(dtid) + int3(dx, dy, 0);
+        if (all(neighbor.xy >= 0) && all(neighbor.xy < res))
+        {
+            float w = (2 - abs(dx)) * (2 - abs(dy)); // Gaussian 3x3: center=4, edges=2, corners=1
+            sum += froxelData[neighbor] * w;
+            weight += w;
+        }
+    }
+
+    blurredData[dtid] = sum / weight;
+}
+
 #pragma compute Accumulation AtmosphericScatteringAccumulation
 
 [RootSignature(SeeDRootSignature)]
 [numthreads(16, 16, 1)]
 void AtmosphericScatteringAccumulation(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
-    uint seed = initRand(dtid.xy * dtid.z);
-    
-    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    HLSL::Camera camera = cameras[viewContext.cameraIndex];
-    
     StructuredBuffer<HLSL::Froxels> froxels = ResourceDescriptorHeap[asParameters.froxelsIndex];
     HLSL::Froxels currentFroxel = froxels[asParameters.currentFroxelIndex];
     HLSL::Froxels historyFroxel = froxels[asParameters.historyFroxelIndex];
-    
+
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
     RWTexture3D<float4> historyFroxelData = ResourceDescriptorHeap[historyFroxel.index];
-    
+
     float4 accumulatedRadiance = float4(0, 0, 0, 0);
     for (uint z = 0; z < currentFroxel.resolution.z; z++)
     {
         uint3 fro = uint3(dtid.xy, z);
-        float4 froData = froxelData[fro];
-        historyFroxelData[fro] = froData;
+        float4 froData = historyFroxelData[fro];
         accumulatedRadiance.xyz += exp(-accumulatedRadiance.w) * (froData.xyz * froData.w);
         accumulatedRadiance.w += froData.w;
         froxelData[fro] = accumulatedRadiance;
@@ -224,6 +250,9 @@ void AtmosphericScatteringReprojection(uint3 gtid : SV_GroupThreadID, uint3 dtid
     
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
     if (viewContext.frameNumber > 10)
-        froxelData[dtid.xyz] = lerp(previousData, froxelData[dtid.xyz], 0.1);
+    {
+        float blendFactor = (any(historyFroxelPos < 0.0) || any(historyFroxelPos > 1.0)) ? 1.0 : 0.1;
+        froxelData[dtid.xyz] = lerp(previousData, froxelData[dtid.xyz], blendFactor);
+    }
 }
 #endif

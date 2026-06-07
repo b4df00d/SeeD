@@ -206,7 +206,7 @@ uint xxhash(in uint p)
 
 uint xxhash(in uint2 pixel)
 {
-    uint p = viewContext.frameTime << 24 | pixel.x << 12 | pixel.y;
+    uint p = viewContext.frameNumber << 24 | pixel.x << 12 | pixel.y;
     //p += viewContext.frameTime;
     //p = 0 << 20 | pixel.x << 10 | pixel.y;
     return xxhash(p);

@@ -362,6 +362,10 @@ namespace HLSL
         float angle;
         float size;
         LightType type;
+        uint castShadow;
+        uint pad1;
+        uint pad2;
+        uint pad3;
     };
     
     struct Froxels
@@ -383,6 +387,11 @@ namespace HLSL
         float density;
         float luminosity;
         float specialNear;
+        float heightFalloff;
+        float noiseFrequency;
+        float noiseThresholdLow;
+        float noiseThresholdHigh;
+        float animationSpeed;
     };
     
     struct PostProcessHalfResParameters

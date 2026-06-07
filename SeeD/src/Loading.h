@@ -1415,11 +1415,11 @@ public:
             else
                 light.color = float4(l->mColorDiffuse.r, l->mColorDiffuse.g, l->mColorDiffuse.b, 1);
             float d = 1;
-            float lightIntensity = 1 / (l->mAttenuationConstant + l->mAttenuationLinear * d + l->mAttenuationQuadratic * d * d);
-            lightIntensity = min(lightIntensity, 10.0f);
-            light.color *= lightIntensity;
-            light.color.a = 1;
+            float lightIntensity = 1.0f / (l->mAttenuationConstant + l->mAttenuationLinear * d + l->mAttenuationQuadratic * d * d);
+            light.color.a = lightIntensity;
             light.range = lightIntensity * 20;
+
+            light.castShadow = true;
 
             switch (l->mType)
             {

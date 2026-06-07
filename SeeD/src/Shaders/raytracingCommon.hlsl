@@ -295,7 +295,7 @@ bool SampleLightRIS(inout uint rngState, float3 hitPosition, float3 surfaceNorma
 
 #if SHADOW_RAY_IN_RIS
             // Casting a shadow ray for all candidates here is expensive, but can significantly decrease noise
-            if (any(CastShadowRay(accelerationStructure, hitPosition, surfaceNormal, lightVector, lightDistance) > 0.0f))
+            if (candidate.castShadow && any(CastShadowRay(accelerationStructure, hitPosition, surfaceNormal, lightVector, lightDistance) > 0.0f))
                 continue;
 #endif
 
