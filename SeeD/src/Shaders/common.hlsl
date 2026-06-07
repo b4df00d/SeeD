@@ -697,7 +697,13 @@ bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
     if (distance(boundingSphere.xyz, camera.worldPos.xyz) < boundingSphere.w) return false; // BS intersecting the camera pos
     
     float4 viewSphere = float4(mul(camera.view, float4(boundingSphere.xyz, 1)).xyz, boundingSphere.w); // assume view matrix is not scaled
-    
+
+    // The screen-space silhouette (sphere_screen_extents) takes sqrt(x*x + z*z - r*r)
+    // and sqrt(y*y + z*z - r*r). These go negative -> NaN when the sphere is closer in
+    // depth than its own radius (camera near it, possibly off to the side), producing a
+    // garbage screen AABB and false culls. Require z > r so both terms stay positive.
+    if (viewSphere.z <= boundingSphere.w) return false; // too close to project reliably; keep it
+
     if (boundingSphere.w / saturate(viewSphere.z) < 0.0025f) return true; // BS too small
     
     float3 sphereClosestPointToCamera = viewSphere.xyz - normalize(viewSphere.xyz) * boundingSphere.w;
@@ -716,10 +722,13 @@ bool OcclusionCulling(in HLSL::Camera camera, float4 boundingSphere)
     float fMipLevel = ceil(log2(max(vExtents.x, vExtents.y)));
     fMipLevel = clamp(fMipLevel, 0.0f, vHZB.z - 1.0f);
     
-    float4 vOcclusionDepth = float4(tHZB.SampleLevel(samplerLinearClamp, vUV.xy, fMipLevel),
-                                    tHZB.SampleLevel(samplerLinearClamp, vUV.zy, fMipLevel),
-                                    tHZB.SampleLevel(samplerLinearClamp, vUV.zw, fMipLevel),
-                                    tHZB.SampleLevel(samplerLinearClamp, vUV.xw, fMipLevel));
+    // HZB is a conservative min/max reduction; it must be point-sampled. A bilinear
+    // sampler averages neighbouring texels and reports a surface closer than the true
+    // farthest occluder near depth discontinuities, which falsely culls instances.
+    float4 vOcclusionDepth = float4(tHZB.SampleLevel(samplerPointClamp, vUV.xy, fMipLevel),
+                                    tHZB.SampleLevel(samplerPointClamp, vUV.zy, fMipLevel),
+                                    tHZB.SampleLevel(samplerPointClamp, vUV.zw, fMipLevel),
+                                    tHZB.SampleLevel(samplerPointClamp, vUV.xw, fMipLevel));
     
     float fMaxOcclusionDepth = max(max(max(vOcclusionDepth.x, vOcclusionDepth.y), vOcclusionDepth.z), vOcclusionDepth.w);
     bool bCulled = fMaxOcclusionDepth < fBoundSphereDepth;

@@ -80,6 +80,19 @@
                             "minLOD         = 0.0f, "\
                             "maxLOD         = 3.402823466e+38f, "\
                             "space          = 0, "\
+                            "visibility     = SHADER_VISIBILITY_ALL),"\
+            "StaticSampler(s5, "\
+                            "filter         = FILTER_MIN_MAG_MIP_POINT, "\
+                            "addressU       = TEXTURE_ADDRESS_CLAMP, "\
+                            "addressV       = TEXTURE_ADDRESS_CLAMP, "\
+                            "addressW       = TEXTURE_ADDRESS_CLAMP, "\
+                            "mipLodBias     = 0.0f, "\
+                            "maxAnisotropy  = 0, "\
+                            "comparisonFunc = COMPARISON_NEVER, "\
+                            "borderColor    = STATIC_BORDER_COLOR_TRANSPARENT_BLACK, "\
+                            "minLOD         = 0.0f, "\
+                            "maxLOD         = 3.402823466e+38f, "\
+                            "space          = 0, "\
                             "visibility     = SHADER_VISIBILITY_ALL)"
 
 //---------------------------------------------------------------------------------------------
@@ -127,6 +140,7 @@ SamplerComparisonState samplerShadows : register(s1);
 SamplerComparisonState samplerShadowsReverseZ : register(s2);
 SamplerState samplerPoint : register(s3);
 SamplerState samplerLinearClamp : register(s4);
+SamplerState samplerPointClamp : register(s5);
 
 #define BINDINGS_HLSL
 #endif

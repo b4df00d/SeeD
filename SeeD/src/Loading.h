@@ -1150,7 +1150,7 @@ public:
             {
                 MeshLoader::MeshOriginal originalMesh;
                 float3 minBB = float3(FLT_MAX);
-                float3 maxBB = float3(FLT_MIN);
+                float3 maxBB = float3(-FLT_MAX);
 
                 originalMesh.vertices.resize(m->mNumVertices);
                 for (unsigned int j = 0; j < m->mNumVertices; j++)
@@ -1339,19 +1339,6 @@ public:
             auto& newMat = ent.Get<Components::Material>();
             newMat.shader = { shader };
 
-            aiString texName;
-            /*
-            for (unsigned int j = 0; j < 17; j++)
-            {
-                for (unsigned int k = 0; k < m->GetTextureCount((aiTextureType)j); k++)
-                {
-                    texName = "";
-                    m->GetTexture((aiTextureType)j, k, &texName);
-                    std::cout << texName.C_Str() << "\n";
-                }
-            }
-            */
-
             for (uint j = 0; j < HLSL::MaterialTextureCount; j++)
             {
                 newMat.textures[j] = { entityInvalid };
@@ -1364,25 +1351,51 @@ public:
             newMat.textures[4] = CreateOrLoadTexture(m, 2, aiTextureType_AMBIENT_OCCLUSION, aiTextureType_AMBIENT);
             newMat.textures[5] = CreateOrLoadTexture(m, 2, aiTextureType_EMISSION_COLOR, aiTextureType_EMISSIVE);
 
-
             for (uint j = 0; j < HLSL::MaterialParametersCount; j++)
             {
-                newMat.parameters[j] = { 1 };
+                newMat.parameters[j] = 1.0f;
             }
-            newMat.parameters[0] = { 1 }; // albedo
-            newMat.parameters[1] = { 1 }; // roughness
-            newMat.parameters[2] = { 0 }; // metalness
-            newMat.parameters[4] = { 0 }; // cutout
 
-            float normalScale = 1;
-            m->Get(AI_MATKEY_BUMPSCALING, normalScale); // normal
+            // Albedo scalar tint
+            newMat.parameters[0] = 1.0f;
+            aiColor4D baseColor(1, 1, 1, 1);
+            if (m->Get(AI_MATKEY_BASE_COLOR, baseColor) == AI_SUCCESS || m->Get(AI_MATKEY_COLOR_DIFFUSE, baseColor) == AI_SUCCESS)
+                newMat.parameters[0] = (baseColor.r + baseColor.g + baseColor.b) / 3.0f;
+
+            // Roughness: prefer PBR factor, fall back to shininess conversion
+            newMat.parameters[1] = 1.0f;
+            float roughness = 1.0f;
+            if (m->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness) == AI_SUCCESS)
+                newMat.parameters[1] = roughness;
+            else
+            {
+                float shininess = 0.0f;
+                if (m->Get(AI_MATKEY_SHININESS, shininess) == AI_SUCCESS && shininess > 0.0f)
+                    newMat.parameters[1] = 1.0f - sqrtf(shininess / 1024.0f); // perceptual remap
+            }
+
+            // Metalness: PBR factor
+            newMat.parameters[2] = 0.0f;
+            float metalness = 0.0f;
+            if (m->Get(AI_MATKEY_METALLIC_FACTOR, metalness) == AI_SUCCESS)
+                newMat.parameters[2] = metalness;
+
+            // Normal scale
+            float normalScale = 1.0f;
+            m->Get(AI_MATKEY_BUMPSCALING, normalScale);
             newMat.parameters[3] = normalScale;
 
-            float opacity = 1;
-            m->Get(AI_MATKEY_OPACITY, opacity); // cutout
-            newMat.parameters[4] = min(opacity, newMat.parameters[4]);
-            m->Get(AI_MATKEY_TRANSPARENCYFACTOR, opacity); // cutout
-            newMat.parameters[4] = min(opacity, newMat.parameters[4]);
+            // Cutout threshold — parameters[4] = 0 means opaque (no alpha test).
+            // AI_MATKEY_OPACITY: 1=fully opaque, 0=fully transparent.
+            // AI_MATKEY_TRANSPARENCYFACTOR: 0=opaque, 1=transparent (inverse convention).
+            newMat.parameters[4] = 0.0f;
+            float opacity = 1.0f;
+            m->Get(AI_MATKEY_OPACITY, opacity);
+            float transparency = 0.0f;
+            m->Get(AI_MATKEY_TRANSPARENCYFACTOR, transparency);
+            float effectiveOpacity = opacity * (1.0f - transparency);
+            if (effectiveOpacity < 0.99f)
+                newMat.parameters[4] = effectiveOpacity;
 
             matIndexToEntity.push_back(ent);
         }
