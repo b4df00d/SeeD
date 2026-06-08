@@ -1396,20 +1396,22 @@ public:
 
 class GPUDebug : public Pass
 {
-    ViewResource postProcessed;
+    ViewResource lighted;
     ViewResource depth;
     Components::Handle<Components::Shader> indirectDebugShader;
     Components::Handle<Components::Shader> selectionShader;
+    Components::Handle<Components::Shader> debugBuffersShader;
 
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        postProcessed.Register("postProcessed", view);
+        lighted.Register("lighted", view);
         depth.Register("depth", view);
         indirectDebugShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debug.hlsl|Debug");
         selectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\selection.hlsl|Selection");
+        debugBuffersShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debugBuffers.hlsl|Lighting");
     }
     void Setup(View* view) override
     {
@@ -1423,12 +1425,15 @@ public:
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
         auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
+        auto rtParametersAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
+
 
         Shader& selection = *AssetLibrary::instance->Get<Shader>(selectionShader.Get().id, true);
         commandBuffer->SetCompute(selection);
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, rtParametersAddress);
 
         commandBuffer->cmd->Dispatch(1, 1, 1);
 
@@ -1444,25 +1449,37 @@ public:
         }
 
 
-        if (options.debugMode == Options::DebugMode::ray
-            || options.debugMode == Options::DebugMode::boundingSphere)
+        if (options.debugMode != Options::DebugMode::none
+            || options.debugDraw != Options::DebugDraw::none)
         {
-            Resource rts[] = { postProcessed.Get() };
-            //SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);
-            SetupView(view, rts, ARRAYSIZE(rts), false, nullptr, false, true);
+            Shader& debugBuffers = *AssetLibrary::instance->Get<Shader>(debugBuffersShader.Get().id, true);
+            commandBuffer->SetCompute(debugBuffers);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, rtParametersAddress);
+            commandBuffer->cmd->Dispatch(debugBuffers.DispatchX(view->renderResolution.x), debugBuffers.DispatchY(view->renderResolution.y), 1);
 
-            postProcessed.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            if (options.debugMode == Options::DebugMode::ray
+                || options.debugMode == Options::DebugMode::boundingSphere)
+            {
+                Resource rts[] = { lighted.Get() };
+                SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);
+                //SetupView(view, rts, ARRAYSIZE(rts), false, nullptr, false, true);
 
-            Shader& indirectDebug = *AssetLibrary::instance->Get<Shader>(indirectDebugShader.Get().id, true);
-            commandBuffer->SetGraphic(indirectDebug);
-            commandBuffer->cmd->SetGraphicsRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-            commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);
-            commandBuffer->cmd->SetGraphicsRootConstantBufferView(EditorContextRegister, editorContextAddress);
+                lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-            uint maxDraw = 2;
-            commandBuffer->cmd->ExecuteIndirect(indirectDebug.commandSignature, maxDraw, view->editorContext.indirectDebugBuffer.GetResourcePtr(), 0, view->editorContext.indirectDebugVerticesCount.GetResourcePtr(), 0);
+                Shader& indirectDebug = *AssetLibrary::instance->Get<Shader>(indirectDebugShader.Get().id, true);
+                commandBuffer->SetGraphic(indirectDebug);
+                commandBuffer->cmd->SetGraphicsRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+                commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);
+                commandBuffer->cmd->SetGraphicsRootConstantBufferView(EditorContextRegister, editorContextAddress);
 
-            postProcessed.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                uint maxDraw = 2;
+                commandBuffer->cmd->ExecuteIndirect(indirectDebug.commandSignature, maxDraw, view->editorContext.indirectDebugBuffer.GetResourcePtr(), 0, view->editorContext.indirectDebugVerticesCount.GetResourcePtr(), 0);
+
+                lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
         }
 
         Close();
@@ -2135,9 +2152,9 @@ public:
     Lighting lighting;
     Forward forward;
     PostProcessHalfRes postProcessHalfRes;
+    GPUDebug gpuDebug;
     DLSS dlss;
     PostProcess postProcess;
-    GPUDebug gpuDebug;
     Present present;
 
 
@@ -2161,11 +2178,11 @@ public:
         gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
         lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &gBuffers.commandBuffer, &accelerationStructure.commandBuffer);
         lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers.commandBuffer, &lightingProbes.commandBuffer);
-        postProcessHalfRes.On(this, GPU::instance->graphicQueue, "postProcessHalfRes", &lighting.commandBuffer, &atmospehricScattering.commandBuffer);
-        forward.On(this, GPU::instance->graphicQueue, "forward", &postProcessHalfRes.commandBuffer, &atmospehricScattering.commandBuffer);
+        forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer, &atmospehricScattering.commandBuffer);
+        postProcessHalfRes.On(this, GPU::instance->graphicQueue, "postProcessHalfRes", &forward.commandBuffer, nullptr);
+        gpuDebug.On(this, GPU::instance->graphicQueue, "gpuDebug", &forward.commandBuffer, nullptr);
         dlss.On(this, GPU::instance->graphicQueue, "dlss", &forward.commandBuffer, nullptr);
         postProcess.On(this, GPU::instance->graphicQueue, "postProcess", &dlss.commandBuffer, nullptr);
-        gpuDebug.On(this, GPU::instance->graphicQueue, "gpuDebug", &postProcess.commandBuffer, nullptr);
         present.On(this, GPU::instance->graphicQueue, "present", &gpuDebug.commandBuffer, nullptr);
     }
 
@@ -2187,9 +2204,9 @@ public:
         lighting.Off();
         forward.Off();
         postProcessHalfRes.Off();
+        gpuDebug.Off();
         dlss.Off();
         postProcess.Off();
-        gpuDebug.Off();
         present.Off();
 
         View::Off();
@@ -2220,8 +2237,8 @@ public:
         SUBTASKVIEWPASS(gBuffers);
         SUBTASKVIEWPASS(lightingProbes);
         SUBTASKVIEWPASS(lighting);
-        SUBTASKVIEWPASS(gpuDebug);
         SUBTASKVIEWPASS(forward);
+        SUBTASKVIEWPASS(gpuDebug);
         SUBTASKVIEWPASS(postProcessHalfRes);
         SUBTASKVIEWPASS(dlss);
         SUBTASKVIEWPASS(postProcess);
@@ -2276,9 +2293,9 @@ public:
         lighting.Execute();
         postProcessHalfRes.Execute();
         forward.Execute();
+        gpuDebug.Execute();
         dlss.Execute();
         postProcess.Execute();
-        gpuDebug.Execute();
         present.Execute();
     }
 

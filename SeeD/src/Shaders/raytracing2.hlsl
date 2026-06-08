@@ -531,9 +531,6 @@ void PathTraceRays()
     // Write radiance to output buffer
     float4 color = ResolveSampleData(accumulatedSampleData, rtParameters.SHARCSamplesPerPixel, rtParameters.SHARCRadianceScale);
     
-    RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
-    RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
-    lighted[pixel] = color;
     
     
     if (editorContext.GIBounces)// Bounce Heatmap
@@ -578,12 +575,10 @@ void PathTraceRays()
             color = float4(sampleDir * 0.5 + 0.5, 1);
     }
 
-    /*
-    RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-    HLSL::GIReservoirCompressed res = {};
-    res.color = PackRGBE_sqrt(color.xyz);
-    giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x] = res;
-    */
+    
+    RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
+    RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
+    lighted[pixel] = color;
     
     
     /*

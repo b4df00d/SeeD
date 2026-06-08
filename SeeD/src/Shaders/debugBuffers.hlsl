@@ -31,18 +31,10 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     }
     else if (editorContext.normals)
     {
-        lighted[dtid.xy].xyz = s.normal.xyz * 0.5 + 0.5;
+        lighted[dtid.xy].xyz = normalize(s.normal.xyz) * 0.5 + 0.5;
     }
     else if (editorContext.lighting)
     {
-        s.albedo = 1;
-    
-        float h = 0;
-        float3 d = RESTIRLight(rtParameters.directReservoirIndex, cd, s, h);
-        float3 i = RESTIRLight(rtParameters.giReservoirIndex, cd, s, h);
-    
-        RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-        lighted[dtid.xy] = float4(d + i, 1);
     }
     else if (editorContext.GIprobes)
     {
@@ -107,6 +99,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         bool inRange = abs(length(debugPixel - int2(dtid.xy))) <= 0;
         if (inRange)
         {
+            
             Texture2D<uint> instanceID = ResourceDescriptorHeap[viewContext.instanceIDIndex];
             uint sampleInstanceID = instanceID[debugPixel];
     
@@ -120,6 +113,16 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
             float3 center = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
             float radius = instance.GetScale() * mesh.boundingSphere.w;
             DrawSphere(center, radius);
+        }
+    }
+    if (editorContext.rays) // daw ray
+    {
+        RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
+        HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
+        uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
+        if (abs(length(debugPixel - dtid.xy)) < 6)
+        {
+            DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + r.dir.xyz * min(r.dist, 2));
         }
     }
 }

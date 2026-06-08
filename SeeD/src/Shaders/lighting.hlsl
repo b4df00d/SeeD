@@ -203,22 +203,9 @@ void RayGen()
         }
     }
     
-    r.color = r.color / max(0.00001, r.W / (r.Wsum / r.Wcount));
-    //r.color = saturate(evalCombinedBRDF(cd.worldNorm, r.dir, -cd.viewDir, s)) * r.color;
+    //r.color = r.color / max(0.00001, r.W / (r.Wsum / r.Wcount));
     
-    float4 result = float4(r.color, 1);
-    if (editorContext.rays) // daw ray
-    {
-        uint2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
-        if (abs(length(debugPixel - dtid)) < 6)
-        {
-            DrawLine(cd.offsetedWorldPos, cd.offsetedWorldPos + r.dir.xyz * min(r.dist, 2));
-        }
-        result.xyz *= success;
-    }
-    
-    //lighted[dtid.xy] = result;
-    //specularHitDistance[dtid.xy] = r.dist;
+
     
     RWTexture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalIndex];
     normal[dtid.xy] = float4(cd.worldNorm, 1); // store the normal in full fp16 and not only 0-1 range
