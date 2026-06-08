@@ -107,8 +107,16 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
         
         HLSL::Mesh::LOD lod = mesh.LODs[lodIndex];
         
-        uint meshletIndex = 0;
-        InterlockedAdd(counter[1], lod.meshletCount, meshletIndex);
+        // Reserve space for the whole wave with a single atomic: the first
+        // active lane adds the wave total, and each lane derives its slot from
+        // the exclusive prefix sum of meshlet counts across active lanes.
+        uint waveOffset = WavePrefixSum(lod.meshletCount);
+        uint waveTotal = WaveActiveSum(lod.meshletCount);
+        uint waveBase = 0;
+        if (WaveIsFirstLane())
+            InterlockedAdd(counter[1], waveTotal, waveBase);
+        waveBase = WaveReadLaneFirst(waveBase);
+        uint meshletIndex = waveBase + waveOffset;
         
         RWStructuredBuffer<HLSL::GroupedCullingDispatch> meshletsToCull = ResourceDescriptorHeap[viewContext.meshletsToCullIndex];
         HLSL::GroupedCullingDispatch mdc = (HLSL::GroupedCullingDispatch) 0;
@@ -178,8 +186,16 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     {
         RWStructuredBuffer<uint> meshletCounter = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
         RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
-        uint index = 0;
-        InterlockedAdd(meshletCounter[0], 1, index);
+        // Each active lane writes one draw call: the first active lane reserves
+        // a contiguous block for the whole wave, and each lane takes its slot
+        // from the count of active lanes preceding it.
+        uint waveOffset = WavePrefixCountBits(true);
+        uint waveTotal = WaveActiveCountBits(true);
+        uint waveBase = 0;
+        if (WaveIsFirstLane())
+            InterlockedAdd(meshletCounter[0], waveTotal, waveBase);
+        waveBase = WaveReadLaneFirst(waveBase);
+        uint index = waveBase + waveOffset;
         HLSL::MeshletDrawCall mdc = (HLSL::MeshletDrawCall) 0;
         mdc.instanceIndex = meshletToCull.instanceIndex;
         mdc.meshletIndex = meshletToCull.meshletIndex;
