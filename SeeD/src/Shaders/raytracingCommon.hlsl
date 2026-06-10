@@ -197,16 +197,17 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
         float distance = sqrt(dot(lightToSurface, lightToSurface));
         float rDistance = 1.0f / distance;
         incidentVector = lightToSurface * rDistance;
-        lightDistance = length(lightToSurface);
+        lightDistance = distance;
 
-        float attenuation = 1.0f;
-        if (light.size > 0)
+        float attenuation = min(4.0f, 1.0f / pow(lightDistance, 2.0f));
+        if (light.range > 0)
         {
-            attenuation = square(saturate(1.0f - square(square(distance * light.size))));
-
-            if (attenuation == 0)
-                return;
+            float d2 = square(distance / light.range);
+            attenuation *= square(saturate(1.0f - square(d2)));   // (1 - (d/range)^4)^2
+            //if (attenuation == 0)  return;
         }
+        
+            //if (attenuation < 0.01)  return;
 
         float spotlight = 1.0f;
         if (light.type == HLSL::LightType::Spot)
@@ -214,10 +215,10 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
             float LdotD = dot(incidentVector, light.dir.xyz);
             float directionAngle = acos(LdotD);
             spotlight = 1.0f - smoothstep(light.angle, light.angle*2, directionAngle);
-            if (spotlight == 0)
-                return;
+            //if (spotlight == 0) return;
         }
 
+        irradiance = light.color.w;
         if (light.size > 0)
         {
             halfAngularSize = atan(min(light.size * rDistance, 1.0f));
@@ -228,10 +229,9 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
 
             irradiance = radianceTimesPi * solidAngleOverPi;
         }
-        else
-            irradiance = light.color.w * square(rDistance) * 1000;
-
+        
         irradiance *= spotlight * attenuation;
+        //irradiance *= saturate(1.0f / square(lightDistance));
     }
     else
         return;
@@ -803,45 +803,3 @@ bool evalIndirectCombinedBRDF(float2 u,
 
     return true;
 }
-
-/*
-
-// TODO: Delete this
-[shader("miss")]
-void ShadowMiss(inout ShadowRayPayload payload : SV_RayPayload)
-{
-}
-
-[shader("closesthit")]
-void ClosestHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
-{
-    payload.visibility = float3(0.0f, 0.0f, 0.0f);
-}
-
-[shader("anyhit")]
-void AnyHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
-{
-    SurfaceData s = GetRTSurfaceData(InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.uv);
-
-    switch (s.shadingDomain)
-    {
-        case ShadingDomain::AlphaTested:
-        case ShadingDomain::TransmissiveAlphaTested:
-        {
-            if (s.albedo.a < 0.5)
-                IgnoreHit();
-
-            break;
-        }
-
-        default:
-            // Modulate the visiblity by the material's transmission
-            payload.visibility *= (1.0f - s.albedo.a) * s.albedo.rgb;
-            if (dot(payload.visibility, 0.333f) > 0.001f)
-                IgnoreHit();
-
-            break;
-    }
-    AcceptHitAndEndSearch();
-}
-*/

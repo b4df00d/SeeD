@@ -516,7 +516,6 @@ public:
         rayTracingContextParams.giReservoirIndex = raytracingContext.giReservoir.Get().uav.offset;
         rayTracingContextParams.previousgiReservoirIndex = raytracingContext.giReservoir.GetPrevious().uav.offset;
         rayTracingContextParams.lightedIndex = GetRegisteredResource("lighted").uav.offset;
-        rayTracingContextParams.directlightIndex = GetRegisteredResource("directlight").uav.offset;
         rayTracingContextParams.specularHitDistanceIndex = GetRegisteredResource("specularHitDistance").uav.offset;
         rayTracingContextParams.instancesRaytracingHeapIndex = raytracingContext.instancesRayTracing.GetResource().uav.offset;
         rayTracingContextParams.instancesRaytracingCountHeapIndex = raytracingContext.instancesRayTracingCount.GetResource().uav.offset;
@@ -1285,7 +1284,6 @@ public:
 class Lighting : public Pass
 {
     ViewResource lighted;
-    ViewResource directlight;
     ViewResource specularHitDistance;
     ViewResource albedo;
     ViewResource depth;
@@ -1300,8 +1298,6 @@ public:
         ZoneScoped;
         lighted.Register("lighted", view);
         lighted.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "lighted");
-        directlight.Register("directlight", view);
-        directlight.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "directlight");
         specularHitDistance.Register("specularHitDistance", view);
         specularHitDistance.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16_FLOAT, "specularHitDistance");
         albedo.Register("albedo", view);
@@ -1447,7 +1443,6 @@ public:
             editorState.selectedObject.FromUInt(selectionResult[0]);
             view->editorContext.selectionResult.ReadBackUnMap();
         }
-
 
         if (options.debugMode != Options::DebugMode::none
             || options.debugDraw != Options::DebugDraw::none)
@@ -1671,7 +1666,7 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         transparencyLayer.Register("transparencyLayer", view);
-        transparencyLayer.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "transparencyLayer"); // must be the same as Lighted input
+        transparencyLayer.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "transparencyLayer"); // must be the same as Lighted input
         lighted.Register("lighted", view);
         albedo.Register("albedo", view);
         normal.Register("normal", view);
@@ -1845,7 +1840,7 @@ public:
     NVSDK_NGX_Parameter* ngx_parameters = nullptr;
     NVSDK_NGX_Handle* dlss_feature = nullptr;
     NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_Balanced;// NVSDK_NGX_PerfQuality_Value_MaxQuality;// NVSDK_NGX_PerfQuality_Value_MaxPerf;
-    float sharpness = 0.033f;
+    float sharpness = 0.0033f;
     bool initialized = false;
     bool created = false;
     HLSL::Upscaling upscalingPreviousSetting;
@@ -1996,7 +1991,7 @@ public:
                     dlss_create_params.Feature.InPerfQualityValue = perf_quality;
                     dlss_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
                         NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-                        //NVSDK_NGX_DLSS_Feature_Flags_MVJittered |
+                        NVSDK_NGX_DLSS_Feature_Flags_MVJittered |
                         //NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
                         //NVSDK_NGX_DLSS_Feature_Flags_DoSharpening |
                         NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
@@ -2047,9 +2042,12 @@ public:
                 dlss_eval_params.pInExposureTexture = nullptr;
                 dlss_eval_params.InExposureScale = 1.0f;
 
-                // use jitter info only if NVSDK_NGX_DLSS_Feature_Flags_MVJittered ?
-                //dlss_eval_params.InJitterOffsetX = view->viewContext.jitter[view->viewContext.jitterIndex].x;
-                //dlss_eval_params.InJitterOffsetY = view->viewContext.jitter[view->viewContext.jitterIndex].y;
+                // Jitter offset must ALWAYS be supplied (independent of MVJittered). Our projection
+                // applies an NDC offset of (halton-0.5)/renderResolution, so the pixel-space offset
+                // DLSS expects is (halton-0.5)*0.5.
+                float2 dlssJitter = view->viewContext.jitter[view->viewContext.jitterIndex];
+                dlss_eval_params.InJitterOffsetX = (dlssJitter.x - 0.5f) * 0.5f;
+                dlss_eval_params.InJitterOffsetY = (dlssJitter.y - 0.5f) * 0.5f;
 
                 dlss_eval_params.InReset = false;
                 dlss_eval_params.InRenderSubrectDimensions = { view->renderResolution.x, view->renderResolution.y };
@@ -2083,9 +2081,13 @@ public:
                 dlss_eval_params.InExposureScale = 1.0f;
                 //dlss_eval_params.pInAlpha = albedo.Get().GetResource();
 
-                // use jitter info only if NVSDK_NGX_DLSS_Feature_Flags_MVJittered ?
-                //dlss_eval_params.InJitterOffsetX = view->viewContext.jitter[view->viewContext.jitterIndex].x;
-                //dlss_eval_params.InJitterOffsetY = view->viewContext.jitter[view->viewContext.jitterIndex].y;
+                // Jitter offset must ALWAYS be supplied (independent of MVJittered, which only
+                // describes whether the MVs already contain jitter). Our projection applies an
+                // NDC offset of (halton-0.5)/renderResolution (see mesh.hlsl), so the pixel-space
+                // offset DLSS expects is (halton-0.5)*0.5.
+                float2 dlssdJitter = view->viewContext.jitter[view->viewContext.jitterIndex];
+                dlss_eval_params.InJitterOffsetX = (dlssdJitter.x - 0.5f) * 0.5f;
+                dlss_eval_params.InJitterOffsetY = (dlssdJitter.y - 0.5f) * 0.5f;
 
                 NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSSD_EXT(commandBuffer->cmd, dlss_feature, ngx_parameters, &dlss_eval_params);
                 seedAssert(NVSDK_NGX_SUCCEED(result));
@@ -2504,7 +2506,7 @@ public:
                     float unitMul = tableMultiplier > 0.0f ? tableMultiplier : options.customLightMultiplier;
                     hlsllight.pos = float4(worldMatrix[3].xyz, 1);
                     hlsllight.dir = float4(normalize(worldMatrix[2].xyz), 1);
-                    hlsllight.color = float4(light.color.xyz * light.color.w * unitMul, light.color.w);
+                    hlsllight.color = float4(light.color.xyz * unitMul, light.color.w);
                     hlsllight.angle = light.angle;
                     hlsllight.range = light.range;
                     hlsllight.type = light.type;
