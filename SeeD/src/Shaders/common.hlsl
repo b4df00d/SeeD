@@ -1383,21 +1383,23 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
 
 bool UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir current, float rand)
 {
-    bool accept = false;
-    if(rand == 1 && (current.W > previous.W))
-        accept = true;
-    else if(rand < (current.W / (previous.W + current.W)))
-        accept = true;
-    //if(rand <= (current.W / ((previous.Wsum / previous.Wcount) + current.W)))
+    // Canonical weighted reservoir sampling (Chao '82 / ReSTIR streaming update).
+    // current.Wsum carries this candidate's resampling weight (pHat / sourcePdf),
+    // current.Wcount its sample count (1 for a fresh sample, M for a merged reservoir).
+    // The selection probability MUST be based on the resampling weight, not on the
+    // target function pHat (== current.W) as it was before, otherwise the estimator
+    // is biased towards bright samples and ignores the accumulated history weight.
+    previous.Wsum   += current.Wsum;
+    previous.Wcount += current.Wcount;
+
+    bool accept = previous.Wsum > 0.0f && (rand * previous.Wsum < current.Wsum);
     if(accept)
     {
         previous.color = current.color;
-        previous.W = current.W;
-        previous.dist = current.dist;
-        previous.dir = current.dir;
+        previous.W     = current.W; // target function pHat of the now-selected sample
+        previous.dist  = current.dist;
+        previous.dir   = current.dir;
     }
-    previous.Wsum += current.Wsum;
-    previous.Wcount += current.Wcount;
     return accept;
 }
 
@@ -1412,57 +1414,77 @@ void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
     }
 }
 
+// ============================================================================
+// TODO - upgrade to "true" ReSTIR GI (enables spatial reuse + cross-surface
+//        temporal reuse). Current scheme is temporal-only and correct, but the
+//        primary BRDF/view is frozen into the stored radiance, so reservoirs
+//        cannot be shared between pixels with different surfaces.
+//
+//   [ ] Store raw incoming radiance Lo instead of the shaded estimate
+//       (today HitRadiance = f0*cos0/p0 * Lo, so proba must stay 1).
+//   [ ] Set restirRay.proba = the primary BRDF sample pdf p0 (real source pdf).
+//       NOTE: only valid once Lo is stored raw - otherwise we divide by pdf twice.
+//   [ ] pHat = luminance(f*cos*Lo) RE-EVALUATED at the receiving surface,
+//       not luminance(stored color).
+//   [ ] Re-evaluate the BRDF at resolve time (RESTIRLight / the resolve block)
+//       instead of returning color * UCW directly.
+//   [ ] Add the reconnection Jacobian when reusing a sample whose origin differs
+//       from the current pixel's (temporal origin shift + spatial neighbours).
+//   [ ] Add a spatial resampling pass over screen-space neighbours (needs the
+//       Jacobian + a depth/normal validity test like the temporal one below).
+// ============================================================================
 bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, uint seed, float bias)
 {
-    float blend = 1.0-saturate((cd.viewDistDiff - 0.001) * 10 + bias);
-    uint frameFilteringCount = max(0, blend * rtParameters.maxFrameFilteringCount-1);
-    
-    //uint prevXJitter = clamp(cd.previousPixel.x + (RNG(seed) * 2.0f - 1.0f) + 0.5f, 0, viewContext.renderResolution.x);
-    //uint prevYJitter = clamp(cd.previousPixel.y + (RNG(seed) * 2.0f - 1.0f) + 0.5f, 0, viewContext.renderResolution.y);
-    uint prevXJitter = cd.previousPixel.x;
-    uint prevYJitter = cd.previousPixel.y;
-    
+    // ---- Temporal reprojection validity ------------------------------------
+    // Reject history that reprojected off-screen (disocclusion at frame edges,
+    // where previousUV gets saturate-clamped onto an unrelated border pixel) or
+    // onto a geometrically inconsistent surface. Use a *relative* depth test so
+    // the rejection threshold is scale independent instead of the old absolute
+    // (viewDistDiff - 0.001) * 10 form.
+    bool  onScreen     = all(cd.previousUV > 0.0f) && all(cd.previousUV < 1.0f);
+    float relDepthDiff = cd.viewDistDiff / max(cd.viewDist, 1e-4f);
+    float confidence   = onScreen ? saturate(1.0f - relDepthDiff * 8.0f) : 0.0f;
+    confidence         = saturate(confidence - bias); // glossy / secondary-bounce bias
+
+    // History length clamp (M-cap): fewer frames of reuse when confidence is low.
+    uint frameFilteringCount = (uint) max(0.0f, confidence * rtParameters.maxFrameFilteringCount - 1.0f);
+
+    uint2 prevPixel = uint2(cd.previousPixel);
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[previousReservoirIndex];
-    HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[prevXJitter + prevYJitter * viewContext.renderResolution.x]);
-    // if not first time fill with previous frame reservoir
-    if (viewContext.frameNumber == 0)
-    {
-        r.dir = 0;
-        r.dist = 0;
-        r.color = 0;
-        r.W = 0;
-        r.Wsum = 0;
-        r.Wcount = 0;
-    }
-    
-    HLSL::GIReservoir newR;
-    float W = dot(restirRay.HitRadiance.xyz, float3(0.4, 0.6, 0.3));
-    newR.color = restirRay.HitRadiance.xyz;
-    newR.W = W;
-    newR.dir = restirRay.Direction;
-    newR.Wcount = 1;
-    newR.dist = length(restirRay.HitPosition - restirRay.Origin);
-    newR.Wsum = W / max(restirRay.proba, 0.00001);
-    
-    bool accept = true;
-    if(frameFilteringCount == 0)
-        r = newR;
+    HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[prevPixel.x + prevPixel.y * viewContext.renderResolution.x]);
+
+    // Drop the history on the first frame or whenever it failed validation.
+    if (viewContext.frameNumber == 0 || frameFilteringCount == 0)
+        r = (HLSL::GIReservoir) 0;
     else
-    {
         ScaleGIReservoir(r, frameFilteringCount);
-        accept = UpdateGIReservoir(r, newR, RNG(seed) + rtParameters.reservoirRandBias);
-    }
-    
-    if(!accept)
-    {
-        restirRay.HitRadiance = r.color / max(0.00001, r.W / (r.Wsum / r.Wcount));
-        restirRay.Direction = r.dir;
-        restirRay.HitPosition = restirRay.Origin + r.dir * r.dist;
-    }
-    
+
+    // ---- New path-traced candidate -----------------------------------------
+    float pHat = Luminance(restirRay.HitRadiance.xyz); // target function (proper luma)
+    HLSL::GIReservoir newR;
+    newR.color  = restirRay.HitRadiance.xyz;
+    newR.W      = pHat;
+    newR.dir    = restirRay.Direction;
+    newR.dist   = length(restirRay.HitPosition - restirRay.Origin);
+    newR.Wcount = 1;
+    newR.Wsum   = pHat / max(restirRay.proba, 0.00001f); // RIS weight pHat / sourcePdf
+
+    // Keep the random strictly in [0,1) so the very first candidate is always
+    // selected into an empty reservoir (rand * Wsum < Wsum requires rand < 1).
+    float rand = clamp(RNG(seed) + rtParameters.reservoirRandBias, 0.0f, 0.999999f);
+    bool accept = UpdateGIReservoir(r, newR, rand);
+
+    // ---- Resolve the reservoir back into a radiance estimate ----------------
+    // Unbiased contribution weight: UCW = Wsum / (M * pHat_selected).
+    // Always resolve (not only on reject) so the accept path stays consistent.
+    float ucw = r.Wsum / max(r.Wcount * r.W, 0.00001f);
+    restirRay.HitRadiance = r.color * ucw;
+    restirRay.Direction   = r.dir;
+    restirRay.HitPosition = restirRay.Origin + r.dir * r.dist;
+
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];
     giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x] = PackGIReservoir(r);
-    
+
     return accept;
 }
 

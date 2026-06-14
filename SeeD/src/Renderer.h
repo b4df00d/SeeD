@@ -351,7 +351,7 @@ struct RayTracingContext
         SHARCAccumulation.CreateBuffer(SHARCEntryCount * 16, 16, false, "SHARCAccumulation");
         SHARCResolved.CreateBuffer(SHARCEntryCount * 16, 16, false, "SHARCResolved");
 
-        rtParameters.maxFrameFilteringCount = 2;
+        rtParameters.maxFrameFilteringCount = 1;
         rtParameters.reservoirRandBias = 0.0;
         rtParameters.reservoirSpacialRandBias = 0.2;
         rtParameters.spacialRadius = 0.0f;
