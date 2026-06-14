@@ -361,8 +361,8 @@ namespace HLSL
         float range;
         float angle;
         float size;
-        LightType type;
         uint castShadow;
+        LightType type;
         uint pad1;
         uint pad2;
         uint pad3;
@@ -438,7 +438,6 @@ namespace HLSL
         uint giReservoirIndex;
         uint previousgiReservoirIndex;
         uint lightedIndex;
-        uint directlightIndex;
         uint specularHitDistanceIndex;
         uint maxFrameFilteringCount;
         float reservoirRandBias;

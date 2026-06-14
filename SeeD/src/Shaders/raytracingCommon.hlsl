@@ -163,13 +163,20 @@ inline float3 BounceHeatmap(uint bounce)
     }
 }
 
-// Decodes light vector and distance from Light structure based on the light type
-void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enableSoftShadows, out float3 incidentVector, out float lightDistance, out float irradiance)
+// Decodes light vector and distance from Light structure based on the light type.
+// 'irradiance' is the *base* (distance-independent) radiometric weight and is what the RIS
+// resampling target PDF should use. 'lightFalloff' carries the 1/d^2 (and range) distance
+// attenuation and must be multiplied into the final shading AFTER a light has been selected.
+// Keeping the falloff out of 'irradiance' is deliberate: if it were baked in here it would end
+// up in both the RIS target PDF and the final term and cancel exactly (f / pHat == 1), so the
+// per-light distance attenuation would be invisible in the image.
+void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enableSoftShadows, out float3 incidentVector, out float lightDistance, out float irradiance, out float lightFalloff)
 {
     incidentVector = 0;
     float halfAngularSize = 0;
     irradiance = 0;
     lightDistance = 0;
+    lightFalloff = 1.0f;
 
     if (light.type == HLSL::LightType::Directional)
     {
@@ -229,9 +236,11 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
 
             irradiance = radianceTimesPi * solidAngleOverPi;
         }
-        
-        irradiance *= spotlight * attenuation;
-        //irradiance *= saturate(1.0f / square(lightDistance));
+
+        // Spotlight cone is part of the base weight (it is angular, not distance based), but the
+        // distance attenuation is returned separately so callers apply it once after RIS selection.
+        irradiance *= spotlight;
+        lightFalloff = attenuation;
     }
     else
         return;
@@ -290,8 +299,11 @@ bool SampleLightRIS(inout uint rngState, float3 hitPosition, float3 surfaceNorma
             float3 lightVector;
             float lightDistance;
             float irradiance;
+            float lightFalloff;
             float2 rand2 = float2(RNG(rngState), RNG(rngState));
-            GetLightData(candidate, hitPosition, rand2, rtParameters.enableSoftShadows, lightVector, lightDistance, irradiance);
+            // Target PDF uses the base irradiance only (no distance falloff) so the falloff survives
+            // as f / pHat in the final estimator instead of cancelling out.
+            GetLightData(candidate, hitPosition, rand2, rtParameters.enableSoftShadows, lightVector, lightDistance, irradiance, lightFalloff);
 
 #if SHADOW_RAY_IN_RIS
             // Casting a shadow ray for all candidates here is expensive, but can significantly decrease noise

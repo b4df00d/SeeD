@@ -379,8 +379,11 @@ void PathTraceRays()
                     float3 incidentVector;
                     float lightDistance;
                     float irradiance;
+                    float lightFalloff;
                     float2 rand2 = float2(RNG(rngState), RNG(rngState));
-                    GetLightData(light, hitPos, rand2, rtParameters.enableSoftShadows, incidentVector, lightDistance, irradiance);
+                    GetLightData(light, hitPos, rand2, rtParameters.enableSoftShadows, incidentVector, lightDistance, irradiance, lightFalloff);
+                    // Apply distance attenuation once, after RIS selection (see GetLightData comment).
+                    irradiance *= lightFalloff;
                     float3 vectorToLight = -incidentVector;
 
                     // Cast shadow ray towards the selected light
@@ -512,8 +515,6 @@ void PathTraceRays()
         }
         
         sampleRadiance += directLight;
-        RWTexture2D<float4> directlight = ResourceDescriptorHeap[rtParameters.directlightIndex];
-        directlight[pixel] = float4(directLight, 1);
         
         if (!isUpdatePass)
         {

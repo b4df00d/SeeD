@@ -1450,7 +1450,7 @@ bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint pre
     else
     {
         ScaleGIReservoir(r, frameFilteringCount);
-        accept = UpdateGIReservoir(r, newR, RNG(seed) - rtParameters.reservoirRandBias);
+        accept = UpdateGIReservoir(r, newR, RNG(seed) + rtParameters.reservoirRandBias);
     }
     
     if(!accept)

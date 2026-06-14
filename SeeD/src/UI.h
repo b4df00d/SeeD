@@ -1156,7 +1156,7 @@ public:
 
         ImGui::Text("RT");
         ImGui::SliderInt("frameFilter", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.maxFrameFilteringCount, 1, 512, "%d", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("randBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirRandBias, 0, 1);
+        ImGui::SliderFloat("randBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirRandBias, -1, 1);
         ImGui::SliderFloat("spacialRandBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirSpacialRandBias, 0, 1);
         ImGui::SliderFloat("spacialRadius", &Renderer::instance->mainView.raytracingContext.rtParameters.spacialRadius, 0, 32);
         ImGui::SliderFloat("SHARCSceneScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCSceneScale, 1, 64, "%f", ImGuiSliderFlags_Logarithmic);

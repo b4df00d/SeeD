@@ -68,8 +68,11 @@ void RayGen()
         float3 incidentVector;
         float lightDistance;
         float irradiance;
+        float lightFalloff;
         float2 rand2 = float2(RNG(rngState), RNG(rngState));
-        GetLightData(light, froxelWorldPos, rand2, rtParameters.enableSoftShadows, incidentVector, lightDistance, irradiance);
+        GetLightData(light, froxelWorldPos, rand2, rtParameters.enableSoftShadows, incidentVector, lightDistance, irradiance, lightFalloff);
+        // Apply distance attenuation once, after RIS selection (see GetLightData comment).
+        irradiance *= lightFalloff;
         float3 vectorToLight = -incidentVector;
 
         // Cast shadow ray towards the selected light
@@ -78,7 +81,7 @@ void RayGen()
         {
             // If light is not in shadow, evaluate BRDF and accumulate its contribution into radiance
             // This is an entry point for evaluation of all other BRDFs based on selected configuration (for direct light)
-            float3 lightContribution = light.color.xyz * irradiance * lightWeight * lightVisibility * asParameters.luminosity;
+            float3 lightContribution = light.color.xyz * irradiance * lightWeight * lightVisibility* asParameters.luminosity;
             sampleRadiance += lightContribution;
         }
     }
