@@ -505,20 +505,17 @@ void PathTraceRays()
         }
         
         indirectRay.HitRadiance = sampleRadiance;
-        if (rtParameters.maxFrameFilteringCount > 1)
-        {
-            // RESTIR now resolves the reservoir into an unbiased radiance estimate in
-            // both the accept and reject cases, so always read it back.
-            RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, rngState, 1-primaryRoughtness);
-            sampleRadiance = indirectRay.HitRadiance;
-        }
-        
-        sampleRadiance += directLight;
-        
         if (!isUpdatePass)
         {
-            UpdateSampleData(accumulatedSampleData, sampleRadiance, isDiffusePath, hitDistance);
-            
+            // Always run temporal ReSTIR so the reservoir is populated for the spatial
+            // reuse pass (lighting.hlsl), even when temporal filtering is disabled
+            // (maxFrameFilteringCount == 1 -> the reservoir just holds this frame's sample).
+            RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, rngState, 1-primaryRoughtness);
+
+            // Pass 1 composites DIRECT light only. The indirect radiance is resolved from
+            // the reservoir AFTER spatial reuse in lighting.hlsl, which does lighted += indirect.
+            UpdateSampleData(accumulatedSampleData, directLight, isDiffusePath, hitDistance);
+
             if (editorContext.GIBounces)// Bounce Heatmap
                 debugColor = BounceHeatmap(bounce);
         }

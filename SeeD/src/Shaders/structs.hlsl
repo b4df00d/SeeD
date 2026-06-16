@@ -443,7 +443,8 @@ namespace HLSL
         float reservoirRandBias;
         float reservoirSpacialRandBias;
         float spacialRadius;
-        
+        uint spacialSampleCount;
+
         float SHARCSceneScale;
         uint SHARCEntriesNum;
         uint SHARCHashEntriesBufferIndex;
@@ -475,14 +476,16 @@ namespace HLSL
         float W;
         float Wsum;
         float Wcount;
+        float3 hitNormal; // sample-point geometric normal (needed for the spatial reuse Jacobian)
     };
-    
+
     struct GIReservoirCompressed
     {
         uint dir;
         uint color;
         uint Wcount_W;
         uint dist_Wsum;
+        uint hitNormal; // octahedral-packed
     };
     // ----------------- End RT stuff ------------------
     

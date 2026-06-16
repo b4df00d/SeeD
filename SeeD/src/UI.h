@@ -1159,6 +1159,7 @@ public:
         ImGui::SliderFloat("randBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirRandBias, -1, 1);
         ImGui::SliderFloat("spacialRandBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirSpacialRandBias, 0, 1);
         ImGui::SliderFloat("spacialRadius", &Renderer::instance->mainView.raytracingContext.rtParameters.spacialRadius, 0, 32);
+        ImGui::SliderInt("spacialSamples", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.spacialSampleCount, 0, 64);
         ImGui::SliderFloat("SHARCSceneScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCSceneScale, 1, 64, "%f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("SHARCRadianceScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCRadianceScale, 0.1, 10);
         ImGui::SliderFloat("SHARCRoughnessThreshold", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCRoughnessThreshold, 0, 1);

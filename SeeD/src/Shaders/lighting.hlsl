@@ -20,8 +20,7 @@ cbuffer CustomRT : register(b3)
 
 #include "raytracingCommon.hlsl"
 
-static uint poissonDiskCount = 4;
-static float2 poissonDisk[64] = 
+static float2 poissonDisk[64] =
 {
     float2(-0.613392, 0.617481),
     float2(0.170019, -0.040254),
@@ -109,6 +108,7 @@ void RayGen()
     //lighted[dtid.xy] = float4(0,0,0,1);
     specularHitDistance[dtid.xy] = 0;
     
+                
     
     GBufferCameraData cd = GetGBufferCameraData(dtid);
     if(cd.reverseZ <= 0.0)
@@ -120,91 +120,98 @@ void RayGen()
     SurfaceData s = GetSurfaceData(dtid.xy);
     
     uint seed = initRand(dtid.xy);
+    uint poissonDiskCount = clamp(rtParameters.spacialSampleCount, 1u, 64u); // tweakable neighbour count
     uint poissonIndexRng = nextRand(seed) * (64 - poissonDiskCount);
     
     RaytracingAccelerationStructure AccelerationStructure = ResourceDescriptorHeap[rtParameters.BVH];
     
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
-    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);
-    
-    float2 radius = rtParameters.spacialRadius;
-    float3 success = float3(0, 0, 1);
-    if(radius.x > 0)
+    uint resW = viewContext.renderResolution.x;
+    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * resW]);
+
+    // ---- Spatial ReSTIR reuse ------------------------------------------------
+    // Combine this pixel's (temporal) reservoir with a few screen-space neighbours
+    // using canonical weighted reservoir sampling + the GI reconnection Jacobian.
+    // Neighbour reservoirs were finalised by Pass 1 (raytracing2.hlsl) and are
+    // safe to read thanks to the giReservoir UAV barrier before this dispatch.
+    float radius = rtParameters.spacialRadius;
+    if(radius > 0)
     {
-        uint spacialReuse = 0;
-        HLSL::GIReservoir candidateReservoir = r;
-        float3 candidateRayOrigin = cd.offsetedWorldPos;
+        HLSL::GIReservoir combined = r;     // central sample's combine weight == its own Wsum
         for (uint i = 0; i < poissonDiskCount; i++)
         {
-            int2 pixel = dtid.xy + poissonDisk[i+poissonIndexRng] * radius * (i / float(poissonDiskCount));
-            if (pixel.x < 0 || pixel.y < 0) continue;
-            if (pixel.x >= viewContext.renderResolution.x || pixel.y >= viewContext.renderResolution.y) continue;
+            int2 np = dtid.xy + poissonDisk[i + poissonIndexRng] * radius * (i / float(poissonDiskCount));
+            if (np.x < 0 || np.y < 0) continue;
+            if (np.x >= (int)resW || np.y >= (int)viewContext.renderResolution.y) continue;
+            if (np.x == dtid.x && np.y == dtid.y) continue;  // skip self (i==0 lands on the centre pixel)
+
+            GBufferCameraData ncd = GetGBufferCameraData(np.xy);
+            // Receiver-similarity gates keep the (BRDF-not-re-evaluated) reuse valid.
+            if (abs(cd.viewDist - ncd.viewDist) > 0.2) continue;
+            if (dot(cd.worldNorm, ncd.worldNorm) < 0.9) continue;
+
+            HLSL::GIReservoir rn = UnpackGIReservoir(giReservoir[np.x + np.y * resW]);
+            if (rn.Wcount <= 0 || rn.W <= 0) continue;
+
+            // Reconnect the neighbour's sample point (built from ITS origin) to our receiver.
+            float3 samplePos = ncd.offsetedWorldPos + rn.dir * rn.dist;
+            float3 toSample  = samplePos - cd.offsetedWorldPos;
+            float  newDist   = length(toSample);
+            float3 newDir    = toSample / max(newDist, 1e-6f);
+
+            // ReSTIR GI reconnection Jacobian: (cosR / dR^2) / (cosQ / dQ^2)
+            float dQ   = max(rn.dist, 1e-6f);
+            float dR   = max(newDist, 1e-6f);
+            float cosQ = abs(dot(normalize(ncd.offsetedWorldPos - samplePos), rn.hitNormal));
+            float cosR = abs(dot(normalize(cd.offsetedWorldPos  - samplePos), rn.hitNormal));
+            float J    = (cosR * dQ * dQ) / max(cosQ * dR * dR, 1e-6f);
+            if (cosQ <= 1e-3f || J <= 0.0f || J > 10.0f) continue;   // reject grazing / firefly shifts
+
+            float pHat = Luminance(rn.color);                        // target fn at this pixel (diffuse approx)
+            float ucw  = rn.Wsum / max(rn.Wcount * rn.W, 1e-5f);     // neighbour unbiased contribution weight
+            float w    = pHat * ucw * rn.Wcount * J;                 // canonical spatial reuse weight
+
+            combined.Wsum   += w;
+            combined.Wcount += rn.Wcount;
+            if (w > 0.0f && nextRand(seed) * combined.Wsum < w)
             {
-                GBufferCameraData cdNeightbor = GetGBufferCameraData(pixel.xy);
-            
-                if(abs(cd.viewDist - cdNeightbor.viewDist) > (0.2)) continue;
-                if(dot(cd.worldNorm, cdNeightbor.worldNorm) < 0.9) continue;
-                
-                HLSL::GIReservoir rNeightbor = UnpackGIReservoir(giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x]);
-                
-                if(rNeightbor.W > candidateReservoir.W)
-                {
-                    candidateReservoir.color = rNeightbor.color;
-                    candidateReservoir.W = rNeightbor.W;
-                    candidateReservoir.dist = rNeightbor.dist;
-                    candidateReservoir.dir = rNeightbor.dir;
-                    
-                    candidateRayOrigin = cd.offsetedWorldPos;
-                }
-                candidateReservoir.Wsum += rNeightbor.Wsum;
-                candidateReservoir.Wcount += rNeightbor.Wcount;
-                
-                spacialReuse++;
+                combined.color     = rn.color;
+                combined.W         = pHat;
+                combined.dir       = newDir;     // reconnected from THIS receiver
+                combined.dist      = newDist;
+                combined.hitNormal = rn.hitNormal;
             }
         }
-        
-        if(spacialReuse > 0)
+
+        // Visibility test of the finally-selected reconnection; on occlusion keep the
+        // central reservoir (rejects indirect light leaking through geometry).
+        if (combined.Wcount > r.Wcount)
         {
-            float3 candidateRayHitPos = candidateRayOrigin + candidateReservoir.dir * candidateReservoir.dist;
-            float3 newRayDir = candidateRayHitPos - cd.offsetedWorldPos;
-            float newRayDist = length(newRayDir);
-            newRayDir = newRayDir / newRayDist;
-        
             RayDesc ray;
-            ray.Origin = cd.offsetedWorldPos;
-            ray.Direction = newRayDir;
-            ray.TMin = 0.0f;
-            ray.TMax = newRayDist;
+            ray.Origin    = cd.offsetedWorldPos;
+            ray.Direction = combined.dir;
+            ray.TMin      = 0.0f;
+            ray.TMax      = combined.dist;
 
             ShadowRayPayload payload;
             payload.visibility = float3(1.0f, 1.0f, 1.0f);
+            TraceRay(AccelerationStructure, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
 
-            uint rayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH;
-            //rayFlags &= (~RAY_FLAG_FORCE_OPAQUE);
-            TraceRay(AccelerationStructure, rayFlags, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
-
-            if(any(payload.visibility > 0))
-            {
-                // we dont have visibility between current pixel and neightbor hitpoint, so we discard the sample
-                r = candidateReservoir;
-                r.dir = ray.Direction;
-                r.dist = ray.TMax;
-                success = float3(0, 1, 0);
-                
-                // If light is not in shadow, evaluate BRDF and accumulate its contribution into radiance
-                // This is an entry point for evaluation of all other BRDFs based on selected configuration (for direct light)
-                //s.albedo = 1;
-                //r.color = evalCombinedBRDF(cd.worldNorm, r.dir, -cd.viewDir, s) * r.color;
-            }
-            else
-            {
-                success = float3(1, 0, 0);
-            }
+            if (any(payload.visibility > 0))   // unoccluded -> accept the spatially-combined reservoir
+                r = combined;
         }
     }
-    
-    //r.color = r.color / max(0.00001, r.W / (r.Wsum / r.Wcount));
-    
+
+    // ---- Resolve indirect from the reservoir and composite onto direct light --
+    // UCW = Wsum / (M * pHat_selected); indirect radiance estimate = color * UCW.
+    // The reservoir stores UNSCALED path radiance, so apply SHARCRadianceScale here
+    // to match the direct light that Pass 1 scaled in ResolveSampleData.
+    float ucw = r.Wsum / max(r.Wcount * r.W, 1e-5f);
+    float3 indirect = r.color * ucw * rtParameters.SHARCRadianceScale;
+    if (!editorContext.GIBounces && !editorContext.GIAlbedo && !editorContext.GINormals)
+        lighted[dtid.xy] += float4(indirect, 0.0f);
+
+
 
     
     RWTexture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalIndex];

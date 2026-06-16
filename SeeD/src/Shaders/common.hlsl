@@ -1361,6 +1361,7 @@ HLSL::GIReservoirCompressed PackGIReservoir(HLSL::GIReservoir r)
     result.dist_Wsum = (asuint(f32tof16(distLog)) << 16) | asuint(f32tof16(WsumLog));
     
     result.dir = octahedral_32P(r.dir, octahedralPrecision);
+    result.hitNormal = octahedral_32P(r.hitNormal, octahedralPrecision);
     return result;
 }
 
@@ -1378,6 +1379,7 @@ HLSL::GIReservoir UnpackGIReservoir(HLSL::GIReservoirCompressed r)
     result.Wsum = exp2(WsumLog);
     
     result.dir = i_octahedral_32(r.dir, octahedralPrecision);
+    result.hitNormal = i_octahedral_32(r.hitNormal, octahedralPrecision);
     return result;
 }
 
@@ -1395,10 +1397,11 @@ bool UpdateGIReservoir(inout HLSL::GIReservoir previous, HLSL::GIReservoir curre
     bool accept = previous.Wsum > 0.0f && (rand * previous.Wsum < current.Wsum);
     if(accept)
     {
-        previous.color = current.color;
-        previous.W     = current.W; // target function pHat of the now-selected sample
-        previous.dist  = current.dist;
-        previous.dir   = current.dir;
+        previous.color     = current.color;
+        previous.W         = current.W; // target function pHat of the now-selected sample
+        previous.dist      = current.dist;
+        previous.dir       = current.dir;
+        previous.hitNormal = current.hitNormal;
     }
     return accept;
 }
@@ -1415,23 +1418,26 @@ void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
 }
 
 // ============================================================================
-// TODO - upgrade to "true" ReSTIR GI (enables spatial reuse + cross-surface
-//        temporal reuse). Current scheme is temporal-only and correct, but the
-//        primary BRDF/view is frozen into the stored radiance, so reservoirs
-//        cannot be shared between pixels with different surfaces.
+// ReSTIR GI status / TODO.
+//   Pass 1 (raytracing2.hlsl) = temporal reuse here + writes the reservoir.
+//   Pass 2 (lighting.hlsl)    = spatial reuse, resolve, composite lighted += indirect.
 //
+//   [x] Reconnection Jacobian for reusing a sample whose origin differs from the
+//       current pixel's (see lighting.hlsl spatial loop).
+//   [x] Spatial resampling pass over screen-space neighbours (canonical WRS +
+//       depth/normal validity + a visibility ray on the selected reconnection).
+//   [x] Store the sample-point normal in the reservoir (needed by the Jacobian).
+//
+//   Still approximate / open:
 //   [ ] Store raw incoming radiance Lo instead of the shaded estimate
 //       (today HitRadiance = f0*cos0/p0 * Lo, so proba must stay 1).
 //   [ ] Set restirRay.proba = the primary BRDF sample pdf p0 (real source pdf).
 //       NOTE: only valid once Lo is stored raw - otherwise we divide by pdf twice.
-//   [ ] pHat = luminance(f*cos*Lo) RE-EVALUATED at the receiving surface,
-//       not luminance(stored color).
-//   [ ] Re-evaluate the BRDF at resolve time (RESTIRLight / the resolve block)
-//       instead of returning color * UCW directly.
-//   [ ] Add the reconnection Jacobian when reusing a sample whose origin differs
-//       from the current pixel's (temporal origin shift + spatial neighbours).
-//   [ ] Add a spatial resampling pass over screen-space neighbours (needs the
-//       Jacobian + a depth/normal validity test like the temporal one below).
+//   [ ] pHat = luminance(f*cos*Lo) RE-EVALUATED at the receiver, and re-evaluate
+//       the BRDF at resolve - removes the "similar-surface only" restriction that
+//       the spatial depth/normal gates currently enforce.
+//   [ ] Unbiased spatial combine (pairwise-MIS / 1/Z) - the current combine is the
+//       biased estimator, kept small by the validity gates + visibility ray.
 // ============================================================================
 bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, uint seed, float bias)
 {
@@ -1468,6 +1474,7 @@ bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint pre
     newR.dist   = length(restirRay.HitPosition - restirRay.Origin);
     newR.Wcount = 1;
     newR.Wsum   = pHat / max(restirRay.proba, 0.00001f); // RIS weight pHat / sourcePdf
+    newR.hitNormal = restirRay.HitNormal;
 
     // Keep the random strictly in [0,1) so the very first candidate is always
     // selected into an empty reservoir (rand * Wsum < Wsum requires rand < 1).

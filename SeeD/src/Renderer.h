@@ -355,6 +355,7 @@ struct RayTracingContext
         rtParameters.reservoirRandBias = 0.0;
         rtParameters.reservoirSpacialRandBias = 0.2;
         rtParameters.spacialRadius = 0.0f;
+        rtParameters.spacialSampleCount = 8;
 
         rtParameters.SHARCSceneScale = 20;
         rtParameters.SHARCEntriesNum = SHARCEntryCount;
