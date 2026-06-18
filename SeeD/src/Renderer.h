@@ -495,6 +495,7 @@ public:
         viewContextParams.motionIndex = GetRegisteredResource("motion").srv.offset;
         viewContextParams.objectIDIndex = GetRegisteredResource("objectID").uav.offset;
         viewContextParams.instanceIDIndex = GetRegisteredResource("instanceID").uav.offset;
+        viewContextParams.overdrawIndex = GetRegisteredResource("overdraw").uav.offset;
         viewContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
         viewContextParams.reverseZ = true;
         viewContextParams.HZB = GetRegisteredResource("depthDownSample").srv.offset;
@@ -538,6 +539,7 @@ public:
         editorContextParams.GIBounces = options.debugDraw == Options::DebugDraw::GIBounces;
         editorContextParams.GIAlbedo = options.debugDraw == Options::DebugDraw::GIAlbedo;
         editorContextParams.GINormals = options.debugDraw == Options::DebugDraw::GINormals;
+        editorContextParams.overdraw = options.debugDraw == Options::DebugDraw::overdraw;
         editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
         editorContextParams.debugVerticesHeapIndex = editorContext.indirectDebugVertices.GetResource().uav.offset;
         editorContextParams.debugVerticesCountHeapIndex = editorContext.indirectDebugVerticesCount.GetResource().uav.offset;
@@ -1117,6 +1119,7 @@ class GBuffers : public Pass
     ViewResource motion;
     ViewResource objectID;
     ViewResource instanceID;
+    ViewResource overdraw;
     Components::Handle<Components::Shader> meshShader;
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
@@ -1140,6 +1143,8 @@ public:
         objectID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "objectID");
         instanceID.Register("instanceID", view);
         instanceID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "instanceID");
+        overdraw.Register("overdraw", view);
+        overdraw.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "overdraw"); // per-pixel atomic counter for the overdraw heatmap
         meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl|DefaultG");
 
         Open();
@@ -1151,6 +1156,7 @@ public:
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         commandBuffer.Get().cmd->DiscardResource(albedo.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(specularAlbedo.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(normal.Get().GetResource(), nullptr);
@@ -1159,6 +1165,7 @@ public:
         commandBuffer.Get().cmd->DiscardResource(motion.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(objectID.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(instanceID.Get().GetResource(), nullptr);
+        commandBuffer.Get().cmd->DiscardResource(overdraw.Get().GetResource(), nullptr);
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
@@ -1167,6 +1174,7 @@ public:
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         Close();
         ExecuteNow();
     }
@@ -1187,6 +1195,17 @@ public:
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+        // Overdraw heatmap: clear the counter then make it a UAV the pixel shader atomically increments.
+        // Only paid for when the overdraw debug view is active.
+        bool overdrawEnabled = options.debugDraw == Options::DebugDraw::overdraw;
+        if (overdrawEnabled)
+        {
+            float clearOverdraw[4] = { 0, 0, 0, 0 };
+            overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            commandBuffer->cmd->ClearRenderTargetView(overdraw.Get().rtv.handle, clearOverdraw, 0, nullptr);
+            overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
 
         Resource rts[] = { albedo.Get(), specularAlbedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get(), objectID.Get(), instanceID.Get()};
         SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true, false);
@@ -1213,6 +1232,9 @@ public:
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+
+        if (overdrawEnabled)
+            overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
 
 
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);

@@ -174,7 +174,14 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     }
     
     if((o.albedo.a+0.01) < material.parameters[4]) discard;
-    
+
+    if (editorContext.overdraw) // count shaded fragments per pixel for the overdraw heatmap
+    {
+        RWTexture2D<uint> overdraw = ResourceDescriptorHeap[viewContext.overdrawIndex];
+        uint previous;
+        InterlockedAdd(overdraw[uint2(inVerts.pos.xy)], 1, previous);
+    }
+
     o.specularAlbedo = lerp(1, s.albedo, s.metalness);
     o.roughness = s.roughness;
     o.metalness = s.metalness;

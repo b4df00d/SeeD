@@ -163,6 +163,7 @@ namespace HLSL
         uint motionIndex;
         uint objectIDIndex;
         uint instanceIDIndex;
+        uint overdrawIndex;
         uint depthIndex;
         uint reverseZ;
         uint HZB;
@@ -502,6 +503,7 @@ namespace HLSL
         uint GIBounces : 1;
         uint GIAlbedo : 1;
         uint GINormals : 1;
+        uint overdraw : 1;
         uint debugBufferHeapIndex;
         uint debugVerticesHeapIndex;
         uint debugVerticesCountHeapIndex;

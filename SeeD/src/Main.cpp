@@ -94,6 +94,7 @@ struct Options
         GIBounces,
         GIAlbedo,
         GINormals,
+        overdraw,
     };
     DebugDraw debugDraw = DebugDraw::none;
 } options;
@@ -342,10 +343,10 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\ScienceLab\\ScieneLab.gltf");
 
     engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets3\\";
-    engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets3\\SpaceJunkyard_NantStudios2.gltf");
+    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets3\\SpaceJunkyard_NantStudios2.gltf");
     //World::instance->Load("Cave.seed");
 
-    //World::instance->Load("Save.seed");
+    World::instance->Load("Save.seed");
 
     engine.Loop();
     engine.Off();

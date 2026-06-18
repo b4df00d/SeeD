@@ -12,6 +12,19 @@ cbuffer CustomRT : register(b3)
 
 #pragma compute Lighting Lighting
 
+// number of overdraws that maps to the hot end (red) of the heatmap
+#define OVERDRAW_MAX 16.0
+
+// blue -> green -> red ramp for t in [0,1]
+float3 OverdrawColor(float t)
+{
+    t = saturate(t);
+    float3 cold = float3(0, 0, 1);
+    float3 mid = float3(0, 1, 0);
+    float3 hot = float3(1, 0, 0);
+    return t < 0.5 ? lerp(cold, mid, t * 2) : lerp(mid, hot, t * 2 - 1);
+}
+
 [RootSignature(SeeDRootSignature)]
 [numthreads(16, 16, 1)]
 void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
@@ -32,6 +45,13 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     else if (editorContext.normals)
     {
         lighted[dtid.xy].xyz = normalize(s.normal.xyz) * 0.5 + 0.5;
+    }
+    else if (editorContext.overdraw)
+    {
+        RWTexture2D<uint> overdraw = ResourceDescriptorHeap[viewContext.overdrawIndex];
+        uint count = overdraw[dtid.xy];
+        float3 color = count == 0 ? float3(0, 0, 0) : OverdrawColor(count / OVERDRAW_MAX);
+        lighted[dtid.xy] = float4(color, 1);
     }
     else if (editorContext.lighting)
     {
