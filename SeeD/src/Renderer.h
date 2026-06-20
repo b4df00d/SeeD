@@ -2702,8 +2702,15 @@ public:
 
                     this->viewWorld.cameras.Get().Add(hlslcam);
 
-                    editorState.cameraView = mat.matrix;
-                    editorState.cameraProj = hlslcam.proj;
+                    // The editor gizmo must use the camera we actually render with,
+                    // which is cameras.Get()[0] (the first/main camera). Loaded scenes
+                    // can now contain extra static camera entities, so guard against
+                    // overwriting this with the last camera in the query.
+                    if (i == 0)
+                    {
+                        editorState.cameraView = mat.matrix;
+                        editorState.cameraProj = hlslcam.proj;
+                    }
                 }
                 this->viewWorld.cameras.Get().Add(hlslcamPrevious);
 
