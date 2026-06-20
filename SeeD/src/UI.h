@@ -684,28 +684,71 @@ public:
         ImGui::BeginGroup();
         const ImGuiWindowFlags child_flags = ImGuiWindowFlags_MenuBar;
         ImGuiID child_id = ImGui::GetID((void*)(intptr_t)0);
-        const bool child_is_visible = ImGui::BeginChild(child_id, ImVec2(200, ImGui::GetContentRegionAvail().y), ImGuiChildFlags_Borders, child_flags);
+        const bool child_is_visible = ImGui::BeginChild(child_id, ImVec2(300, ImGui::GetContentRegionAvail().y), ImGuiChildFlags_Borders, child_flags);
         {
             const std::lock_guard<std::mutex> lock(Resource::lock);
+
+            auto resBytes = [](const Resource& r) -> UINT64
+            {
+                return r.allocation ? r.allocation->GetSize() : 0;
+            };
+
+            // Tally VRAM per category for the headers and the grand total.
+            UINT64 catTotal[(int)ResourceCategory::Count] = {};
+            UINT64 grandTotal = 0;
             for (int i = 0; i < Resource::allResources.size(); i++)
             {
+                UINT64 b = resBytes(Resource::allResources[i]);
+                catTotal[(int)Resource::allResources[i].category] += b;
+                grandTotal += b;
+            }
 
-                ImGui::PushID(i);
-                selected = selectedResource.allocation != nullptr && selectedResource.allocation == Resource::allResources[i].allocation;
-                if (selected)
+            const double toMB = 1.0 / (1024.0 * 1024.0);
+            ImGui::Text("Tracked VRAM: %.1f MB", grandTotal * toMB);
+            ImGui::Separator();
+
+            for (int c = 0; c < (int)ResourceCategory::Count; c++)
+            {
+                if (catTotal[c] == 0)
                 {
-                    ImGui::TextColored(ImVec4(1, 1, 0, 1), Resource::allResourcesNames[i].c_str());
+                    // still skip if there genuinely are no resources in this category
+                    bool any = false;
+                    for (int i = 0; i < Resource::allResources.size(); i++)
+                        if ((int)Resource::allResources[i].category == c) { any = true; break; }
+                    if (!any)
+                        continue;
                 }
-                else
+
+                char header[160];
+                snprintf(header, sizeof(header), "%s  -  %.1f MB###cat%d",
+                    ResourceCategoryName((ResourceCategory)c), catTotal[c] * toMB, c);
+
+                if (ImGui::TreeNode(header))
                 {
-                    ImGui::Selectable(Resource::allResourcesNames[i].c_str(), &selected);
-                    if (selected)
-                        selectedResource = Resource::allResources[i];
+                    for (int i = 0; i < Resource::allResources.size(); i++)
+                    {
+                        if ((int)Resource::allResources[i].category != c)
+                            continue;
+
+                        ImGui::PushID(i);
+                        const char* dispName = Resource::allResourcesNames[i].empty() ? "(unnamed)" : Resource::allResourcesNames[i].c_str();
+                        selected = selectedResource.allocation != nullptr && selectedResource.allocation == Resource::allResources[i].allocation;
+                        if (selected)
+                        {
+                            ImGui::TextColored(ImVec4(1, 1, 0, 1), "%s", dispName);
+                        }
+                        else
+                        {
+                            ImGui::Selectable(dispName, &selected);
+                            if (selected)
+                                selectedResource = Resource::allResources[i];
+                        }
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%.2f MB", resBytes(Resource::allResources[i]) * toMB);
+                        ImGui::PopID();
+                    }
+                    ImGui::TreePop();
                 }
-                ImGui::SameLine();
-                if (Resource::allResources[i].GetResource())
-                    ImGui::Text("%u", Resource::allResources[i].GetResource()->GetDesc().Width);
-                ImGui::PopID();
             }
         }
         ImGui::EndChild();
@@ -720,12 +763,36 @@ public:
         {
             ImGuiIO& io = ImGui::GetIO();
             auto desc = selectedResource.GetResource()->GetDesc();
-            float textureW = (float)desc.Width;
-            float textureH = (float)desc.Height;
-            float ratio = textureW / textureH;
-            ImVec2 img_sz = ImGui::GetContentRegionAvail();
-            img_sz.y = img_sz.x / ratio;
+
+            if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
             {
+                // Buffers have no image preview; show allocation info instead of
+                // trying to build a (mip-based) texture view, which used to crash.
+                UINT64 sizeBytes = selectedResource.allocation ? selectedResource.allocation->GetSize() : (UINT64)desc.Width;
+                ImGui::Text("Buffer");
+                ImGui::Text("Category: %s", ResourceCategoryName(selectedResource.category));
+                ImGui::Text("Size: %.3f MB  (%llu bytes)", sizeBytes / (1024.0 * 1024.0), (unsigned long long)sizeBytes);
+                uint stride = selectedResource.stride;
+                if (stride > 0)
+                {
+                    ImGui::Text("Stride: %u bytes", stride);
+                    ImGui::Text("Elements: %llu", (unsigned long long)(desc.Width / stride));
+                }
+            }
+            else
+            {
+                float textureW = (float)desc.Width;
+                float textureH = (float)desc.Height;
+                float ratio = textureH > 0 ? textureW / textureH : 1.0f;
+                ImVec2 img_sz = ImGui::GetContentRegionAvail();
+                img_sz.y = img_sz.x / ratio;
+
+                // mip/slice persist across selections, clamp to the current resource.
+                if (mip < 0) mip = 0;
+                if (mip > (int)desc.MipLevels - 1) mip = (int)desc.MipLevels - 1;
+                if (slice < 0) slice = 0;
+                if (slice > (int)desc.DepthOrArraySize - 1) slice = (int)desc.DepthOrArraySize - 1;
+
                 ImGui::Text("%.0fx%.0f", textureW, textureH);
                 if (desc.MipLevels > 1)
                 {
@@ -738,9 +805,12 @@ public:
                     ImGui::SliderInt("slice", &slice, 0, desc.DepthOrArraySize - 1);
                 }
 
-                seedAssert(mip < desc.MipLevels);
-
-                bool isBuffer = false;
+                // Simple display controls: isolate colour channels via the image tint.
+                static bool showR = true, showG = true, showB = true;
+                ImGui::TextUnformatted("Channels:");
+                ImGui::SameLine(); ImGui::Checkbox("R", &showR);
+                ImGui::SameLine(); ImGui::Checkbox("G", &showG);
+                ImGui::SameLine(); ImGui::Checkbox("B", &showB);
 
                 // Create texture view
                 D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc;
@@ -752,10 +822,6 @@ public:
                 if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D)
                 {
                     // Copy requested slice into a 2D preview texture and create a 2D SRV from it for ImGui
-                    // compute mip dims
-                    uint mipW = max(1u, (uint)(desc.Width >> mip));
-                    uint mipH = max(1u, (uint)(desc.Height >> mip));
-
                     // perform copy (synchronous)
                     Copy3DSliceToPreview(selectedResource.GetResource(), desc, mip, slice);
 
@@ -773,55 +839,44 @@ public:
                         GPU::instance->device->CreateShaderResourceView(viewRes, &srvDesc, UI::instance->imgCPUHandle);
                     }
                 }
-                else if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+                else // TEXTURE2D / TEXTURE1D
                 {
                     if (srvDesc.Format == DXGI_FORMAT_D32_FLOAT) srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
                     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
                     srvDesc.Texture2D.MostDetailedMip = mip;
-                    //srvDesc.Texture2D.MipLevels = desc.MipLevels - mip;
-                    srvDesc.Texture2D.MipLevels = -1;// desc.MipLevels;
+                    srvDesc.Texture2D.MipLevels = -1;
                     srvDesc.Texture2D.PlaneSlice = 0;
                     srvDesc.Texture2D.ResourceMinLODClamp = 0;
-                    GPU::instance->device->CreateShaderResourceView(selectedResource.GetResource(), &srvDesc, UI::instance->imgCPUHandle);
-                }
-                else if (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
-                {
-                    isBuffer = true;
-                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-                    srvDesc.Format = DXGI_FORMAT_UNKNOWN;
                     GPU::instance->device->CreateShaderResourceView(selectedResource.GetResource(), &srvDesc, UI::instance->imgCPUHandle);
                 }
 
                 ImTextureID my_tex_id = UI::instance->imgGPUHandle.ptr;
 
-                if (!isBuffer)
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+                ImVec2 uv_min = ImVec2(0.0f, 0.0f);                 // Top-left
+                ImVec2 uv_max = ImVec2(1.0f, 1.0f);                 // Lower-right
+                ImVec4 tint_col = ImVec4(showR ? 1.0f : 0.0f, showG ? 1.0f : 0.0f, showB ? 1.0f : 0.0f, 1.0f);
+                ImVec4 border_col = ImGui::GetStyleColorVec4(ImGuiCol_Border);
+                child_id = ImGui::GetID((void*)(intptr_t)2);
+                ImGui::Image(my_tex_id, img_sz, uv_min, uv_max, tint_col, border_col);
+                if (ImGui::BeginItemTooltip())
                 {
-                    ImVec2 pos = ImGui::GetCursorScreenPos();
-                    ImVec2 uv_min = ImVec2(0.0f, 0.0f);                 // Top-left
-                    ImVec2 uv_max = ImVec2(1.0f, 1.0f);                 // Lower-right
-                    ImVec4 tint_col = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);   // No tint
-                    ImVec4 border_col = ImGui::GetStyleColorVec4(ImGuiCol_Border);
-                    child_id = ImGui::GetID((void*)(intptr_t)2);
-                    ImGui::Image(my_tex_id, img_sz, uv_min, uv_max, tint_col, border_col);
-                    if (ImGui::BeginItemTooltip())
-                    {
-                        ImVec2 imgPos = ImVec2(pos.x, pos.y);
+                    ImVec2 imgPos = ImVec2(pos.x, pos.y);
 
-                        float region_sz = 16.0f;
-                        float region_x = io.MousePos.x - pos.x - region_sz * 0.5f;
-                        float region_y = io.MousePos.y - pos.y - region_sz * 0.5f;
-                        float zoom = 16.0f;
-                        if (region_x < 0.0f) { region_x = 0.0f; }
-                        else if (region_x > img_sz.x - region_sz) { region_x = img_sz.x - region_sz; }
-                        if (region_y < 0.0f) { region_y = 0.0f; }
-                        else if (region_y > img_sz.y - region_sz) { region_y = img_sz.y - region_sz; }
-                        ImGui::Text("Min: (%.2f, %.2f)", region_x, region_y);
-                        ImGui::Text("Max: (%.2f, %.2f)", region_x + region_sz, region_y + region_sz);
-                        ImVec2 uv0 = ImVec2((region_x) / img_sz.x, (region_y) / img_sz.y);
-                        ImVec2 uv1 = ImVec2((region_x + region_sz) / img_sz.x, (region_y + region_sz) / img_sz.y);
-                        ImGui::Image(my_tex_id, ImVec2(region_sz * zoom, region_sz * zoom), uv0, uv1, tint_col, border_col);
-                        ImGui::EndTooltip();
-                    }
+                    float region_sz = 16.0f;
+                    float region_x = io.MousePos.x - pos.x - region_sz * 0.5f;
+                    float region_y = io.MousePos.y - pos.y - region_sz * 0.5f;
+                    float zoom = 16.0f;
+                    if (region_x < 0.0f) { region_x = 0.0f; }
+                    else if (region_x > img_sz.x - region_sz) { region_x = img_sz.x - region_sz; }
+                    if (region_y < 0.0f) { region_y = 0.0f; }
+                    else if (region_y > img_sz.y - region_sz) { region_y = img_sz.y - region_sz; }
+                    ImGui::Text("Min: (%.2f, %.2f)", region_x, region_y);
+                    ImGui::Text("Max: (%.2f, %.2f)", region_x + region_sz, region_y + region_sz);
+                    ImVec2 uv0 = ImVec2((region_x) / img_sz.x, (region_y) / img_sz.y);
+                    ImVec2 uv1 = ImVec2((region_x + region_sz) / img_sz.x, (region_y + region_sz) / img_sz.y);
+                    ImGui::Image(my_tex_id, ImVec2(region_sz * zoom, region_sz * zoom), uv0, uv1, tint_col, border_col);
+                    ImGui::EndTooltip();
                 }
             }
         }
@@ -915,95 +970,125 @@ public:
 InstancesWindow instancesWindow;
 
 #include "Shaders/structs.hlsl"
-class OptionWindow : public EditorWindow
+// Single window combining frame/debug options with post-process tuning.
+// Rarely-touched parameters live under "Advanced" tree nodes so the common
+// controls stay front and center.
+class RenderingWindow : public EditorWindow
 {
 public:
-    OptionWindow() : EditorWindow("Option") {}
+    RenderingWindow() : EditorWindow("Rendering") { isOpen = true; }
     void Update() override final
     {
         ZoneScoped;
-        if (!ImGui::Begin("Option", &isOpen, ImGuiWindowFlags_None))
+        if (!ImGui::Begin("Rendering", &isOpen, ImGuiWindowFlags_None))
         {
             ImGui::End();
             return;
         }
 
-        ImGui::Checkbox("stopFrustumUpdate", &options.stopFrustumUpdate);
-        ImGui::Checkbox("stopBufferUpload", &options.stopBufferUpload);
-        ImGui::Checkbox("enableStructuredCommandBuffersReadback", &options.enableStructuredCommandBuffersReadback);
-        ImGui::Checkbox("stepMotion", &options.stepMotion);
-        ImGui::Checkbox("shaderHotReload", &options.shaderReload);
-        ImGui::Checkbox("frontToBackSort", &options.frontToBackSort);
-        ImGui::SliderFloat("sortMaxDistance", &options.sortMaxDistance, 1.0f, 100000.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+        auto& rt = Renderer::instance->mainView.raytracingContext.rtParameters;
+        auto& atmo = Renderer::instance->mainView.atmospehricScattering.asparams;
+        auto& pp = Renderer::instance->mainView.postProcess.ppparams;
 
-        int debugModeIndex = (int)options.debugMode;
-        const char* items[] = { "none", "ray", "boundingSphere" };
-        ImGui::Combo("debugMode", &debugModeIndex, items, IM_ARRAYSIZE(items));
-        options.debugMode = (Options::DebugMode)debugModeIndex;
-
-        int debugDrawIndex = (int)options.debugDraw;
-        const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "lighting", "GIprobes", "GIBounces", "GIAlbedo", "GINormals", "overdraw"};
-        ImGui::Combo("debugDraw", &debugDrawIndex, itemsDraw, IM_ARRAYSIZE(itemsDraw));
-        options.debugDraw = (Options::DebugDraw)debugDrawIndex;
-
-        ImGui::End();
-    }
-};
-OptionWindow optionWindow;
-
-class PostProcessWindow : public EditorWindow
-{
-public:
-    PostProcessWindow() : EditorWindow("PostProcess") {}
-    void Update() override final
-    {
-        ZoneScoped;
-        if (!ImGui::Begin("PostProcessWindow", &isOpen, ImGuiWindowFlags_None))
+        if (ImGui::CollapsingHeader("Debug View"))
         {
-            ImGui::End();
-            return;
+            int debugModeIndex = (int)options.debugMode;
+            const char* items[] = { "none", "ray", "boundingSphere" };
+            ImGui::Combo("debugMode", &debugModeIndex, items, IM_ARRAYSIZE(items));
+            ImGui::SetItemTooltip("Overlay debug geometry (rays / bounding spheres).");
+            options.debugMode = (Options::DebugMode)debugModeIndex;
+
+            int debugDrawIndex = (int)options.debugDraw;
+            const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "lighting", "GIprobes", "GIBounces", "GIAlbedo", "GINormals", "overdraw"};
+            ImGui::Combo("debugDraw", &debugDrawIndex, itemsDraw, IM_ARRAYSIZE(itemsDraw));
+            ImGui::SetItemTooltip("Replace the final image with a debug buffer visualization.");
+            options.debugDraw = (Options::DebugDraw)debugDrawIndex;
+
+            ImGui::Checkbox("stopFrustumUpdate", &options.stopFrustumUpdate);
+            ImGui::SetItemTooltip("Freeze the culling frustum to inspect culling from a fixed viewpoint.");
+            ImGui::Checkbox("stopBufferUpload", &options.stopBufferUpload);
+            ImGui::SetItemTooltip("Stop uploading buffers to the GPU (freeze scene data).");
+            ImGui::Checkbox("stepMotion", &options.stepMotion);
+            ImGui::SetItemTooltip("Advance motion one frame at a time.");
+            ImGui::Checkbox("shaderHotReload", &options.shaderReload);
+            ImGui::SetItemTooltip("Reload shaders from disk when they change.");
+            ImGui::Checkbox("enableStructuredCommandBuffersReadback", &options.enableStructuredCommandBuffersReadback);
+            ImGui::SetItemTooltip("Read back structured command buffers from the GPU for inspection.");
         }
 
-        ImGui::Text("RT");
-        ImGui::SliderInt("frameFilter", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.maxFrameFilteringCount, 1, 512, "%d", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("randBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirRandBias, -1, 1);
-        ImGui::SliderFloat("spacialRandBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirSpacialRandBias, 0, 1);
-        ImGui::SliderFloat("spacialRadius", &Renderer::instance->mainView.raytracingContext.rtParameters.spacialRadius, 0, 128);
-        ImGui::SliderInt("spacialSamples", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.spacialSampleCount, 0, 64);
-        ImGui::SliderFloat("SHARCSceneScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCSceneScale, 1, 64, "%f", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("SHARCRadianceScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCRadianceScale, 0.1, 10);
-        ImGui::SliderFloat("SHARCRoughnessThreshold", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCRoughnessThreshold, 0, 1);
-        ImGui::SliderInt("SHARCSamplesPerPixel", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.SHARCSamplesPerPixel, 1, 8);
-        ImGui::SliderInt("SHARCAccumulationFrameNum", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.SHARCAccumulationFrameNum, 1, 512, "%d", ImGuiSliderFlags_Logarithmic);
+        if (ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::Checkbox("frontToBackSort", &options.frontToBackSort);
+            ImGui::SetItemTooltip("Sort instances front-to-back to reduce overdraw.");
+            ImGui::BeginDisabled(!options.frontToBackSort);
+            ImGui::SliderFloat("sortMaxDistance", &options.sortMaxDistance, 1.0f, 100000.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SetItemTooltip("Max distance considered when sorting instances.");
+            ImGui::EndDisabled();
+        }
 
-        ImGui::Text("ATMO");
-        ImGui::SliderFloat("density", &Renderer::instance->mainView.atmospehricScattering.asparams.density, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("luminosity", &Renderer::instance->mainView.atmospehricScattering.asparams.luminosity, 0, 2, "%.6f");
-        ImGui::SliderFloat("specialNear", &Renderer::instance->mainView.atmospehricScattering.asparams.specialNear, 0.1, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("heightFalloff", &Renderer::instance->mainView.atmospehricScattering.asparams.heightFalloff, 0, 0.2f, "%.6f", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("noiseFrequency", &Renderer::instance->mainView.atmospehricScattering.asparams.noiseFrequency, 0.001f, 2, "%.6f", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("noiseThresholdLow", &Renderer::instance->mainView.atmospehricScattering.asparams.noiseThresholdLow, 0, 1, "%.3f");
-        ImGui::SliderFloat("noiseThresholdHigh", &Renderer::instance->mainView.atmospehricScattering.asparams.noiseThresholdHigh, 0, 1, "%.3f");
-        ImGui::SliderFloat("animationSpeed", &Renderer::instance->mainView.atmospehricScattering.asparams.animationSpeed, 0, 0.0001f, "%.10f", ImGuiSliderFlags_Logarithmic);
+        if (ImGui::CollapsingHeader("Ray Tracing", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::SliderInt("frameFilter", (int*)&rt.maxFrameFilteringCount, 1, 512, "%d", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("spacialRadius", &rt.spacialRadius, 0, 128);
+            ImGui::SliderInt("spacialSamples", (int*)&rt.spacialSampleCount, 0, 64);
 
-        ImGui::Text("EXPO");
-        ImGui::SliderFloat("expoMul", &Renderer::instance->mainView.postProcess.ppparams.expoMul, 0, 8);
-        ImGui::SliderFloat("expoAdd", &Renderer::instance->mainView.postProcess.ppparams.expoAdd, -1, 1);
-        ImGui::SliderFloat("P", &Renderer::instance->mainView.postProcess.ppparams.P, 0, 2);
-        ImGui::SliderFloat("a", &Renderer::instance->mainView.postProcess.ppparams.a, 0, 2);
-        ImGui::SliderFloat("m", &Renderer::instance->mainView.postProcess.ppparams.m, 0, 2);
-        ImGui::SliderFloat("l", &Renderer::instance->mainView.postProcess.ppparams.l, 0, 2);
-        ImGui::SliderFloat("c", &Renderer::instance->mainView.postProcess.ppparams.c, 0, 3);
-        ImGui::SliderFloat("b", &Renderer::instance->mainView.postProcess.ppparams.b, 0, 1);
+            if (ImGui::TreeNode("Advanced##rt"))
+            {
+                ImGui::SliderFloat("randBias", &rt.reservoirRandBias, -1, 1);
+                ImGui::SliderFloat("spacialRandBias", &rt.reservoirSpacialRandBias, 0, 1);
+                ImGui::SliderFloat("SHARCSceneScale", &rt.SHARCSceneScale, 1, 64, "%f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("SHARCRadianceScale", &rt.SHARCRadianceScale, 0.1, 10);
+                ImGui::SliderFloat("SHARCRoughnessThreshold", &rt.SHARCRoughnessThreshold, 0, 1);
+                ImGui::SliderInt("SHARCSamplesPerPixel", (int*)&rt.SHARCSamplesPerPixel, 1, 8);
+                ImGui::SliderInt("SHARCAccumulationFrameNum", (int*)&rt.SHARCAccumulationFrameNum, 1, 512, "%d", ImGuiSliderFlags_Logarithmic);
+                ImGui::TreePop();
+            }
+        }
 
-        ImGui::Text("Upscaling");
-        const char* modes[] = { "none", "taa", "dlss",  "dlssd" };
-        ImGui::Combo("upscaling", (int*)&Renderer::instance->mainView.upscaling, modes, 4);
+        if (ImGui::CollapsingHeader("Atmospheric Scattering", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::SliderFloat("density", &atmo.density, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
+
+            if (ImGui::TreeNode("Advanced##atmo"))
+            {
+                ImGui::SliderFloat("luminosity", &atmo.luminosity, 0, 2, "%.6f");
+                ImGui::SliderFloat("specialNear", &atmo.specialNear, 0.1, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("heightFalloff", &atmo.heightFalloff, 0, 0.2f, "%.6f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("noiseFrequency", &atmo.noiseFrequency, 0.001f, 2, "%.6f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("noiseThresholdLow", &atmo.noiseThresholdLow, 0, 1, "%.3f");
+                ImGui::SliderFloat("noiseThresholdHigh", &atmo.noiseThresholdHigh, 0, 1, "%.3f");
+                ImGui::SliderFloat("animationSpeed", &atmo.animationSpeed, 0, 0.0001f, "%.10f", ImGuiSliderFlags_Logarithmic);
+                ImGui::TreePop();
+            }
+        }
+
+        if (ImGui::CollapsingHeader("Exposition", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            ImGui::SliderFloat("expoMul", &pp.expoMul, 0, 8);
+
+            if (ImGui::TreeNode("Advanced##expo"))
+            {
+                ImGui::SliderFloat("expoAdd", &pp.expoAdd, -1, 1);
+                ImGui::SliderFloat("P", &pp.P, 0, 2);
+                ImGui::SliderFloat("a", &pp.a, 0, 2);
+                ImGui::SliderFloat("m", &pp.m, 0, 2);
+                ImGui::SliderFloat("l", &pp.l, 0, 2);
+                ImGui::SliderFloat("c", &pp.c, 0, 3);
+                ImGui::SliderFloat("b", &pp.b, 0, 1);
+                ImGui::TreePop();
+            }
+        }
+
+        if (ImGui::CollapsingHeader("Upscaling", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            const char* modes[] = { "none", "taa", "dlss",  "dlssd" };
+            ImGui::Combo("upscaling", (int*)&Renderer::instance->mainView.upscaling, modes, 4);
+        }
 
         ImGui::End();
     }
 };
-PostProcessWindow postProcessWindow;
+RenderingWindow renderingWindow;
 
 class MeshStorageWindow : public EditorWindow
 {
@@ -1018,7 +1103,80 @@ public:
             return;
         }
 
-        // Read buffer occupancy of mesh storage
+        MeshStorage* ms = MeshStorage::instance;
+        if (ms == nullptr)
+        {
+            ImGui::TextDisabled("Mesh storage not initialized.");
+            ImGui::End();
+            return;
+        }
+
+        const std::lock_guard<std::recursive_mutex> lock(ms->lock);
+
+        const double toMB = 1.0 / (1024.0 * 1024.0);
+        auto bytes = [](uint count, size_t stride) { return (double)count * (double)stride; };
+
+        // Per-buffer occupancy (used / capacity).
+        auto bar = [&](const char* label, uint used, uint capacity, size_t stride)
+        {
+            float frac = capacity > 0 ? (float)((double)used / (double)capacity) : 0.0f;
+            char overlay[96];
+            snprintf(overlay, sizeof(overlay), "%.2f / %.2f MB  (%u / %u)",
+                bytes(used, stride) * toMB, bytes(capacity, stride) * toMB, used, capacity);
+            ImGui::Text("%s", label);
+            ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 0), overlay);
+        };
+
+        ImGui::SeparatorText("Buffers");
+        bar("meshes", ms->nextMeshOffset, ms->meshesAllocatedCount, sizeof(HLSL::Mesh));
+        bar("meshlets", ms->nextMeshletOffset, ms->meshletsAllocatedCount, sizeof(HLSL::Meshlet));
+        bar("meshlet vertices", ms->nextMeshletVertexOffset, ms->meshletVerticesAllocatedCount, sizeof(unsigned int));
+        bar("meshlet triangles", ms->nextMeshletTriangleOffset, ms->meshletTrianglesAllocatedCount, sizeof(unsigned char));
+        bar("vertices", ms->nextVertexOffset, ms->verticesAllocatedCount, sizeof(Vertex));
+        bar("indices", ms->nextIndexOffset, ms->indicesAllocatedCount, sizeof(unsigned int));
+
+        double totalUsed =
+            bytes(ms->nextMeshOffset, sizeof(HLSL::Mesh)) +
+            bytes(ms->nextMeshletOffset, sizeof(HLSL::Meshlet)) +
+            bytes(ms->nextMeshletVertexOffset, sizeof(unsigned int)) +
+            bytes(ms->nextMeshletTriangleOffset, sizeof(unsigned char)) +
+            bytes(ms->nextVertexOffset, sizeof(Vertex)) +
+            bytes(ms->nextIndexOffset, sizeof(unsigned int));
+        double totalCap =
+            bytes(ms->meshesAllocatedCount, sizeof(HLSL::Mesh)) +
+            bytes(ms->meshletsAllocatedCount, sizeof(HLSL::Meshlet)) +
+            bytes(ms->meshletVerticesAllocatedCount, sizeof(unsigned int)) +
+            bytes(ms->meshletTrianglesAllocatedCount, sizeof(unsigned char)) +
+            bytes(ms->verticesAllocatedCount, sizeof(Vertex)) +
+            bytes(ms->indicesAllocatedCount, sizeof(unsigned int));
+
+        ImGui::Separator();
+        ImGui::Text("Total %.2f / %.2f MB across %zu meshes",
+            totalUsed * toMB, totalCap * toMB, ms->allMeshes.size());
+
+        // Visual layout of the vertices buffer: each mesh occupies [vertexOffset, +vertexCount].
+        ImGui::SeparatorText("Vertex buffer layout");
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 p0 = ImGui::GetCursorScreenPos();
+        float width = ImGui::GetContentRegionAvail().x;
+        float height = 24.0f;
+        ImVec2 p1 = ImVec2(p0.x + width, p0.y + height);
+        dl->AddRectFilled(p0, p1, IM_COL32(40, 40, 40, 255));
+
+        uint cap = ms->verticesAllocatedCount;
+        if (cap > 0)
+        {
+            for (size_t i = 0; i < ms->allMeshes.size(); i++)
+            {
+                auto& m = ms->allMeshes[i];
+                float x0 = p0.x + width * ((float)m.vertexOffset / cap);
+                float x1 = p0.x + width * ((float)(m.vertexOffset + m.vertexCount) / cap);
+                ImU32 col = (ImU32)ImColor::HSV((float)((i * 0.137f) - (int)(i * 0.137f)), 0.6f, 0.85f);
+                dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(max(x1, x0 + 1.0f), p1.y), col);
+            }
+        }
+        dl->AddRect(p0, p1, IM_COL32(120, 120, 120, 255));
+        ImGui::Dummy(ImVec2(width, height));
 
         ImGui::End();
     }

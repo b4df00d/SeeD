@@ -260,7 +260,8 @@ public:
             myfile << importPath << std::endl;
             for (auto& item : map)
             {
-                myfile << item.first.hash << " " << item.second.path << std::endl;
+                // tab separated: original file paths can contain spaces
+                myfile << item.first.hash << "\t" << item.second.path << "\t" << item.second.originalFilePath << std::endl;
             }
         }
     }
@@ -272,12 +273,37 @@ public:
         std::ifstream myfile(file);
         if (myfile.is_open())
         {
-            myfile >> importPath;
-            assetID id;
-            String path;
-            while (myfile >> id.hash >> path)
+            std::getline(myfile, importPath);
+            while (std::getline(myfile, line))
             {
+                if (line.empty())
+                    continue;
+
+                assetID id;
+                String path;
+                String originalFilePath;
+
+                size_t t1 = line.find('\t');
+                if (t1 != std::string::npos)
+                {
+                    // current format: hash \t path \t originalFilePath
+                    size_t t2 = line.find('\t', t1 + 1);
+                    id.hash = std::stoull(line.substr(0, t1));
+                    path = line.substr(t1 + 1, (t2 == std::string::npos ? line.size() : t2) - (t1 + 1));
+                    originalFilePath = (t2 == std::string::npos) ? String() : String(line.substr(t2 + 1));
+                }
+                else
+                {
+                    // legacy format: hash path (space separated, no originalFilePath)
+                    size_t s = line.find(' ');
+                    if (s == std::string::npos)
+                        continue;
+                    id.hash = std::stoull(line.substr(0, s));
+                    path = line.substr(s + 1);
+                }
+
                 map[id].path = path;
+                map[id].originalFilePath = originalFilePath;
                 map[id].type = GetType(id);
             }
         }
@@ -394,7 +420,7 @@ public:
             fin.close();
         }
 
-        resource.Create(metadata.resourceDesc, name);
+        resource.Create(metadata.resourceDesc, name, ResourceCategory::AssetTexture);
 
         IDStorageFile* fileHandle = nullptr;
         factory->OpenFile(path.ToWString().c_str(), IID_PPV_ARGS(&fileHandle));

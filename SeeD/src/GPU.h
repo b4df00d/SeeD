@@ -58,17 +58,44 @@ struct DSV
 };
 
 struct CommandBuffer;
+
+// VRAM accounting buckets, surfaced grouped in the GPUResources window.
+enum class ResourceCategory
+{
+    AssetTexture,           // textures streamed in from assets
+    RenderingTexture,       // render targets, depth, GI volumes, etc.
+    RenderingBuffer,        // structured / geometry / scratch buffers on DEFAULT heap
+    UploadBuffer,           // CPU->GPU upload heap buffers
+    ReadbackBuffer,         // GPU->CPU readback heap buffers
+    AccelerationStructure,  // raytracing BLAS / TLAS
+    Count
+};
+static const char* ResourceCategoryName(ResourceCategory c)
+{
+    switch (c)
+    {
+    case ResourceCategory::AssetTexture:          return "Asset Textures";
+    case ResourceCategory::RenderingTexture:      return "Rendering Textures";
+    case ResourceCategory::RenderingBuffer:       return "Rendering Buffers";
+    case ResourceCategory::UploadBuffer:          return "Upload Buffers";
+    case ResourceCategory::ReadbackBuffer:        return "Readback Buffers";
+    case ResourceCategory::AccelerationStructure: return "Acceleration Structures";
+    default:                                      return "Unknown";
+    }
+}
+
 class Resource
 {
 public:
     D3D12MA::Allocation* allocation{ 0 };
     uint stride{ 0 };
+    ResourceCategory category{ ResourceCategory::RenderingBuffer };
     SRV srv{ UINT32_MAX };
     UAV uav{ UINT32_MAX };
     RTV rtv{ UINT32_MAX, 0, 0 };
     DSV dsv{ UINT32_MAX, 0 };
 
-    void Create(D3D12_RESOURCE_DESC desc, String name = "Texture");
+    void Create(D3D12_RESOURCE_DESC desc, String name = "Texture", ResourceCategory category = ResourceCategory::RenderingTexture);
     void CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, String name = "Texture");
     void CreateTexture(uint3 resolution, DXGI_FORMAT format, bool mips, String name = "Texture");
     void CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String name = "Texture");
@@ -822,9 +849,10 @@ public:
 GPU* GPU::instance;
 
 
-void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name)
+void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name, ResourceCategory category)
 {
     Release(true);
+    this->category = category;
     D3D12MA::ALLOCATION_DESC allocationDesc = {};
     allocationDesc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
 
@@ -888,9 +916,10 @@ void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, St
 }
 
 void Resource::CreateTexture(uint3 resolution, DXGI_FORMAT format, bool mips, String name)
-{ 
+{
     //ZoneScoped;
     Release(true);
+    category = ResourceCategory::RenderingTexture;
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = resolution.z > 1 ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     resourceDesc.Alignment = 0;
@@ -972,6 +1001,7 @@ void Resource::CreateRenderTarget(uint2 resolution, DXGI_FORMAT format, String n
 {
     //ZoneScoped;
     Release(true);
+    category = ResourceCategory::RenderingTexture;
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     resourceDesc.Alignment = 0;
@@ -1058,6 +1088,7 @@ void Resource::CreateDepthTarget(uint2 resolution, String name)
 {
     //ZoneScoped;
     Release(true);
+    category = ResourceCategory::RenderingTexture;
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     resourceDesc.Alignment = 0;
@@ -1145,6 +1176,7 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D
     //ZoneScoped;
     Release(true);
 
+    category = upload ? ResourceCategory::UploadBuffer : ResourceCategory::RenderingBuffer;
     stride = _stride;
 
     D3D12_RESOURCE_DESC resourceDesc = {};
@@ -1270,6 +1302,7 @@ void Resource::CreateReadBackBuffer(uint size, String name)
 {
     //ZoneScoped;
     Release(true);
+    category = ResourceCategory::ReadbackBuffer;
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     resourceDesc.Alignment = 0;
@@ -1333,6 +1366,7 @@ void Resource::CreateAccelerationStructure(uint size, String name)
 {
     //ZoneScoped;
     Release(true);
+    category = ResourceCategory::AccelerationStructure;
     D3D12_RESOURCE_DESC resourceDesc = {};
     resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     resourceDesc.Alignment = 0;

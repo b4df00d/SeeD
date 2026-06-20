@@ -363,8 +363,8 @@ struct RayTracingContext
         rtParameters.maxFrameFilteringCount = 1;
         rtParameters.reservoirRandBias = 0.0;
         rtParameters.reservoirSpacialRandBias = 0.2;
-        rtParameters.spacialRadius = 0.0f;
-        rtParameters.spacialSampleCount = 8;
+        rtParameters.spacialRadius = 64.0f;
+        rtParameters.spacialSampleCount = 16;
         rtParameters.SHARCSceneScale = 20;
         rtParameters.SHARCEntriesNum = SHARCEntryCount;
         rtParameters.SHARCHashEntriesBufferIndex = SHARCHash.uav.offset;
