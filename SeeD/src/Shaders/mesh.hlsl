@@ -153,6 +153,10 @@ PS_OUTPUT PixelForward(MSVert inVerts)
 }
 
 
+// Force early depth test so occluded fragments are rejected before the shader runs.
+// Without this, the overdraw UAV write below makes D3D12 default to late depth testing,
+// which shades every covered fragment regardless of draw order (defeating the front-to-back sort).
+[earlydepthstencil]
 PS_OUTPUT PixelgBuffer(MSVert inVerts)
 {
     PS_OUTPUT o;

@@ -4,6 +4,8 @@
 
 #define GROUPED_CULLING_THREADS 128
 #define INSTANCE_CULLING_THREADS 128
+#define DRAW_SORT_THREADS 128
+#define SORT_BUCKETS 256 // depth bins for front-to-back draw ordering
 
 #ifdef __cplusplus // bah c�est surtout pour par avoir ca dans le HLSL
 #define SeeDalign __declspec(align(16))
@@ -154,6 +156,10 @@ namespace HLSL
         uint instancesCulledArgsIndex;
         uint meshletsToCullIndex;
         uint meshletsCulledArgsIndex;
+        uint meshletsCulledArgsSortedIndex;
+        uint sortHistogramIndex;
+        uint meshletBucketsIndex;
+        uint frontToBackSort;
         uint instancesCounterIndex;
         uint meshletsCounterIndex;
         uint albedoIndex;
@@ -169,6 +175,7 @@ namespace HLSL
         uint HZB;
         uint HZBMipCount;
         float textureLODBias;
+        float sortMaxDistance; // world-space distance mapped to the farthest front-to-back sort bucket
     };
     
     struct Shader

@@ -1453,7 +1453,7 @@ bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint pre
     confidence         = saturate(confidence - bias); // glossy / secondary-bounce bias
 
     // History length clamp (M-cap): fewer frames of reuse when confidence is low.
-    uint frameFilteringCount = (uint) max(0.0f, confidence * rtParameters.maxFrameFilteringCount - 1.0f);
+    uint frameFilteringCount = (uint) max(0.0f, confidence * rtParameters.maxFrameFilteringCount);
 
     uint2 prevPixel = uint2(cd.previousPixel);
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[previousReservoirIndex];

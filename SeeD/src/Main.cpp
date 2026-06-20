@@ -72,6 +72,8 @@ struct Options
     bool enableStructuredCommandBuffersReadback = false;
     bool stepMotion = false;
     bool shaderReload = true;
+    bool frontToBackSort = true;
+    float sortMaxDistance = 512.0f;
     int lightUnitsIndex = 0;
     float customLightMultiplier = 1.0f;
 
@@ -334,7 +336,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\caldera-main\\map_source\\prefabs\\br\\wz_vg\\mp_wz_island\\commercial\\hotel_01.usd");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\appart-vincent-03-v03.fbx");
 
-    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets2\\";
+    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets2\\";
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\BrutalistLevelKit\\brutalist.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\FantasticVillage\\map_village_day.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Cambodia\\TemplesOfCambodia_01_01_Exterior_02.gltf");
@@ -342,7 +344,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Bazaar\\LV_Bazaar.gltf");
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\ScienceLab\\ScieneLab.gltf");
 
-    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets3\\";
+    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets3\\";
     //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets3\\SpaceJunkyard_NantStudios2.gltf");
     //World::instance->Load("Cave.seed");
 
