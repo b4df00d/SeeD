@@ -68,7 +68,10 @@
     <ClInclude Include="src\Containers.h">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\ComponentsUIMetaData.h">
+    <ClInclude Include="src\ComponentMetaData.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ComponentMetaTypes.h">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="..\Third\ImGuizmo-master\ImGuizmo.h">

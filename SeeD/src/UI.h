@@ -1,200 +1,8 @@
 #pragma once
 
-enum class PropertyTypes : int
-{
-    _none,
-    _int,
-    _uint,
-    _float,
-    _float2,
-    _float3,
-    _float4,
-    _quaternion,
-    _float4x4,
-    _assetID,
-    _Handle,
-    _bool
-};
-bool KnownType(String typeName)
-{
-    if (typeName == "int")
-        return true;
-    else if (typeName == "uint")
-        return true;
-    else if (typeName == "float")
-        return true;
-    else if (typeName == "float2")
-        return true;
-    else if (typeName == "float3")
-        return true;
-    else if (typeName == "float4")
-        return true;
-    else if (typeName == "quaternion")
-        return true;
-    else if (typeName == "float4x4")
-        return true;
-    else if (typeName == "assetID")
-        return true;
-    else if (typeName == "Handle")
-        return true;
-    else if (typeName == "bool")
-        return true;
-    return false;
-}
-struct MemberInfoParse
-{
-    String name;
-    String dataType;
-    String dataTemplateType;
-    String dataCount;
-};
-struct ComponentInfoParse
-{
-    String name;
-    std::vector<MemberInfoParse> members;
-    String propertyDrawPtr;
-};
-struct MemberInfo
-{
-    String name;
-    PropertyTypes dataType;
-    Components::Mask dataTemplateType;
-    int dataCount;
-    int offset;
-};
-struct ComponentInfo
-{
-    String name;       // Component name
-    Components::Mask mask;
-    void (*PropertyDraw)(char*);
-    std::vector<MemberInfo> members;
-};
-std::vector<ComponentInfo> knownComponents;
-
-String FormatComponentsArray(std::vector<String>& componentsInfo)
-{
-    String out = "ComponentInfo knownComponents[] = \n{\n";
-
-    for (uint i = 0; i < componentsInfo.size(); i++)
-    {
-        auto& name = componentsInfo[i];
-        out += std::format("\t{}MetaData,\n", name.c_str());
-    }
-
-    out += "};\n";
-
-    return out;
-}
-String FormatMetaData(ComponentInfoParse cmpInfo, uint& cmpIndex)
-{
-    String out = std::format("knownComponents.push_back(\n \t{{ \"{0}\", Components::{0}::mask, {1}, \n \t\t{{\n", cmpInfo.name.c_str(), cmpInfo.propertyDrawPtr.c_str());
-
-    for (uint i = 0; i < cmpInfo.members.size(); i++)
-    {
-        auto& m = cmpInfo.members[i];
-        out += std::format("\t\t\t{{ \"{0}\", PropertyTypes::_{1}, {2}, {3}, offsetof(Components::{4}, {0}) }},\n", m.name.c_str(), m.dataType.c_str(), m.dataTemplateType.c_str(), m.dataCount.c_str(), cmpInfo.name.c_str());
-    }
-
-    out += "\t\t}\n \t}";
-    out += "); \n";
-
-    cmpIndex++;
-    return out;
-}
-void ParseCpp(String path)
-{
-    std::ifstream fin(path);
-    std::ofstream fout("G:\\Work\\Dev\\SeeD\\SeeD\\src\\ComponentsUIMetaData.h");
-    if (fin.is_open() && fout.is_open())
-    {
-        fout << "#pragma once" << std::endl;
-
-        //fout << "std::vector<ComponentInfo> knownComponents;" << std::endl;
-        fout << "void InitKnownComponents() { \n" << std::endl;
-        fout << "static bool initialized = false;\n" << std::endl;
-        fout << "if(initialized) return;\n" << std::endl;
-        fout << "initialized = true;\n" << std::endl;
-
-        std::vector<ComponentInfoParse> cmpInfos;
-        String line;
-        uint cmpIndex = 0;
-        while (getline(fin, line))
-        {
-            if (line.find(": ComponentBase<") != -1)
-            {
-                auto tokens = line.Split(" ");
-                cmpInfos.resize(cmpInfos.size() + 1);
-                ComponentInfoParse& cmpInfo = cmpInfos[cmpInfos.size() - 1];
-                cmpInfo.propertyDrawPtr = "nullptr";
-                cmpInfo.name = tokens[1];
-                while (line.find("};") == -1)
-                {
-                    getline(fin, line);
-                    tokens = line.Split(" ");
-                    if (tokens.size() >= 2)
-                    {
-                        String typeToken = tokens[0];
-                        String templateTypeToken = "NULL";
-                        int chevron = (int)typeToken.find("<");
-                        if (chevron != -1)
-                        {
-                            templateTypeToken = typeToken.substr(chevron + 1, typeToken.find(">") - chevron - 1);
-                            templateTypeToken = std::format("Components::{0}::mask", templateTypeToken.c_str());
-                            typeToken = typeToken.substr(0, chevron);
-                        }
-                        if (KnownType(typeToken))
-                        {
-                            MemberInfoParse info;
-                            info.dataType = typeToken;
-                            info.dataTemplateType = templateTypeToken;
-                            info.name = tokens[1].substr(0, tokens[1].length() - 1); //delete the ; at the end
-                            int bracketIndex = (int)info.name.find("[");
-                            if (bracketIndex != -1)
-                            {
-                                int bracketIndexOut = (int)info.name.find("]");
-                                info.dataCount = info.name.substr(bracketIndex + 1, bracketIndexOut - bracketIndex - 1);
-                                info.name = info.name.substr(0, bracketIndex);
-                            }
-                            else
-                            {
-                                info.dataCount = "1";
-                            }
-                            cmpInfo.members.push_back(info);
-                        }
-                    }
-                }
-            }
-            else if (line.find("PropertyDraw(") != -1)
-            {
-                int start = (int)line.find("void ") + 5;
-                int end = (int)line.find("PropertyDraw(");
-                String drawTarget = line.substr(start, end - start);
-
-                for (uint i = 0; i < (uint)cmpInfos.size(); i++)
-                {
-                    if (cmpInfos[i].name == drawTarget)
-                    {
-                        int start = (int)line.find("void ") + 5;
-                        int end = (int)line.find("(");
-                        String funcName = line.substr(start, end - start);
-                        cmpInfos[i].propertyDrawPtr = "Components::" + funcName;
-                    }
-                }
-            }
-        }
-
-        for (uint i = 0; i < (uint)cmpInfos.size(); i++)
-        {
-
-            fout << FormatMetaData(cmpInfos[i], cmpIndex);
-        }
-
-        fout << "}\n" << std::endl;
-
-        fin.close();
-        fout.close();
-    }
-}
+// Component reflection metadata (PropertyTypes / MemberInfo / ComponentInfo /
+// knownComponents) and the metadata generator (ParseCpp) now live in
+// ComponentMetaTypes.h, included from World.h. Only the call sites remain in this file.
 
 #include "UIHelpers.h"
 
@@ -1125,6 +933,8 @@ public:
         ImGui::Checkbox("enableStructuredCommandBuffersReadback", &options.enableStructuredCommandBuffersReadback);
         ImGui::Checkbox("stepMotion", &options.stepMotion);
         ImGui::Checkbox("shaderHotReload", &options.shaderReload);
+        ImGui::Checkbox("frontToBackSort", &options.frontToBackSort);
+        ImGui::SliderFloat("sortMaxDistance", &options.sortMaxDistance, 1.0f, 100000.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
 
         int debugModeIndex = (int)options.debugMode;
         const char* items[] = { "none", "ray", "boundingSphere" };
@@ -1158,7 +968,7 @@ public:
         ImGui::SliderInt("frameFilter", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.maxFrameFilteringCount, 1, 512, "%d", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("randBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirRandBias, -1, 1);
         ImGui::SliderFloat("spacialRandBias", &Renderer::instance->mainView.raytracingContext.rtParameters.reservoirSpacialRandBias, 0, 1);
-        ImGui::SliderFloat("spacialRadius", &Renderer::instance->mainView.raytracingContext.rtParameters.spacialRadius, 0, 32);
+        ImGui::SliderFloat("spacialRadius", &Renderer::instance->mainView.raytracingContext.rtParameters.spacialRadius, 0, 128);
         ImGui::SliderInt("spacialSamples", (int*)&Renderer::instance->mainView.raytracingContext.rtParameters.spacialSampleCount, 0, 64);
         ImGui::SliderFloat("SHARCSceneScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCSceneScale, 1, 64, "%f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("SHARCRadianceScale", &Renderer::instance->mainView.raytracingContext.rtParameters.SHARCRadianceScale, 0.1, 10);
@@ -1612,7 +1422,7 @@ public:
 };
 FileBrowserWindow fileBrowserWindow;
 
-#include "ComponentsUIMetaData.h"
+// InitKnownComponents() is declared in ComponentMetaData.h, included from World.h.
 class PropertyWindow : public EditorWindow
 {
     int componentAddIndex = 0;
@@ -2141,8 +1951,13 @@ public:
                 if (ImGui::MenuItem("Load World"))
                 {
                     editorState.selectedObject = {};
-                    String file = "Save.seed";
-                    World::instance->Load(file);
+                    World::instance->ClearImmediate();
+                    World::instance->Load("Save.seed");
+                }
+                if (ImGui::MenuItem("Add Prefab"))
+                {
+                    // additive: compose the current world with another .seed
+                    World::instance->Load("Save.seed");
                 }
                 if (ImGui::MenuItem("Clear World"))
                 {

@@ -168,7 +168,8 @@ copy /Y "..\Third\DLSS-main\lib\Windows_x86_64\rel\*.*" "..\x64\Release\"</Comma
     <ClInclude Include="..\Third\imgui-docking\imgui_internal.h" />
     <ClInclude Include="..\Third\imgui-docking\misc\cpp\imgui_stdlib.h" />
     <ClInclude Include="..\Third\ImGuizmo-master\ImGuizmo.h" />
-    <ClInclude Include="src\ComponentsUIMetaData.h" />
+    <ClInclude Include="src\ComponentMetaData.h" />
+    <ClInclude Include="src\ComponentMetaTypes.h" />
     <ClInclude Include="src\Containers.h" />
     <ClInclude Include="src\Editor.h" />
     <ClInclude Include="src\GPU.h" />
