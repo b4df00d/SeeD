@@ -84,6 +84,7 @@ public:
     void CreateAccelerationStructure(uint size, String name = "AccelerationStructure");
     void BackBuffer(ID3D12Resource* backBuffer);
     void Release(bool deferred = false);
+    void FreeNow();
     ID3D12Resource* GetResource();
     uint BufferSize();
     void UploadTexture(std::vector<D3D12_SUBRESOURCE_DATA> subresources, CommandBuffer& cb);
@@ -1455,10 +1456,8 @@ void Resource::Release(bool deferred)
                     found = true;
                 }
             }
-            if(found)
+            if (allocation->GetResource() != nullptr)
                 releaseResources.push_back({ GPU::instance->frameNumber , *this });
-            else
-                IOs::Log("You want to release a resource that is not in allresources anymore (deferred)");
 
             lock.unlock();
         }
@@ -1476,7 +1475,8 @@ void Resource::Release(bool deferred)
                 }
             }
             lock.unlock();
-            if(found)
+
+            if (allocation->GetResource() != nullptr)
             {
                 allocation->Release();
                 GPU::instance->descriptorHeap.FreeGlobalSlot(srv);
@@ -1484,8 +1484,6 @@ void Resource::Release(bool deferred)
                 GPU::instance->descriptorHeap.FreeRTVSlot(rtv);
                 GPU::instance->descriptorHeap.FreeDSVSlot(dsv);
             }
-            else
-                IOs::Log("You want to release a resource that is not in allresources anymore (not deferred)");
         }
     }
     allocation = { 0 };
