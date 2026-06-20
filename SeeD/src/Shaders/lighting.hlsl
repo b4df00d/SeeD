@@ -129,15 +129,37 @@ void RayGen()
     uint resW = viewContext.renderResolution.x;
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * resW]);
 
-    // ---- Spatial ReSTIR reuse ------------------------------------------------
-    // Combine this pixel's (temporal) reservoir with a few screen-space neighbours
-    // using canonical weighted reservoir sampling + the GI reconnection Jacobian.
+    // ---- Spatial ReSTIR reuse (pairwise MIS) ---------------------------------
+    // Combine this pixel's (temporal) reservoir = the "canonical" sample with a few
+    // screen-space neighbours. Each neighbour is MIS-weighted against the canonical
+    // so the reconnection Jacobian appears in BOTH the resampling weight and the MIS
+    // denominator -> unbiased even at Wcount==1 (no temporal). The plain 1/M combine
+    // it replaces let J brighten freely because E[J] >= 1 (reciprocal-symmetric shift).
+    //
+    // CRITICAL: each neighbour's MIS weight carries a 1/M factor (M = #neighbours), and
+    // the canonical takes the remainder m0 = 1 - sum(m_i). Without the 1/M the weights
+    // do not sum to 1 and the image brightens linearly with spacialSampleCount.
+    //
+    // The target fn here is luminance (geometry-free), so the per-pair target factors
+    // cancel and the weights collapse to functions of confidence (Wcount) and J:
+    //   neighbour i :  m_i = (1/M) * cI / (cI + cC*J)     w_i = m_i * J * Wsum_i / cI
+    //   canonical   :  m0  = 1 - sum(m_i)                 w0  = m0 * Wsum_c / cC
+    // Because 1/M is unknown until the loop ends, we WRS-pick a neighbour "champion"
+    // with the un-normalised weights, then do a final draw champion-vs-canonical
+    // (hierarchical WRS == flat WRS over all candidates).
+    //
     // Neighbour reservoirs were finalised by Pass 1 (raytracing2.hlsl) and are
     // safe to read thanks to the giReservoir UAV barrier before this dispatch.
     float radius = rtParameters.spacialRadius;
     if(radius > 0)
     {
-        HLSL::GIReservoir combined = r;     // central sample's combine weight == its own Wsum
+        float cC    = max(r.Wcount, 1.0f);          // canonical confidence (floored so an empty
+                                                    // centre can't N*-brighten via cC==0)
+        float pHatC = r.W;                          // canonical target (Luminance of its colour)
+        HLSL::GIReservoir champ = (HLSL::GIReservoir)0;  // selected neighbour (champion)
+        float champWsumPrime = 0.0f;                // running un-normalised weight sum (= M * sum w_i)
+        float sumMiTimesM    = 0.0f;                // sum cI/(cI+cC*J) = M * sum(m_i)
+        uint  validNeighbors = 0;
         for (uint i = 0; i < poissonDiskCount; i++)
         {
             int2 np = dtid.xy + poissonDisk[i + poissonIndexRng] * radius * (i / float(poissonDiskCount));
@@ -159,33 +181,56 @@ void RayGen()
             float  newDist   = length(toSample);
             float3 newDir    = toSample / max(newDist, 1e-6f);
 
-            // ReSTIR GI reconnection Jacobian: (cosR / dR^2) / (cosQ / dQ^2)
+            // ReSTIR GI reconnection Jacobian (neighbour -> this receiver):
+            //   J = (cosR / dR^2) / (cosQ / dQ^2) = (cosR * dQ^2) / (cosQ * dR^2)
             float dQ   = max(rn.dist, 1e-6f);
             float dR   = max(newDist, 1e-6f);
             float cosQ = abs(dot(normalize(ncd.offsetedWorldPos - samplePos), rn.hitNormal));
             float cosR = abs(dot(normalize(cd.offsetedWorldPos  - samplePos), rn.hitNormal));
-            float J    = (cosR * dQ * dQ) / max(cosQ * dR * dR, 1e-6f);
-            if (cosQ <= 1e-3f || J <= 0.0f || J > 10.0f) continue;   // reject grazing / firefly shifts
+            if (cosQ <= 1e-3f) continue;                          // grazing donor
+            float J = (cosR * dQ * dQ) / max(cosQ * dR * dR, 1e-6f);
+            if (J <= 0.0f || J > 10.0f) continue;                 // firefly/variance guard (no longer a bias fix)
 
-            float pHat = Luminance(rn.color);                        // target fn at this pixel (diffuse approx)
-            float ucw  = rn.Wsum / max(rn.Wcount * rn.W, 1e-5f);     // neighbour unbiased contribution weight
-            float w    = pHat * ucw * rn.Wcount * J;                 // canonical spatial reuse weight
+            float cI        = rn.Wcount;                          // neighbour confidence
+            float denomPair = max(cI + cC * J, 1e-6f);            // balance-heuristic denominator for this pair
 
-            combined.Wsum   += w;
-            combined.Wcount += rn.Wcount;
-            if (w > 0.0f && nextRand(seed) * combined.Wsum < w)
+            // (M * m_i) = cI/(cI+cC*J);  (M * w_i) = J * Wsum_i / (cI+cC*J).
+            sumMiTimesM += cI / denomPair;
+            float wPrime = J * rn.Wsum / denomPair;
+
+            validNeighbors++;
+            champWsumPrime += wPrime;
+            if (wPrime > 0.0f && nextRand(seed) * champWsumPrime < wPrime)
             {
-                combined.color     = rn.color;
-                combined.W         = pHat;
-                combined.dir       = newDir;     // reconnected from THIS receiver
-                combined.dist      = newDist;
-                combined.hitNormal = rn.hitNormal;
+                champ.color     = rn.color;
+                champ.W         = Luminance(rn.color);   // == pHat at receiver (geometry-free target)
+                champ.dir       = newDir;     // reconnected from THIS receiver
+                champ.dist      = newDist;
+                champ.hitNormal = rn.hitNormal;
             }
+        }
+
+        // Finalise the MIS weights now that M is known, then draw champion vs canonical.
+        float invM   = (validNeighbors > 0) ? 1.0f / (float)validNeighbors : 0.0f;
+        float wNb    = champWsumPrime * invM;            // total neighbour weight = sum w_i
+        float m0     = saturate(1.0f - sumMiTimesM * invM);   // canonical MIS weight = 1 - sum(m_i)
+        float w0     = m0 * r.Wsum / cC;                 // canonical resampling weight (0 if centre empty)
+
+        HLSL::GIReservoir combined = champ;   // champ is zero-init when no neighbour was picked
+        combined.Wsum   = wNb + w0;
+        combined.Wcount = cC + (float)validNeighbors;    // bookkeeping only; resolve pins Wcount = 1
+        if (w0 > 0.0f && nextRand(seed) * combined.Wsum < w0)
+        {
+            combined.color     = r.color;
+            combined.W         = pHatC;
+            combined.dir       = r.dir;
+            combined.dist      = r.dist;
+            combined.hitNormal = r.hitNormal;
         }
 
         // Visibility test of the finally-selected reconnection; on occlusion keep the
         // central reservoir (rejects indirect light leaking through geometry).
-        if (combined.Wcount > r.Wcount)
+        if (validNeighbors > 0 && combined.W > 0.0f)
         {
             RayDesc ray;
             ray.Origin    = cd.offsetedWorldPos;
@@ -198,14 +243,22 @@ void RayGen()
             TraceRay(AccelerationStructure, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
 
             if (any(payload.visibility > 0))   // unoccluded -> accept the spatially-combined reservoir
+            {
+                // The pairwise estimator's UCW is already Wsum / pHat(Y) (MIS weights sum to 1,
+                // so there is NO 1/M factor). Pin Wcount = 1 so the shared resolve below
+                // (Wsum / (Wcount * W)) evaluates to exactly that and stays unbiased.
                 r = combined;
+                r.Wcount = 1.0f;
+            }
         }
     }
 
     // ---- Resolve indirect from the reservoir and composite onto direct light --
     // UCW = Wsum / (M * pHat_selected); indirect radiance estimate = color * UCW.
-    // The reservoir stores UNSCALED path radiance, so apply SHARCRadianceScale here
-    // to match the direct light that Pass 1 scaled in ResolveSampleData.
+    // For the temporal-only path M = r.Wcount; for the spatial pairwise-MIS path the
+    // MIS weights already sum to 1 (no 1/M), so it pinned r.Wcount = 1 above to reuse
+    // this same expression. The reservoir stores UNSCALED path radiance, so apply
+    // SHARCRadianceScale here to match the direct light Pass 1 scaled in ResolveSampleData.
     float ucw = r.Wsum / max(r.Wcount * r.W, 1e-5f);
     float3 indirect = r.color * ucw * rtParameters.SHARCRadianceScale;
     if (!editorContext.GIBounces && !editorContext.GIAlbedo && !editorContext.GINormals)
