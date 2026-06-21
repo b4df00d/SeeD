@@ -35,6 +35,7 @@ struct MSVert
 
 groupshared HLSL::Camera camera;
 groupshared HLSL::Instance instance;
+groupshared HLSL::Mesh mesh;
 groupshared HLSL::Meshlet meshlet;
 groupshared float4x4 worldMatrix;
 groupshared float4x4 previousWorldMatrix;
@@ -54,7 +55,10 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         instance = instances[instanceIndexIndirect];
         worldMatrix = instance.unpack(instance.current);
         previousWorldMatrix = instance.unpack(instance.previous);
-        
+
+        StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
+        mesh = meshes[instance.meshIndex]; // for SNORM16 position decode (aabbMin / aabbExtent)
+
         StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
         meshlet = meshlets[meshletIndexIndirect];
         meshlet.vertexCount = min(HLSL::max_vertices, meshlet.vertexCount);
@@ -72,8 +76,14 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
     {
         uint tmpIndex = meshlet.vertexOffset + groupThreadId.x;
         uint index = meshletVertices[tmpIndex];
-        float4 pos = float4(verticesData[index].pos.xyz, 1);
-        
+
+        // Decode SNORM16 position (local to mesh AABB). packedPos.x = [x|y<<16], packedPos.y = [z|0<<16].
+        uint2 pp = verticesData[index].packedPos;
+        int3 qi = int3(int(pp.x << 16) >> 16, int(pp.x) >> 16, int(pp.y << 16) >> 16);
+        float3 q = max(float3(qi) / 32767.0f, -1.0f);
+        float3 objectPos = mesh.aabbMin.xyz + (q * 0.5f + 0.5f) * mesh.aabbExtent.xyz;
+        float4 pos = float4(objectPos, 1);
+
         float4 worldPos = mul(worldMatrix, pos);
         float4 clipPos = mul(camera.viewProj, worldPos);
         outVerts[groupThreadId.x].currentPos = clipPos;
@@ -98,8 +108,7 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         
         outVerts[groupThreadId.x].color = color;
         outVerts[groupThreadId.x].uv = verticesData[index].uv;
-        //outVerts[groupThreadId.x].uv = verticesData[index].uv1;
-        
+
         outVerts[groupThreadId.x].objectID = instance.objectID;
         outVerts[groupThreadId.x].instanceID = instanceIndexIndirect;
     }

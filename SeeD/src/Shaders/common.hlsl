@@ -1798,24 +1798,16 @@ void DrawLine(float3 begin, float3 end)
     counter[0] = 1;
     InterlockedAdd(counter[1], 2, index);
     
-    RWStructuredBuffer<HLSL::Vertex> debugVertices = ResourceDescriptorHeap[editorContext.debugVerticesHeapIndex];
-    HLSL::Vertex vertex1;
-    HLSL::Vertex vertex2;
-    
+    RWStructuredBuffer<HLSL::DebugVertex> debugVertices = ResourceDescriptorHeap[editorContext.debugVerticesHeapIndex];
+    HLSL::DebugVertex vertex1;
+    HLSL::DebugVertex vertex2;
+
     vertex1.pos = begin;
-    vertex1.normal = RandUINT(asuint(Rand(begin)));
-    vertex1.tangent = 0;
-    vertex1.binormal = 0;
-    vertex1.uv = 0;
-    vertex1.uv1 = 0;
-    
+    vertex1.color = RandUINT(asuint(Rand(begin)));
+
     vertex2.pos = end;
-    vertex2.normal = vertex1.normal;
-    vertex2.tangent = 0;
-    vertex2.binormal = 0;
-    vertex2.uv = 0;
-    vertex2.uv1 = 0;
-    
+    vertex2.color = vertex1.color;
+
     debugVertices[index] = vertex1;
     debugVertices[index+1] = vertex2;
     
@@ -1881,37 +1873,29 @@ void DrawCircle(float3 center, float radius, float3 axis)
     
     float3 color = RandUINT(asuint(Rand(center)));
     
-    RWStructuredBuffer<HLSL::Vertex> debugVertices = ResourceDescriptorHeap[editorContext.debugVerticesHeapIndex];
-    
+    RWStructuredBuffer<HLSL::DebugVertex> debugVertices = ResourceDescriptorHeap[editorContext.debugVerticesHeapIndex];
+
     float4 p = float4(radius, 0, 0, 1);
     if(axis.x > 0.66)
         p = float4(0, radius, 0, 1);
-    
+
     for (float i = 0; i < steps; i++)
     {
         float4x4 mat1 = GetMatrix(center, axis, stepsAngle * i, radius);
         float4x4 mat2 = GetMatrix(center, axis, stepsAngle * (i+1), radius);
-        
-        HLSL::Vertex vertex1;
-        HLSL::Vertex vertex2;
-        
+
+        HLSL::DebugVertex vertex1;
+        HLSL::DebugVertex vertex2;
+
         float3 begin = mul(mat1, p).xyz;
         float3 end = mul(mat2, p).xyz;
-    
+
         vertex1.pos = begin;
-        vertex1.normal = color;
-        vertex1.tangent = 0;
-        vertex1.binormal = 0;
-        vertex1.uv = 0;
-        vertex1.uv1 = 0;
-    
+        vertex1.color = color;
+
         vertex2.pos = end;
-        vertex2.normal = color;
-        vertex2.tangent = 0;
-        vertex2.binormal = 0;
-        vertex2.uv = 0;
-        vertex2.uv1 = 0;
-    
+        vertex2.color = color;
+
         debugVertices[index + i * 2] = vertex1;
         debugVertices[index + i * 2 + 1] = vertex2;
     }

@@ -183,15 +183,26 @@ namespace HLSL
         uint id;
     };
     
-    // must be similar to MeshLoader::Vertex
+    // must match GPU.h VertexPacked (plain layout, 52 bytes).
+    // Position is packed as SNORM16 x,y,z (w unused) LOCAL to the mesh AABB, kept at
+    // offset 0 so the BLAS can read it directly as R16G16B16A16_SNORM. Decode with
+    // Mesh.aabbMin / Mesh.aabbExtent (see mesh.hlsl). uv is placed right after the
+    // packed position so the first 16 bytes are filled exactly (no straddle padding).
     struct Vertex
     {
-        float3 pos;
+        uint2 packedPos;
+        float2 uv;
         float3 normal;
         float3 tangent;
         float3 binormal;
-        float2 uv;
-        float2 uv1;
+    };
+
+    // Debug-only vertex (kept full precision, decoupled from the mesh Vertex format).
+    // must match GPU.h DebugVertex
+    struct DebugVertex
+    {
+        float3 pos;
+        float3 color;
     };
     
     // must be similar to MeshLoader::Triangles (unsigned char)
@@ -211,7 +222,8 @@ namespace HLSL
 
     struct Mesh
     {
-        float4 boundingSphere;
+        float4 aabbMin;    // .xyz : mesh-AABB min  (anchor for SNORM16 position decode)
+        float4 aabbExtent; // .xyz : mesh-AABB size (max - min)
         uint lodCount;
         uint storageIndex;
         uint vertexOffset;
@@ -224,6 +236,14 @@ namespace HLSL
             uint indexCount;
         };
         LOD LODs[4];
+
+        // Bounding sphere derived from the AABB (object space): xyz = center, w = radius.
+        // Matches the previously stored value (center = (min+max)/2, radius = length(max-min)/2).
+        float4 GetBoundingSphere()
+        {
+            float3 c = aabbMin.xyz + aabbExtent.xyz * 0.5;
+            return float4(c, length(aabbExtent.xyz) * 0.5);
+        }
     };
     
     static const uint MaterialTextureCount = 7;

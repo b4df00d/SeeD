@@ -26,6 +26,7 @@ extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"
 #include "Shaders/structs.hlsl"
 
 #define FRAMEBUFFERING 2
+//#define ASYNC_COMPUTE
 
         // Helper to compute aligned buffer sizes
 #ifndef ROUND_UP
@@ -719,6 +720,7 @@ public:
         }
         graphicQueue->SetName(L"graphicQueue");
 
+#ifdef ASYNC_COMPUTE
         commandQueueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
         commandQueueDesc.Type = D3D12_COMMAND_LIST_TYPE::D3D12_COMMAND_LIST_TYPE_COMPUTE;
         hr = device->CreateCommandQueue(&commandQueueDesc, IID_PPV_ARGS(&computeQueue));
@@ -728,6 +730,9 @@ public:
             return;
         }
         computeQueue->SetName(L"computeQueue");
+#else
+        computeQueue = graphicQueue;
+#endif
 
         commandQueueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
         commandQueueDesc.Type = D3D12_COMMAND_LIST_TYPE::D3D12_COMMAND_LIST_TYPE_COPY;
@@ -1726,7 +1731,9 @@ void CommandBuffer::On(ID3D12CommandQueue* _queue, String name)
 {
     queue = _queue;
     D3D12_COMMAND_LIST_TYPE type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+#ifdef ASYNC_COMPUTE
     if (queue == GPU::instance->computeQueue) type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+#endif
     if (queue == GPU::instance->copyQueue) type = D3D12_COMMAND_LIST_TYPE_COPY;
     HRESULT hr = GPU::instance->device->CreateCommandAllocator(type, IID_PPV_ARGS(&cmdAlloc));
     if (FAILED(hr))
@@ -2544,7 +2551,7 @@ struct Profiler
 };
 Profiler* Profiler::instance;
 
-struct Vertex // et pas HLSL::Vertex car a cause de hlsl++ il sera pas aligne pareil mais il doivent rester les memes !
+struct Vertex // full-precision CPU/disk vertex (MeshData / .mesh). NOT the GPU layout (see VertexPacked).
 {
     float px, py, pz;
     float nx, ny, nz;
@@ -2552,6 +2559,32 @@ struct Vertex // et pas HLSL::Vertex car a cause de hlsl++ il sera pas aligne pa
     float bx, by, bz;
     float u, v, u1, v1;
 };
+
+// GPU vertex actually stored in the 'vertices' buffer. Must match HLSL::Vertex (52 bytes, plain layout).
+// packedPos holds SNORM16 x,y,z (w unused) LOCAL to the mesh AABB at offset 0 so the BLAS can read it
+// directly as R16G16B16A16_SNORM; the mesh shader decodes it with Mesh.aabbMin / Mesh.aabbExtent.
+struct VertexPacked
+{
+    uint32_t packedPos0, packedPos1; // [x|y<<16], [z|0<<16]
+    float u, v;
+    float nx, ny, nz;
+    float tx, ty, tz;
+    float bx, by, bz;
+};
+
+// Row-major 3x4 affine handed to DXR Triangles.Transform3x4 to dequantize the SNORM16 positions while
+// building the BLAS: objectPos = diag(halfExtent) * q + center, with q in [-1,1]. First 12 floats used.
+struct BLASTransform
+{
+    float m[16];
+};
+
+// Quantize a value in [-1,1] to SNORM16 (matches hardware SNORM decode max(c/32767,-1)).
+inline int16_t QuantizeSNorm16(float v)
+{
+    float c = v < -1.f ? -1.f : (v > 1.f ? 1.f : v);
+    return (int16_t)lroundf(c * 32767.0f);
+}
 
 struct Meshlet : HLSL::Meshlet
 {
@@ -2632,6 +2665,9 @@ struct MeshStorage
     static constexpr float GROWTH_FACTOR = 1.5f;
 
     StructuredUploadBuffer<float4x4> identityMatrix;
+    // One row-major 3x4 dequantization transform per mesh (indexed by Mesh.storageIndex), used as the
+    // DXR Triangles.Transform3x4 so the BLAS reconstructs object-space positions from SNORM16 data.
+    StructuredUploadBuffer<BLASTransform> meshTransforms;
 
     void On()
     {
@@ -2644,7 +2680,7 @@ struct MeshStorage
         meshletVerticesAllocatedCount = meshletVertexMaxCount;
         meshletTriangles.CreateBuffer<unsigned char>(meshletTrianglesMaxCount, "meshlet triangles");
         meshletTrianglesAllocatedCount = meshletTrianglesMaxCount;
-        vertices.CreateBuffer<Vertex>(vertexMaxCount, "vertices");
+        vertices.CreateBuffer<VertexPacked>(vertexMaxCount, "vertices");
         verticesAllocatedCount = vertexMaxCount;
         indices.CreateBuffer<unsigned int>(indexMaxCount, "indices");
         indicesAllocatedCount = indexMaxCount;
@@ -2654,6 +2690,11 @@ struct MeshStorage
         float4x4 iden = float4x4::identity();
         identityMatrix.Add(iden);
         identityMatrix.Upload();
+
+        // Pre-size the per-mesh transform buffer so it doesn't reallocate (and change GPU VA) while a
+        // batch of meshes is being loaded into a not-yet-executed command buffer.
+        meshTransforms.Resize(meshesMaxCount);
+        meshTransforms.Upload();
     }
 
     void Off()
@@ -2666,6 +2707,7 @@ struct MeshStorage
         indices.Release();
         scratchBLAS.Release();
         identityMatrix.Release();
+        meshTransforms.Release();
         instance = nullptr;
     }
 
@@ -2745,12 +2787,26 @@ struct MeshStorage
 
         // Ensure mesh buffer has capacity
         EnsureBufferCapacity(meshes, meshesAllocatedCount, nextMeshOffset, sizeof(HLSL::Mesh), "meshes", commandBuffer);
-        EnsureBufferCapacity(vertices, verticesAllocatedCount, nextVertexOffset, sizeof(Vertex), "vertices", commandBuffer);
+        EnsureBufferCapacity(vertices, verticesAllocatedCount, nextVertexOffset, sizeof(VertexPacked), "vertices", commandBuffer);
 
-        newMesh.boundingSphere = meshData.boundingSphere;
+        // Mesh AABB drives both the SNORM16 position quantization and the per-mesh BLAS dequant transform.
+        float mnx = FLT_MAX, mny = FLT_MAX, mnz = FLT_MAX, mxx = -FLT_MAX, mxy = -FLT_MAX, mxz = -FLT_MAX;
+        for (auto& sv : meshData.vertices)
+        {
+            mnx = min(mnx, sv.px); mny = min(mny, sv.py); mnz = min(mnz, sv.pz);
+            mxx = max(mxx, sv.px); mxy = max(mxy, sv.py); mxz = max(mxz, sv.pz);
+        }
+        if (meshData.vertices.empty()) { mnx = mny = mnz = 0; mxx = mxy = mxz = 0; }
+        float ex = mxx - mnx, ey = mxy - mny, ez = mxz - mnz;
+
+        newMesh.aabbMin = float4(mnx, mny, mnz, 0);
+        newMesh.aabbExtent = float4(ex, ey, ez, 0);
+        newMesh.lodCount = (uint)min((int)meshData.LODs.size(), 4);
         newMesh.storageIndex = _nextMeshOffset;
         newMesh.vertexCount = (uint)meshData.vertices.size();
         newMesh.vertexOffset = _nextVertexOffset;
+
+        for (int i = 0; i < 4; i++) newMesh.LODs[i] = {}; // unused LODs -> meshletCount 0 (culling fallback relies on this)
 
         for (int i = 0; i < min((int)meshData.LODs.size(), 4); i++)
         {
@@ -2799,8 +2855,41 @@ struct MeshStorage
         }
         lock.unlock();
 
+        // Pack vertices: SNORM16 position (local to the mesh AABB) + attributes (uv1 dropped).
+        std::vector<VertexPacked> packed(meshData.vertices.size());
+        float invx = ex > 0 ? 1.0f / ex : 0.0f;
+        float invy = ey > 0 ? 1.0f / ey : 0.0f;
+        float invz = ez > 0 ? 1.0f / ez : 0.0f;
+        for (size_t i = 0; i < meshData.vertices.size(); i++)
+        {
+            const Vertex& s = meshData.vertices[i];
+            VertexPacked& d = packed[i];
+            int16_t qx = QuantizeSNorm16((s.px - mnx) * invx * 2.0f - 1.0f);
+            int16_t qy = QuantizeSNorm16((s.py - mny) * invy * 2.0f - 1.0f);
+            int16_t qz = QuantizeSNorm16((s.pz - mnz) * invz * 2.0f - 1.0f);
+            d.packedPos0 = (uint32_t)(uint16_t)qx | ((uint32_t)(uint16_t)qy << 16);
+            d.packedPos1 = (uint32_t)(uint16_t)qz; // w = 0
+            d.u = s.u; d.v = s.v;
+            d.nx = s.nx; d.ny = s.ny; d.nz = s.nz;
+            d.tx = s.tx; d.ty = s.ty; d.tz = s.tz;
+            d.bx = s.bx; d.by = s.by; d.bz = s.bz;
+        }
+
+        // Per-mesh BLAS dequant transform: objectPos = diag(halfExtent) * q + center, q in [-1,1].
+        {
+            float hx = ex * 0.5f, hy = ey * 0.5f, hz = ez * 0.5f;
+            BLASTransform xf = {};
+            xf.m[0] = hx;  xf.m[3]  = mnx + hx;
+            xf.m[5] = hy;  xf.m[7]  = mny + hy;
+            xf.m[10] = hz; xf.m[11] = mnz + hz;
+            if (_nextMeshOffset >= meshTransforms.Size())
+                meshTransforms.Resize(_nextMeshOffset + 64);
+            meshTransforms[_nextMeshOffset] = xf;
+            meshTransforms.Upload();
+        }
+
         meshes.UploadElements(&newMesh, 1, _nextMeshOffset, commandBuffer);
-        vertices.UploadElements(meshData.vertices.data(), (uint)meshData.vertices.size(), _nextVertexOffset, commandBuffer);
+        vertices.UploadElements(packed.data(), (uint)packed.size(), _nextVertexOffset, commandBuffer);
 
 
         meshes.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
@@ -2825,14 +2914,16 @@ struct MeshStorage
         bool isOpaque = false;
         D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};
         descriptor.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        // Position is the SNORM16 packedPos at offset 0 of VertexPacked; the per-mesh Transform3x4
+        // below dequantizes it (q in [-1,1]) back to object space during the build.
         descriptor.Triangles.VertexBuffer.StartAddress = vertices.GetResource()->GetGPUVirtualAddress();
         descriptor.Triangles.VertexBuffer.StrideInBytes = vertices.stride;
         descriptor.Triangles.VertexCount = mesh.vertexCount;
-        descriptor.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+        descriptor.Triangles.VertexFormat = DXGI_FORMAT_R16G16B16A16_SNORM;
         descriptor.Triangles.IndexBuffer = indices.GetResource()->GetGPUVirtualAddress() + mesh.LODs[0].indexOffset * indices.stride; // TODO : read from meshRT and not LOD 0
         descriptor.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
         descriptor.Triangles.IndexCount = mesh.LODs[0].indexCount;
-        descriptor.Triangles.Transform3x4 = identityMatrix.GetResourcePtr()->GetGPUVirtualAddress();
+        descriptor.Triangles.Transform3x4 = meshTransforms.GetResourcePtr()->GetGPUVirtualAddress() + (UINT64)mesh.storageIndex * sizeof(BLASTransform);
         descriptor.Flags = isOpaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS prebuildDesc;

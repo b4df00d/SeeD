@@ -310,7 +310,7 @@ struct EditorContext
     // create a indirect buffer to store line to be drawn buy this debug shader 
     HLSL::EditorContext editorContext;
     StructuredBuffer<HLSL::IndirectCommand> indirectDebugBuffer;
-    StructuredBuffer<HLSL::Vertex> indirectDebugVertices;
+    StructuredBuffer<HLSL::DebugVertex> indirectDebugVertices;
     StructuredBuffer<uint> indirectDebugVerticesCount; // draw count, vertex index count
 
     StructuredBuffer<HLSL::SelectionResult> selectionResult;

@@ -28,12 +28,12 @@ VS_OUTPUT VertexMain(in uint vertexID : SV_VertexID, in uint instanceID : SV_Ins
     StructuredBuffer<HLSL::IndirectCommand> indirectCommands = ResourceDescriptorHeap[editorContext.debugBufferHeapIndex];
     HLSL::IndirectCommand indirectCommand = indirectCommands[0];
     
-    StructuredBuffer<HLSL::Vertex> debugVertices = ResourceDescriptorHeap[editorContext.debugVerticesHeapIndex];
-    HLSL::Vertex vertex = debugVertices[vertexID];
-    
+    StructuredBuffer<HLSL::DebugVertex> debugVertices = ResourceDescriptorHeap[editorContext.debugVerticesHeapIndex];
+    HLSL::DebugVertex vertex = debugVertices[vertexID];
+
     float4 worldPos = float4(vertex.pos.xyz, 1);
     o.pos = mul(camera.viewProj, worldPos);
-    o.color = float4(vertex.normal, 0);
+    o.color = float4(vertex.color, 0);
     
     return o;
 }

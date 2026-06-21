@@ -1132,7 +1132,7 @@ public:
         bar("meshlets", ms->nextMeshletOffset, ms->meshletsAllocatedCount, sizeof(HLSL::Meshlet));
         bar("meshlet vertices", ms->nextMeshletVertexOffset, ms->meshletVerticesAllocatedCount, sizeof(unsigned int));
         bar("meshlet triangles", ms->nextMeshletTriangleOffset, ms->meshletTrianglesAllocatedCount, sizeof(unsigned char));
-        bar("vertices", ms->nextVertexOffset, ms->verticesAllocatedCount, sizeof(Vertex));
+        bar("vertices", ms->nextVertexOffset, ms->verticesAllocatedCount, sizeof(VertexPacked));
         bar("indices", ms->nextIndexOffset, ms->indicesAllocatedCount, sizeof(unsigned int));
 
         double totalUsed =
@@ -1140,14 +1140,14 @@ public:
             bytes(ms->nextMeshletOffset, sizeof(HLSL::Meshlet)) +
             bytes(ms->nextMeshletVertexOffset, sizeof(unsigned int)) +
             bytes(ms->nextMeshletTriangleOffset, sizeof(unsigned char)) +
-            bytes(ms->nextVertexOffset, sizeof(Vertex)) +
+            bytes(ms->nextVertexOffset, sizeof(VertexPacked)) +
             bytes(ms->nextIndexOffset, sizeof(unsigned int));
         double totalCap =
             bytes(ms->meshesAllocatedCount, sizeof(HLSL::Mesh)) +
             bytes(ms->meshletsAllocatedCount, sizeof(HLSL::Meshlet)) +
             bytes(ms->meshletVerticesAllocatedCount, sizeof(unsigned int)) +
             bytes(ms->meshletTrianglesAllocatedCount, sizeof(unsigned char)) +
-            bytes(ms->verticesAllocatedCount, sizeof(Vertex)) +
+            bytes(ms->verticesAllocatedCount, sizeof(VertexPacked)) +
             bytes(ms->indicesAllocatedCount, sizeof(unsigned int));
 
         ImGui::Separator();

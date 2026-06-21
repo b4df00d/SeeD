@@ -130,8 +130,9 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
             HLSL::Mesh mesh = meshes[instance.meshIndex];
         
             float4x4 worldMatrix = instance.unpack(instance.current);
-            float3 center = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
-            float radius = instance.GetScale() * mesh.boundingSphere.w;
+            float4 meshBS = mesh.GetBoundingSphere();
+            float3 center = mul(worldMatrix, float4(meshBS.xyz, 1)).xyz;
+            float radius = instance.GetScale() * meshBS.w;
             DrawSphere(center, radius);
         }
     }

@@ -59,8 +59,9 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
     RWStructuredBuffer<HLSL::InstanceCullingDispatch> instancesCulledArgs = ResourceDescriptorHeap[viewContext.instancesCulledArgsIndex];
     
     float4x4 worldMatrix = instance.unpack(instance.current);
-    float3 center = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1)).xyz;
-    float radius = abs(instance.GetScale() * mesh.boundingSphere.w); // assume uniform scaling
+    float4 meshBS = mesh.GetBoundingSphere();
+    float3 center = mul(worldMatrix, float4(meshBS.xyz, 1)).xyz;
+    float radius = abs(instance.GetScale() * meshBS.w); // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
     float dist = length(camera.worldPos.xyz - center.xyz);
   
