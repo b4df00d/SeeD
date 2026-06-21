@@ -1,3 +1,80 @@
+// ============================================================================
+// TODO list  (self-contained: each point holds all the data needed to start a
+//             dedicated coding session)
+// ============================================================================
+//
+// [ ] 1. Shader Execution Reordering (SER)
+//        https://devblogs.microsoft.com/directx/shader-execution-reordering/
+//        - Target the EXISTING DXR pipeline. raytracing2.hlsl already has
+//          raygeneration/miss/closesthit/anyhit shaders + TraceRay/DispatchRays,
+//          so no DXR rewrite is needed.
+//        - Use MaybeReorderThread to reorder by hit/material coherence AFTER
+//          TraceRay returns, to cut shading divergence (threads in a warp that
+//          hit different materials/closest-hit paths get regrouped).
+//        - Biggest win is exactly this multi-material pipeline case.
+//
+// [ ] 2. Opacity Micro Map (OMM)
+//        https://github.com/NVIDIA-RTX/OMM
+//        - Cutout already works in RT but is costly: it goes through the any-hit
+//          shaders in raytracing2.hlsl (alpha test in any-hit).
+//        - OMM lets the RT cores skip most any-hit invocations (known-opaque /
+//          known-transparent micro-triangles), keeping any-hit only for the
+//          unknown border region.
+//        - Touches the same RT shaders as SER -> implement alongside point 1.
+//
+// [ ] 3. Simple terrain with Erosion
+//        https://blog.runevision.com/2026/03/fast-and-gorgeous-erosion-filter.html
+//        - GPU "terrain paint" pass: compute the base heightmap + erosion on the
+//          GPU and store the result into a final heightmap texture.
+//        - Geometry: ONE clustered terrain grid mesh stored ONCE in mesh storage,
+//          instanced across a quadtree (the quadtree drives instance/LOD
+//          selection and per-node world extents).
+//        - Deformation: displace vertices in the MESH SHADER by sampling the
+//          final heightmap at render time (no baked geometry, no duplicated
+//          storage per node).
+//        - The base grid can reuse the lighter mesh format from point 4.
+//
+// [ ] 4. Reduce mesh storage and vertex strides  (FULL commit, no fallback)
+//        - Meshlet indices on 8 bits.
+//        - Vertex positions on 16 bits, LOCAL to the cluster center: store a
+//          per-cluster center + extent/scale and reconstruct world/local pos in
+//          the mesh shader (adjust the vertex fetch accordingly).
+//        - This is foundational: terrain (3) and skinning (6) build on it.
+//        - WATCH: GPU culling has a latent empty-LOD bug (far instances vanish if
+//          the selected LOD has 0 meshlets) -- re-check culling after changing
+//          the meshlet/cluster format.
+//
+// [ ] 5. Project file
+//        - Simple .txt format (like the existing .seed / UILayout.txt files).
+//        - Stores: asset directory, scene to load, and window/render settings.
+//
+// [ ] 6. Mesh skinning feature
+//        - PREREQUISITE: Assimp bone-list loading must be done first (see point 7
+//          dependency: bones come from asset loading).
+//        - Approach: duplicate the mesh per skinned instance; a compute shader
+//          reads the ORIGINAL mesh and writes the transformed (skinned) copy.
+//
+// [ ] 7. Simple animation system
+//        - Bone list comes from Assimp asset loading.
+//        - Feeds the bone matrices consumed by the skinning compute shader (6).
+//
+// [ ] 8. Jolt integration with ECS
+//        - ECS components: rigidbody, collisionmesh, constraint.
+//        - System A: initializes Jolt bodies/constraints from the ECS components.
+//        - System B: reads transforms back from Jolt and writes them into the ECS
+//          each frame.
+//
+// [ ] 9. Execute pass command buffers as soon as they are ready, in the correct
+//        order -- WITHOUT locking a dedicated thread just to do the submission.
+//
+// [ ] 10. DLSS parameters UI: model, quality.
+//
+// [ ] 11. GBuffer draw calls (ExecuteIndirect) must be able to run different
+//         shaders -- at least one with early-Z and one without -- so cutout works
+//         in the GBuffer (mirrors the RT cutout handling).
+//
+// ============================================================================
+
 #define WIN32_LEAN_AND_MEAN
 #include <iostream>
 #include <vector>
