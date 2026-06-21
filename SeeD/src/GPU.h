@@ -2560,16 +2560,16 @@ struct Vertex // full-precision CPU/disk vertex (MeshData / .mesh). NOT the GPU 
     float u, v, u1, v1;
 };
 
-// GPU vertex actually stored in the 'vertices' buffer. Must match HLSL::Vertex (52 bytes, plain layout).
-// packedPos holds SNORM16 x,y,z (w unused) LOCAL to the mesh AABB at offset 0 so the BLAS can read it
-// directly as R16G16B16A16_SNORM; the mesh shader decodes it with Mesh.aabbMin / Mesh.aabbExtent.
+// GPU vertex actually stored in the 'vertices' buffer. Must match HLSL::Vertex (24 bytes, plain layout).
+// packedPos holds SNORM16 x,y,z LOCAL to the mesh AABB at offset 0 so the BLAS can read it directly as
+// R16G16B16A16_SNORM; the high 16 bits of packedPos1 (the BLAS-ignored w) carry the TBN handedness sign.
+// normalOct/tangentOct are octahedral-packed unit vectors (decoded with i_octahedral_32(.,16)).
 struct VertexPacked
 {
-    uint32_t packedPos0, packedPos1; // [x|y<<16], [z|0<<16]
+    uint32_t packedPos0, packedPos1; // [x|y<<16], [z|handedness<<16]
     float u, v;
-    float nx, ny, nz;
-    float tx, ty, tz;
-    float bx, by, bz;
+    uint32_t normalOct;
+    uint32_t tangentOct;
 };
 
 // Row-major 3x4 affine handed to DXR Triangles.Transform3x4 to dequantize the SNORM16 positions while
@@ -2584,6 +2584,24 @@ inline int16_t QuantizeSNorm16(float v)
 {
     float c = v < -1.f ? -1.f : (v > 1.f ? 1.f : v);
     return (int16_t)lroundf(c * 32767.0f);
+}
+
+// Octahedral-encode a (near-)unit vector into a uint, 16 bits/axis. Inverse of the shader's
+// i_octahedral_32(data, 16). Uses signNotZero (0 -> +1) so it round-trips cleanly.
+inline uint32_t OctEncode32(float x, float y, float z)
+{
+    float l1 = fabsf(x) + fabsf(y) + fabsf(z);
+    if (l1 < 1e-12f) { x = 0.f; y = 0.f; z = 1.f; l1 = 1.f; } // degenerate (e.g. mesh without normals)
+    x /= l1; y /= l1; z /= l1;
+    if (z < 0.f)
+    {
+        float ox = (1.f - fabsf(y)) * (x >= 0.f ? 1.f : -1.f);
+        float oy = (1.f - fabsf(x)) * (y >= 0.f ? 1.f : -1.f);
+        x = ox; y = oy;
+    }
+    uint32_t dx = (uint32_t)floorf((0.5f + 0.5f * x) * 65535.f + 0.5f);
+    uint32_t dy = (uint32_t)floorf((0.5f + 0.5f * y) * 65535.f + 0.5f);
+    return (dy << 16) | dx;
 }
 
 struct Meshlet : HLSL::Meshlet
@@ -2855,7 +2873,8 @@ struct MeshStorage
         }
         lock.unlock();
 
-        // Pack vertices: SNORM16 position (local to the mesh AABB) + attributes (uv1 dropped).
+        // Pack vertices: SNORM16 position (local to the mesh AABB) + octahedral normal/tangent + uv.
+        // The binormal is dropped and rebuilt on the GPU from the handedness sign stored in packedPos.w.
         std::vector<VertexPacked> packed(meshData.vertices.size());
         float invx = ex > 0 ? 1.0f / ex : 0.0f;
         float invy = ey > 0 ? 1.0f / ey : 0.0f;
@@ -2867,12 +2886,19 @@ struct MeshStorage
             int16_t qx = QuantizeSNorm16((s.px - mnx) * invx * 2.0f - 1.0f);
             int16_t qy = QuantizeSNorm16((s.py - mny) * invy * 2.0f - 1.0f);
             int16_t qz = QuantizeSNorm16((s.pz - mnz) * invz * 2.0f - 1.0f);
+
+            // TBN handedness = sign(dot(cross(normal, tangent), binormal)); stored as the 4th SNORM16.
+            float cx = s.ny * s.tz - s.nz * s.ty;
+            float cy = s.nz * s.tx - s.nx * s.tz;
+            float cz = s.nx * s.ty - s.ny * s.tx;
+            float hdot = cx * s.bx + cy * s.by + cz * s.bz;
+            int16_t hSnorm = hdot >= 0.0f ? (int16_t)32767 : (int16_t)-32767;
+
             d.packedPos0 = (uint32_t)(uint16_t)qx | ((uint32_t)(uint16_t)qy << 16);
-            d.packedPos1 = (uint32_t)(uint16_t)qz; // w = 0
+            d.packedPos1 = (uint32_t)(uint16_t)qz | ((uint32_t)(uint16_t)hSnorm << 16);
             d.u = s.u; d.v = s.v;
-            d.nx = s.nx; d.ny = s.ny; d.nz = s.nz;
-            d.tx = s.tx; d.ty = s.ty; d.tz = s.tz;
-            d.bx = s.bx; d.by = s.by; d.bz = s.bz;
+            d.normalOct = OctEncode32(s.nx, s.ny, s.nz);
+            d.tangentOct = OctEncode32(s.tx, s.ty, s.tz);
         }
 
         // Per-mesh BLAS dequant transform: objectPos = diag(halfExtent) * q + center, q in [-1,1].

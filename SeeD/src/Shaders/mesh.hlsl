@@ -94,15 +94,17 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         float4 previousClipPos = mul(camera.previousViewProj, previousWorldPos);
         outVerts[groupThreadId.x].previousPos = previousClipPos;
         
-        float3 normal = verticesData[index].normal.xyz;
+        float3 normal = i_octahedral_32(verticesData[index].normalOct, 16);
         float3 worldNormal = mul((float3x3)worldMatrix, normal);
         outVerts[groupThreadId.x].normal = normalize(worldNormal);
-        
-        float3 tangent = verticesData[index].tangent.xyz;
+
+        float3 tangent = i_octahedral_32(verticesData[index].tangentOct, 16);
         float3 worldTangent = mul((float3x3)worldMatrix, tangent);
         outVerts[groupThreadId.x].tangent = worldTangent;
-        
-        float3 binormal = verticesData[index].binormal.xyz;
+
+        // Rebuild the binormal from the handedness sign packed in packedPos.w (high 16 bits of pp.y).
+        float handedness = (int(pp.y) >> 16) >= 0 ? 1.0f : -1.0f;
+        float3 binormal = cross(normal, tangent) * handedness;
         float3 worldBinormal = mul((float3x3)worldMatrix, binormal);
         outVerts[groupThreadId.x].binormal = worldBinormal;
         

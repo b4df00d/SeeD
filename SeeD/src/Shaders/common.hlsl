@@ -1320,9 +1320,9 @@ float2 bary)
 
     float2 uv = ((1 - bary.x - bary.y) * uv1 + bary.x * uv2 + bary.y * uv3);
     
-    float3 nrm1 = verticesData[i1].normal;
-    float3 nrm2 = verticesData[i2].normal;
-    float3 nrm3 = verticesData[i3].normal;
+    float3 nrm1 = i_octahedral_32(verticesData[i1].normalOct, 16);
+    float3 nrm2 = i_octahedral_32(verticesData[i2].normalOct, 16);
+    float3 nrm3 = i_octahedral_32(verticesData[i3].normalOct, 16);
 
     float3 normal = ((1 - bary.x - bary.y) * nrm1 + bary.x * nrm2 + bary.y * nrm3);
     float4x4 worldMatrix = instance.unpack(instance.current);

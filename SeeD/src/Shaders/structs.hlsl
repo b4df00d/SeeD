@@ -183,18 +183,18 @@ namespace HLSL
         uint id;
     };
     
-    // must match GPU.h VertexPacked (plain layout, 52 bytes).
-    // Position is packed as SNORM16 x,y,z (w unused) LOCAL to the mesh AABB, kept at
-    // offset 0 so the BLAS can read it directly as R16G16B16A16_SNORM. Decode with
-    // Mesh.aabbMin / Mesh.aabbExtent (see mesh.hlsl). uv is placed right after the
-    // packed position so the first 16 bytes are filled exactly (no straddle padding).
+    // must match GPU.h VertexPacked (plain layout, 24 bytes).
+    // packedPos: SNORM16 x,y,z LOCAL to the mesh AABB, at offset 0 so the BLAS can read it
+    //   directly as R16G16B16A16_SNORM (decode with Mesh.aabbMin / Mesh.aabbExtent, see mesh.hlsl).
+    //   The 4th SNORM16 (high 16 bits of packedPos.y) stores the TBN handedness sign (+/-1),
+    //   ignored by the BLAS; used to rebuild the binormal = cross(normal,tangent)*handedness.
+    // normalOct/tangentOct: unit vectors octahedral-packed via octahedral_32(v,16) / i_octahedral_32.
     struct Vertex
     {
         uint2 packedPos;
         float2 uv;
-        float3 normal;
-        float3 tangent;
-        float3 binormal;
+        uint normalOct;
+        uint tangentOct;
     };
 
     // Debug-only vertex (kept full precision, decoupled from the mesh Vertex format).
