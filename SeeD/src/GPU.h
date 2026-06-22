@@ -2538,6 +2538,23 @@ struct Profiler
 
     }
 
+    // Clear the rolling timing history of every pass. Called when a shader hot-reloads
+    // so the next averaged samples reflect the NEW shader, not a blend with the old one.
+    void ResetSamples()
+    {
+        lock.lock();
+        for (uint i = 0; i < ARRAYSIZE(queueProfile); i++)
+        {
+            for (auto& e : queueProfile[i].entries)
+            {
+                for (uint s = 0; s < ProfileData::FilterSize; s++)
+                    e.TimeSamples[s] = 0.0;
+                e.CurrSample = 0;
+            }
+        }
+        lock.unlock();
+    }
+
     void Off()
     {
         ZoneScoped;

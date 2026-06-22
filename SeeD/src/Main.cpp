@@ -149,6 +149,7 @@ struct Options
     bool enableStructuredCommandBuffersReadback = false;
     bool stepMotion = false;
     bool shaderReload = true;
+    bool shaderStatsCsv = true; // dump ..\shaderStats.csv for the live edit/profile loop
     bool frontToBackSort = true;
     float sortMaxDistance = 512.0f;
     int lightUnitsIndex = 0;
@@ -219,6 +220,10 @@ public:
 
     Systems::Player player;
 
+    // live shader stats (edit -> hot-reload -> profile loop)
+    float shaderStatsSecondsSinceReload = 0.0f;
+    float shaderStatsCsvTimer = 0.0f;
+
     void On(IOs::WindowInformation window)
     {
         ZoneScoped;
@@ -266,6 +271,30 @@ public:
             CLEAR();
 
             world.DeferredRelease(); // thread this ?
+
+            // Live shader stats: when a shader hot-reloads, restart the GPU timing window so the
+            // averages reflect the NEW shader, then periodically dump shaderStats.csv. The external
+            // optimize loop watches each pass's reloadId (bumps on recompile) + secondsSinceReload.
+            if (options.shaderStatsCsv)
+            {
+                float dt = Time::instance->deltaSeconds;
+                if (assetLibrary.shaderLoaded > 0)
+                {
+                    shaderStatsSecondsSinceReload = 0.0f;
+                    profiler.ResetSamples();
+                }
+                else
+                {
+                    shaderStatsSecondsSinceReload += dt;
+                }
+                shaderStatsCsvTimer += dt;
+                if (shaderStatsCsvTimer >= 0.5f)
+                {
+                    shaderStatsCsvTimer = 0.0f;
+                    if (ShaderStatsCollector::instance)
+                        ShaderStatsCollector::instance->WriteCsv("..\\shaderStats.csv", shaderStatsSecondsSinceReload);
+                }
+            }
 
             if (options.stepMotion)
                 Sleep(250);

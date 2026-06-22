@@ -1490,6 +1490,184 @@ SceneLoader* SceneLoader::instance = nullptr;
 
 #pragma comment(lib, "dxcompiler.lib")
 #include "../../Third/DirectXShaderCompiler-main/inc/dxcapi.h"
+
+// DXC reflection numbers for one compiled shader stage.
+struct ReflectionStats
+{
+    uint instrTotal = 0;
+    uint instrFloat = 0;
+    uint instrInt = 0;
+    uint instrTex = 0;
+    uint tempRegs = 0;
+    uint3 threadGroup = uint3(0, 0, 0);
+};
+
+// Collects per-shader-pass compile results so they can be dumped to shaderStats.csv for the
+// live "edit -> hot-reload -> profile" loop. The handshake the external optimizer relies on:
+//   - reloadId : bumped every time a pass is (re)compiled, so a fresh result is unambiguous.
+//   - status   : OK / COMPILE_ERROR (+ error text, same string DXC prints to the console).
+// A pass groups all its stages (mesh+pixel, etc.); GPU timings live in the #PASSES section,
+// keyed by render-pass zone name (see Profiler), written by WriteCsv().
+struct ShaderStatsCollector
+{
+    static ShaderStatsCollector* instance;
+
+    struct Stage
+    {
+        String entry;
+        String stage;          // ms_6_6 / ps_6_6 / cs_6_6 / vs_6_6 / lib_6_6
+        ReflectionStats refl;
+        uint dxilBytes = 0;
+    };
+    struct Pass
+    {
+        String file;
+        String pass;
+        uint reloadId = 0;
+        bool compiledOk = true;
+        String error;
+        std::vector<Stage> stages;
+    };
+
+    std::mutex mtx;
+    std::unordered_map<std::string, Pass> passes;   // key "file|pass"; element ptrs are stable across rehash
+    static thread_local Pass* current;              // pass being compiled on the calling thread
+    uint writeSeq = 0;
+
+    static std::string Key(const String& file, const String& pass)
+    {
+        return std::string(file.c_str()) + "|" + std::string(pass.c_str());
+    }
+
+    void BeginPass(const String& file, const String& pass)
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        Pass& p = passes[Key(file, pass)];
+        p.file = file;
+        p.pass = pass;
+        p.reloadId++;
+        p.compiledOk = true;
+        p.error.clear();
+        p.stages.clear();
+        current = &p;
+    }
+
+    void RecordStage(const String& entry, const String& stage, const ReflectionStats& refl, uint dxilBytes)
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        if (current == nullptr) return;
+        Stage s;
+        s.entry = entry;
+        s.stage = stage;
+        s.refl = refl;
+        s.dxilBytes = dxilBytes;
+        current->stages.push_back(s);
+    }
+
+    void RecordError(const String& error)
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        if (current == nullptr) return;
+        current->compiledOk = false;
+        if (current->error.empty())
+            current->error = error;
+    }
+
+    void EndPass(bool compiled)
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        if (current != nullptr && !compiled)
+            current->compiledOk = false;
+        current = nullptr;
+    }
+
+    static std::string CsvEscape(const std::string& in)
+    {
+        std::string out = "\"";
+        for (char c : in)
+        {
+            if (c == '\r') continue;
+            if (c == '\n') { out += " | "; continue; }
+            if (c == '"') { out += "\"\""; continue; }
+            out += c;
+        }
+        out += "\"";
+        return out;
+    }
+
+    // Atomically (tmp + rename) writes both sections. secondsSinceReload lets the optimizer know
+    // the GPU timings have settled on the new shader before trusting them.
+    void WriteCsv(const char* path, float secondsSinceReload)
+    {
+        std::lock_guard<std::mutex> g(mtx);
+        uint seq = ++writeSeq;
+        std::string tmp = std::string(path) + ".tmp";
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f.is_open()) return;
+
+        f << "writeSeq," << seq << ",secondsSinceReload," << secondsSinceReload << "\n";
+
+        f << "#SHADERS\n";
+        f << "file,pass,entry,stage,reloadId,status,instr_total,instr_float,instr_int,instr_tex,temp_regs,tg_x,tg_y,tg_z,dxil_bytes,error\n";
+        for (auto& kv : passes)
+        {
+            Pass& p = kv.second;
+            const char* status = p.compiledOk ? "OK" : "COMPILE_ERROR";
+            std::string err = CsvEscape(std::string(p.error.c_str()));
+            if (p.stages.empty())
+            {
+                f << p.file << "," << p.pass << ",,," << p.reloadId << "," << status
+                  << ",,,,,,,,,," << err << "\n";
+            }
+            else
+            {
+                for (auto& s : p.stages)
+                {
+                    f << p.file << "," << p.pass << "," << s.entry << "," << s.stage << ","
+                      << p.reloadId << "," << status << ","
+                      << s.refl.instrTotal << "," << s.refl.instrFloat << "," << s.refl.instrInt << "," << s.refl.instrTex << ","
+                      << s.refl.tempRegs << "," << s.refl.threadGroup.x << "," << s.refl.threadGroup.y << "," << s.refl.threadGroup.z << ","
+                      << s.dxilBytes << "," << err << "\n";
+                }
+            }
+        }
+
+        f << "#PASSES\n";
+        f << "zone,queue,gpu_ms_avg,gpu_ms_min,gpu_ms_max\n";
+        if (Profiler::instance != nullptr)
+        {
+            const char* qn[3] = { "graphic", "compute", "copy" };
+            for (uint q = 0; q < 3; q++)
+            {
+                for (auto& e : Profiler::instance->queueProfile[q].entries)
+                {
+                    if (e.name == nullptr || e.name[0] == '\0') continue;
+                    double avg = 0, mn = 0, mx = 0;
+                    int n = 0;
+                    for (uint s = 0; s < Profiler::ProfileData::FilterSize; s++)
+                    {
+                        double t = e.TimeSamples[s];
+                        if (t > 0.0)
+                        {
+                            if (n == 0) { mn = t; mx = t; }
+                            else { mn = std::min(mn, t); mx = std::max(mx, t); }
+                            avg += t;
+                            n++;
+                        }
+                    }
+                    if (n > 0) avg /= n;
+                    f << e.name << "," << qn[q] << "," << avg << "," << mn << "," << mx << "\n";
+                }
+            }
+        }
+
+        f.close();
+        MoveFileExA(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING);
+    }
+};
+ShaderStatsCollector* ShaderStatsCollector::instance = nullptr;
+thread_local ShaderStatsCollector::Pass* ShaderStatsCollector::current = nullptr;
+
 class ShaderLoader
 {
 public :
@@ -1501,6 +1679,8 @@ public :
     {
         ZoneScoped;
         instance = this;
+        static ShaderStatsCollector statsCollector;
+        ShaderStatsCollector::instance = &statsCollector;
         HRESULT hr;
         hr = DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&DxcUtils));
         if (FAILED(hr)) GPU::PrintDeviceRemovedReason(hr);
@@ -1604,6 +1784,7 @@ public :
             std::string errorMsg = std::string((char*)pErrors->GetStringPointer());
             IOs::Log("---------------------- {} COMPILE FAILED -------------------", file.c_str());
             IOs::Log(errorMsg);
+            if (ShaderStatsCollector::instance) ShaderStatsCollector::instance->RecordError(errorMsg);
             return D3D12_SHADER_BYTECODE{};
         }
         // Quit if the compilation failed.
@@ -1611,6 +1792,7 @@ public :
         pResults->GetStatus(&hrStatus);
         if (!SUCCEEDED(hrStatus))
         {
+            if (ShaderStatsCollector::instance) ShaderStatsCollector::instance->RecordError("compile failed (no error blob)");
             return D3D12_SHADER_BYTECODE{};
         }
 
@@ -1623,7 +1805,10 @@ public :
             CreateRTShaderLibrary(shader, pResults);
         }
 
-        ShaderReflection(pResults, shader);
+        ReflectionStats refl{};
+        ShaderReflection(pResults, shader, &refl);
+        if (ShaderStatsCollector::instance)
+            ShaderStatsCollector::instance->RecordStage(entry, type, refl, (uint)shaderBytecode.BytecodeLength);
 
 #if 0
         // Save pdb.
@@ -2103,7 +2288,7 @@ public :
         return pso;
     }
 
-    void ShaderReflection(IDxcResult* pResults, Shader* shader = NULL)
+    void ShaderReflection(IDxcResult* pResults, Shader* shader = NULL, ReflectionStats* outStats = nullptr)
     {
         // Reflection to get custom cbuffer layout
         IDxcBlob* pReflectionData;
@@ -2124,6 +2309,20 @@ public :
         pShaderReflection->GetDesc(&refDesc);
 
         std::cout << "InstructionCounts (float | int | texture | total): " << refDesc.FloatInstructionCount << " | " << refDesc.IntInstructionCount << " | " << refDesc.TextureLoadInstructions << " | " << refDesc.InstructionCount << " -- TempRegisterCount : " << refDesc.TempRegisterCount << std::endl;
+
+        {
+            uint x = 0, y = 0, z = 0;
+            pShaderReflection->GetThreadGroupSize(&x, &y, &z);
+            if (outStats != nullptr)
+            {
+                outStats->instrTotal = refDesc.InstructionCount;
+                outStats->instrFloat = refDesc.FloatInstructionCount;
+                outStats->instrInt = refDesc.IntInstructionCount;
+                outStats->instrTex = refDesc.TextureLoadInstructions;
+                outStats->tempRegs = refDesc.TempRegisterCount;
+                outStats->threadGroup = uint3(x, y, z);
+            }
+        }
 
         if (shader != NULL)
         {
@@ -2463,7 +2662,9 @@ public :
 
     bool Load(Shader& shader, String file, String shaderName)
     {
+        if (ShaderStatsCollector::instance) ShaderStatsCollector::instance->BeginPass(file, shaderName);
         bool compiled = Parse(shader, file, shaderName);
+        if (ShaderStatsCollector::instance) ShaderStatsCollector::instance->EndPass(compiled);
         if (compiled)
             IOs::Log("compiled {}", file.c_str());
         return compiled;
@@ -2537,6 +2738,11 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             }
             else
             {
+                // Failed compile: keep the last-good shader live, but copy the edited file's
+                // timestamps onto it so NeedReload() doesn't recompile every frame (reload storm)
+                // until the source actually changes again. Fixing the file bumps mtime -> reloads.
+                if (map[id].data != nullptr)
+                    ((Shader*)map[id].data)->creationTime = shader.creationTime;
                 shader.Release();
             }
         }
