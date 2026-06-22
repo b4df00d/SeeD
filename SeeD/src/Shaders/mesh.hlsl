@@ -25,21 +25,16 @@ struct MSVert
     float4 currentPos : TEXCOORD0;
     float4 previousPos : TEXCOORD1;
     float3 normal : NORMAL;
-    float3 tangent : TEXCOORD2;
-    float3 binormal : TEXCOORD3;
-    float3 color : COLOR0;
-    float2 uv : TEXCOORD4;
-    nointerpolation uint objectID : TEXCOORD5;
-    nointerpolation uint instanceID : TEXCOORD6;
+    float4 tangent : TEXCOORD2; // xyz = tangent, w = world-space handedness (binormal sign)
+    float2 uv : TEXCOORD3;
 };
 
-groupshared HLSL::Camera camera;
-groupshared HLSL::Instance instance;
 groupshared HLSL::Mesh mesh;
 groupshared HLSL::Meshlet meshlet;
-groupshared float4x4 worldMatrix;
-groupshared float4x4 previousWorldMatrix;
-groupshared float3 color;
+groupshared float4x4 worldMatrix;     // object->world (for normal/tangent)
+groupshared float4x4 mvp;             // viewProj * world
+groupshared float4x4 previousMvp;     // previousViewProj * previousWorld
+groupshared float worldDetSign;       // sign(det(world)) -> keeps binormal handedness correct on mirrored instances
 
 [RootSignature(SeeDRootSignature)]
 [outputtopology("triangle")]
@@ -49,12 +44,17 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
     if(groupThreadId.x == 0)
     {
         StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-        camera = cameras[0]; //viewContext.cameraIndex];
-        
+        HLSL::Camera camera = cameras[0]; //viewContext.cameraIndex];
+
         StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-        instance = instances[instanceIndexIndirect];
+        HLSL::Instance instance = instances[instanceIndexIndirect];
         worldMatrix = instance.unpack(instance.current);
-        previousWorldMatrix = instance.unpack(instance.previous);
+        float4x4 previousWorldMatrix = instance.unpack(instance.previous);
+
+        // Concatenate once per group so each vertex does a single matrix*vector (no intermediate worldPos).
+        mvp = mul(camera.viewProj, worldMatrix);
+        previousMvp = mul(camera.previousViewProj, previousWorldMatrix);
+        worldDetSign = determinant((float3x3)worldMatrix) >= 0.0f ? 1.0f : -1.0f;
 
         StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
         mesh = meshes[instance.meshIndex]; // for SNORM16 position decode (aabbMin / aabbExtent)
@@ -63,8 +63,6 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         meshlet = meshlets[meshletIndexIndirect];
         meshlet.vertexCount = min(HLSL::max_vertices, meshlet.vertexCount);
         meshlet.triangleCount = min(HLSL::max_triangles, meshlet.triangleCount);
-        
-        color = RandUINT(meshletIndexIndirect);
     }
     GroupMemoryBarrierWithGroupSync();
     
@@ -74,45 +72,31 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
     if (groupThreadId.x < meshlet.vertexCount)
     {
-        uint tmpIndex = meshlet.vertexOffset + groupThreadId.x;
-        uint index = meshletVertices[tmpIndex];
+        uint index = meshletVertices[meshlet.vertexOffset + groupThreadId.x];
+        HLSL::Vertex v = verticesData[index]; // single fetch
 
-        // Decode SNORM16 position (local to mesh AABB). packedPos.x = [x|y<<16], packedPos.y = [z|0<<16].
-        uint2 pp = verticesData[index].packedPos;
-        int3 qi = int3(int(pp.x << 16) >> 16, int(pp.x) >> 16, int(pp.y << 16) >> 16);
+        // Decode SNORM16 position (local to mesh AABB). packedPos.x = [x|y<<16], packedPos.y = [z|handedness<<16].
+        int3 qi = int3(int(v.packedPos.x << 16) >> 16, int(v.packedPos.x) >> 16, int(v.packedPos.y << 16) >> 16);
         float3 q = max(float3(qi) / 32767.0f, -1.0f);
         float3 objectPos = mesh.aabbMin.xyz + (q * 0.5f + 0.5f) * mesh.aabbExtent.xyz;
         float4 pos = float4(objectPos, 1);
 
-        float4 worldPos = mul(worldMatrix, pos);
-        float4 clipPos = mul(camera.viewProj, worldPos);
+        float4 clipPos = mul(mvp, pos);
         outVerts[groupThreadId.x].currentPos = clipPos;
         clipPos.xy += viewContext.jitter.xy * clipPos.w;
         outVerts[groupThreadId.x].pos = clipPos;
-        
-        float4 previousWorldPos = mul(previousWorldMatrix, pos);
-        float4 previousClipPos = mul(camera.previousViewProj, previousWorldPos);
-        outVerts[groupThreadId.x].previousPos = previousClipPos;
-        
-        float3 normal = i_octahedral_32(verticesData[index].normalOct, 16);
-        float3 worldNormal = mul((float3x3)worldMatrix, normal);
-        outVerts[groupThreadId.x].normal = normalize(worldNormal);
 
-        float3 tangent = i_octahedral_32(verticesData[index].tangentOct, 16);
-        float3 worldTangent = mul((float3x3)worldMatrix, tangent);
-        outVerts[groupThreadId.x].tangent = worldTangent;
+        outVerts[groupThreadId.x].previousPos = mul(previousMvp, pos);
 
-        // Rebuild the binormal from the handedness sign packed in packedPos.w (high 16 bits of pp.y).
-        float handedness = (int(pp.y) >> 16) >= 0 ? 1.0f : -1.0f;
-        float3 binormal = cross(normal, tangent) * handedness;
-        float3 worldBinormal = mul((float3x3)worldMatrix, binormal);
-        outVerts[groupThreadId.x].binormal = worldBinormal;
-        
-        outVerts[groupThreadId.x].color = color;
-        outVerts[groupThreadId.x].uv = verticesData[index].uv;
+        float3 normal = i_octahedral_32(v.normalOct, 16);
+        outVerts[groupThreadId.x].normal = normalize(mul((float3x3)worldMatrix, normal));
 
-        outVerts[groupThreadId.x].objectID = instance.objectID;
-        outVerts[groupThreadId.x].instanceID = instanceIndexIndirect;
+        // Pass tangent + world-space handedness; the binormal is rebuilt in the pixel shader.
+        float3 tangent = i_octahedral_32(v.tangentOct, 16);
+        float handedness = ((int(v.packedPos.y) >> 16) >= 0 ? 1.0f : -1.0f) * worldDetSign;
+        outVerts[groupThreadId.x].tangent = float4(mul((float3x3)worldMatrix, tangent), handedness);
+
+        outVerts[groupThreadId.x].uv = v.uv;
     }
     ByteAddressBuffer trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
     if (groupThreadId.x < meshlet.triangleCount)
@@ -146,20 +130,21 @@ PS_OUTPUT PixelForward(MSVert inVerts)
     
     StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
     HLSL::Material material = materials[instance.materialIndex];
-    
-    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent, inVerts.binormal);
-    
+
+    float3 binormal = cross(inVerts.normal, inVerts.tangent.xyz) * inVerts.tangent.w;
+    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent.xyz, binormal);
+
     o.albedo = s.albedo;
     o.specularAlbedo = lerp(1, s.albedo, s.metalness);
     o.roughness = s.roughness;
     o.metalness = s.metalness;
     o.normal = float4(StoreNormal(normalize(s.normal)), 1);
-    
+
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
-    
-    o.objectID = inVerts.objectID;
-    o.instanceID = inVerts.instanceID;
-    
+
+    o.objectID = instance.objectID;
+    o.instanceID = instanceIndexIndirect;
+
     return o;
 }
 
@@ -177,15 +162,16 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     
     StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
     HLSL::Material material = materials[instance.materialIndex];
-    
-    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent, inVerts.binormal);
-    
+
+    float3 binormal = cross(inVerts.normal, inVerts.tangent.xyz) * inVerts.tangent.w;
+    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent.xyz, binormal);
+
     o.albedo = s.albedo;
-    
+
     if (editorContext.clusters)
     {
         o.albedo = 1;
-        o.albedo.xyz = inVerts.color;
+        o.albedo.xyz = RandUINT(meshletIndexIndirect); // per-meshlet debug color (computed here, not interpolated)
     }
     
     if((o.albedo.a+0.01) < material.parameters[4]) discard;
@@ -203,10 +189,10 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     o.normal = float4(StoreNormal(normalize(s.normal)), 1);
     
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
-    
-    o.objectID = inVerts.objectID;
-    o.instanceID = inVerts.instanceID;
-    
+
+    o.objectID = instance.objectID;
+    o.instanceID = instanceIndexIndirect;
+
     return o;
 }
 

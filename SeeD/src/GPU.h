@@ -26,7 +26,7 @@ extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"
 #include "Shaders/structs.hlsl"
 
 #define FRAMEBUFFERING 2
-//#define ASYNC_COMPUTE
+#define ASYNC_COMPUTE
 
         // Helper to compute aligned buffer sizes
 #ifndef ROUND_UP
