@@ -665,7 +665,7 @@ public:
         fin.read(magic, sizeof(magic));
         uint32_t version = 0;
         fin.read((char*)&version, sizeof(version));
-        if (std::string(magic, 4) != "SEED" || version < 2 || version > 4)
+        if (std::string(magic, 4) != "SEED" || version < 2 || version > 5)
         {
             IOs::Log("Unsupported world file {} (version {})", name.c_str(), version);
             return result;
@@ -778,12 +778,21 @@ public:
         }
 
         // ---- read pools, create entities, build savedId -> new entity map ----
+        // v5 stores the total entity count up front so the containers below reserve exactly
+        // (older files just grow). result.created doubles as the created-entity list.
+        uint32_t totalEntities = (version >= 5) ? readU32() : 0;
+
         std::unordered_map<uint, EntityBase> idMap;
-        struct Created { EntityBase entity; uint archetypeRef; };
-        std::vector<Created> created;
+        if (totalEntities) { idMap.reserve(totalEntities); result.created.reserve(totalEntities); }
+
+        struct PoolBatch { uint createdBegin; uint count; uint archetypeRef; };
+        std::vector<PoolBatch> batches;
         std::vector<std::vector<int>> archetypes; // per file-pool: list of schema indices
+        std::vector<char> staging;                // ONE reusable buffer, holds the current component array
 
         uint32_t poolCount = readU32();
+        batches.reserve(poolCount);
+        archetypes.reserve(poolCount);             // reserved so the `arche` refs below stay valid
         for (uint p = 0; p < poolCount; p++)
         {
             uint32_t compCount = readU32();
@@ -791,42 +800,51 @@ public:
             for (auto& a : archetype) a = (int)readU32();
             uint32_t entityCount = readU32();
 
-            std::vector<std::vector<char>> blobs((size_t)compCount);
-            for (uint c = 0; c < compCount; c++)
-            {
-                FComp& sc = schema[archetype[c]];
-                blobs[c].resize((size_t)entityCount * sc.stride);
-                if (!blobs[c].empty()) fin.read(blobs[c].data(), blobs[c].size());
-            }
-
             Components::Mask mask = 0;
-            int entityComp = -1;
             for (uint c = 0; c < compCount; c++)
             {
                 Plan& pl = plans[archetype[c]];
-                if (pl.isEntity) entityComp = (int)c;
                 if (pl.kcIndex >= 0) mask |= knownComponents[pl.kcIndex].mask;
             }
 
             uint archetypeRef = (uint)archetypes.size();
-            archetypes.push_back(archetype);
+            archetypes.push_back(std::move(archetype));
+            std::vector<int>& arche = archetypes.back();  // archetype was moved-from; use arche below
 
-            for (uint s = 0; s < entityCount; s++)
+            // Make every entity for this pool up front so the file can be processed COMPONENT-major:
+            // read one component's whole array into the single reusable `staging` buffer and scatter
+            // it across the rows, then reuse that same buffer for the next component. (The old code
+            // allocated a separate blob per component and held them all at once.)
+            uint createdBegin = (uint)result.created.size();
+            for (uint s = 0; s < entityCount; s++) { Entity e; e.Make(mask); result.created.push_back(e); }
+            batches.push_back({ createdBegin, entityCount, archetypeRef });
+
+            for (uint c = 0; c < compCount; c++)
             {
-                EntityBase saved = entityInvalid;
-                if (entityComp >= 0)
-                    saved = *(EntityBase*)(blobs[entityComp].data() + (size_t)s * schema[archetype[entityComp]].stride);
+                FComp& sc = schema[arche[c]];
+                size_t arraySize = (size_t)entityCount * sc.stride;
+                if (staging.size() < arraySize) staging.resize(arraySize);
+                if (arraySize) fin.read(staging.data(), arraySize); // consume even when skipped below
 
-                Entity e; e.Make(mask);
-                EntityBase mapped = e;
-
-                for (uint c = 0; c < compCount; c++)
+                Plan& pl = plans[arche[c]];
+                if (pl.isEntity)
                 {
-                    Plan& pl = plans[archetype[c]];
-                    if (pl.kcIndex < 0 || pl.isEntity) continue;        // removed comp / self-id
-                    if (Components::transient[pl.bucket]) continue;
+                    // not scattered (Make set new ids) -- the saved ids only feed the remap map
+                    for (uint s = 0; s < entityCount; s++)
+                    {
+                        EntityBase saved = *(EntityBase*)(staging.data() + (size_t)s * sc.stride);
+                        if (saved.id != entityInvalid.id)
+                            idMap[saved.id] = result.created[createdBegin + s];
+                    }
+                    continue;
+                }
+                if (pl.kcIndex < 0 || Components::transient[pl.bucket]) continue; // removed/transient: consumed, not scattered
+
+                for (uint s = 0; s < entityCount; s++)
+                {
+                    Entity e = result.created[createdBegin + s];
                     char* dst = e.Get(pl.bucket);
-                    char* src = blobs[c].data() + (size_t)s * schema[archetype[c]].stride;
+                    char* src = staging.data() + (size_t)s * sc.stride;
                     if (pl.bulkCopy)
                     {
                         memcpy(dst, src, pl.curStride);
@@ -842,42 +860,35 @@ public:
                             memcpy(dst + fc.dstOffset, src + fc.srcOffset, fc.size);
                     }
                 }
-
-                created.push_back({ mapped, archetypeRef });
-
-                if (saved.id != entityInvalid.id)
-                    idMap[saved.id] = mapped;
             }
         }
 
         fin.close();
 
         // ---- remap handles in freshly created entities (forward refs now resolvable) ----
-        for (auto& cr : created)
+        for (auto& b : batches)
         {
-            Entity e = cr.entity;
-            std::vector<int>& archetype = archetypes[cr.archetypeRef];
-            for (uint c = 0; c < archetype.size(); c++)
+            std::vector<int>& arche = archetypes[b.archetypeRef];
+            for (uint c = 0; c < arche.size(); c++)
             {
-                Plan& pl = plans[archetype[c]];
+                Plan& pl = plans[arche[c]];
                 if (pl.kcIndex < 0 || pl.handles.empty()) continue;
-                char* data = e.Get(pl.bucket);
-                for (auto& hf : pl.handles)
+                for (uint s = 0; s < b.count; s++)
                 {
-                    for (uint k = 0; k < hf.count; k++)
-                    {
-                        EntityBase* h = (EntityBase*)(data + hf.dstOffset + (size_t)k * sizeof(EntityBase));
-                        if (h->id == entityInvalid.id) continue;
-                        auto it = idMap.find(h->id);
-                        if (it != idMap.end()) *h = it->second;
-                        else { h->id = entityInvalid.id; h->rev = entityInvalid.rev; }
-                    }
+                    Entity e = result.created[b.createdBegin + s];
+                    char* data = e.Get(pl.bucket);
+                    for (auto& hf : pl.handles)
+                        for (uint k = 0; k < hf.count; k++)
+                        {
+                            EntityBase* h = (EntityBase*)(data + hf.dstOffset + (size_t)k * sizeof(EntityBase));
+                            if (h->id == entityInvalid.id) continue;
+                            auto it = idMap.find(h->id);
+                            if (it != idMap.end()) *h = it->second;
+                            else { h->id = entityInvalid.id; h->rev = entityInvalid.rev; }
+                        }
                 }
             }
         }
-
-        result.created.reserve(created.size());
-        for (auto& cr : created) result.created.push_back(cr.entity);
 
         if (haveRoot)
         {
@@ -912,7 +923,7 @@ public:
 
         const char magic[4] = { 'S','E','E','D' };
         fout.write(magic, sizeof(magic));
-        writeU32(4);
+        writeU32(5);
         writeU32(root.ToUInt()); // explicit prefab root (invalid for whole-world saves)
         uint64_t guid = SchemaGUID(); // schema fingerprint -> Load fastpath when it matches the loading build
         fout.write((char*)&guid, sizeof(guid));
@@ -942,6 +953,7 @@ public:
         // ---- group requested entities by their pool (order preserved within a pool) ----
         std::vector<uint> poolOrder;                        // pools that contain >=1 requested entity
         std::unordered_map<uint, std::vector<uint>> byPool; // pool -> entity slot indices
+        uint32_t totalEntities = 0;                         // valid entities actually written
         for (auto& eb : entities)
         {
             Entity e = eb;
@@ -949,8 +961,10 @@ public:
             EntitySlot& slot = entitySlots[eb.id];
             if (byPool.find(slot.pool) == byPool.end()) poolOrder.push_back(slot.pool);
             byPool[slot.pool].push_back(slot.index);
+            totalEntities++;
         }
 
+        writeU32(totalEntities);                            // v5: total entity count -> exact reserves on Load
         writeU32((uint32_t)poolOrder.size());
         for (uint p : poolOrder)
         {
