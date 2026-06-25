@@ -3,3 +3,5 @@
 /x64
 /SeeD/Third/assimp-master/out/build/x64-Debug/bin/assimp-vc143-mtd.ilk
 /Assets
+/shaderStats.csv
+/shaderStats.csv.tmp
