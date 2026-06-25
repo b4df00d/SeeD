@@ -256,6 +256,18 @@ void VerifyKnownComponents()
                     cmp.name.c_str(), cmp.members[m].name.c_str(), cmp.members[m].offset, stride);
                 seedAssert(false);
             }
+            // Members must be in strictly ascending offset order: the serializer derives each
+            // field's byte size from the next field's offset (no sort) and SaveEntities writes
+            // fields in this order. Out-of-order here means a STALE ComponentMetaData.h --
+            // regenerate it via the "Generate components Metadata" menu after editing a
+            // component's fields (it always emits declaration order == ascending offset order).
+            if (m > 0 && cmp.members[m].offset <= cmp.members[m - 1].offset)
+            {
+                IOs::Log("Metadata error: {} members out of offset order ('{}' offset {} <= '{}' offset {}) -- regenerate ComponentMetaData.h",
+                    cmp.name.c_str(), cmp.members[m].name.c_str(), cmp.members[m].offset,
+                    cmp.members[m - 1].name.c_str(), cmp.members[m - 1].offset);
+                seedAssert(false);
+            }
         }
     }
 }

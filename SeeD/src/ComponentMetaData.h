@@ -75,11 +75,11 @@ knownComponents.push_back(
 knownComponents.push_back(
  	{ "Light", Components::Light::mask, nullptr,
  		{
-			{ "type", PropertyTypes::_uint, NULL, 1, offsetof(Components::Light, type) },
 			{ "color", PropertyTypes::_float4, NULL, 1, offsetof(Components::Light, color) },
 			{ "size", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, size) },
 			{ "range", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, range) },
 			{ "angle", PropertyTypes::_float, NULL, 1, offsetof(Components::Light, angle) },
+			{ "type", PropertyTypes::_raw, NULL, 1, offsetof(Components::Light, type) },
 			{ "castShadow", PropertyTypes::_bool, NULL, 1, offsetof(Components::Light, castShadow) },
 		}
  	});
@@ -89,6 +89,13 @@ knownComponents.push_back(
 			{ "fovY", PropertyTypes::_float, NULL, 1, offsetof(Components::Camera, fovY) },
 			{ "nearClip", PropertyTypes::_float, NULL, 1, offsetof(Components::Camera, nearClip) },
 			{ "farClip", PropertyTypes::_float, NULL, 1, offsetof(Components::Camera, farClip) },
+		}
+ 	});
+knownComponents.push_back(
+ 	{ "Prefab", Components::Prefab::mask, Components::PrefabPropertyDraw,
+ 		{
+			{ "file", PropertyTypes::_raw, NULL, ECS_PREFAB_PATH, offsetof(Components::Prefab, file) },
+			{ "loadDistance", PropertyTypes::_float, NULL, 1, offsetof(Components::Prefab, loadDistance) },
 		}
  	});
 }

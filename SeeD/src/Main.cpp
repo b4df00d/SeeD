@@ -34,7 +34,7 @@
 //          storage per node).
 //        - The base grid can reuse the lighter mesh format from point 4.
 //
-// [ ] 4. Reduce mesh storage and vertex strides  (FULL commit, no fallback)
+// [X] 4. Reduce mesh storage and vertex strides  (FULL commit, no fallback)
 //        - Meshlet indices on 8 bits.
 //        - Vertex positions on 16 bits, LOCAL to the cluster center: store a
 //          per-cluster center + extent/scale and reconstruct world/local pos in
@@ -219,6 +219,7 @@ public:
     ShaderLoader shaderLoader;
 
     Systems::Player player;
+    Systems::PrefabStreaming prefabStreaming;
 
     // live shader stats (edit -> hot-reload -> profile loop)
     float shaderStatsSecondsSinceReload = 0.0f;
@@ -242,6 +243,7 @@ public:
         EditorWindow::Load();
 
         player.On();
+        prefabStreaming.On();
     }
 
     void Loop()
@@ -254,6 +256,15 @@ public:
             gpu.FrameStart();
             ui.FrameStart();
             ios.ProcessMessages();
+
+            // Prefab streaming + deferred cleanup run single-threaded at frame start, before the
+            // ECS systems and the editor read the world. world.structureChanged is reset here
+            // (before systems) and set by the streaming system on any load/unload; the hierarchy
+            // window reads it to refresh. Running before DeferredRelease + RUN guarantees an
+            // unload's entities are fully removed before the hierarchy rebuilds.
+            world.structureChanged = false;
+            prefabStreaming.Update(&world);
+            world.DeferredRelease(); // thread this ?
 
             TASK(UpdateWindow);
             TASKWITHSUBFLOW(ScheduleInputs);
@@ -269,8 +280,6 @@ public:
 
             RUN();
             CLEAR();
-
-            world.DeferredRelease(); // thread this ?
 
             // Live shader stats: when a shader hot-reloads, restart the GPU timing window so the
             // averages reflect the NEW shader, then periodically dump shaderStats.csv. The external
@@ -311,6 +320,7 @@ public:
         renderer.WaitFrame(); // wait current frame
 
         player.Off();
+        prefabStreaming.Off();
 
         shaderLoader.Off();
         textureLoader.Off();

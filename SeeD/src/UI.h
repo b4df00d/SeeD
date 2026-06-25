@@ -384,7 +384,7 @@ public:
     {
         ZoneScoped;
 
-        if (editorState.dirtyHierarchy)
+        if (editorState.dirtyHierarchy || World::instance->structureChanged)
         {
             nodes.clear();
 
@@ -421,15 +421,18 @@ public:
             for (uint i = 0; i < nodes.size(); i++)
             {
                 TreeNode& node = nodes[i];
-                
-                bool hasParent = result[i].Has<Components::Parent>();
+
+                // Use the node's OWN entity, not result[i]: nodes is filtered (unnamed entities
+                // are skipped when !showUnname), so result[i] can be a different entity than node.
+                World::Entity nodeEnt = node.entity;
+                bool hasParent = nodeEnt.Has<Components::Parent>();
                 if (!hasParent)
                 {
                         node.parent = &world;
                 }
                 else
                 {
-                    auto& pent = result[i].Get<Components::Parent>().entity;
+                    auto& pent = nodeEnt.Get<Components::Parent>().entity;
                     if (!pent.IsValid())// || !World::Entity(pent.Get().index).Has<Components::Instance>())
                     {
                         node.parent = &world;
@@ -2117,6 +2120,12 @@ public:
                     // additive: compose the current world with another .seed
                     World::instance->Load("Save.seed");
                 }
+                if (ImGui::MenuItem("Save Selected As Prefab"))
+                {
+                    World::Entity sel = editorState.selectedObject;
+                    if (sel.IsValid())
+                        World::instance->SavePrefab(sel, "Prefab.seed");
+                }
                 if (ImGui::MenuItem("Clear World"))
                 {
                     World::instance->Clear();
@@ -2146,6 +2155,19 @@ public:
                         light.type = HLSL::LightType::Directional;
                         light.size = 0.025f;
                         light.castShadow = true;
+                        editorState.dirtyHierarchy = true;
+                    }
+                    if (ImGui::MenuItem("Prefab"))
+                    {
+                        World::Entity ent;
+                        editorState.selectedObject = ent.Make(Components::Prefab::mask | Components::Transform::mask, "Prefab");
+                        auto& trans = ent.Get<Components::Transform>();
+                        trans.position = float3(0);
+                        trans.rotation = quaternion::identity();
+                        trans.scale = float3(1);
+                        auto& pf = ent.Get<Components::Prefab>();
+                        pf.file[0] = 0;
+                        pf.loadDistance = 50.0f;
                         editorState.dirtyHierarchy = true;
                     }
                     ImGui::EndMenu();
