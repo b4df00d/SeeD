@@ -2201,14 +2201,14 @@ public:
             ZoneScopedN("Creation");
             auto previousGPUData = this->gpuData;
             uint size = previousGPUData.BufferSize();
-            this->CreateBuffer(this->cpuData.size());
+            this->CreateBuffer((uint)this->cpuData.size());
             this->gpuData.Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
             cb.cmd->CopyBufferRegion(this->gpuData.GetResource(), 0, previousGPUData.GetResource(), 0, size);
             this->gpuData.Transition(cb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         }
         if (this->GetResource().GetResource() == nullptr)
         {
-            this->CreateBuffer(this->cpuData.size());
+            this->CreateBuffer((uint)this->cpuData.size());
         }
 
         {
@@ -2223,7 +2223,7 @@ public:
             }
             else if (totalUploadSize > MAX_CACHED_UPLOAD_SIZE)
             {
-                cachedUploadAllocation->CreateUploadBuffer<T>(dirtyIndices.size(), "dirtyUpload");
+                cachedUploadAllocation->CreateUploadBuffer<T>((uint)dirtyIndices.size(), "dirtyUpload");
             }
             else
             {

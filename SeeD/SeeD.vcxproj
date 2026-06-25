@@ -102,7 +102,8 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
-      <SDLCheck>true</SDLCheck>
+      <SDLCheck>false</SDLCheck>
+      <DisableSpecificWarnings>4530;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
@@ -118,6 +119,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalOptions>/ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>..\Third\meshoptimizer-master\out\build\x64-Debug\meshoptimizer.lib;..\Third\assimp-master\out\build\x64-Debug\lib\assimp-vc143-mtd.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_backend_dx12_x64d.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_spd_x64d.lib;..\Third\DirectXTex-main\DirectXTex\Bin\Desktop_2022\x64\Debug\DirectXTex.lib;..\Third\DLSS-main\lib\Windows_x86_64\x64\nvsdk_ngx_d_dbg.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
@@ -135,7 +137,8 @@ copy /Y "..\Third\DLSS-main\lib\Windows_x86_64\rel\*.*" "..\x64\Debug\"</Command
       <WarningLevel>Level3</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <SDLCheck>true</SDLCheck>
+      <SDLCheck>false</SDLCheck>
+      <DisableSpecificWarnings>4530;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
@@ -152,6 +155,7 @@ copy /Y "..\Third\DLSS-main\lib\Windows_x86_64\rel\*.*" "..\x64\Debug\"</Command
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalOptions>/ignore:4099 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>..\Third\meshoptimizer-master\out\build\x64-Release\meshoptimizer.lib;..\Third\assimp-master\out\build\x64-Release\lib\assimp-vc143-mt.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_backend_dx12_x64.lib;..\Third\FidelityFX-SDK-v1.1.3\sdk\bin\ffx_sdk\ffx_spd_x64.lib;..\Third\DirectXTex-main\DirectXTex\Bin\Desktop_2022\x64\Release\DirectXTex.lib;..\Third\DLSS-main\lib\Windows_x86_64\x64\nvsdk_ngx_d.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
