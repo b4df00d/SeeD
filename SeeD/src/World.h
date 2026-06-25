@@ -637,7 +637,9 @@ public:
     // remaps handles, so the same file can be loaded as a prefab into a populated world,
     // and multiple files compose. For a full replace, call ClearImmediate() first.
     // Format is self-describing (schema by component name), so adding/removing components
-    // or fields stays loadable. Every entity in the file is created fresh (no asset dedup) --
+    // or fields stays loadable; a v4 file also carries a schema GUID and when it matches this
+    // build Load takes a fastpath that skips all schema/migration work. Every entity in the file
+    // is created fresh (no asset dedup) --
     // a duplicate Shader/Mesh/Texture entity is harmless because the AssetLibrary keys the
     // actual GPU asset by assetID and loads it once regardless of how many entities reference it.
     struct LoadResult
@@ -649,9 +651,6 @@ public:
     LoadResult Load(String name)
     {
         //TODO : try to have the fewer allocations possible
-
-        //TODO : add a GUID computed from the current knownComponents to detect a mismatch between the file and the current build (in case of a field rename for example)
-        //this could be used as a fastpath to load in bulk without verification of the schema and the migration plan (if the GUID match, the file is compatible with the current build)
 
         ZoneScoped;
         InitKnownComponents();
@@ -666,16 +665,25 @@ public:
         fin.read(magic, sizeof(magic));
         uint32_t version = 0;
         fin.read((char*)&version, sizeof(version));
-        if (std::string(magic, 4) != "SEED" || (version != 2 && version != 3))
+        if (std::string(magic, 4) != "SEED" || version < 2 || version > 4)
         {
             IOs::Log("Unsupported world file {} (version {})", name.c_str(), version);
             return result;
         }
 
-        // v3 stores an explicit prefab-root id right after the version (SavePrefab writes the
+        // v3+ stores an explicit prefab-root id right after the version (SavePrefab writes the
         // real root; whole-world Save writes invalid). v2 files have none -> root stays invalid.
         uint32_t rootRaw = 0; bool haveRoot = false;
-        if (version == 3) { fin.read((char*)&rootRaw, sizeof(rootRaw)); haveRoot = true; }
+        if (version >= 3) { fin.read((char*)&rootRaw, sizeof(rootRaw)); haveRoot = true; }
+
+        // v4+ stores a schema GUID (fingerprint of knownComponents). If it matches this build the
+        // file layout is byte-identical to ours -> skip schema verification and migration-plan
+        // building (fastpath). Older files / a changed schema fall through to by-name migration.
+        uint64_t fileGUID = 0; bool haveGUID = false;
+        if (version >= 4) { fin.read((char*)&fileGUID, sizeof(fileGUID)); haveGUID = true; }
+        bool schemaMatches = haveGUID && (fileGUID == SchemaGUID());
+        if (haveGUID && !schemaMatches)
+            IOs::Log("Schema GUID mismatch for {} -- saved by a different build, migrating by field name", name.c_str());
 
         auto readU32 = [&]() { uint32_t v = 0; fin.read((char*)&v, sizeof(v)); return v; };
         auto readStr = [&]() { uint32_t n = readU32(); std::string s; s.resize(n); if (n) fin.read(s.data(), n); return s; };
@@ -693,15 +701,17 @@ public:
             c.fields.resize(fc);
             for (auto& f : c.fields) { f.name = readStr(); f.type = readU32(); f.count = readU32(); f.offset = readU32(); f.size = 0; }
 
-            // SaveEntities writes a component's fields in declaration order, which is ascending
-            // offset order, so derive each field's byte size directly from the next field's offset
-            // (last = stride - offset). The debug assert traps a malformed/foreign unsorted file.
-            for (size_t i = 0; i < c.fields.size(); i++)
-            {
-                seedAssert(i == 0 || c.fields[i].offset > c.fields[i - 1].offset);
-                uint end = (i + 1 < c.fields.size()) ? c.fields[i + 1].offset : c.stride;
-                c.fields[i].size = end - c.fields[i].offset;
-            }
+            // Field sizes are only needed by the by-name migration path (the fastpath copies whole
+            // strides). SaveEntities writes fields in declaration / ascending-offset order, so
+            // derive each size from the next field's offset (last = stride - offset). The debug
+            // assert traps a malformed/foreign unsorted file.
+            if (!schemaMatches)
+                for (size_t i = 0; i < c.fields.size(); i++)
+                {
+                    seedAssert(i == 0 || c.fields[i].offset > c.fields[i - 1].offset);
+                    uint end = (i + 1 < c.fields.size()) ? c.fields[i + 1].offset : c.stride;
+                    c.fields[i].size = end - c.fields[i].offset;
+                }
         }
 
         // ---- per-file-component migration plan against the current build ----
@@ -725,33 +735,35 @@ public:
             pl.isEntity = (sc.name == "Entity");
             for (uint k = 0; k < knownComponents.size(); k++)
                 if (knownComponents[k].name == sc.name) { pl.kcIndex = (int)k; break; }
-            if (pl.kcIndex < 0) continue;
+            if (pl.kcIndex < 0) continue;       // component removed in this build -> skipped on load
 
             pl.bucket = Components::MaskToBucket(knownComponents[pl.kcIndex].mask);
             pl.curStride = Components::strides[pl.bucket];
 
-            // current field offset/size table (size derived like the file side)
-            struct CF { std::string name; uint offset; uint size; PropertyTypes type; uint count; };
+            // Handle fields come from the CURRENT schema on both paths (needed for handle remap).
+            for (auto& m : knownComponents[pl.kcIndex].members)
+                if (m.dataType == PropertyTypes::_Handle)
+                    pl.handles.push_back({ (uint)m.offset, (uint)m.dataCount });
+
+            // Fastpath: GUID matched, so this component's file layout == current layout. No field
+            // matching, just copy the whole stride.
+            if (schemaMatches) { pl.bulkCopy = true; continue; }
+
+            // ---- by-name migration: match each current field to a file field, derive copies ----
+            struct CF { std::string name; uint offset; uint size; };
             std::vector<CF> cf;
-            for (auto& m : knownComponents[pl.kcIndex].members) cf.push_back({ (std::string)m.name, (uint)m.offset, 0u, m.dataType, (uint)m.dataCount });
+            for (auto& m : knownComponents[pl.kcIndex].members) cf.push_back({ (std::string)m.name, (uint)m.offset, 0u });
+            // current member sizes: declaration order is ascending offset, derive from the next.
+            for (size_t i = 0; i < cf.size(); i++)
             {
-                // knownComponents members come from the generator in declaration order, which C++
-                // guarantees is ascending offset order (members share access control), so derive
-                // sizes in place without sorting. The debug assert traps any future reordering.
-                for (size_t i = 0; i < cf.size(); i++)
-                {
-                    seedAssert(i == 0 || cf[i].offset > cf[i - 1].offset);
-                    uint end = (i + 1 < cf.size()) ? cf[i + 1].offset : pl.curStride;
-                    cf[i].size = end - cf[i].offset;
-                }
+                seedAssert(i == 0 || cf[i].offset > cf[i - 1].offset);
+                uint end = (i + 1 < cf.size()) ? cf[i + 1].offset : pl.curStride;
+                cf[i].size = end - cf[i].offset;
             }
 
             bool identical = (sc.stride == pl.curStride) && (sc.fields.size() == cf.size());
             for (auto& c : cf)
             {
-                if (c.type == PropertyTypes::_Handle)
-                    pl.handles.push_back({ c.offset, c.count });
-
                 FField* sf = nullptr;
                 for (auto& f : sc.fields) if (f.name == c.name) { sf = &f; break; }
                 if (sf)
@@ -877,7 +889,7 @@ public:
             }
         }
 
-        IOs::Log("World loaded from {}", name.c_str());
+        IOs::Log("World loaded from {} [{}]", name.c_str(), schemaMatches ? "schema fastpath" : "migration");
         return result;
     }
 
@@ -900,8 +912,10 @@ public:
 
         const char magic[4] = { 'S','E','E','D' };
         fout.write(magic, sizeof(magic));
-        writeU32(3);
+        writeU32(4);
         writeU32(root.ToUInt()); // explicit prefab root (invalid for whole-world saves)
+        uint64_t guid = SchemaGUID(); // schema fingerprint -> Load fastpath when it matches the loading build
+        fout.write((char*)&guid, sizeof(guid));
 
         // ---- schema table = all knownComponents ----
         writeU32((uint32_t)knownComponents.size());

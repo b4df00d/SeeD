@@ -271,3 +271,43 @@ void VerifyKnownComponents()
         }
     }
 }
+
+// Stable 64-bit fingerprint of the whole component schema: every component's name + stride
+// and every member's name/type/count/offset, in knownComponents order. Saved into .seed files
+// (v4+) so Load can tell whether a file was written by a build with the EXACT same layout. A
+// match -> the file is byte-identical to us, Load skips all schema verification + migration and
+// bulk-copies. A mismatch (rename, reorder, new/removed field, type/size change) flips the
+// fingerprint -> Load falls back to the by-name migration path. FNV-1a. First call MUST be after
+// InitKnownComponents(); the result is then cached for the rest of the run (the schema is fixed
+// once loaded -- regenerating metadata only takes effect after a rebuild).
+uint64_t SchemaGUID()
+{
+    static bool cached = false;
+    static uint64_t guid = 0;
+    if (cached) return guid;
+
+    uint64_t h = 1469598103934665603ull; // FNV offset basis
+    auto mix = [&](const void* p, size_t n)
+    {
+        const unsigned char* b = (const unsigned char*)p;
+        for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull; // FNV prime
+    };
+    auto mixU32 = [&](uint32_t v) { mix(&v, sizeof(v)); };
+    auto mixStr = [&](const std::string& s) { mixU32((uint32_t)s.size()); mix(s.data(), s.size()); };
+    for (auto& kc : knownComponents)
+    {
+        mixStr((std::string)kc.name);
+        mixU32(Components::strides[Components::MaskToBucket(kc.mask)]);
+        mixU32((uint32_t)kc.members.size());
+        for (auto& m : kc.members)
+        {
+            mixStr((std::string)m.name);
+            mixU32((uint32_t)m.dataType);
+            mixU32((uint32_t)m.dataCount);
+            mixU32((uint32_t)m.offset);
+        }
+    }
+    guid = h;
+    cached = true;
+    return guid;
+}
