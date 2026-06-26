@@ -577,6 +577,160 @@ public:
 
 static PerFrame<CommandBuffer>* endOfLastFrame = nullptr;
 
+// Pool of reusable CPU->GPU upload-heap buffers, bucketed by power-of-two capacity from 16KB to
+// 4MB. Mesh loading fires thousands of small Upload()/UploadElements() calls; previously each one
+// created its own D3D12MA UPLOAD allocation and deferred-freed it, which dominated load time.
+// Acquire() hands back a recycled, persistently-mapped buffer (no CreateResource / Map on the hot
+// path); Retire() queues it and Recycle() returns it to the free list once the GPU has consumed it
+// (same ~2-frame latency as Resource::releaseResources). Sizes above the top bucket bypass the pool
+// and keep the original create-and-deferred-release path. All free-list / pending access is guarded
+// by the pool's own mutex. Owned by GPU (see GPU::uploadBufferPool); On()/Off() bracket its lifetime.
+class UploadBufferPool
+{
+public:
+    static constexpr uint MIN_SHIFT = 14;                         // 16 KB smallest bucket
+    static constexpr uint MAX_SHIFT = 22;                         // 4 MB  largest bucket
+    static constexpr uint MAX_SIZE = 1u << MAX_SHIFT;             // 4 MB
+    static constexpr uint NUM_BUCKETS = MAX_SHIFT - MIN_SHIFT + 1;
+
+    struct Buffer
+    {
+        D3D12MA::Allocation* alloc = nullptr;
+        void* mapped = nullptr;     // kept mapped for the buffer's whole lifetime
+        uint capacity = 0;
+    };
+
+    struct Pending
+    {
+        uint frameNumber;
+        Buffer buf;
+        int bucket;
+    };
+
+    D3D12MA::Allocator* allocator = nullptr; // borrowed from GPU; set in On()
+    std::vector<Buffer> freeLists[NUM_BUCKETS];
+    std::vector<Pending> pending;
+    std::mutex poolLock; // guards freeLists / pending
+
+    void On(D3D12MA::Allocator* alloc)
+    {
+        allocator = alloc;
+    }
+
+    // Power-of-two bucket index for a byte size (floor-clamped to MIN_SHIFT), or -1 if > MAX_SIZE.
+    static int BucketFor(uint size)
+    {
+        if (size > MAX_SIZE)
+            return -1;
+        uint shift = MIN_SHIFT;
+        while ((1u << shift) < size)
+            shift++;
+        return (int)(shift - MIN_SHIFT);
+    }
+
+    // Returns a buffer of the matching bucket capacity (reused if available, else newly created and
+    // persistently mapped). outBucket == -1 means size > MAX_SIZE: the returned Buffer is empty and
+    // the caller must allocate manually.
+    Buffer Acquire(uint size, int& outBucket)
+    {
+        int bucket = BucketFor(size);
+        outBucket = bucket;
+        if (bucket < 0)
+            return {};
+
+        poolLock.lock();
+        if (!freeLists[bucket].empty())
+        {
+            Buffer buf = freeLists[bucket].back();
+            freeLists[bucket].pop_back();
+            poolLock.unlock();
+            return buf;
+        }
+        poolLock.unlock();
+
+        // Miss: create a new upload buffer of the bucket capacity (outside the lock, as the original
+        // per-call path did) and map it once for its whole lifetime.
+        uint capacity = 1u << (MIN_SHIFT + (uint)bucket);
+
+        D3D12_RESOURCE_DESC resourceDesc = {};
+        resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        resourceDesc.Alignment = 0;
+        resourceDesc.Width = capacity;
+        resourceDesc.Height = 1;
+        resourceDesc.DepthOrArraySize = 1;
+        resourceDesc.MipLevels = 1;
+        resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+        resourceDesc.SampleDesc.Count = 1;
+        resourceDesc.SampleDesc.Quality = 0;
+        resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        D3D12MA::ALLOCATION_DESC allocationDesc = {};
+        allocationDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+
+        Buffer buf;
+        buf.capacity = capacity;
+        allocator->CreateResource(
+            &allocationDesc,
+            &resourceDesc,
+            D3D12_RESOURCE_STATE_COPY_SOURCE,
+            NULL,
+            &buf.alloc,
+            IID_NULL, NULL);
+        buf.alloc->SetName(L"UploadBufferPool");
+        buf.alloc->GetResource()->Map(0, nullptr, &buf.mapped);
+        return buf;
+    }
+
+    // Queue a consumed buffer for return to its free list.
+    void Retire(const Buffer& buf, int bucket, uint frameNumber)
+    {
+        poolLock.lock();
+        pending.push_back({ frameNumber, buf, bucket });
+        poolLock.unlock();
+    }
+
+    // Return buffers older than the threshold to their free lists. Called with the same threshold the
+    // deferred frees use, so a buffer is only reused once the GPU is guaranteed done with it.
+    void Recycle(uint frameNumberThreshold)
+    {
+        poolLock.lock();
+        for (int i = (int)pending.size() - 1; i >= 0; i--)
+        {
+            if (pending[i].frameNumber < frameNumberThreshold)
+            {
+                freeLists[pending[i].bucket].push_back(pending[i].buf);
+                pending[i] = pending.back();
+                pending.pop_back();
+            }
+        }
+        poolLock.unlock();
+    }
+
+    // Unmap and release every pooled allocation. Must run before the D3D12MA allocator is destroyed.
+    void Off()
+    {
+        poolLock.lock();
+        for (auto& p : pending)
+        {
+            p.buf.alloc->GetResource()->Unmap(0, nullptr);
+            p.buf.alloc->Release();
+        }
+        pending.clear();
+        for (uint b = 0; b < NUM_BUCKETS; b++)
+        {
+            for (auto& buf : freeLists[b])
+            {
+                buf.alloc->GetResource()->Unmap(0, nullptr);
+                buf.alloc->Release();
+            }
+            freeLists[b].clear();
+        }
+        poolLock.unlock();
+        allocator = nullptr;
+    }
+};
+
 class GPU
 {
 public:
@@ -604,6 +758,8 @@ public:
 
     D3D12MA::Allocator* allocator{};
 
+    UploadBufferPool uploadBufferPool;
+
     DescriptorHeap descriptorHeap;
 
     // for the perFrame stuff
@@ -621,6 +777,7 @@ public:
         descriptorHeap.On(device);
         CreateSwapChain(window);
         CreateMemoryAllocator();
+        uploadBufferPool.On(allocator);
     }
 
     void Off()
@@ -633,6 +790,7 @@ public:
 
         Resource::ReleaseResources(true);
         //Resource::CleanUploadResources(true);
+        uploadBufferPool.Off(); // free pooled upload buffers before the allocator goes away
         for (uint i = 0; i < Resource::allResourcesNames.size(); i++)
         {
             IOs::Log("{}", Resource::allResourcesNames[i].c_str());
@@ -1610,9 +1768,29 @@ void Resource::Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb)
         return;
     //ZoneScopedN("Resource::Upload");
 
+    if (dataSize == 0)
+        return;
+
     if (dataSize + offset > GetResource()->GetDesc().Width)
         IOs::Log("Resource {} full", WCharToString(allocation->GetName()));
 
+    int bucket;
+    UploadBufferPool::Buffer up = GPU::instance->uploadBufferPool.Acquire(dataSize, bucket);
+
+    if (bucket >= 0)
+    {
+        // Pooled, persistently-mapped upload buffer: no per-call CreateResource / Map / Unmap.
+        memcpy(up.mapped, data, dataSize);
+
+        lock.lock();
+        cb.cmd->CopyBufferRegion(allocation->GetResource(), offset, up.alloc->GetResource(), 0, dataSize);
+        lock.unlock();
+
+        GPU::instance->uploadBufferPool.Retire(up, bucket, GPU::instance->frameNumber);
+        return;
+    }
+
+    // Larger than the pool's top bucket (> 4 MB): create-and-deferred-release as before.
     D3D12MA::Allocation* uploadAllocation;
 
     D3D12_RESOURCE_DESC resourceDesc = {};
@@ -1659,6 +1837,7 @@ void Resource::Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb)
 
 void Resource::UploadElements(void* data, uint count, uint index, CommandBuffer& cb)
 {
+    ZoneScoped;
     Upload(data, count * stride, index * stride, cb);
 }
 
@@ -1681,7 +1860,7 @@ void Resource::Barrier(CommandBuffer& cb)
 
 void Resource::ReleaseResources(bool everything)
 {
-    //ZoneScoped; 
+    //ZoneScoped;
     uint frameNumberThreshold = GPU::instance->frameNumber - 1;
     if (everything)
         frameNumberThreshold = UINT_MAX;
@@ -2749,6 +2928,8 @@ struct MeshStorage
     // Helper function to grow a buffer if needed
     void EnsureBufferCapacity(Resource& resource, uint& allocatedCount, uint requiredCount, uint elementStride, const String& bufferName, CommandBuffer& commandBuffer)
     {
+        ZoneScoped;
+
         if (allocatedCount < requiredCount)
         {
             // Calculate new size with growth factor
@@ -2845,6 +3026,8 @@ struct MeshStorage
 
         for (int i = 0; i < min((int)meshData.LODs.size(), 4); i++)
         {
+            ZoneScopedN("Load LOD");
+
             auto& lod = meshData.LODs[i];
             auto& newMeshLOD = newMesh.LODs[i];
 
@@ -2896,39 +3079,45 @@ struct MeshStorage
         float invx = ex > 0 ? 1.0f / ex : 0.0f;
         float invy = ey > 0 ? 1.0f / ey : 0.0f;
         float invz = ez > 0 ? 1.0f / ez : 0.0f;
-        for (size_t i = 0; i < meshData.vertices.size(); i++)
         {
-            const Vertex& s = meshData.vertices[i];
-            VertexPacked& d = packed[i];
-            int16_t qx = QuantizeSNorm16((s.px - mnx) * invx * 2.0f - 1.0f);
-            int16_t qy = QuantizeSNorm16((s.py - mny) * invy * 2.0f - 1.0f);
-            int16_t qz = QuantizeSNorm16((s.pz - mnz) * invz * 2.0f - 1.0f);
+            ZoneScopedN("Pack vertices");
+            for (size_t i = 0; i < meshData.vertices.size(); i++)
+            {
+                const Vertex& s = meshData.vertices[i];
+                VertexPacked& d = packed[i];
+                int16_t qx = QuantizeSNorm16((s.px - mnx) * invx * 2.0f - 1.0f);
+                int16_t qy = QuantizeSNorm16((s.py - mny) * invy * 2.0f - 1.0f);
+                int16_t qz = QuantizeSNorm16((s.pz - mnz) * invz * 2.0f - 1.0f);
 
-            // TBN handedness = sign(dot(cross(normal, tangent), binormal)); stored as the 4th SNORM16.
-            float cx = s.ny * s.tz - s.nz * s.ty;
-            float cy = s.nz * s.tx - s.nx * s.tz;
-            float cz = s.nx * s.ty - s.ny * s.tx;
-            float hdot = cx * s.bx + cy * s.by + cz * s.bz;
-            int16_t hSnorm = hdot >= 0.0f ? (int16_t)32767 : (int16_t)-32767;
+                // TBN handedness = sign(dot(cross(normal, tangent), binormal)); stored as the 4th SNORM16.
+                float cx = s.ny * s.tz - s.nz * s.ty;
+                float cy = s.nz * s.tx - s.nx * s.tz;
+                float cz = s.nx * s.ty - s.ny * s.tx;
+                float hdot = cx * s.bx + cy * s.by + cz * s.bz;
+                int16_t hSnorm = hdot >= 0.0f ? (int16_t)32767 : (int16_t)-32767;
 
-            d.packedPos0 = (uint32_t)(uint16_t)qx | ((uint32_t)(uint16_t)qy << 16);
-            d.packedPos1 = (uint32_t)(uint16_t)qz | ((uint32_t)(uint16_t)hSnorm << 16);
-            d.u = s.u; d.v = s.v;
-            d.normalOct = OctEncode32(s.nx, s.ny, s.nz);
-            d.tangentOct = OctEncode32(s.tx, s.ty, s.tz);
+                d.packedPos0 = (uint32_t)(uint16_t)qx | ((uint32_t)(uint16_t)qy << 16);
+                d.packedPos1 = (uint32_t)(uint16_t)qz | ((uint32_t)(uint16_t)hSnorm << 16);
+                d.u = s.u; d.v = s.v;
+                d.normalOct = OctEncode32(s.nx, s.ny, s.nz);
+                d.tangentOct = OctEncode32(s.tx, s.ty, s.tz);
+            }
         }
 
         // Per-mesh BLAS dequant transform: objectPos = diag(halfExtent) * q + center, q in [-1,1].
         {
-            float hx = ex * 0.5f, hy = ey * 0.5f, hz = ez * 0.5f;
-            BLASTransform xf = {};
-            xf.m[0] = hx;  xf.m[3]  = mnx + hx;
-            xf.m[5] = hy;  xf.m[7]  = mny + hy;
-            xf.m[10] = hz; xf.m[11] = mnz + hz;
-            if (_nextMeshOffset >= meshTransforms.Size())
-                meshTransforms.Resize(_nextMeshOffset + 64);
-            meshTransforms[_nextMeshOffset] = xf;
-            meshTransforms.Upload();
+            ZoneScopedN("BLAS transform");
+            {
+                float hx = ex * 0.5f, hy = ey * 0.5f, hz = ez * 0.5f;
+                BLASTransform xf = {};
+                xf.m[0] = hx;  xf.m[3]  = mnx + hx;
+                xf.m[5] = hy;  xf.m[7]  = mny + hy;
+                xf.m[10] = hz; xf.m[11] = mnz + hz;
+                if (_nextMeshOffset >= meshTransforms.Size())
+                    meshTransforms.Resize(_nextMeshOffset + 64);
+                meshTransforms[_nextMeshOffset] = xf;
+                meshTransforms.Upload();
+            }
         }
 
         meshes.UploadElements(&newMesh, 1, _nextMeshOffset, commandBuffer);
@@ -2953,6 +3142,8 @@ struct MeshStorage
 
     void LoadBLAS(Mesh& mesh, CommandBuffer& commandBuffer)
     {
+        ZoneScoped;
+
         lock.lock();
         bool isOpaque = false;
         D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};

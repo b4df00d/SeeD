@@ -2916,6 +2916,8 @@ public:
         ZoneScoped;
 
         Resource::ReleaseResources();
+        // Recycle pooled upload buffers on the same schedule as the deferred frees above.
+        GPU::instance->uploadBufferPool.Recycle(GPU::instance->frameNumber);
 
         HRESULT hr;
         // if the current fence value is still less than "fenceValue", then we know the GPU has not finished executing

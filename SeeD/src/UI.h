@@ -676,7 +676,26 @@ public:
             return;
         }
 
+        if (ImGui::BeginTabBar("##GPUResourcesTabs"))
+        {
+            if (ImGui::BeginTabItem("Resources"))
+            {
+                DrawResourcesTab();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Upload Pool"))
+            {
+                DrawUploadPoolStats();
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
 
+        ImGui::End();
+    }
+
+    void DrawResourcesTab()
+    {
         const char* names[] = { "Resources", "Content" };
         static Resource selectedResource = {};
         static int mip = 0;
@@ -885,8 +904,85 @@ public:
         }
         ImGui::EndChild();
         ImGui::EndGroup();
+    }
 
-        ImGui::End();
+    // Stats for the reusable upload-buffer pool (see UploadBufferPool in GPU.h): per power-of-two
+    // bucket, how many buffers are sitting free vs. in-flight (recorded but not yet recycled), and
+    // the VRAM the pool is holding onto.
+    void DrawUploadPoolStats()
+    {
+        UploadBufferPool* pool = GPU::instance ? &GPU::instance->uploadBufferPool : nullptr;
+        if (pool == nullptr)
+        {
+            ImGui::TextUnformatted("Upload buffer pool not initialized.");
+            return;
+        }
+
+        const double toMB = 1.0 / (1024.0 * 1024.0);
+
+        // Snapshot counts under the pool lock so we don't read the vectors while a loading thread
+        // mutates them.
+        uint freeCount[UploadBufferPool::NUM_BUCKETS] = {};
+        uint pendingCount[UploadBufferPool::NUM_BUCKETS] = {};
+        uint pendingTotal = 0;
+        {
+            const std::lock_guard<std::mutex> lock(pool->poolLock);
+            for (uint b = 0; b < UploadBufferPool::NUM_BUCKETS; b++)
+                freeCount[b] = (uint)pool->freeLists[b].size();
+            for (auto& p : pool->pending)
+            {
+                if (p.bucket >= 0 && p.bucket < (int)UploadBufferPool::NUM_BUCKETS)
+                    pendingCount[p.bucket]++;
+                pendingTotal++;
+            }
+        }
+
+        UINT64 totalBytes = 0;
+        uint totalBuffers = 0;
+        for (uint b = 0; b < UploadBufferPool::NUM_BUCKETS; b++)
+        {
+            UINT64 cap = 1ull << (UploadBufferPool::MIN_SHIFT + b);
+            totalBytes += cap * (freeCount[b] + pendingCount[b]);
+            totalBuffers += freeCount[b] + pendingCount[b];
+        }
+
+        ImGui::Text("Pooled VRAM: %.2f MB    Buffers: %u    In-flight: %u",
+            totalBytes * toMB, totalBuffers, pendingTotal);
+        ImGui::Separator();
+
+        if (ImGui::BeginTable("uploadPoolTable", 5,
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_HighlightHoveredColumn))
+        {
+            ImGui::TableSetupColumn("Bucket");
+            ImGui::TableSetupColumn("Free");
+            ImGui::TableSetupColumn("In-flight");
+            ImGui::TableSetupColumn("Total");
+            ImGui::TableSetupColumn("VRAM");
+            ImGui::TableHeadersRow();
+
+            for (uint b = 0; b < UploadBufferPool::NUM_BUCKETS; b++)
+            {
+                UINT64 cap = 1ull << (UploadBufferPool::MIN_SHIFT + b);
+                uint total = freeCount[b] + pendingCount[b];
+
+                ImGui::TableNextRow();
+                uint col = 0;
+                ImGui::TableSetColumnIndex(col++);
+                if (cap < (1u << 20))
+                    ImGui::Text("%llu KB", (unsigned long long)(cap >> 10));
+                else
+                    ImGui::Text("%llu MB", (unsigned long long)(cap >> 20));
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", freeCount[b]);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", pendingCount[b]);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%u", total);
+                ImGui::TableSetColumnIndex(col++);
+                ImGui::Text("%.2f MB", cap * total * toMB);
+            }
+            ImGui::EndTable();
+        }
     }
 };
 GPUResourcesWindow gpuResourcesWindow;
@@ -2112,7 +2208,7 @@ public:
                 if (ImGui::MenuItem("Load World"))
                 {
                     editorState.selectedObject = {};
-                    World::instance->ClearImmediate();
+                    //World::instance->ClearImmediate();
                     World::instance->Load("Save.seed");
                 }
                 if (ImGui::MenuItem("Add Prefab"))
