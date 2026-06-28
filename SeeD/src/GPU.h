@@ -548,6 +548,36 @@ struct DescriptorHeap
     {
         FreeSlot(&dsv.offset, &dsvDescriptorHeapSlots, dsvDescriptorHeap, dsvdescriptorIncrementSize);
     }
+
+    // Diagnostic: a healthy free list never holds the same slot twice. A duplicate means a slot was
+    // Release()d more than once, so a later Get() can hand out a slot that is still in use -> two
+    // resources share one descriptor. Logs and asserts if any heap's free list is corrupt.
+    uint CheckSlotsValidity()
+    {
+        auto badSlots = [](Slots& slots, uint16_t slotCount) -> uint
+        {
+            std::vector<uint16_t> copy = slots.freeslots;
+            std::sort(copy.begin(), copy.end());
+            uint bad = 0;
+            for (size_t i = 0; i < copy.size(); i++)
+            {
+                if (copy[i] >= slotCount) { bad++; continue; }            // out of range
+                if (i > 0 && copy[i] == copy[i - 1]) bad++;               // duplicate (double free)
+            }
+            return bad;
+        };
+
+        lock.lock();
+        uint g = badSlots(globalDescriptorHeapSlots, maxDescriptorCount);
+        uint r = badSlots(rtvDescriptorHeapSlots, maxDescriptorCount);
+        uint d = badSlots(dsvDescriptorHeapSlots, maxDescriptorCount);
+        lock.unlock();
+
+        if (g || r || d)
+            IOs::Log("DescriptorHeap::CheckSlotsValidity FAILED: bad free slots  global={} rtv={} dsv={}", g, r, d);
+        seedAssert(g == 0 && r == 0 && d == 0);
+        return g + r + d;
+    }
 };
 
 // c�est crade, c�est parceque GPU est pas encore definit et j�ai pas acces a GPU::frameIndex;
@@ -825,6 +855,16 @@ public:
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
         {
             debugController->EnableDebugLayer();
+
+            // GPU-Based Validation: catches out-of-bounds descriptor access, uninitialized
+            // resources, etc. Much slower - enable when hunting a stubborn GPU-side bug.
+            //ID3D12Debug1* debugController1 = nullptr;
+            //if (SUCCEEDED(debugController->QueryInterface(IID_PPV_ARGS(&debugController1))))
+            //{
+            //    debugController1->SetEnableGPUBasedValidation(TRUE);
+            //    debugController1->Release();
+            //}
+
             debugController->Release();
         }
         debugFlags = DXGI_CREATE_FACTORY_DEBUG;
@@ -859,6 +899,20 @@ public:
             GPU::PrintDeviceRemovedReason(hr);
             return;
         }
+
+#if defined(_DEBUG)
+        // Break in the debugger on debug-layer errors. The break fires on the thread and
+        // call stack that made the offending call - walk up the stack to find the bad call.
+        // The message text is in the Output window.
+        ID3D12InfoQueue* infoQueue = nullptr;
+        if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&infoQueue))))
+        {
+            infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
+            infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+            //infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE); // noisy, enable when hunting
+            infoQueue->Release();
+        }
+#endif
 
         D3D12_FEATURE_DATA_D3D12_OPTIONS7 featureData = {};
         device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &featureData, sizeof(featureData));
@@ -1941,6 +1995,8 @@ void CommandBuffer::On(ID3D12CommandQueue* _queue, String name)
         GPU::PrintDeviceRemovedReason(hr);
     }
     hr = GPU::instance->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&passEnd.fence));
+
+    passEnd.fenceValue = 0;
     passEnd.fence->SetName(wname.c_str());
     if (FAILED(hr))
     {
@@ -1957,6 +2013,11 @@ void CommandBuffer::Off()
     cmd->Release();
     cmdAlloc->Release();
     passEnd.fence->Release();
+    if (passEnd.fenceEvent)
+    {
+        CloseHandle(passEnd.fenceEvent);
+        passEnd.fenceEvent = nullptr;
+    }
 }
 // end of definitions of CommandBuffer
 

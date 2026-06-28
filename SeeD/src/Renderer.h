@@ -566,8 +566,8 @@ public:
 class ViewResource
 {
     static std::mutex lock;
-    View* view;
-    UINT64 hash;
+    View* view = nullptr;
+    UINT64 hash = 0;
 public:
     void Register(std::string _name, View* _view)
     {
@@ -578,10 +578,27 @@ public:
             view->resources[hash] = Resource();
         lock.unlock();
     };
+    void Unregister()
+    {
+        if (view == nullptr)
+            return;
+        lock.lock();
+        auto it = view->resources.find(hash);
+        if (it != view->resources.end())
+        {
+            it->second.Release();
+            view->resources.erase(it);
+        }
+        lock.unlock();
+    }
     Resource& Get()
     {
         lock.lock();
-        Resource& res = view->resources[hash];
+        auto it = view->resources.find(hash);
+        // The hash must still be registered (created, and not yet Unregister'd). seedAssert is a
+        // no-op in release, so fall back to operator[] there to avoid dereferencing end().
+        seedAssert(it != view->resources.end());
+        Resource& res = (it != view->resources.end()) ? it->second : view->resources[hash];
         lock.unlock();
         return res;
     }
@@ -690,6 +707,10 @@ public:
             IOs::Log("{} OPEN !!", name.c_str());
 
         commandBuffer->queue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
+        // Signal passEnd just like Execute() so this submission is tracked. Without it, the one-time
+        // init submission from On() (Open/Close/ExecuteNow) leaves fenceValue at 0, so the first
+        // Render()->Open() resets this allocator with nothing to wait on -> COMMAND_ALLOCATOR_SYNC.
+        commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
     void SetupView(View* view, Resource* RT, uint RTCount, bool clearRT, Resource* depth, bool clearDepth, bool displayResolution)
@@ -969,6 +990,7 @@ public:
     {
         Pass::Off();
         ZoneScoped;
+        depthDownSample.Unregister();
         ffxSpdContextDestroy(&context);
     }
     void Setup(View* view) override
@@ -1145,6 +1167,12 @@ public:
         Close();
         ExecuteNow();
     }
+    void Off() override
+    {
+        Pass::Off();
+        ZoneScoped;
+        depth.Unregister();
+    }
     void Setup(View* view) override
     {
         ZoneScoped;
@@ -1228,6 +1256,20 @@ public:
         Close();
         ExecuteNow();
     }
+    void Off() override
+    {
+        Pass::Off();
+        ZoneScoped;
+        albedo.Unregister();
+        specularAlbedo.Unregister();
+        normal.Unregister();
+        metalness.Unregister();
+        roughness.Unregister();
+        motion.Unregister();
+        objectID.Unregister();
+        instanceID.Unregister();
+        overdraw.Unregister();
+    }
     void Setup(View* view) override
     {
         ZoneScoped;
@@ -1286,7 +1328,6 @@ public:
 
         if (overdrawEnabled)
             overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-
 
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
 
@@ -1379,6 +1420,13 @@ public:
         normal.Register("normal", view);
         rayDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracing2.hlsl|Query");
         applyLightingShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\lighting.hlsl|Lighting");
+    }
+    void Off() override
+    {
+        Pass::Off();
+        ZoneScoped;
+        lighted.Unregister();
+        specularHitDistance.Unregister();
     }
     void Setup(View* view) override
     {
@@ -1640,10 +1688,13 @@ public:
 
         ExecuteNow();
     }
-    virtual void Off() override
+    void Off() override
     {
         Pass::Off();
         ZoneScoped;
+        froxelsBuffer.Unregister();
+        atmosphericScatteringFroxels.Unregister();
+        atmosphericScatteringHistoryFroxels.Unregister();
     }
     void Setup(View* view) override
     {
@@ -1750,10 +1801,11 @@ public:
         atmosphericScatteringFroxels.Register("atmosphericScatteringFroxels", view);
         postProcessHalfResShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\PostProcessHalfRes.hlsl|PostProcessHalfRes");
     }
-    virtual void Off() override
+    void Off() override
     {
         Pass::Off();
         ZoneScoped;
+        transparencyLayer.Unregister();
     }
     void Setup(View* view) override
     {
@@ -1834,10 +1886,12 @@ public:
         Close();
         ExecuteNow();
     }
-    virtual void Off() override
+    void Off() override
     {
         Pass::Off();
         ZoneScoped;
+        postProcessed.Unregister();
+        history.Unregister();
     }
     void Setup(View* view) override
     {
@@ -1919,6 +1973,13 @@ public:
     bool created = false;
     HLSL::Upscaling upscalingPreviousSetting;
 
+    NVSDK_NGX_PerfQuality_Value requestedQuality = NVSDK_NGX_PerfQuality_Value_Balanced;
+    bool qualityChangePending = false;
+
+    NVSDK_NGX_DLSS_Hint_Render_Preset dlssPreset = NVSDK_NGX_DLSS_Hint_Render_Preset_Default;
+    NVSDK_NGX_RayReconstruction_Hint_Render_Preset dlssdPreset = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default;
+    bool featureDirty = false;
+
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
@@ -1939,6 +2000,7 @@ public:
     {
         Pass::Off();
         ZoneScoped;
+        upscaled.Unregister();
         NVSDK_NGX_D3D12_Shutdown1(GPU::instance->device);
     }
     void Setup(View* view) override
@@ -1946,6 +2008,44 @@ public:
         ZoneScoped;
 
     }
+
+    void ApplyPresetHint(View* view)
+    {
+        if (!ngx_parameters)
+            return;
+
+        if (view->upscaling == HLSL::Upscaling::dlss)
+        {
+            const char* slot = nullptr;
+            switch (perf_quality)
+            {
+            case NVSDK_NGX_PerfQuality_Value_MaxPerf:          slot = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance; break;
+            case NVSDK_NGX_PerfQuality_Value_Balanced:         slot = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced; break;
+            case NVSDK_NGX_PerfQuality_Value_MaxQuality:       slot = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality; break;
+            case NVSDK_NGX_PerfQuality_Value_UltraPerformance: slot = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance; break;
+            case NVSDK_NGX_PerfQuality_Value_UltraQuality:     slot = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality; break;
+            case NVSDK_NGX_PerfQuality_Value_DLAA:             slot = NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA; break;
+            }
+            if (slot)
+                ngx_parameters->Set(slot, (unsigned int)dlssPreset);
+        }
+        else if (view->upscaling == HLSL::Upscaling::dlssd)
+        {
+            const char* slot = nullptr;
+            switch (perf_quality)
+            {
+            case NVSDK_NGX_PerfQuality_Value_MaxPerf:          slot = NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance; break;
+            case NVSDK_NGX_PerfQuality_Value_Balanced:         slot = NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced; break;
+            case NVSDK_NGX_PerfQuality_Value_MaxQuality:       slot = NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality; break;
+            case NVSDK_NGX_PerfQuality_Value_UltraPerformance: slot = NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance; break;
+            case NVSDK_NGX_PerfQuality_Value_UltraQuality:     slot = NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality; break;
+            case NVSDK_NGX_PerfQuality_Value_DLAA:             slot = NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA; break;
+            }
+            if (slot)
+                ngx_parameters->Set(slot, (unsigned int)dlssdPreset);
+        }
+    }
+
     void CreateDLSS(View* view, uint2 displayResolution, uint2& renderResolution)
     {
         if (initialized)
@@ -1971,7 +2071,7 @@ public:
             IOs::Log("{}", msg);
             };
 #ifdef _DEBUG
-        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;// NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+        feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
 #else
         feature_common_info.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_OFF;
 #endif
@@ -2030,7 +2130,10 @@ public:
         uint renderWidth, renderHeight;
         uint renderMaxWidth, renderMaxHeight;
         uint renderMinWidth, renderMinHeight;
-        NGX_DLSS_GET_OPTIMAL_SETTINGS(ngx_parameters, displayResolution.x, displayResolution.y, perf_quality, &renderWidth, &renderHeight, &renderMaxWidth, &renderMaxHeight, &renderMinWidth, &renderMinHeight, &sharpness);
+        result = NGX_DLSS_GET_OPTIMAL_SETTINGS(ngx_parameters, displayResolution.x, displayResolution.y, perf_quality, &renderWidth, &renderHeight, &renderMaxWidth, &renderMaxHeight, &renderMinWidth, &renderMinHeight, &sharpness);
+
+        if (NVSDK_NGX_FAILED(result)) 
+            return;
 
         renderResolution.x = renderWidth;
         renderResolution.y = renderHeight;
@@ -2053,8 +2156,17 @@ public:
         {
             lighted.Get().Barrier(commandBuffer.Get());
 
-            if (upscalingPreviousSetting != view->upscaling)
+
+            if (upscalingPreviousSetting != view->upscaling || featureDirty)
             {
+                if (dlss_feature)
+                {
+                    NVSDK_NGX_D3D12_ReleaseFeature(dlss_feature);
+                    dlss_feature = nullptr;
+                }
+
+                ApplyPresetHint(view); // must precede the create call below
+
                 if (view->upscaling == HLSL::Upscaling::dlss)
                 {
                     NVSDK_NGX_DLSS_Create_Params dlss_create_params{};
@@ -2097,12 +2209,12 @@ public:
                 }
 
                 created = true;
+                featureDirty = false;
                 upscalingPreviousSetting = view->upscaling;
             }
 
             if (view->upscaling == HLSL::Upscaling::dlss)
             {
-
                 NVSDK_NGX_D3D12_DLSS_Eval_Params dlss_eval_params{};
                 dlss_eval_params.Feature.pInColor = lighted.Get().GetResource();
                 dlss_eval_params.Feature.pInOutput = upscaled.Get().GetResource();
@@ -2858,15 +2970,19 @@ public:
         SUBTASKRENDERER(WaitFrame);
         SUBTASKRENDERER(PresentFrame);
 
+        SUBTASKRENDERER(ApplyPendingQualityChange);
+
 #define INTERLEAVEFRAMES
 #ifdef INTERLEAVEFRAMES
         ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
         ExecuteFrame.precede(WaitFrame);
         WaitFrame.precede(PresentFrame);
+        PresentFrame.precede(ApplyPendingQualityChange);
 #else
         ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
         WaitFrame.precede(ExecuteFrame);
         ExecuteFrame.precede(PresentFrame);
+        PresentFrame.precede(ApplyPendingQualityChange);
 #endif
     }
 
@@ -2940,6 +3056,17 @@ public:
         }
     }
 
+    void Flush()
+    {
+        ZoneScoped;
+        for (uint i = 0; i < FRAMEBUFFERING; i++)
+        {
+            GPU::instance->FrameStart();
+            WaitFrame();
+            PresentFrame();
+        }
+    }
+
     void PresentFrame()
     {
         ZoneScoped;
@@ -2968,5 +3095,39 @@ public:
         }
     }
 
+    void ApplyPendingQualityChange()
+    {
+        DLSS& dlss = mainView.dlss;
+        if (!dlss.qualityChangePending)
+            return;
+
+        Flush();
+
+        if (dlss.dlss_feature)
+        {
+            NVSDK_NGX_D3D12_ReleaseFeature(dlss.dlss_feature);
+            dlss.dlss_feature = nullptr;
+        }
+
+        HLSL::Upscaling savedUpscaling = mainView.upscaling;
+        uint2 disp = mainView.displayResolution;
+
+        editorView.Off();
+        mainView.Off();
+        dlss.perf_quality = dlss.requestedQuality;
+        dlss.initialized = false;
+
+        Resource::ReleaseResources(true);
+        GPU::instance->uploadBufferPool.Recycle(GPU::instance->frameNumber);
+
+        mainView.On(disp, disp); 
+        editorView.On(disp, disp);
+        mainView.upscaling = savedUpscaling;
+        endOfLastFrame = &editorView.editor.commandBuffer;
+
+        GPU::instance->descriptorHeap.CheckSlotsValidity();
+
+        dlss.qualityChangePending = false;
+    }
 };
 Renderer* Renderer::instance;

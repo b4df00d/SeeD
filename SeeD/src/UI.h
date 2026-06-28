@@ -1180,8 +1180,77 @@ public:
 
         if (ImGui::CollapsingHeader("Upscaling", ImGuiTreeNodeFlags_DefaultOpen))
         {
-            const char* modes[] = { "none", "taa", "dlss",  "dlssd" };
-            ImGui::Combo("upscaling", (int*)&Renderer::instance->mainView.upscaling, modes, 4);
+            MainView& view = Renderer::instance->mainView;
+            DLSS& dlss = view.dlss;
+
+            // Axis 1: technique. dlss = Super Resolution, dlssd = Ray Reconstruction (separate NGX
+            // features, not models of one another). Switching here recreates the feature in Render().
+            const char* modes[] = { "none", "taa", "dlss", "dlssd" };
+            ImGui::Combo("technique", (int*)&view.upscaling, modes, 4);
+
+            const bool dlssActive = (view.upscaling == HLSL::Upscaling::dlss || view.upscaling == HLSL::Upscaling::dlssd);
+            if (dlssActive)
+            {
+                // Axis 2: quality. Shared by SR and RR; drives the internal render resolution, so a
+                // change triggers a deferred view rebuild (Renderer::ApplyPendingQualityChange).
+                static const char* qualityNames[] = { "Ultra Performance", "Performance", "Balanced", "Quality", "Ultra Quality", "DLAA" };
+                static const NVSDK_NGX_PerfQuality_Value qualityValues[] = {
+                    NVSDK_NGX_PerfQuality_Value_UltraPerformance,
+                    NVSDK_NGX_PerfQuality_Value_MaxPerf,
+                    NVSDK_NGX_PerfQuality_Value_Balanced,
+                    NVSDK_NGX_PerfQuality_Value_MaxQuality,
+                    NVSDK_NGX_PerfQuality_Value_UltraQuality,
+                    NVSDK_NGX_PerfQuality_Value_DLAA,
+                };
+                int qualityIdx = 2; // Balanced
+                for (int i = 0; i < IM_ARRAYSIZE(qualityValues); i++)
+                    if (qualityValues[i] == dlss.requestedQuality) { qualityIdx = i; break; }
+                if (ImGui::Combo("quality", &qualityIdx, qualityNames, IM_ARRAYSIZE(qualityNames)))
+                {
+                    dlss.requestedQuality = qualityValues[qualityIdx];
+                    // Only rebuild if the render resolution actually changes vs the active mode.
+                    dlss.qualityChangePending = (dlss.requestedQuality != dlss.perf_quality);
+                }
+
+                // Axis 3: model / preset. SR and RR have distinct preset enums, so the list is
+                // context-sensitive to the active technique. A change just recreates the feature.
+                if (view.upscaling == HLSL::Upscaling::dlss)
+                {
+                    static const char* srNames[] = { "Default", "Transformer (K)", "Transformer (J)", "Ultra-Perf (L)", "Performance (M)" };
+                    static const NVSDK_NGX_DLSS_Hint_Render_Preset srValues[] = {
+                        NVSDK_NGX_DLSS_Hint_Render_Preset_Default,
+                        NVSDK_NGX_DLSS_Hint_Render_Preset_K,
+                        NVSDK_NGX_DLSS_Hint_Render_Preset_J,
+                        NVSDK_NGX_DLSS_Hint_Render_Preset_L,
+                        NVSDK_NGX_DLSS_Hint_Render_Preset_M,
+                    };
+                    int modelIdx = 0;
+                    for (int i = 0; i < IM_ARRAYSIZE(srValues); i++)
+                        if (srValues[i] == dlss.dlssPreset) { modelIdx = i; break; }
+                    if (ImGui::Combo("model", &modelIdx, srNames, IM_ARRAYSIZE(srNames)))
+                    {
+                        dlss.dlssPreset = srValues[modelIdx];
+                        dlss.featureDirty = true;
+                    }
+                }
+                else // dlssd: Ray Reconstruction
+                {
+                    static const char* rrNames[] = { "Default", "Transformer (D)", "Latest Transformer (E)" };
+                    static const NVSDK_NGX_RayReconstruction_Hint_Render_Preset rrValues[] = {
+                        NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default,
+                        NVSDK_NGX_RayReconstruction_Hint_Render_Preset_D,
+                        NVSDK_NGX_RayReconstruction_Hint_Render_Preset_E,
+                    };
+                    int modelIdx = 0;
+                    for (int i = 0; i < IM_ARRAYSIZE(rrValues); i++)
+                        if (rrValues[i] == dlss.dlssdPreset) { modelIdx = i; break; }
+                    if (ImGui::Combo("model", &modelIdx, rrNames, IM_ARRAYSIZE(rrNames)))
+                    {
+                        dlss.dlssdPreset = rrValues[modelIdx];
+                        dlss.featureDirty = true;
+                    }
+                }
+            }
         }
 
         ImGui::End();
