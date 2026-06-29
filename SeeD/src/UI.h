@@ -1064,8 +1064,6 @@ public:
         }
 
         auto& rt = Renderer::instance->mainView.raytracingContext.rtParameters;
-        auto& atmo = Renderer::instance->mainView.atmospehricScattering.asparams;
-        auto& pp = Renderer::instance->mainView.postProcess.ppparams;
 
         if (ImGui::CollapsingHeader("Debug View"))
         {
@@ -1118,40 +1116,6 @@ public:
                 ImGui::SliderFloat("SHARCRoughnessThreshold", &rt.SHARCRoughnessThreshold, 0, 1);
                 ImGui::SliderInt("SHARCSamplesPerPixel", (int*)&rt.SHARCSamplesPerPixel, 1, 8);
                 ImGui::SliderInt("SHARCAccumulationFrameNum", (int*)&rt.SHARCAccumulationFrameNum, 1, 512, "%d", ImGuiSliderFlags_Logarithmic);
-                ImGui::TreePop();
-            }
-        }
-
-        if (ImGui::CollapsingHeader("Atmospheric Scattering", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-            ImGui::SliderFloat("density", &atmo.density, 0, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
-
-            if (ImGui::TreeNode("Advanced##atmo"))
-            {
-                ImGui::SliderFloat("luminosity", &atmo.luminosity, 0, 2, "%.6f");
-                ImGui::SliderFloat("specialNear", &atmo.specialNear, 0.1, 1, "%.6f", ImGuiSliderFlags_Logarithmic);
-                ImGui::SliderFloat("heightFalloff", &atmo.heightFalloff, 0, 0.2f, "%.6f", ImGuiSliderFlags_Logarithmic);
-                ImGui::SliderFloat("noiseFrequency", &atmo.noiseFrequency, 0.001f, 2, "%.6f", ImGuiSliderFlags_Logarithmic);
-                ImGui::SliderFloat("noiseThresholdLow", &atmo.noiseThresholdLow, 0, 1, "%.3f");
-                ImGui::SliderFloat("noiseThresholdHigh", &atmo.noiseThresholdHigh, 0, 1, "%.3f");
-                ImGui::SliderFloat("animationSpeed", &atmo.animationSpeed, 0, 0.0001f, "%.10f", ImGuiSliderFlags_Logarithmic);
-                ImGui::TreePop();
-            }
-        }
-
-        if (ImGui::CollapsingHeader("Exposition", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-            ImGui::SliderFloat("expoMul", &pp.expoMul, 0, 8);
-
-            if (ImGui::TreeNode("Advanced##expo"))
-            {
-                ImGui::SliderFloat("expoAdd", &pp.expoAdd, -1, 1);
-                ImGui::SliderFloat("P", &pp.P, 0, 2);
-                ImGui::SliderFloat("a", &pp.a, 0, 2);
-                ImGui::SliderFloat("m", &pp.m, 0, 2);
-                ImGui::SliderFloat("l", &pp.l, 0, 2);
-                ImGui::SliderFloat("c", &pp.c, 0, 3);
-                ImGui::SliderFloat("b", &pp.b, 0, 1);
                 ImGui::TreePop();
             }
         }

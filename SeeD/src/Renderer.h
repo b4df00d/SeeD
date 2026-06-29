@@ -2347,6 +2347,10 @@ public:
     Present present;
 
 
+    Components::RenderSettingsVolume baseSettings;
+    bool baseSettingsCaptured = false;
+
+
     void On(uint2 _displayResolution, uint2 _renderResolution) override
     {
         ZoneScoped;
@@ -2410,6 +2414,7 @@ public:
         tf::Task updateInstances = UpdateInstances(world, subflow);
         tf::Task updateLights = UpdateLights(world, subflow);
         tf::Task updateCameras = UpdateCameras(world, subflow);
+        tf::Task updateRenderSettings = UpdateRenderSettings(world, subflow);
 
         tf::Task uploadAndSetup = UploadAndSetup(world, subflow);
 
@@ -2437,6 +2442,7 @@ public:
         updateInstances.succeed(updateMaterials);
         structuredCommandBufferUpdateTask.succeed(updateInstances);
         uploadAndSetup.succeed(structuredCommandBufferUpdateTask, updateLights, updateCameras);
+        updateRenderSettings.precede(atmospehricScatteringTask, postProcessHalfResTask, postProcessTask);
         // no need to put unnecessary dependencies on upload and setup (passes that do not use the view world data)
         // weeeelllll for all passes that use the camera need to wait for upload and setup to be sure the camera data is updated (just in case the buffers used are new because they are bigger)
         uploadAndSetup.precede(skinningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, atmospehricScatteringTask, postProcessHalfResTask, forwardTask, dlssTask, postProcessTask);
@@ -2829,6 +2835,139 @@ public:
 
             }
         ).name("Update cameras");
+
+        return task;
+    }
+
+    tf::Task UpdateRenderSettings(World& world, tf::Subflow& subflow)
+    {
+        ZoneScoped;
+        tf::Task task = subflow.emplace(
+            [this, &world]()
+            {
+                ZoneScoped;
+
+                HLSL::AtmosphericScatteringParameters& as = atmospehricScattering.asparams;
+                HLSL::PostProcessParameters& pp = postProcess.ppparams;
+
+                if (!baseSettingsCaptured)
+                {
+                    baseSettings.density = as.density;
+                    baseSettings.luminosity = as.luminosity;
+                    baseSettings.specialNear = as.specialNear;
+                    baseSettings.heightFalloff = as.heightFalloff;
+                    baseSettings.noiseFrequency = as.noiseFrequency;
+                    baseSettings.noiseThresholdLow = as.noiseThresholdLow;
+                    baseSettings.noiseThresholdHigh = as.noiseThresholdHigh;
+                    baseSettings.animationSpeed = as.animationSpeed;
+                    baseSettings.expoMul = pp.expoMul;
+                    baseSettings.expoAdd = pp.expoAdd;
+                    baseSettings.P = pp.P;
+                    baseSettings.a = pp.a;
+                    baseSettings.m = pp.m;
+                    baseSettings.l = pp.l;
+                    baseSettings.c = pp.c;
+                    baseSettings.b = pp.b;
+                    baseSettingsCaptured = true;
+                }
+
+                // TODO : when multiple camera switch will work. Get the currently 'main camera' instead of 0
+                uint camQuery = world.Query(Components::Camera::mask, 0);
+                auto& cams = world.frameQueries[camQuery];
+                if (cams.empty())
+                    return;
+                World::Entity camEnt = cams[0].Get<Components::Entity>();
+                float3 cameraPos = ComputeWorldMatrix(camEnt)[3].xyz;
+
+                // Gather volumes and blend low -> high priority so higher priority wins on overlap.
+                uint volQuery = world.Query(Components::RenderSettingsVolume::mask, 0);
+                std::vector<World::Entity> volumes;
+                for (auto& e : world.frameQueries[volQuery])
+                    volumes.push_back(e);
+                std::sort(volumes.begin(), volumes.end(),
+                    [](World::Entity x, World::Entity y)
+                    {
+                        return x.Get<Components::RenderSettingsVolume>().priority
+                             < y.Get<Components::RenderSettingsVolume>().priority;
+                    });
+
+                Components::RenderSettingsVolume result = baseSettings;
+                for (World::Entity e : volumes)
+                {
+                    auto& v = e.Get<Components::RenderSettingsVolume>();
+
+                    float w = 0.0f;
+                    if (v.shape == 2) // Global / unbound
+                    {
+                        w = 1.0f;
+                    }
+                    else
+                    {
+                        float4x4 wm = ComputeWorldMatrix(e);
+                        float3 center = wm[3].xyz;
+                        float distOutside = 0.0f;
+                        if (v.shape == 1) // Sphere
+                        {
+                            float dist = length(cameraPos - center);
+                            distOutside = std::max(dist - v.radius, 0.0f);
+                        }
+                        else // Box (OBB): half-extent along each axis = length(scaled axis) * 0.5
+                        {
+                            float3 d = cameraPos - center;
+                            float3 ax0 = wm[0].xyz, ax1 = wm[1].xyz, ax2 = wm[2].xyz;
+                            float over0 = std::max(fabsf((float)dot(d, normalize(ax0))) - (float)length(ax0) * 0.5f, 0.0f);
+                            float over1 = std::max(fabsf((float)dot(d, normalize(ax1))) - (float)length(ax1) * 0.5f, 0.0f);
+                            float over2 = std::max(fabsf((float)dot(d, normalize(ax2))) - (float)length(ax2) * 0.5f, 0.0f);
+                            distOutside = length(float3(over0, over1, over2));
+                        }
+                        if (v.blendDistance > 0.0f)
+                            w = std::min(std::max(1.0f - distOutside / v.blendDistance, 0.0f), 1.0f);
+                        else
+                            w = distOutside <= 0.0f ? 1.0f : 0.0f;
+                    }
+                    if (w <= 0.0f)
+                        continue;
+
+                    #define RSV_BLEND(bit, field) if (v.overrides & Components::bit) result.field += (v.field - result.field) * w;
+                    RSV_BLEND(RSO_density, density);
+                    RSV_BLEND(RSO_luminosity, luminosity);
+                    RSV_BLEND(RSO_specialNear, specialNear);
+                    RSV_BLEND(RSO_heightFalloff, heightFalloff);
+                    RSV_BLEND(RSO_noiseFrequency, noiseFrequency);
+                    RSV_BLEND(RSO_noiseThresholdLow, noiseThresholdLow);
+                    RSV_BLEND(RSO_noiseThresholdHigh, noiseThresholdHigh);
+                    RSV_BLEND(RSO_animationSpeed, animationSpeed);
+                    RSV_BLEND(RSO_expoMul, expoMul);
+                    RSV_BLEND(RSO_expoAdd, expoAdd);
+                    RSV_BLEND(RSO_P, P);
+                    RSV_BLEND(RSO_a, a);
+                    RSV_BLEND(RSO_m, m);
+                    RSV_BLEND(RSO_l, l);
+                    RSV_BLEND(RSO_c, c);
+                    RSV_BLEND(RSO_b, b);
+                    #undef RSV_BLEND
+                }
+
+                // Write the blended artistic fields back; leave the GPU-index fields to the passes.
+                as.density = result.density;
+                as.luminosity = result.luminosity;
+                as.specialNear = result.specialNear;
+                as.heightFalloff = result.heightFalloff;
+                as.noiseFrequency = result.noiseFrequency;
+                as.noiseThresholdLow = result.noiseThresholdLow;
+                as.noiseThresholdHigh = result.noiseThresholdHigh;
+                as.animationSpeed = result.animationSpeed;
+
+                pp.expoMul = result.expoMul;
+                pp.expoAdd = result.expoAdd;
+                pp.P = result.P;
+                pp.a = result.a;
+                pp.m = result.m;
+                pp.l = result.l;
+                pp.c = result.c;
+                pp.b = result.b;
+            }
+        ).name("Update render settings");
 
         return task;
     }

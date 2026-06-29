@@ -98,5 +98,31 @@ knownComponents.push_back(
 			{ "loadDistance", PropertyTypes::_float, NULL, 1, offsetof(Components::Prefab, loadDistance) },
 		}
  	});
+knownComponents.push_back(
+ 	{ "RenderSettingsVolume", Components::RenderSettingsVolume::mask, Components::RenderSettingsVolumePropertyDraw,
+ 		{
+			{ "shape", PropertyTypes::_uint, NULL, 1, offsetof(Components::RenderSettingsVolume, shape) },
+			{ "radius", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, radius) },
+			{ "blendDistance", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, blendDistance) },
+			{ "priority", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, priority) },
+			{ "overrides", PropertyTypes::_uint, NULL, 1, offsetof(Components::RenderSettingsVolume, overrides) },
+			{ "density", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, density) },
+			{ "luminosity", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, luminosity) },
+			{ "specialNear", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, specialNear) },
+			{ "heightFalloff", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, heightFalloff) },
+			{ "noiseFrequency", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, noiseFrequency) },
+			{ "noiseThresholdLow", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, noiseThresholdLow) },
+			{ "noiseThresholdHigh", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, noiseThresholdHigh) },
+			{ "animationSpeed", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, animationSpeed) },
+			{ "expoMul", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, expoMul) },
+			{ "expoAdd", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, expoAdd) },
+			{ "P", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, P) },
+			{ "a", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, a) },
+			{ "m", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, m) },
+			{ "l", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, l) },
+			{ "c", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, c) },
+			{ "b", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, b) },
+		}
+ 	});
 }
 
