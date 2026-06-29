@@ -1419,6 +1419,11 @@ class FileBrowserWindow : public EditorWindow
     float doubleClickTimer; // ms
     bool selectedByDoubleClick = false;
 
+    // Save-As mode: instead of only picking an existing file, the user edits a destination
+    // filename (pre-filled with a proposal). Select returns <currentDir>\<saveName>.
+    bool saveMode = false;
+    char saveName[256] = {};
+
     typedef void (*callback)(String);
     callback resultCB;
 
@@ -1436,13 +1441,46 @@ public:
         if(OriginalPath.empty())
             OriginalPath = std::filesystem::current_path().string();
 
-        // Setup 
+        // Setup
         isOpen = true;
         Option = InOption;
         Ext = InExt;
+        saveMode = false;
         selectedByDoubleClick = false;
         TryApplyPath(OriginalPath);
 
+        return true;
+    }
+
+    // "Save As" flavor: opens at initialDir with proposedFile pre-filled in an editable name
+    // field, filtered by InExt. On Select, result() receives "<currentDir>\<name>" (or "" if the
+    // name is blank). Pure ImGui -> safe to drive from the editor (worker) thread.
+    bool OpenSave(const String& initialDir, const String& proposedFile, const std::set<String>& InExt, callback result)
+    {
+        resultCB = result;
+        isOpen = true;
+        Option = FileBrowserOption::FILE;
+        saveMode = true;
+        Ext = InExt;
+        selectedByDoubleClick = false;
+        OriginalPath = initialDir.empty() ? String(std::filesystem::current_path().string()) : initialDir;
+        TryApplyPath(OriginalPath);
+        strncpy_s(saveName, proposedFile.c_str(), _TRUNCATE); // pre-fill the destination name
+        return true;
+    }
+
+    // "Open" flavor: pick one existing file at/under initialDir, filtered by InExt. On Select (or
+    // double-click), result() receives "<currentDir>\<file>" (or "" if nothing picked). Pure ImGui.
+    bool OpenLoad(const String& initialDir, const std::set<String>& InExt, callback result)
+    {
+        resultCB = result;
+        isOpen = true;
+        Option = FileBrowserOption::FILE;
+        saveMode = false;
+        Ext = InExt;
+        selectedByDoubleClick = false;
+        OriginalPath = initialDir.empty() ? String(std::filesystem::current_path().string()) : initialDir;
+        TryApplyPath(OriginalPath);
         return true;
     }
 
@@ -1469,6 +1507,15 @@ public:
             ImGui::Spacing();
             EditContent();
             ImGui::Spacing();
+
+            // Editable destination filename (Save-As only)
+            if (saveMode)
+            {
+                ImGui::Text("Name:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(-1);
+                ImGui::InputText("##SaveName", saveName, sizeof(saveName));
+            }
 
             // Extension text in the bottom right
             String ext;
@@ -1511,8 +1558,10 @@ public:
                     OutSelectedPath = EditedPath;
                     break;
                 case FileBrowserOption::FILE:
-                    OutSelectedPath = Selected.empty() ?
-                        "" : EditedPath + "\\" + Selected;
+                    if (saveMode)
+                        OutSelectedPath = (saveName[0] == 0) ? "" : EditedPath + "\\" + saveName;
+                    else
+                        OutSelectedPath = Selected.empty() ? "" : EditedPath + "\\" + Selected;
                     break;
                 }
                 result = true;
@@ -1615,7 +1664,7 @@ public:
         const ImGuiStyle style = ImGui::GetStyle();
         const ImVec2 size = {
             Width - style.WindowPadding.x * 2.0f,
-            Height - style.WindowPadding.y * 2.0f - 115.0f
+            Height - style.WindowPadding.y * 2.0f - (saveMode ? 143.0f : 115.0f) // extra row for the name field
         };
         if (ImGui::BeginListBox("##FileBrowserContent", size))
         {
@@ -1647,15 +1696,12 @@ public:
             {
                 if (ContentEntry(file, false))
                 {
-                    if (file == Selected && (doubleClickTimer < doubleClickTime))
-                    {
-                        Selected = file;
+                    const bool isDoubleClick = (file == Selected) && (doubleClickTimer < doubleClickTime);
+                    Selected = file;
+                    if (saveMode)
+                        strncpy_s(saveName, file.c_str(), _TRUNCATE); // clicking a file fills the name to overwrite it
+                    else if (isDoubleClick)
                         selectedByDoubleClick = true;
-                    }
-                    else
-                    {
-                        Selected = file;
-                    }
                     doubleClickTimer = 0;
                 }
             }
@@ -2229,13 +2275,34 @@ public:
                 }
                 if (ImGui::MenuItem("Save World"))
                 {
-                    World::instance->Save("Save.seed");
+                    // Point the browser at the loaded world's folder/name; else the project folder + Save.seed.
+                    namespace fs = std::filesystem;
+                    fs::path base = editorState.currentWorldPath.empty()
+                        ? fs::path(project.projectDir.c_str()) / "Save.seed"
+                        : fs::path(editorState.currentWorldPath.c_str());
+                    fileBrowserWindow.OpenSave(base.parent_path().string(), base.filename().string(),
+                        { ".seed" }, [](String path) // non-capturing -> converts to the callback fn ptr
+                        {
+                            if (path.empty()) return; // cancelled / blank name
+                            World::instance->Save(path);
+                            editorState.currentWorldPath = path; // remember for the next Save World
+                        });
                 }
                 if (ImGui::MenuItem("Load World"))
                 {
-                    editorState.selectedObject = {};
-                    //World::instance->ClearImmediate();
-                    World::instance->Load("Save.seed");
+                    // Start in the loaded world's folder; else the project folder.
+                    namespace fs = std::filesystem;
+                    fs::path base = editorState.currentWorldPath.empty()
+                        ? fs::path(project.projectDir.c_str()) / "Save.seed"
+                        : fs::path(editorState.currentWorldPath.c_str());
+                    fileBrowserWindow.OpenLoad(base.parent_path().string(), { ".seed" }, [](String path)
+                    {
+                        if (path.empty()) return; // cancelled
+                        editorState.selectedObject = {};
+                        //World::instance->ClearImmediate();
+                        editorState.currentWorldPath = path; // remember for Save/Load World
+                        World::instance->Load(path);
+                    });
                 }
                 if (ImGui::MenuItem("Add Prefab"))
                 {

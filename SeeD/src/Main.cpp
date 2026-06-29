@@ -191,7 +191,9 @@ struct EditorState
     bool show = true;
     World::Entity selectedObject = entityInvalid;
     bool dirtyHierarchy = true;
-    
+
+    String currentWorldPath; // absolute path of the world last loaded/saved ("" = none yet); proposed by the Save World file browser
+
     float4x4 cameraView;
     float4x4 cameraProj;
 };
@@ -438,7 +440,10 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     options.sortMaxDistance = project.sortMaxDistance;
 
     if (!project.startupScene.empty())
-        World::instance->Load(project.SceneAbs(project.startupScene));
+    {
+        editorState.currentWorldPath = project.SceneAbs(project.startupScene);
+        World::instance->Load(editorState.currentWorldPath);
+    }
 
     engine.Loop();
     engine.Off();
