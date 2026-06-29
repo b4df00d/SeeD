@@ -68,39 +68,17 @@ public:
     static void Save()
     {
         ZoneScoped;
-        String file = "..\\UILayout.txt";
-
-        String line;
-        std::ofstream myfile(file);
-        if (myfile.is_open())
-        {
-            for (auto& item : guiWindows)
-            {
-                myfile << item->name << " " << item->isOpen << std::endl;
-            }
-        }
+        if (!Project::instance) return;
+        for (auto& item : guiWindows)
+            Project::instance->SetWindowOpen(item->name, item->isOpen);
     }
 
     static void Load()
     {
         ZoneScoped;
-        String file = "..\\UILayout.txt";
-
-        String line;
-        std::ifstream myfile(file);
-        if (myfile.is_open())
-        {
-            String name;
-            bool open;
-            while (myfile >> name >> open)
-            {
-                for (auto& item : guiWindows)
-                {
-                    if (item->name == name)
-                        item->isOpen = open;
-                }
-            }
-        }
+        if (!Project::instance) return;
+        for (auto& item : guiWindows)
+            item->isOpen = Project::instance->WindowOpen(item->name, item->isOpen);
     }
 };
 std::vector<EditorWindow*> EditorWindow::guiWindows;
@@ -2270,6 +2248,21 @@ public:
 
             if (ImGui::BeginMenu("File"))
             {
+                if (ImGui::MenuItem("Save Project"))
+                {
+                    // capture the current camera pose into the project
+                    uint q = World::instance->Query(Components::Camera::mask | Components::Transform::mask, 0);
+                    auto& cams = World::instance->frameQueries[q];
+                    if (!cams.empty())
+                    {
+                        auto& t = cams[0].Get<Components::Transform>();
+                        store(t.position, project.cameraPos);
+                        store(t.rotation, project.cameraRot);
+                        project.hasCamera = true;
+                    }
+                    EditorWindow::Save(); // push editor window open-states into the project
+                    project.Save();       // write the single project file
+                }
                 if (ImGui::MenuItem("Save World"))
                 {
                     World::instance->Save("Save.seed");

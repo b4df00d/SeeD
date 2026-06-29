@@ -1332,6 +1332,15 @@ namespace Systems
             World::instance->systems.push_back(this);
         }
 
+        void On(float3 position, quaternion rotation)
+        {
+            On();
+
+            auto& trans = camera.Get<Components::Transform>();
+            trans.position = position;
+            trans.rotation = rotation;
+        }
+
         void Off() override
         {
             auto item = std::find(World::instance->systems.begin(), World::instance->systems.end(), this);

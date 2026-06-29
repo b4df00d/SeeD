@@ -67,7 +67,8 @@
 // [ ] 9. Execute pass command buffers as soon as they are ready, in the correct
 //        order -- WITHOUT locking a dedicated thread just to do the submission.
 //
-// [ ] 10. DLSS parameters UI: model, quality.
+// [O] 10. DLSS parameters UI: model, quality.
+//         Changing quality is craching
 //
 // [ ] 11. GBuffer draw calls (ExecuteIndirect) must be able to run different
 //         shaders -- at least one with early-Z and one without -- so cutout works
@@ -190,11 +191,14 @@ struct EditorState
     bool show = true;
     World::Entity selectedObject = entityInvalid;
     bool dirtyHierarchy = true;
-
+    
     float4x4 cameraView;
     float4x4 cameraProj;
 };
 EditorState editorState;
+
+#include "Project.h"
+Project project;
 
 #include "Loading.h"
 #include "Renderer.h"
@@ -242,7 +246,7 @@ public:
         ui.On(&ios.window, gpu.device, gpu.swapChain);
         EditorWindow::Load();
 
-        player.On();
+        player.On(float3(project.cameraPos[0], project.cameraPos[1], project.cameraPos[2]), quaternion(project.cameraRot[0], project.cameraRot[1], project.cameraRot[2], project.cameraRot[3]));
         prefabStreaming.On();
     }
 
@@ -334,7 +338,6 @@ public:
         gpu.Off();
         ios.Off();
         time.Off();
-        EditorWindow::Save();
     }
 
     void ScheduleInputs(tf::Subflow& subflow)
@@ -415,56 +418,27 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // call that each time to force the correctness of component metadata ?
     //ParseCpp("G:\\Work\\Dev\\SeeD\\SeeD\\src\\World.h");
 
+    // The project (asset dirs + window/render settings + editor layout) must be loaded BEFORE the
+    // window/GPU are created, since it supplies the window settings.
+    project.Load(lpCmdLine ? String(lpCmdLine) : String(""));
+
     IOs::WindowInformation window;
-    window.usevSync = false;
+    window.usevSync = project.vsync;
 #ifdef _DEBUG
     window.usevSync = true;
 #endif
-    window.fullScreen = false;
+    window.fullScreen = project.fullscreen;
     window.windowInstance = hInstance;
-    window.windowResolution = uint2(float2(1600.0f, 900.0f) * 1.75f);
+    window.windowResolution = uint2(project.windowWidth, project.windowHeight);
 
     Engine engine;
     engine.On(window);
 
+    options.frontToBackSort = project.frontToBackSort;
+    options.sortMaxDistance = project.sortMaxDistance;
 
-    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets\\";
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Vehicules\\bus scifi.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Mario1\\scene.gltf");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Stronghold.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Japanese restaurant\\source\\Inakaya_Cycles2.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\bridge\\source\\nature-and-cyvilization.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Cabin\\Rural_Cabins.gltf");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\_Environment.fbx");
-    
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\5v5GameMap.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Human\\the-queen-of-swords\\the queen of swords.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\toko.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Blokcing_obj.obj");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\GTA.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Bistro\\BistroInterior.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Provence\\Provence.gltf");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\tokyo\\source\\Export.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\WildWest\\WildWest2.gltf");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\Halo.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\BOURDON-V01.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Objects\\primitives.fbx");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\places\\caldera-main\\map_source\\prefabs\\br\\wz_vg\\mp_wz_island\\commercial\\hotel_01.usd");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets\\Places\\appart-vincent-03-v03.fbx");
-
-    engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets2\\";
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\BrutalistLevelKit\\brutalist.gltf");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\FantasticVillage\\map_village_day.gltf");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Cambodia\\TemplesOfCambodia_01_01_Exterior_02.gltf");
-    //World::instance->Load("Temple.seed");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\Bazaar\\LV_Bazaar.gltf");
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets2\\ScienceLab\\ScieneLab.gltf");
-
-    //engine.assetLibrary.importPath = "E:\\Work\\Dev\\EngineAssets3\\";
-    //engine.sceneLoader.Load("E:\\Work\\Dev\\EngineAssets3\\SpaceJunkyard_NantStudios2.gltf");
-    //World::instance->Load("Cave.seed");
-
-    World::instance->Load("Save.seed");
+    if (!project.startupScene.empty())
+        World::instance->Load(project.SceneAbs(project.startupScene));
 
     engine.Loop();
     engine.Off();

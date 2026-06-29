@@ -179,6 +179,7 @@ copy /Y "..\Third\DLSS-main\lib\Windows_x86_64\rel\*.*" "..\x64\Release\"</Comma
     <ClInclude Include="src\GPU.h" />
     <ClInclude Include="src\IO.h" />
     <ClInclude Include="src\Loading.h" />
+    <ClInclude Include="src\Project.h" />
     <ClInclude Include="src\Renderer.h" />
     <ClInclude Include="src\Shaders\HashGridCommon.h" />
     <ClInclude Include="src\Shaders\SharcCommon.h" />

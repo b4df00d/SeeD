@@ -22,16 +22,16 @@ public:
     // https://www.youtube.com/watch?v=cGB3wT0U5Ao&ab_channel=CppCon
     // used Open Addressing Hash Map ?
     // plf::colony ?
-    String file = "..\\assetLibrary.txt";
-    String assetsPath = "..\\Assets\\";
+    String assetsPath;
     std::unordered_map<assetID, Asset> map;
     std::vector<assetID> assetsAlive;
-    String importPath = "..\\Assets\\";
+    String importPath;
     std::unordered_map<assetID, String> allAssetsInImportPath;
     std::unordered_map<assetID, uint> loadingRequest;
     int meshLoadingLimit = 5;
     int shaderLoadingLimit = 5;
     int textureLoadingLimit = 5;
+    int unloadFrameThreshold = 600;
     int meshLoaded = 0;
     int shaderLoaded = 0;
     int textureLoaded = 0;
@@ -47,15 +47,17 @@ public:
         {
             commandBuffer.Get(i).On(GPU::instance->computeQueue, name); //not copyQueue because creation of blas needs it :(
         }
+        assetsPath = Project::instance->CacheDirAbs();
+        importPath = Project::instance->SourceDirAbs();
         namespace fs = std::filesystem;
-        fs::create_directories("..\\Assets");
-        Load();
+        std::error_code ec;
+        fs::create_directories((std::string)assetsPath, ec);
+        fs::create_directories((std::string)importPath, ec);
     }
 
     void Off()
     {
         ZoneScoped;
-        Save();
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
             commandBuffer.Get(i).Off();
@@ -152,27 +154,21 @@ public:
             }
             else if (item.type == AssetLibrary::AssetType::mesh || item.type == AssetLibrary::AssetType::texture)
             {
-                /*
-                if (item.lastGetFrameCount > 100)
+                item.lastGetFrameCount++;
+                if (item.lastGetFrameCount > (uint)unloadFrameThreshold)
                 {
-                    if (item.type == AssetLibrary::AssetType::mesh)
+                    if (item.type == AssetLibrary::AssetType::texture)
                     {
-                        // TODO : a real release in meshStorage
-                        ((Mesh*)item.second.data)->BLAS.Release();
-                    }
-                    else if (item.type == AssetLibrary::AssetType::texture)
-                    {
-                        ((Resource*)item.data)->allocation->Release();
+                        ((Resource*)item.data)->Release();
+                        delete (Resource*)item.data;
                         item.data = nullptr;
-
-                        // factorize with mesh release when done
                         assetsAlive[i] = assetsAlive.back();
                         assetsAlive.pop_back();
                         i--;
                     }
+                    // Mesh eviction deferred: MeshStorage has no slot reclaim yet (only BLAS.Release).
+                    // Meshes stay resident until that exists -- see plan risks.
                 }
-                item.lastGetFrameCount++;
-                */
             }
         }
     }
@@ -190,11 +186,11 @@ public:
         return type;
     }
 
-    assetID Add(String path, String originalFilePath)
+    assetID Add(String path, String originalFilePath, assetID id = {})
     {
         ZoneScoped;
-        assetID id;
-        id.hash = std::hash<std::string>{}(path);
+        if(id.hash == 0)
+            id.hash = std::hash<std::string>{}(path);
         lock.lock();
         map[id].path = path;
         map[id].originalFilePath = originalFilePath;
@@ -215,13 +211,33 @@ public:
         return map[id].path;
     }
 
+    bool ProbeCache(assetID id)
+    {
+        String base = std::format("{}{}", assetsPath.c_str(), id.hash);
+        String path;
+        AssetType type;
+        if (std::filesystem::exists((std::string)(base + ".mesh"))) { path = base + ".mesh"; type = AssetType::mesh; }
+        else if (std::filesystem::exists((std::string)(base + ".tex"))) { path = base + ".tex"; type = AssetType::texture; }
+        else return false;
+
+        lock.lock();
+        map[id].path = path;
+        map[id].type = type;
+        map[id].originalFilePath = "";
+        map[id].data = nullptr;
+        lock.unlock();
+        return true;
+    }
+
     template<typename T>
     T* Get(assetID id, bool immediate = false)
     {
         if (id == assetID::Invalid)
             return nullptr;
 
-        seedAssert(map.contains(id));
+        if (!map.contains(id) && !ProbeCache(id))
+            return nullptr;
+
         auto& asset = map[id];
         if (asset.data == nullptr)
         {
@@ -250,64 +266,6 @@ public:
     void LoadAssets();
     void LoadAsset(assetID id, bool ignoreBudget);
 
-    void Save()
-    {
-        ZoneScoped;
-        String line;
-        std::ofstream myfile(file);
-        if (myfile.is_open())
-        {
-            myfile << importPath << std::endl;
-            for (auto& item : map)
-            {
-                // tab separated: original file paths can contain spaces
-                myfile << item.first.hash << "\t" << item.second.path << "\t" << item.second.originalFilePath << std::endl;
-            }
-        }
-    }
-
-    void Load()
-    {
-        ZoneScoped;
-        String line;
-        std::ifstream myfile(file);
-        if (myfile.is_open())
-        {
-            std::getline(myfile, importPath);
-            while (std::getline(myfile, line))
-            {
-                if (line.empty())
-                    continue;
-
-                assetID id;
-                String path;
-                String originalFilePath;
-
-                size_t t1 = line.find('\t');
-                if (t1 != std::string::npos)
-                {
-                    // current format: hash \t path \t originalFilePath
-                    size_t t2 = line.find('\t', t1 + 1);
-                    id.hash = std::stoull(line.substr(0, t1));
-                    path = line.substr(t1 + 1, (t2 == std::string::npos ? line.size() : t2) - (t1 + 1));
-                    originalFilePath = (t2 == std::string::npos) ? String() : String(line.substr(t2 + 1));
-                }
-                else
-                {
-                    // legacy format: hash path (space separated, no originalFilePath)
-                    size_t s = line.find(' ');
-                    if (s == std::string::npos)
-                        continue;
-                    id.hash = std::stoull(line.substr(0, s));
-                    path = line.substr(s + 1);
-                }
-
-                map[id].path = path;
-                map[id].originalFilePath = originalFilePath;
-                map[id].type = GetType(id);
-            }
-        }
-    }
 
     String FindInImportPath(String name)
     {
@@ -410,7 +368,7 @@ public:
         ZoneScoped;
         Resource resource = {};
 
-        // For a serious streaming system, should this be available in a RAM DataBase for super fast access ?
+        // TODO : For a serious streaming system, should this be available in a RAM DataBase for super fast access ?
         String metaPath = path.substr(0, path.length() - 4) + ".meta";
         DirectStorageSampleTextureMetadataHeader metadata;
         std::ifstream fin(metaPath, std::ios::binary);
@@ -576,7 +534,7 @@ public:
         if (fin.is_open())
         {
             fin.close();
-            return AssetLibrary::instance->Add(path, name);
+            return AssetLibrary::instance->Add(path, name, id);
             //return id;
         }
         return assetID::Invalid;
@@ -815,7 +773,8 @@ public:
         CloseHandle(metadataFileHandle);
         CloseHandle(texturedataFileHandle);
 
-        return AssetLibrary::instance->Add(path, name);
+        path = std::format("{}{}.tex", AssetLibrary::instance->assetsPath.c_str(), id.hash);
+        return AssetLibrary::instance->Add(path, name, id);
     }
 };
 TextureLoader* TextureLoader::instance = nullptr;
@@ -900,7 +859,19 @@ public:
             fout.close();
         }
 
-        return AssetLibrary::instance->Add(path, name);
+        String metaPath = std::format("{}{}.meta", AssetLibrary::instance->assetsPath.c_str(), id.hash);
+        std::ofstream meta(metaPath, std::ios::binary);
+        if (meta.is_open())
+        {
+            uint32_t type = (uint32_t)AssetLibrary::AssetType::mesh;
+            uint32_t nameLen = (uint32_t)name.size();
+            meta.write((char*)&type, sizeof(type));
+            meta.write((char*)&nameLen, sizeof(nameLen));
+            meta.write(name.c_str(), nameLen);
+            meta.close();
+        }
+
+        return AssetLibrary::instance->Add(path, name, id);
     }
 
     // also DirectXMesh can do meshlets https://github.com/microsoft/DirectXMesh
