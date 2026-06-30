@@ -1877,7 +1877,7 @@ public:
         ppparams.c = 1.33;
         ppparams.b = 0.0;
         ppparams.expoAdd = 0;
-        ppparams.expoMul = 4;
+        ppparams.expoMul = 1;
 
 
         Open();

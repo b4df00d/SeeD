@@ -2071,11 +2071,103 @@ public:
 
     }
 
+    // Wireframe overlay of the selected RenderSettingsVolume's bounds + blend-falloff boundary.
+    // Always-on-top (ImGui), projected with the editor camera. Reads the same fields the blend uses
+    // (Renderer's UpdateRenderSettings) so the gizmo matches the actual influence region.
+    void DrawVolumeGizmo(World::Entity sel)
+    {
+        auto& v = sel.Get<Components::RenderSettingsVolume>();
+        if (v.shape == 2) // Global / unbound: nothing to draw
+            return;
+
+        float4x4 world = ComputeWorldMatrix(sel);
+        float4x4 viewProj = mul(inverse(editorState.cameraView), editorState.cameraProj);
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+
+        // world point -> screen; false if behind the camera (segment is then skipped)
+        auto W2S = [&](float3 p, ImVec2& out) -> bool
+        {
+            float4 cp = mul(float4(p, 1), viewProj); // row-vector convention (engine uses mul(vec, mat))
+            float w = (float)cp.w;
+            if (w <= 1e-4f) return false;
+            float nx = (float)cp.x / w;
+            float ny = (float)cp.y / w;
+            out = ImVec2((nx * 0.5f + 0.5f) * disp.x, (1.0f - (ny * 0.5f + 0.5f)) * disp.y);
+            return true;
+        };
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        auto Line = [&](float3 a, float3 b, ImU32 col)
+        {
+            ImVec2 sa, sb;
+            if (W2S(a, sa) && W2S(b, sb)) dl->AddLine(sa, sb, col, 1.5f);
+        };
+
+        const ImU32 boundsCol = IM_COL32(255, 220, 40, 255);
+        const ImU32 blendCol  = IM_COL32(255, 220, 40, 90);
+        const float twoPi = 6.28318530718f;
+
+        float3 center = world[3].xyz;
+
+        if (v.shape == 1) // Sphere: center + radius, ignores rotation/scale (matches the blend)
+        {
+            auto circle = [&](float r, ImU32 col, float3 a, float3 b)
+            {
+                const int seg = 32;
+                float3 prev = center + a * r;
+                for (int i = 1; i <= seg; i++)
+                {
+                    float t = twoPi * (float)i / (float)seg;
+                    float3 cur = center + (a * cosf(t) + b * sinf(t)) * r;
+                    Line(prev, cur, col);
+                    prev = cur;
+                }
+            };
+            auto sphere = [&](float r, ImU32 col)
+            {
+                circle(r, col, float3(1, 0, 0), float3(0, 1, 0));
+                circle(r, col, float3(0, 1, 0), float3(0, 0, 1));
+                circle(r, col, float3(0, 0, 1), float3(1, 0, 0));
+            };
+            sphere(v.radius, boundsCol);
+            if (v.blendDistance > 0.0f)
+                sphere(v.radius + v.blendDistance, blendCol);
+        }
+        else // Box (shape==0): OBB from the Transform (half along axis i = length(world[i])*0.5)
+        {
+            float3 ax = world[0].xyz, ay = world[1].xyz, az = world[2].xyz;
+            auto box = [&](float3 hx, float3 hy, float3 hz, ImU32 col)
+            {
+                float3 corner[8];
+                for (int i = 0; i < 8; i++)
+                {
+                    float sx = (i & 1) ? 1.0f : -1.0f;
+                    float sy = (i & 2) ? 1.0f : -1.0f;
+                    float sz = (i & 4) ? 1.0f : -1.0f;
+                    corner[i] = center + hx * sx + hy * sy + hz * sz;
+                }
+                for (int i = 0; i < 8; i++)
+                    for (int j = i + 1; j < 8; j++)
+                    {
+                        int d = i ^ j;
+                        if (d == 1 || d == 2 || d == 4) Line(corner[i], corner[j], col); // 12 edges
+                    }
+            };
+            box(ax * 0.5f, ay * 0.5f, az * 0.5f, boundsCol);
+            if (v.blendDistance > 0.0f)
+            {
+                float bd = v.blendDistance;
+                box(ax * 0.5f + normalize(ax) * bd, ay * 0.5f + normalize(ay) * bd, az * 0.5f + normalize(az) * bd, blendCol);
+            }
+        }
+    }
+
     void Update() override final
     {
         ZoneScoped;
         if (editorState.selectedObject.IsValid() && editorState.selectedObject.Has<Components::Transform>())
             EditTransform(editorState.cameraView, editorState.cameraProj, editorState.selectedObject);
+        if (editorState.selectedObject.IsValid() && editorState.selectedObject.Has<Components::RenderSettingsVolume>())
+            DrawVolumeGizmo(editorState.selectedObject);
     }
 };
 Guizmo guizmo;
