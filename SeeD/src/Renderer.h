@@ -252,6 +252,7 @@ struct ViewContext
     StructuredBuffer<HLSL::InstanceCullingDispatch> instancesCulledArgs;
     StructuredBuffer<HLSL::GroupedCullingDispatch> meshletsToCull;
     StructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs;
+    StructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgsCutout; // late-Z cutout draw list (unsorted)
     StructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgsSorted; // front-to-back ordered copy
     StructuredBuffer<uint> sortHistogram; // depth-bucket counts / offsets for the draw sort
     StructuredBuffer<uint> meshletBuckets; // per-culled-meshlet depth bucket, filled during culling
@@ -284,10 +285,11 @@ struct ViewContext
         meshletsToCull.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         instancesCounter.CreateBuffer(2, D3D12_RESOURCE_STATE_COMMON);
         meshletsCulledArgs.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
+        meshletsCulledArgsCutout.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         meshletsCulledArgsSorted.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         sortHistogram.CreateBuffer(SORT_BUCKETS, D3D12_RESOURCE_STATE_COMMON);
         meshletBuckets.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
-        meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
+        meshletsCounter.CreateBuffer(2, D3D12_RESOURCE_STATE_COMMON); // [0] opaque draw count, [1] cutout draw count
         jitterIndex = 0;
     }
 
@@ -298,6 +300,7 @@ struct ViewContext
         instancesCulledArgs.Release();
         meshletsToCull.Release();
         meshletsCulledArgs.Release();
+        meshletsCulledArgsCutout.Release();
         meshletsCulledArgsSorted.Release();
         sortHistogram.Release();
         meshletBuckets.Release();
@@ -497,6 +500,7 @@ public:
         viewContextParams.meshletsToCullIndex = viewContext.meshletsToCull.GetResource().uav.offset;
         viewContextParams.instancesCounterIndex = viewContext.instancesCounter.GetResource().uav.offset;
         viewContextParams.meshletsCulledArgsIndex = viewContext.meshletsCulledArgs.GetResource().uav.offset;
+        viewContextParams.meshletsCulledArgsCutoutIndex = viewContext.meshletsCulledArgsCutout.GetResource().uav.offset;
         viewContextParams.meshletsCulledArgsSortedIndex = viewContext.meshletsCulledArgsSorted.GetResource().uav.offset;
         viewContextParams.sortHistogramIndex = viewContext.sortHistogram.GetResource().uav.offset;
         viewContextParams.meshletBucketsIndex = viewContext.meshletBuckets.GetResource().uav.offset;
@@ -1125,6 +1129,7 @@ public:
 
         view->viewContext.instancesCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
         view->viewContext.meshletsCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+        view->viewContext.meshletsCulledArgsCutout.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
         view->viewContext.meshletsCulledArgsSorted.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
         view->viewContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
         view->viewContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
@@ -1203,6 +1208,9 @@ public:
             view->viewContext.meshletsCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         }
 
+        // Cutout list is always populated (unsorted) and always drawn -- flush it to the GBuffer's second draw.
+        view->viewContext.meshletsCulledArgsCutout.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
         view->viewContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
         Close();
@@ -1257,6 +1265,7 @@ class GBuffers : public Pass
     ViewResource instanceID;
     ViewResource overdraw;
     Components::Handle<Components::Shader> meshShader;
+    Components::Handle<Components::Shader> meshShaderCutout; // late-Z variant for alpha-tested (cutout) meshlets
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
@@ -1282,6 +1291,7 @@ public:
         overdraw.Register("overdraw", view);
         overdraw.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "overdraw"); // per-pixel atomic counter for the overdraw heatmap
         meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl|DefaultG");
+        meshShaderCutout.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl|DefaultGCutout");
 
         Open();
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1374,6 +1384,18 @@ public:
         auto& drawArgs = options.frontToBackSort ? view->viewContext.meshletsCulledArgsSorted : view->viewContext.meshletsCulledArgs;
         uint maxDraw = drawArgs.Size();
         commandBuffer->cmd->ExecuteIndirect(shader.commandSignature, maxDraw, drawArgs.GetResourcePtr(), 0, view->viewContext.meshletsCounter.GetResourcePtr(), 0);
+
+        // Cutout (alpha-tested) meshlets: same GBuffer targets, but a late-Z PSO (no [earlydepthstencil])
+        // so the discard runs before depth is written. Draws from its own unsorted list; the count lives
+        // in meshletsCounter[1] (byte offset sizeof(uint)). Mirrors the RT force-opaque/alpha-test split.
+        Shader& cutoutShader = *AssetLibrary::instance->Get<Shader>(meshShaderCutout.Get().id, true);
+        commandBuffer->SetGraphic(cutoutShader);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetGraphicsRootConstantBufferView(EditorContextRegister, editorContextAddress);
+
+        auto& cutoutArgs = view->viewContext.meshletsCulledArgsCutout;
+        commandBuffer->cmd->ExecuteIndirect(cutoutShader.commandSignature, cutoutArgs.Size(), cutoutArgs.GetResourcePtr(), 0, view->viewContext.meshletsCounter.GetResourcePtr(), sizeof(uint));
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
@@ -3019,6 +3041,7 @@ public:
                 this->viewContext.instancesCulledArgs.Resize(this->viewWorld.instances.Size());
                 this->viewContext.meshletsToCull.Resize(this->viewWorld.meshletsCount);
                 this->viewContext.meshletsCulledArgs.Resize(this->viewWorld.meshletsCount);
+                this->viewContext.meshletsCulledArgsCutout.Resize(this->viewWorld.meshletsCount);
                 this->viewContext.meshletsCulledArgsSorted.Resize(this->viewWorld.meshletsCount);
                 this->viewContext.meshletBuckets.Resize(this->viewWorld.meshletsCount);
                 this->raytracingContext.instancesRayTracing.Resize(this->viewWorld.instances.Size());

@@ -1,6 +1,5 @@
 // ============================================================================
-// TODO list  (self-contained: each point holds all the data needed to start a
-//             dedicated coding session)
+// TODO list  
 // ============================================================================
 //
 // [ ] 1. Shader Execution Reordering (SER)
@@ -70,9 +69,13 @@
 // [O] 10. DLSS parameters UI: model, quality.
 //         Changing quality is craching
 //
-// [ ] 11. GBuffer draw calls (ExecuteIndirect) must be able to run different
+// [X] 11. GBuffer draw calls (ExecuteIndirect) must be able to run different
 //         shaders -- at least one with early-Z and one without -- so cutout works
 //         in the GBuffer (mirrors the RT cutout handling).
+// 
+// [ ] 12. Do a better component metadata parsing
+//         for the moment it´s only getting components in world.h, but it should
+//         be able to parse any header file and get all the components in it.
 //
 // ============================================================================
 

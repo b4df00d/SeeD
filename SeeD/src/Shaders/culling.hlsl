@@ -22,7 +22,8 @@ void CullingReset(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadI
     isntancesCounters[1] = 0;
     
     RWStructuredBuffer<uint> meshletsCounters = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
-    meshletsCounters[0] = 0;
+    meshletsCounters[0] = 0; // opaque (early-Z) draw count
+    meshletsCounters[1] = 0; // cutout (late-Z) draw count
 
     RWStructuredBuffer<uint> instanceRaytracingCounter = ResourceDescriptorHeap[rtParameters.instancesRaytracingCountHeapIndex];
     instanceRaytracingCounter[0] = 0;
@@ -216,42 +217,65 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     if (!culled)
     {
         RWStructuredBuffer<uint> meshletCounter = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
-        RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
-        // Each active lane writes one draw call: the first active lane reserves
-        // a contiguous block for the whole wave, and each lane takes its slot
-        // from the count of active lanes preceding it.
-        uint waveOffset = WavePrefixCountBits(true);
-        uint waveTotal = WaveActiveCountBits(true);
-        uint waveBase = 0;
-        if (WaveIsFirstLane())
-            InterlockedAdd(meshletCounter[0], waveTotal, waveBase);
-        waveBase = WaveReadLaneFirst(waveBase);
-        uint index = waveBase + waveOffset;
+
         HLSL::MeshletDrawCall mdc = (HLSL::MeshletDrawCall) 0;
         mdc.instanceIndex = meshletToCull.instanceIndex;
         mdc.meshletIndex = meshletToCull.meshletIndex;
         mdc.ThreadGroupCountX = 1;
         mdc.ThreadGroupCountY = 1;
         mdc.ThreadGroupCountZ = 1;
-        meshletsCulledArgs[index] = mdc;
 
-        if (viewContext.frontToBackSort)
+        // Split the draw list by shading domain, mirroring the RT path (parameters[4] != 0 == cutout):
+        // opaque meshlets go to the early-Z list, cutout meshlets to a separate late-Z list so their
+        // alpha-test discard can prevent depth writes. Cutout draws skip the front-to-back sort.
+        StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
+        bool cutout = materials[instance.materialIndex].parameters[4] != 0;
+
+        if (cutout)
         {
-            // We already have this meshlet's world-space center, so derive its depth bucket
-            // here for free. Stash it for the scatter pass and accumulate the histogram.
-            uint bucket = DepthBucketFromCenter(center, camera);
-            RWStructuredBuffer<uint> meshletBuckets = ResourceDescriptorHeap[viewContext.meshletBucketsIndex];
-            meshletBuckets[index] = bucket;
+            RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgsCutout = ResourceDescriptorHeap[viewContext.meshletsCulledArgsCutoutIndex];
+            // Reserve one slot per active lane with a single wave-aggregated atomic on counter[1].
+            uint waveOffset = WavePrefixCountBits(true);
+            uint waveTotal = WaveActiveCountBits(true);
+            uint waveBase = 0;
+            if (WaveIsFirstLane())
+                InterlockedAdd(meshletCounter[1], waveTotal, waveBase);
+            waveBase = WaveReadLaneFirst(waveBase);
+            meshletsCulledArgsCutout[waveBase + waveOffset] = mdc;
+        }
+        else
+        {
+            RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
+            // Each active lane writes one draw call: the first active lane reserves
+            // a contiguous block for the whole wave, and each lane takes its slot
+            // from the count of active lanes preceding it.
+            uint waveOffset = WavePrefixCountBits(true);
+            uint waveTotal = WaveActiveCountBits(true);
+            uint waveBase = 0;
+            if (WaveIsFirstLane())
+                InterlockedAdd(meshletCounter[0], waveTotal, waveBase);
+            waveBase = WaveReadLaneFirst(waveBase);
+            uint index = waveBase + waveOffset;
+            meshletsCulledArgs[index] = mdc;
 
-            RWStructuredBuffer<uint> sortHistogram = ResourceDescriptorHeap[viewContext.sortHistogramIndex];
-            // Wave-aggregate the histogram: lanes sharing a bucket collapse into a single global
-            // atomic (one per distinct bucket per wave) instead of one atomic per meshlet.
-            uint repLane, bucketLanes;
-            WaveBucketBallot(bucket, repLane, bucketLanes);
-            if (WaveGetLaneIndex() == repLane)
+            if (viewContext.frontToBackSort)
             {
-                uint base;
-                InterlockedAdd(sortHistogram[bucket], bucketLanes, base);
+                // We already have this meshlet's world-space center, so derive its depth bucket
+                // here for free. Stash it for the scatter pass and accumulate the histogram.
+                uint bucket = DepthBucketFromCenter(center, camera);
+                RWStructuredBuffer<uint> meshletBuckets = ResourceDescriptorHeap[viewContext.meshletBucketsIndex];
+                meshletBuckets[index] = bucket;
+
+                RWStructuredBuffer<uint> sortHistogram = ResourceDescriptorHeap[viewContext.sortHistogramIndex];
+                // Wave-aggregate the histogram: lanes sharing a bucket collapse into a single global
+                // atomic (one per distinct bucket per wave) instead of one atomic per meshlet.
+                uint repLane, bucketLanes;
+                WaveBucketBallot(bucket, repLane, bucketLanes);
+                if (WaveGetLaneIndex() == repLane)
+                {
+                    uint base;
+                    InterlockedAdd(sortHistogram[bucket], bucketLanes, base);
+                }
             }
         }
     }

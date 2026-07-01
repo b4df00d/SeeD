@@ -17,6 +17,7 @@ struct PS_OUTPUT
 };
 
 #pragma gBuffer DefaultG MeshMain PixelgBuffer
+#pragma gBuffer DefaultGCutout MeshMain PixelgBuffer CUTOUT
 #pragma forward DefaultF MeshMain PixelForward
 
 struct MSVert
@@ -88,8 +89,9 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
 
         outVerts[groupThreadId.x].previousPos = mul(previousMvp, pos);
 
+        // Not normalized here: GetSurfaceData renormalizes after interpolation anyway.
         float3 normal = i_octahedral_32(v.normalOct, 16);
-        outVerts[groupThreadId.x].normal = normalize(mul((float3x3)worldMatrix, normal));
+        outVerts[groupThreadId.x].normal = mul((float3x3)worldMatrix, normal);
 
         // Pass tangent + world-space handedness; the binormal is rebuilt in the pixel shader.
         float3 tangent = i_octahedral_32(v.tangentOct, 16);
@@ -103,21 +105,12 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
     {
         uint offset = meshlet.triangleOffset + groupThreadId.x * 3;
         uint alignedOffset = offset & ~3;
-        uint diff = (offset - alignedOffset);
+        uint shift = (offset - alignedOffset) * 8;
         uint2 packedData = trianglesData.Load2(alignedOffset);
-        
-        uint tri[8];
-        tri[0] = (packedData.x) & 0x000000ff;
-        tri[1] = (packedData.x >> 8) & 0x000000ff;
-        tri[2] = (packedData.x >> 16) & 0x000000ff;
-        tri[3] = (packedData.x >> 24) & 0x000000ff;
-        
-        tri[4] = (packedData.y) & 0x000000ff;
-        tri[5] = (packedData.y >> 8) & 0x000000ff;
-        tri[6] = (packedData.y >> 16) & 0x000000ff;
-        tri[7] = (packedData.y >> 24) & 0x000000ff;
-        
-        outIndices[groupThreadId.x] = uint3(tri[diff], tri[diff + 1], tri[diff + 2]);
+
+        // Funnel-shift the 3 index bytes down to bit 0 (HLSL shifts are mod-32: guard shift==0).
+        uint tri3 = (packedData.x >> shift) | (shift == 0 ? 0 : packedData.y << (32 - shift));
+        outIndices[groupThreadId.x] = uint3(tri3 & 0xff, (tri3 >> 8) & 0xff, (tri3 >> 16) & 0xff);
     }
 }
 
@@ -152,7 +145,11 @@ PS_OUTPUT PixelForward(MSVert inVerts)
 // Force early depth test so occluded fragments are rejected before the shader runs.
 // Without this, the overdraw UAV write below makes D3D12 default to late depth testing,
 // which shades every covered fragment regardless of draw order (defeating the front-to-back sort).
+// Cutout variant (CUTOUT define) omits early-Z so the alpha-test discard runs BEFORE depth is
+// written -- otherwise the transparent texels would still occlude what's behind them.
+#ifndef CUTOUT
 [earlydepthstencil]
+#endif
 PS_OUTPUT PixelgBuffer(MSVert inVerts)
 {
     PS_OUTPUT o;
@@ -174,7 +171,9 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
         o.albedo.xyz = RandUINT(meshletIndexIndirect); // per-meshlet debug color (computed here, not interpolated)
     }
     
+#ifdef CUTOUT
     if((o.albedo.a+0.01) < material.parameters[4]) discard;
+#endif
 
     if (editorContext.overdraw) // count shaded fragments per pixel for the overdraw heatmap
     {

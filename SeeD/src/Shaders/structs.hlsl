@@ -156,6 +156,7 @@ namespace HLSL
         uint instancesCulledArgsIndex;
         uint meshletsToCullIndex;
         uint meshletsCulledArgsIndex;
+        uint meshletsCulledArgsCutoutIndex; // late-Z cutout draw list (parallel to meshletsCulledArgs)
         uint meshletsCulledArgsSortedIndex;
         uint sortHistogramIndex;
         uint meshletBucketsIndex;
