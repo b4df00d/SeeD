@@ -44,7 +44,7 @@
 //          the selected LOD has 0 meshlets) -- re-check culling after changing
 //          the meshlet/cluster format.
 //
-// [ ] 5. Project file
+// [X] 5. Project file
 //        - Simple .txt format (like the existing .seed / UILayout.txt files).
 //        - Stores: asset directory, scene to load, and window/render settings.
 //
@@ -64,7 +64,7 @@
 //        - System B: reads transforms back from Jolt and writes them into the ECS
 //          each frame.
 //
-// [ ] 9. Execute pass command buffers as soon as they are ready, in the correct
+// [X] 9. Execute pass command buffers as soon as they are ready, in the correct
 //        order -- WITHOUT locking a dedicated thread just to do the submission.
 //
 // [O] 10. DLSS parameters UI: model, quality.

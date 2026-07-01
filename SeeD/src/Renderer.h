@@ -440,8 +440,9 @@ public:
         }
     }
     virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
-    virtual void Execute() = 0;
-    
+    // Submission is no longer per-view: passes self-register into Renderer::submissions and are
+    // submitted in registration order by the cooperative drain (TODO #9). No View::Execute().
+
     Resource& GetRegisteredResource(String name)
     {
         UINT64 hash = std::hash<std::string>{}(name);
@@ -606,6 +607,55 @@ public:
 };
 std::mutex ViewResource::lock;
 
+// Ordered, cooperative GPU-submission list (TODO #9). Passes record their command buffers in
+// parallel, but submission to the queues must happen in one fixed order (a topological order of
+// the fence dependencies). Each submittable registers once (in Pass::On / Renderer::On) and gets a
+// slot index. When a worker finishes recording a pass it calls MarkReadyAndDrain(index): under the
+// lock it flags that slot ready and submits every contiguous-ready slot from the cursor forward.
+// So whichever worker unblocks the cursor performs the submission inline -- no dedicated thread.
+struct SubmissionList
+{
+    static SubmissionList* instance;
+    std::vector<std::function<void()>> execute; // submission action per slot, in order
+    std::vector<bool> ready;                    // guarded by mutex
+    size_t cursor = 0;
+    std::mutex mutex;
+
+    void Clear() // before each (re)build of the views
+    {
+        std::lock_guard lk(mutex);
+        execute.clear();
+        ready.clear();
+        cursor = 0;
+    }
+    int Register(std::function<void()> fn) // at view (re)build, returns the slot index
+    {
+        execute.push_back(std::move(fn));
+        ready.push_back(false);
+        return (int)execute.size() - 1;
+    }
+    void Reset() // once per frame, before any drain
+    {
+        std::lock_guard lk(mutex);
+        std::fill(ready.begin(), ready.end(), false);
+        cursor = 0;
+    }
+    void MarkReadyAndDrain(int index) // called by whoever finishes a pass
+    {
+        std::lock_guard lk(mutex);
+        ready[index] = true;
+        while (cursor < execute.size() && ready[cursor])
+            execute[cursor++]();
+    }
+    void DrainRemaining() // final safety net
+    {
+        std::lock_guard lk(mutex);
+        while (cursor < execute.size() && ready[cursor])
+            execute[cursor++]();
+    }
+};
+SubmissionList* SubmissionList::instance = nullptr;
+
 class Pass
 {
 public:
@@ -613,6 +663,9 @@ public:
     PerFrame<CommandBuffer> commandBuffer;
     PerFrame<CommandBuffer>* dependency = nullptr;
     PerFrame<CommandBuffer>* dependency2 = nullptr;
+
+    // Slot in SubmissionList; the On() call order across the views defines the GPU submission order.
+    int submitIndex = -1;
 
     // debug only ?
     String name;
@@ -630,6 +683,9 @@ public:
         {
             commandBuffer.Get(i).On(queue, name);
         }
+
+        // Self-register into the submission list. View::On() call order == GPU submission order.
+        submitIndex = SubmissionList::instance->Register([this]{ this->Execute(); });
     }
 
     virtual void Off()
@@ -681,6 +737,7 @@ public:
     void Execute()
     {
         ZoneScoped;
+        ZoneName(name.c_str(), name.size()); // show the pass name (e.g. "culling") instead of "Execute"
         if (commandBuffer->open)
             IOs::Log("{} OPEN !!", name.c_str());
 
@@ -2315,8 +2372,10 @@ public:
 };
 
 
-#define SUBTASKVIEWPASS(pass) tf::Task pass##Task = subflow.emplace([this](){this->pass.Render(this);}).name(#pass)
-#define SUBTASKPASS(pass) tf::Task pass##Task = subflow.emplace([this](){this->pass.Render(nullptr);}).name(#pass)
+// After recording, mark this pass ready and submit every now-contiguous-ready pass from the cursor.
+// Whichever worker unblocks the cursor performs the submission inline -- no dedicated submit thread.
+#define SUBTASKVIEWPASS(pass) tf::Task pass##Task = subflow.emplace([this](){this->pass.Render(this); SubmissionList::instance->MarkReadyAndDrain(this->pass.submitIndex);}).name(#pass)
+#define SUBTASKPASS(pass) tf::Task pass##Task = subflow.emplace([this](){this->pass.Render(nullptr); SubmissionList::instance->MarkReadyAndDrain(this->pass.submitIndex);}).name(#pass)
 #define SUBTASKRENDERERWORLD(pass) tf::Task pass = subflow.emplace([this, world](){this->pass(world);}).name(#pass)
 #define SUBTASKRENDERER(pass) tf::Task pass = subflow.emplace([this](){this->pass();}).name(#pass)
 
@@ -2470,29 +2529,6 @@ public:
         return presentTask;
     }
 
-    void Execute() override
-    {
-        ZoneScoped;
-        hzb.Execute();
-        structuredCommandBufferUpdate.Execute();
-        gpuDebugInit.Execute();
-        skinning.Execute();
-        particles.Execute();
-        spawning.Execute();
-        culling.Execute();
-        zPrepass.Execute();
-        accelerationStructure.Execute();
-        atmospehricScattering.Execute();
-        gBuffers.Execute();
-        lightingProbes.Execute();
-        lighting.Execute();
-        postProcessHalfRes.Execute();
-        forward.Execute();
-        gpuDebug.Execute();
-        dlss.Execute();
-        postProcess.Execute();
-        present.Execute();
-    }
 
     tf::Task Reset(World& world, tf::Subflow& subflow)
     {
@@ -3050,11 +3086,6 @@ public:
         return editorTask;
     }
 
-    void Execute() override
-    {
-        ZoneScoped;
-        editor.Execute();
-    }
 };
 
 
@@ -3069,6 +3100,17 @@ public:
     MeshStorage meshStorage;
     MainView mainView;
     EditorView editorView;
+    SubmissionList submissions;
+
+    // (Re)build the ordered submission list: AssetLibrary first (index 0), then every pass as the
+    // views' On() register themselves. Must run whenever the views are (re)built (On() can run more
+    // than once, e.g. on a DLSS quality change / resize).
+    void BuildSubmissions()
+    {
+        SubmissionList::instance = &submissions;
+        submissions.Clear();
+        AssetLibrary::instance->submitIndex = submissions.Register([] { AssetLibrary::instance->Execute(); });
+    }
 
     void On(uint2 _displayResolution)
     {
@@ -3077,12 +3119,13 @@ public:
 
         constantBuffer.On();
         meshStorage.On();
+        BuildSubmissions(); // before the views' On(), so passes register after AssetLibrary (slot 0)
         mainView.On(_displayResolution, float2(_displayResolution) * 1.f);
         editorView.On(_displayResolution, _displayResolution);
 
         endOfLastFrame = &editorView.editor.commandBuffer;
     }
-    
+
     void Off()
     {
         ZoneScoped;
@@ -3096,6 +3139,14 @@ public:
     void Schedule(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
+
+        // New frame: clear last frame's ready flags + cursor. Then close the AssetLibrary upload
+        // buffer (all its uploads were recorded in ScheduleLoading, which precedes ScheduleRenderer)
+        // and submit it immediately as slot 0 so it never stalls the cursor for its dependents
+        // (skinning/particles/spawning). The pass Render tasks (which run after this) drain the rest.
+        submissions.Reset();
+        AssetLibrary::instance->Close();
+        submissions.MarkReadyAndDrain(AssetLibrary::instance->submitIndex);
 
         Profiler::instance->frameData.instancesCount = mainView.viewWorld.instances.Size();
         Profiler::instance->frameData.meshletsCount = mainView.viewWorld.meshletsCount;
@@ -3130,10 +3181,10 @@ public:
     {
         ZoneScoped;
 
-        AssetLibrary::instance->Close();
-        AssetLibrary::instance->Execute();
-        mainView.Execute();
-        editorView.Execute();
+        // Most submissions already happened inline as each pass finished recording (MarkReadyAndDrain).
+        // This is the final flush guaranteeing any tail not yet submitted (incl. the last pass) goes out
+        // before WaitFrame/PresentFrame. No dedicated submission thread.
+        submissions.DrainRemaining();
     }
 
     void ExecuteImmediate(ID3D12GraphicsCommandList* cmd, ID3D12CommandQueue* queue)
@@ -3260,7 +3311,8 @@ public:
         Resource::ReleaseResources(true);
         GPU::instance->uploadBufferPool.Recycle(GPU::instance->frameNumber);
 
-        mainView.On(disp, disp); 
+        BuildSubmissions(); // rebuild from scratch: the views' Off()/On() below re-register the passes
+        mainView.On(disp, disp);
         editorView.On(disp, disp);
         mainView.upscaling = savedUpscaling;
         endOfLastFrame = &editorView.editor.commandBuffer;

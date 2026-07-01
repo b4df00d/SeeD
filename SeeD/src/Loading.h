@@ -39,6 +39,9 @@ public:
     PerFrame<CommandBuffer> commandBuffer;
     const char* name = "AssetLibraryUpload";
 
+    // Slot in SubmissionList (registered first, in Renderer::On / the view rebuild). See TODO #9.
+    int submitIndex = -1;
+
     void On()
     {
         ZoneScoped;
