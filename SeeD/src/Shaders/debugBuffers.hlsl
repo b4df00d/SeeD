@@ -37,9 +37,9 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     
     SurfaceData s = GetSurfaceData(cd.pixel.xy);
         
-    if (editorContext.albedo)
+    if (editorContext.albedo || editorContext.clusters || editorContext.triangles)
     {
-        //s.albedo = saturate(cd.viewDistDiff * 2 - 0.5);
+        // clusters/triangles wrote their debug colors into the albedo gbuffer: show it unlit
         lighted[dtid.xy] = s.albedo;
     }
     else if (editorContext.normals)

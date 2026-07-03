@@ -8,12 +8,10 @@ struct PS_OUTPUT
 {
     float4 albedo : SV_Target0; //DXGI_FORMAT_R8G8B8A8_UNORM
     float4 specularAlbedo : SV_Target1; //DXGI_FORMAT_R8G8B8A8_UNORM
-    float4 normal : SV_Target2; //DXGI_FORMAT_R16G16B32A32_FLOAT
+    float4 normal : SV_Target2; //DXGI_FORMAT_R16G16B16A16_FLOAT (a = roughness, DLSS-RR packed mode)
     float metalness : SV_Target3; //DXGI_FORMAT_R8_UNORM
-    float roughness : SV_Target4; //DXGI_FORMAT_R8_UNORM
-    float2 motion : SV_Target5; //DXGI_FORMAT_R16G16_FLOAT
-    uint objectID : SV_Target6; //DXGI_FORMAT_R32_UINT
-    uint instanceID : SV_Target7; //DXGI_FORMAT_R32_UINT
+    float2 motion : SV_Target4; //DXGI_FORMAT_R16G16_FLOAT
+    uint instanceID : SV_Target5; //DXGI_FORMAT_R32_UINT
 };
 
 #pragma gBuffer DefaultG MeshMain PixelgBuffer
@@ -30,6 +28,13 @@ struct MSVert
     float2 uv : TEXCOORD3;
 };
 
+// Mesh pipelines don't auto-generate SV_PrimitiveID for the pixel shader: the mesh shader
+// must export it as a per-primitive attribute (used by the 'triangles' debug view).
+struct MSPrim
+{
+    uint primitiveID : SV_PrimitiveID; // triangle index within the meshlet
+};
+
 groupshared HLSL::Mesh mesh;
 groupshared HLSL::Meshlet meshlet;
 groupshared float4x4 worldMatrix;     // object->world (for normal/tangent)
@@ -40,7 +45,7 @@ groupshared float worldDetSign;       // sign(det(world)) -> keeps binormal hand
 [RootSignature(SeeDRootSignature)]
 [outputtopology("triangle")]
 [numthreads(HLSL::max_triangles, 1, 1)]
-void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, out vertices MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles])
+void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, out vertices MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles], out primitives MSPrim outPrims[HLSL::max_triangles])
 {   
     if(groupThreadId.x == 0)
     {
@@ -111,6 +116,7 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         // Funnel-shift the 3 index bytes down to bit 0 (HLSL shifts are mod-32: guard shift==0).
         uint tri3 = (packedData.x >> shift) | (shift == 0 ? 0 : packedData.y << (32 - shift));
         outIndices[groupThreadId.x] = uint3(tri3 & 0xff, (tri3 >> 8) & 0xff, (tri3 >> 16) & 0xff);
+        outPrims[groupThreadId.x].primitiveID = groupThreadId.x;
     }
 }
 
@@ -129,14 +135,13 @@ PS_OUTPUT PixelForward(MSVert inVerts)
 
     o.albedo = s.albedo;
     o.specularAlbedo = lerp(1, s.albedo, s.metalness);
-    o.roughness = s.roughness;
     o.metalness = s.metalness;
-    o.normal = float4(StoreNormal(normalize(s.normal)), 1);
+    // normal.a carries roughness (DLSS-RR packed mode; lighting.hlsl preserves it on its rewrite)
+    o.normal = float4(StoreNormal(normalize(s.normal)), s.roughness);
 
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
 
-    o.objectID = instance.objectID;
-    o.instanceID = instanceIndexIndirect;
+    o.instanceID = instanceIndexIndirect; // objectID is derived from this in selection.hlsl
 
     return o;
 }
@@ -150,10 +155,10 @@ PS_OUTPUT PixelForward(MSVert inVerts)
 #ifndef CUTOUT
 [earlydepthstencil]
 #endif
-PS_OUTPUT PixelgBuffer(MSVert inVerts)
+PS_OUTPUT PixelgBuffer(MSVert inVerts, uint primitiveID : SV_PrimitiveID)
 {
     PS_OUTPUT o;
-    
+
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndexIndirect];
     
@@ -170,6 +175,11 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
         o.albedo = 1;
         o.albedo.xyz = RandUINT(meshletIndexIndirect); // per-meshlet debug color (computed here, not interpolated)
     }
+    if (editorContext.triangles)
+    {
+        o.albedo = 1;
+        o.albedo.xyz = RandUINT(meshletIndexIndirect * HLSL::max_triangles + primitiveID); // unique seed per triangle
+    }
     
 #ifdef CUTOUT
     if((o.albedo.a+0.01) < material.parameters[4]) discard;
@@ -183,14 +193,13 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts)
     }
 
     o.specularAlbedo = lerp(1, s.albedo, s.metalness);
-    o.roughness = s.roughness;
     o.metalness = s.metalness;
-    o.normal = float4(StoreNormal(normalize(s.normal)), 1);
+    // normal.a carries roughness (DLSS-RR packed mode; lighting.hlsl preserves it on its rewrite)
+    o.normal = float4(StoreNormal(normalize(s.normal)), s.roughness);
     
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
 
-    o.objectID = instance.objectID;
-    o.instanceID = instanceIndexIndirect;
+    o.instanceID = instanceIndexIndirect; // objectID is derived from this in selection.hlsl
 
     return o;
 }

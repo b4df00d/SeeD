@@ -100,7 +100,7 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
         instanceDesc.AccelerationStructure = instance.rayTracingBLAS;
         
         uint instanceRTIndex = 0;
-        InterlockedAdd(instanceRaytracingCounter[0], 1, instanceRTIndex);
+        InterlockedAdd(instanceRaytracingCounter[0], 1, instanceRTIndex); //TODO : the optim with WavePrefixCountBits and WavePrefixCountBits
         instanceRaytracing[instanceRTIndex] = instanceDesc;
     }
     
@@ -110,7 +110,7 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
     if (!culled)
     {
         // we can chose the mesh LOD here also
-        uint lodIndex = max(min(log2(dist * 0.05 / radius  + 1) * 3, 3), 0);
+        uint lodIndex = max(min(log2(dist * viewContext.lodDistanceMultiplier / radius + 1) * 3, 3), 0);
         
         HLSL::Mesh::LOD lod = mesh.LODs[lodIndex];
         

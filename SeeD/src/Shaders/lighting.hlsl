@@ -240,7 +240,17 @@ void RayGen()
 
             ShadowRayPayload payload;
             payload.visibility = float3(1.0f, 1.0f, 1.0f);
-            TraceRay(AccelerationStructure, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
+
+            // Cull backfaces : the ray origin comes from the gbuffer and can be inside the geometry,
+            // without culling the ray hits the backface of its own surface and wrongly occludes the pixel
+            uint rayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+                          | ((!rtParameters.enableBackFaceCull) ? RAY_FLAG_NONE : RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
+
+#if DISABLE_BACK_FACE_CULLING
+            rayFlags &= (~RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
+#endif // DISABLE_BACK_FACE_CULLING
+
+            TraceRay(AccelerationStructure, rayFlags, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
 
             if (any(payload.visibility > 0))   // unoccluded -> accept the spatially-combined reservoir
             {
@@ -268,7 +278,7 @@ void RayGen()
 
     
     RWTexture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalIndex];
-    normal[dtid.xy] = float4(cd.worldNorm, 1); // store the normal in full fp16 and not only 0-1 range
+    normal[dtid.xy] = float4(cd.worldNorm, s.roughness); // full-range fp16 normal; .a must keep roughness (DLSS-RR packed mode)
     
 }
 

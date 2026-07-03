@@ -1074,7 +1074,7 @@ public:
             options.debugMode = (Options::DebugMode)debugModeIndex;
 
             int debugDrawIndex = (int)options.debugDraw;
-            const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "lighting", "GIprobes", "GIBounces", "GIAlbedo", "GINormals", "overdraw"};
+            const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "triangles", "lighting", "GIprobes", "GIBounces", "GIAlbedo", "GINormals", "overdraw"};
             ImGui::Combo("debugDraw", &debugDrawIndex, itemsDraw, IM_ARRAYSIZE(itemsDraw));
             ImGui::SetItemTooltip("Replace the final image with a debug buffer visualization.");
             options.debugDraw = (Options::DebugDraw)debugDrawIndex;
@@ -1099,6 +1099,8 @@ public:
             ImGui::SliderFloat("sortMaxDistance", &options.sortMaxDistance, 1.0f, 100000.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
             ImGui::SetItemTooltip("Max distance considered when sorting instances.");
             ImGui::EndDisabled();
+            ImGui::SliderFloat("lodDistanceMultiplier", &options.lodDistanceMultiplier, 0.001f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SetItemTooltip("Scales how fast meshes drop to coarser LODs with distance (higher = coarser sooner).");
         }
 
         if (ImGui::CollapsingHeader("Ray Tracing", ImGuiTreeNodeFlags_DefaultOpen))
@@ -2362,6 +2364,10 @@ public:
                         store(t.rotation, project.cameraRot);
                         project.hasCamera = true;
                     }
+                    // push the options-backed render settings into the project
+                    project.frontToBackSort = options.frontToBackSort;
+                    project.sortMaxDistance = options.sortMaxDistance;
+                    project.lodDistanceMultiplier = options.lodDistanceMultiplier;
                     EditorWindow::Save(); // push editor window open-states into the project
                     project.Save();       // write the single project file
                 }

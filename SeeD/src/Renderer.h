@@ -508,10 +508,8 @@ public:
         viewContextParams.meshletsCounterIndex = viewContext.meshletsCounter.GetResource().uav.offset;
         viewContextParams.albedoIndex = GetRegisteredResource("albedo").srv.offset;
         viewContextParams.metalnessIndex = GetRegisteredResource("metalness").srv.offset;
-        viewContextParams.roughnessIndex = GetRegisteredResource("roughness").srv.offset;
         viewContextParams.normalIndex = GetRegisteredResource("normal").srv.offset;
         viewContextParams.motionIndex = GetRegisteredResource("motion").srv.offset;
-        viewContextParams.objectIDIndex = GetRegisteredResource("objectID").uav.offset;
         viewContextParams.instanceIDIndex = GetRegisteredResource("instanceID").uav.offset;
         viewContextParams.overdrawIndex = GetRegisteredResource("overdraw").uav.offset;
         viewContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
@@ -520,6 +518,7 @@ public:
         viewContextParams.HZBMipCount = GetRegisteredResource("depthDownSample").GetResource()->GetDesc().MipLevels;
         viewContextParams.textureLODBias = -1.0f;
         viewContextParams.sortMaxDistance = options.sortMaxDistance;
+        viewContextParams.lodDistanceMultiplier = options.lodDistanceMultiplier;
         viewContextParams.mousePixel = int4(IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1], IOs::instance->mouse.mousePos[2], IOs::instance->mouse.mousePos[3]);
         float2 previousJit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy);
         viewContext.jitterIndex = (viewContextParams.frameNumber) % ARRAYSIZE(viewContext.jitter);
@@ -553,6 +552,7 @@ public:
         editorContextParams.albedo = options.debugDraw == Options::DebugDraw::albedo;
         editorContextParams.normals = options.debugDraw == Options::DebugDraw::normals;
         editorContextParams.clusters = options.debugDraw == Options::DebugDraw::clusters;
+        editorContextParams.triangles = options.debugDraw == Options::DebugDraw::triangles;
         editorContextParams.lighting = options.debugDraw == Options::DebugDraw::lighting;
         editorContextParams.GIprobes = options.debugDraw == Options::DebugDraw::GIprobes;
         editorContextParams.GIBounces = options.debugDraw == Options::DebugDraw::GIBounces;
@@ -1258,10 +1258,8 @@ class GBuffers : public Pass
     ViewResource specularAlbedo;
     ViewResource normal;
     ViewResource metalness;
-    ViewResource roughness;
     ViewResource depth;
     ViewResource motion;
-    ViewResource objectID;
     ViewResource instanceID;
     ViewResource overdraw;
     Components::Handle<Components::Shader> meshShader;
@@ -1276,16 +1274,12 @@ public:
         specularAlbedo.Register("specularAlbedo", view);
         specularAlbedo.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "specularAlbedo");
         normal.Register("normal", view);
-        normal.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "normal");
+        normal.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "normal"); // a = roughness (DLSS-RR packed mode)
         metalness.Register("metalness", view);
         metalness.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8_UNORM, "metalness");
-        roughness.Register("roughness", view);
-        roughness.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8_UNORM, "roughness");
         depth.Register("depth", view);
         motion.Register("motion", view);
         motion.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16_FLOAT, "motion");
-        objectID.Register("objectID", view);
-        objectID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "objectID");
         instanceID.Register("instanceID", view);
         instanceID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "instanceID");
         overdraw.Register("overdraw", view);
@@ -1298,27 +1292,21 @@ public:
         specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         commandBuffer.Get().cmd->DiscardResource(albedo.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(specularAlbedo.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(normal.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(metalness.Get().GetResource(), nullptr);
-        commandBuffer.Get().cmd->DiscardResource(roughness.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(motion.Get().GetResource(), nullptr);
-        commandBuffer.Get().cmd->DiscardResource(objectID.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(instanceID.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(overdraw.Get().GetResource(), nullptr);
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-        roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-        objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         Close();
@@ -1332,9 +1320,7 @@ public:
         specularAlbedo.Unregister();
         normal.Unregister();
         metalness.Unregister();
-        roughness.Unregister();
         motion.Unregister();
-        objectID.Unregister();
         instanceID.Unregister();
         overdraw.Unregister();
     }
@@ -1351,9 +1337,7 @@ public:
         specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         // Overdraw heatmap: clear the counter then make it a UAV the pixel shader atomically increments.
@@ -1367,7 +1351,7 @@ public:
             overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
-        Resource rts[] = { albedo.Get(), specularAlbedo.Get(), normal.Get(), metalness.Get(), roughness.Get(), motion.Get(), objectID.Get(), instanceID.Get()};
+        Resource rts[] = { albedo.Get(), specularAlbedo.Get(), normal.Get(), metalness.Get(), motion.Get(), instanceID.Get()};
         SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true, false);
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
@@ -1401,9 +1385,7 @@ public:
         specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-        roughness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-        objectID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
 
         if (overdrawEnabled)
@@ -2036,7 +2018,6 @@ class DLSS : public Pass
     ViewResource albedo;
     ViewResource specularAlbedo;
     ViewResource normal;
-    ViewResource roughness;
     ViewResource motion;
     ViewResource depth;
     ViewResource lighted;
@@ -2067,7 +2048,6 @@ public:
         albedo.Register("albedo", view);
         specularAlbedo.Register("specularAlbedo", view);
         normal.Register("normal", view);
-        roughness.Register("roughness", view);
         motion.Register("motion", view);
         depth.Register("depth", view);
         lighted.Register("lighted", view);
@@ -2274,7 +2254,7 @@ public:
                     dlssd_create_params.InTargetWidth = view->displayResolution.x;
                     dlssd_create_params.InTargetHeight = view->displayResolution.y;
                     dlssd_create_params.InPerfQualityValue = perf_quality;
-                    dlssd_create_params.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode::NVSDK_NGX_DLSS_Roughness_Mode_Unpacked;
+                    dlssd_create_params.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode::NVSDK_NGX_DLSS_Roughness_Mode_Packed; // roughness lives in normals.w (one less gbuffer target)
                     dlssd_create_params.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type::NVSDK_NGX_DLSS_Depth_Type_HW;
                     dlssd_create_params.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode::NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
                     dlssd_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
@@ -2329,10 +2309,9 @@ public:
                 dlss_eval_params.pInColor = lighted.Get().GetResource();
                 dlss_eval_params.pInColorAfterFog = lighted.Get().GetResource();
                 dlss_eval_params.pInOutput = upscaled.Get().GetResource();
-                dlss_eval_params.pInNormals = normal.Get().GetResource();
+                dlss_eval_params.pInNormals = normal.Get().GetResource(); // .w = roughness (packed mode)
                 dlss_eval_params.pInDiffuseAlbedo = albedo.Get().GetResource();
                 dlss_eval_params.pInSpecularAlbedo = specularAlbedo.Get().GetResource();
-                dlss_eval_params.pInRoughness = roughness.Get().GetResource();
                 dlss_eval_params.pInDepth = depth.Get().GetResource();
                 dlss_eval_params.pInMotionVectors = motion.Get().GetResource();
                 dlss_eval_params.pInSpecularHitDistance = specularHitDistance.Get().GetResource();

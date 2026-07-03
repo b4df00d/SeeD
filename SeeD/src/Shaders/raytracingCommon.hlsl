@@ -263,7 +263,14 @@ float3 CastShadowRay(RaytracingAccelerationStructure accelerationStructure, floa
     ShadowRayPayload payload;
     payload.visibility = float3(1.0f, 1.0f, 1.0f);
 
-    uint rayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH;
+    // Cull backfaces : the ray origin can be inside the geometry when reconstructed from the gbuffer,
+    // without culling the ray hits the backface of its own surface and wrongly shadows the pixel
+    uint rayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+                  | ((!rtParameters.enableBackFaceCull) ? RAY_FLAG_NONE : RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
+
+#if DISABLE_BACK_FACE_CULLING
+    rayFlags &= (~RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
+#endif // DISABLE_BACK_FACE_CULLING
     //rayFlags &= (~RAY_FLAG_FORCE_OPAQUE);
     TraceRay(accelerationStructure, rayFlags, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
 

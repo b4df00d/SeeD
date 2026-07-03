@@ -156,6 +156,7 @@ struct Options
     bool shaderStatsCsv = true; // dump ..\shaderStats.csv for the live edit/profile loop
     bool frontToBackSort = true;
     float sortMaxDistance = 512.0f;
+    float lodDistanceMultiplier = 0.25f;
     int lightUnitsIndex = 0;
     float customLightMultiplier = 1.0f;
 
@@ -173,6 +174,7 @@ struct Options
         albedo,
         normals,
         clusters,
+        triangles,
         lighting,
         GIprobes,
         GIBounces,
@@ -441,6 +443,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 
     options.frontToBackSort = project.frontToBackSort;
     options.sortMaxDistance = project.sortMaxDistance;
+    options.lodDistanceMultiplier = project.lodDistanceMultiplier;
 
     if (!project.startupScene.empty())
     {

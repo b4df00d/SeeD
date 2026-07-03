@@ -1238,19 +1238,19 @@ SurfaceData GetSurfaceData(uint2 pixel)
 {
     Texture2D<float4> albedo = ResourceDescriptorHeap[viewContext.albedoIndex];
     Texture2D<float> metalness = ResourceDescriptorHeap[viewContext.metalnessIndex];
-    Texture2D<float> roughness = ResourceDescriptorHeap[viewContext.roughnessIndex];
     Texture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalIndex];
-    
+
     SurfaceData s;
     s.shadingDomain = ShadingDomain::Standard;
-    
+
+    float4 packedNormal = normal[pixel]; // a = roughness (DLSS-RR packed layout)
     s.albedo = albedo[pixel];
-    s.normal = ReadNormal(normal[pixel].xyz);
+    s.normal = ReadNormal(packedNormal.xyz);
     s.objectNormal = s.normal;
     //uint seed = initRand(pixel.xy);
     //s.normal = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 0.01));
     s.metalness = metalness[pixel];
-    s.roughness = roughness[pixel];
+    s.roughness = packedNormal.a;
     s.occlusion = 1;
     s.tangent = cross(s.normal, float3(1, 0, 0));
     s.binormal = cross(s.normal, s.tangent);

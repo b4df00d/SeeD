@@ -165,10 +165,8 @@ namespace HLSL
         uint meshletsCounterIndex;
         uint albedoIndex;
         uint metalnessIndex;
-        uint roughnessIndex;
-        uint normalIndex;
+        uint normalIndex; // gbuffer normal, a = roughness (DLSS-RR packed mode)
         uint motionIndex;
-        uint objectIDIndex;
         uint instanceIDIndex;
         uint overdrawIndex;
         uint depthIndex;
@@ -177,6 +175,7 @@ namespace HLSL
         uint HZBMipCount;
         float textureLODBias;
         float sortMaxDistance; // world-space distance mapped to the farthest front-to-back sort bucket
+        float lodDistanceMultiplier; // scales distance in mesh LOD selection (culling.hlsl); higher = drop to coarser LODs sooner
     };
     
     struct Shader
@@ -526,6 +525,7 @@ namespace HLSL
         uint albedo : 1;
         uint normals : 1;
         uint clusters : 1;
+        uint triangles : 1;
         uint lighting : 1;
         uint GIprobes : 1;
         uint GIBounces : 1;

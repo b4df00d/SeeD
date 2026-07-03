@@ -336,8 +336,8 @@ namespace Components
 
         if (ImGui::CollapsingHeader("Atmospheric Scattering", ImGuiTreeNodeFlags_DefaultOpen))
         {
-            row(RSO_density,            "density",            &v->density,            0,      1,      ImGuiSliderFlags_Logarithmic);
-            row(RSO_luminosity,         "luminosity",         &v->luminosity,         0,      2,      0);
+            row(RSO_density,            "density",            &v->density,            0,      1,      0);
+            row(RSO_luminosity,         "luminosity",         &v->luminosity,         0,      1,      ImGuiSliderFlags_Logarithmic);
             row(RSO_specialNear,        "specialNear",        &v->specialNear,        0.1f,   1,      ImGuiSliderFlags_Logarithmic);
             row(RSO_heightFalloff,      "heightFalloff",      &v->heightFalloff,      0,      0.2f,   ImGuiSliderFlags_Logarithmic);
             row(RSO_noiseFrequency,     "noiseFrequency",     &v->noiseFrequency,     0.001f, 2,      ImGuiSliderFlags_Logarithmic);
