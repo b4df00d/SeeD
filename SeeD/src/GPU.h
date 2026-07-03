@@ -2868,6 +2868,7 @@ struct Meshlet : HLSL::Meshlet
 struct Mesh : HLSL::Mesh
 {
     Resource BLAS;
+    Resource BLASLow; // coarsest-LOD BLAS, distance-swapped into the TLAS (empty when lodCount == 1)
 };
 
 struct MeshData
@@ -2921,11 +2922,11 @@ struct MeshStorage
     std::recursive_mutex lock;
 
     // Initial capacity (will grow dynamically as needed)
-    uint meshesMaxCount = 256;
-    uint meshletMaxCount = meshesMaxCount * 128;
+    uint meshesMaxCount = 512;
+    uint meshletMaxCount = meshesMaxCount * 256;
     uint meshletVertexMaxCount = meshletMaxCount * HLSL::max_vertices;
-    uint meshletTrianglesMaxCount = meshletMaxCount * HLSL::max_triangles;
-    uint vertexMaxCount = meshletVertexMaxCount;
+    uint meshletTrianglesMaxCount = meshletMaxCount * HLSL::max_triangles * 2;
+    uint vertexMaxCount = meshletVertexMaxCount / 1.5f;
     uint indexMaxCount = meshletTrianglesMaxCount;
 
     // Current allocated sizes (may exceed initial max counts)
@@ -3206,6 +3207,20 @@ struct MeshStorage
         ZoneScoped;
 
         lock.lock();
+        // High-detail BLAS from LOD0, low-detail BLAS from the coarsest LOD: culling.hlsl picks one
+        // per instance each frame when writing the TLAS instance descs. The two builds share the
+        // scratch buffer through disjoint ranges so no UAV barrier is needed between them.
+        UINT64 scratchUsed = BuildBLAS(mesh, 0, mesh.BLAS, 0, commandBuffer);
+        if (mesh.lodCount > 1)
+            BuildBLAS(mesh, mesh.lodCount - 1, mesh.BLASLow, scratchUsed, commandBuffer);
+        lock.unlock();
+    }
+
+    // Returns the 256-aligned scratch size consumed so a following build can start past it.
+    UINT64 BuildBLAS(Mesh& mesh, uint lodIndex, Resource& blas, UINT64 scratchOffset, CommandBuffer& commandBuffer)
+    {
+        seedAssert(mesh.LODs[lodIndex].indexCount > 0);
+
         bool isOpaque = false;
         D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};
         descriptor.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
@@ -3215,9 +3230,9 @@ struct MeshStorage
         descriptor.Triangles.VertexBuffer.StrideInBytes = vertices.stride;
         descriptor.Triangles.VertexCount = mesh.vertexCount;
         descriptor.Triangles.VertexFormat = DXGI_FORMAT_R16G16B16A16_SNORM;
-        descriptor.Triangles.IndexBuffer = indices.GetResource()->GetGPUVirtualAddress() + mesh.LODs[0].indexOffset * indices.stride; // TODO : read from meshRT and not LOD 0
+        descriptor.Triangles.IndexBuffer = indices.GetResource()->GetGPUVirtualAddress() + mesh.LODs[lodIndex].indexOffset * indices.stride;
         descriptor.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
-        descriptor.Triangles.IndexCount = mesh.LODs[0].indexCount;
+        descriptor.Triangles.IndexCount = mesh.LODs[lodIndex].indexCount;
         descriptor.Triangles.Transform3x4 = meshTransforms.GetResourcePtr()->GetGPUVirtualAddress() + (UINT64)mesh.storageIndex * sizeof(BLASTransform);
         descriptor.Flags = isOpaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
 
@@ -3235,28 +3250,21 @@ struct MeshStorage
         {
             IOs::Log("Raytracing BLAS Creation Error");
         }
-        seedAssert(info.ScratchDataSizeInBytes < maxScratchSizeInBytes);
+        seedAssert(scratchOffset + info.ScratchDataSizeInBytes < maxScratchSizeInBytes);
 
         // Buffer sizes need to be 256-byte-aligned
         UINT64 scratchSizeInBytes = ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
         UINT64 resultSizeInBytes = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
 
-        if (scratchSizeInBytes > maxScratchSizeInBytes)
-        {
-            maxScratchSizeInBytes = (uint)scratchSizeInBytes;
-            //release deferred scratchBLAS
-            //reallocate scratchBLAS
-        }
-
-        mesh.BLAS.CreateAccelerationStructure((uint)resultSizeInBytes, "BLAS");
+        blas.CreateAccelerationStructure((uint)resultSizeInBytes, lodIndex == 0 ? "BLAS" : "BLASLow");
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc;
         buildDesc.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
         buildDesc.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
         buildDesc.Inputs.NumDescs = 1;
         buildDesc.Inputs.pGeometryDescs = &descriptor;
-        buildDesc.DestAccelerationStructureData = mesh.BLAS.GetResource()->GetGPUVirtualAddress();
-        buildDesc.ScratchAccelerationStructureData = scratchBLAS.GetResource()->GetGPUVirtualAddress();
+        buildDesc.DestAccelerationStructureData = blas.GetResource()->GetGPUVirtualAddress();
+        buildDesc.ScratchAccelerationStructureData = scratchBLAS.GetResource()->GetGPUVirtualAddress() + scratchOffset;
         buildDesc.SourceAccelerationStructureData = 0;
         buildDesc.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
 
@@ -3264,11 +3272,11 @@ struct MeshStorage
 
         D3D12_RESOURCE_BARRIER uavBarrier;
         uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        uavBarrier.UAV.pResource = mesh.BLAS.GetResource();
+        uavBarrier.UAV.pResource = blas.GetResource();
         uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
         commandBuffer.cmd->ResourceBarrier(1, &uavBarrier);
 
-        lock.unlock();
+        return scratchSizeInBytes;
     }
 
     // TODO : a real release in meshStorage

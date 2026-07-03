@@ -74,6 +74,7 @@ public:
                 {
                     // TODO : a real release in meshStorage
                     ((Mesh*)item.second.data)->BLAS.Release();
+                    ((Mesh*)item.second.data)->BLASLow.Release();
                 }
                 else if (item.second.type == AssetLibrary::AssetType::shader)
                 {

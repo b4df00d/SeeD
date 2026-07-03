@@ -50,7 +50,8 @@ void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchT
     }
     
     float4 atmoData = atmosphericScattering.Sample(samplerLinearClamp, froUV);
-    //atmoData = cd.viewDist * 0.004;
+    //atmoData.w = max(atmoData.w, saturate(1-exp(-cd.viewDist * 0.0025)));
+    
     transp = float4(atmoData.xyz, 1.0-exp(-atmoData.w));
     
     if(viewContext.upscaling == HLSL::Upscaling::dlssd)

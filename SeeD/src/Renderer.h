@@ -519,6 +519,8 @@ public:
         viewContextParams.textureLODBias = -1.0f;
         viewContextParams.sortMaxDistance = options.sortMaxDistance;
         viewContextParams.lodDistanceMultiplier = options.lodDistanceMultiplier;
+        viewContextParams.distanceCullingValue = options.distanceCullingValue;
+        viewContextParams.distanceCullingValueRT = options.distanceCullingValueRT;
         viewContextParams.mousePixel = int4(IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1], IOs::instance->mouse.mousePos[2], IOs::instance->mouse.mousePos[3]);
         float2 previousJit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy);
         viewContext.jitterIndex = (viewContextParams.frameNumber) % ARRAYSIZE(viewContext.jitter);
@@ -1880,6 +1882,7 @@ public:
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
 
         pphrparams.froxelsIndex = atmosphericScatteringFroxelsBuffer.Get().uav.offset;
         pphrparams.atmosphericScatteringIndex = 0;
@@ -1890,6 +1893,7 @@ public:
         commandBuffer->SetCompute(postProcessHalfRes);
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&pphrparams));
         commandBuffer->cmd->Dispatch(postProcessHalfRes.DispatchX(view->renderResolution.x), postProcessHalfRes.DispatchY(view->renderResolution.y), 1);
 
@@ -1966,6 +1970,7 @@ public:
 
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
 
         if (view->upscaling == HLSL::Upscaling::taa)
         {
@@ -1976,6 +1981,7 @@ public:
             commandBuffer->SetCompute(TAA);
             commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
             commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
             commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&taaparams));
             commandBuffer->cmd->Dispatch(TAA.DispatchX(view->renderResolution.x), TAA.DispatchY(view->renderResolution.y), 1);
 
@@ -2002,6 +2008,7 @@ public:
         commandBuffer->SetCompute(postProcess);
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&ppparams));
         commandBuffer->cmd->Dispatch(postProcess.DispatchX(view->displayResolution.x), postProcess.DispatchY(view->displayResolution.y), 1);
 
@@ -2029,7 +2036,7 @@ public:
     NVSDK_NGX_Parameter* ngx_parameters = nullptr;
     NVSDK_NGX_Handle* dlss_feature = nullptr;
     NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_Balanced;// NVSDK_NGX_PerfQuality_Value_MaxQuality;// NVSDK_NGX_PerfQuality_Value_MaxPerf;
-    float sharpness = 0.0033f;
+    float sharpness = 0.00033f;
     bool initialized = false;
     bool created = false;
     HLSL::Upscaling upscalingPreviousSetting;
@@ -2620,6 +2627,8 @@ public:
                     instance.previous = instance.pack(previousWorldMatrix);
                     instance.objectID = ent.ToUInt();
                     instance.rayTracingBLAS = mesh->BLAS.GetResource()->GetGPUVirtualAddress();
+                    // single-LOD meshes have no low BLAS: alias the high one so culling.hlsl can select blindly
+                    instance.rayTracingBLASLow = mesh->BLASLow.GetResource() ? mesh->BLASLow.GetResource()->GetGPUVirtualAddress() : instance.rayTracingBLAS;
 
                     viewWorld.instances.AddOrUpdate(ent, instance);
                     localMeshletCount += mesh->LODs[0].meshletCount;

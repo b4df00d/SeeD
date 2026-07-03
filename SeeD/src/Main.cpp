@@ -157,6 +157,8 @@ struct Options
     bool frontToBackSort = true;
     float sortMaxDistance = 512.0f;
     float lodDistanceMultiplier = 0.25f;
+    float distanceCullingValue = 6.0f;
+    float distanceCullingValueRT = 6.0f;
     int lightUnitsIndex = 0;
     float customLightMultiplier = 1.0f;
 
@@ -444,6 +446,8 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     options.frontToBackSort = project.frontToBackSort;
     options.sortMaxDistance = project.sortMaxDistance;
     options.lodDistanceMultiplier = project.lodDistanceMultiplier;
+    options.distanceCullingValue = project.distanceCullingValue;
+    options.distanceCullingValueRT = project.distanceCullingValueRT;
 
     if (!project.startupScene.empty())
     {

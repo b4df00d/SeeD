@@ -65,14 +65,20 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
     float radius = abs(instance.GetScale() * meshBS.w); // assume uniform scaling
     float4 boundingSphere = float4(center, radius);
     float dist = length(camera.worldPos.xyz - center.xyz);
-  
+    // mesh LOD from distance; also picks which of the two BLAS the TLAS instance references
+    float rawLod = log2(dist * viewContext.lodDistanceMultiplier / radius + 1) * 3;
+    uint lodIndex = max(min(rawLod, 3), 0);
+    
+    
     {
         // RT instances
         RWStructuredBuffer<uint> instanceRaytracingCounter = ResourceDescriptorHeap[rtParameters.instancesRaytracingCountHeapIndex];
         RWStructuredBuffer<HLSL::D3D12_RAYTRACING_INSTANCE_DESC> instanceRaytracing = ResourceDescriptorHeap[rtParameters.instancesRaytracingHeapIndex];
 
+        bool lowLod = lodIndex >= 1;
+
         HLSL::D3D12_RAYTRACING_INSTANCE_DESC instanceDesc;
-        instanceDesc.InstanceID = instanceIndex;
+        instanceDesc.InstanceID = instanceIndex | (lowLod ? HLSL::RTInstanceLowLodBit : 0);
         instanceDesc.InstanceContributionToHitGroupIndex = 0;
         if(material.parameters[4] == 0)
         {
@@ -84,34 +90,49 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
             instanceDesc.Flags = HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_NONE
                                | HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE; 
         }
-        instanceDesc.Transform[0][0] = worldMatrix[0][0];
-        instanceDesc.Transform[0][1] = worldMatrix[0][1];
-        instanceDesc.Transform[0][2] = worldMatrix[0][2];
-        instanceDesc.Transform[0][3] = worldMatrix[0][3];
-        instanceDesc.Transform[1][0] = worldMatrix[1][0];
-        instanceDesc.Transform[1][1] = worldMatrix[1][1];
-        instanceDesc.Transform[1][2] = worldMatrix[1][2];
-        instanceDesc.Transform[1][3] = worldMatrix[1][3];
-        instanceDesc.Transform[2][0] = worldMatrix[2][0];
-        instanceDesc.Transform[2][1] = worldMatrix[2][1];
-        instanceDesc.Transform[2][2] = worldMatrix[2][2];
-        instanceDesc.Transform[2][3] = worldMatrix[2][3];
-        instanceDesc.InstanceMask = 0xFF;
-        instanceDesc.AccelerationStructure = instance.rayTracingBLAS;
         
-        uint instanceRTIndex = 0;
-        InterlockedAdd(instanceRaytracingCounter[0], 1, instanceRTIndex); //TODO : the optim with WavePrefixCountBits and WavePrefixCountBits
+        instanceDesc.InstanceMask = 0xFF;
+        
+    
+        bool culled = rawLod > viewContext.distanceCullingValueRT;
+        if(culled)
+            instanceDesc.AccelerationStructure = 0;
+        else
+        {
+            instanceDesc.Transform[0][0] = worldMatrix[0][0];
+            instanceDesc.Transform[0][1] = worldMatrix[0][1];
+            instanceDesc.Transform[0][2] = worldMatrix[0][2];
+            instanceDesc.Transform[0][3] = worldMatrix[0][3];
+            instanceDesc.Transform[1][0] = worldMatrix[1][0];
+            instanceDesc.Transform[1][1] = worldMatrix[1][1];
+            instanceDesc.Transform[1][2] = worldMatrix[1][2];
+            instanceDesc.Transform[1][3] = worldMatrix[1][3];
+            instanceDesc.Transform[2][0] = worldMatrix[2][0];
+            instanceDesc.Transform[2][1] = worldMatrix[2][1];
+            instanceDesc.Transform[2][2] = worldMatrix[2][2];
+            instanceDesc.Transform[2][3] = worldMatrix[2][3];
+            instanceDesc.AccelerationStructure = lowLod ? instance.rayTracingBLASLow : instance.rayTracingBLAS;
+        }
+        
+        // Reserve one slot per active lane with a single wave-aggregated atomic:
+        // the first active lane adds the wave total, and each lane derives its
+        // slot from the count of active lanes preceding it.
+        uint waveOffset = WavePrefixCountBits(true);
+        uint waveTotal = WaveActiveCountBits(true);
+        uint waveBase = 0;
+        if (WaveIsFirstLane())
+            InterlockedAdd(instanceRaytracingCounter[0], waveTotal, waveBase);
+        waveBase = WaveReadLaneFirst(waveBase);
+        uint instanceRTIndex = waveBase + waveOffset;
         instanceRaytracing[instanceRTIndex] = instanceDesc;
     }
     
     bool culled = FrustumCulling(camera, boundingSphere);
     if(!culled) culled = OcclusionCulling(camera, boundingSphere);
+    culled |= rawLod > viewContext.distanceCullingValue;
     
     if (!culled)
     {
-        // we can chose the mesh LOD here also
-        uint lodIndex = max(min(log2(dist * viewContext.lodDistanceMultiplier / radius + 1) * 3, 3), 0);
-        
         HLSL::Mesh::LOD lod = mesh.LODs[lodIndex];
         
         // Reserve space for the whole wave with a single atomic: the first

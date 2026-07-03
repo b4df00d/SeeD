@@ -1101,6 +1101,10 @@ public:
             ImGui::EndDisabled();
             ImGui::SliderFloat("lodDistanceMultiplier", &options.lodDistanceMultiplier, 0.001f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
             ImGui::SetItemTooltip("Scales how fast meshes drop to coarser LODs with distance (higher = coarser sooner).");
+            ImGui::SliderFloat("distanceCullingValue", &options.distanceCullingValue, 1.0f, 16.0f, "%.1f");
+            ImGui::SetItemTooltip("Cull instances whose distance-based LOD exceeds this value (lower = cull closer to the camera).");
+            ImGui::SliderFloat("distanceCullingValueRT", &options.distanceCullingValueRT, 1.0f, 16.0f, "%.1f");
+            ImGui::SetItemTooltip("Same threshold for the raytracing scene: culled instances stay in the TLAS but point at a null BLAS.");
         }
 
         if (ImGui::CollapsingHeader("Ray Tracing", ImGuiTreeNodeFlags_DefaultOpen))
@@ -2368,6 +2372,8 @@ public:
                     project.frontToBackSort = options.frontToBackSort;
                     project.sortMaxDistance = options.sortMaxDistance;
                     project.lodDistanceMultiplier = options.lodDistanceMultiplier;
+                    project.distanceCullingValue = options.distanceCullingValue;
+                    project.distanceCullingValueRT = options.distanceCullingValueRT;
                     EditorWindow::Save(); // push editor window open-states into the project
                     project.Save();       // write the single project file
                 }

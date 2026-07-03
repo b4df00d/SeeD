@@ -1296,9 +1296,14 @@ float2 bary)
     return s;
     */
     
+    // culling.hlsl packs the low-BLAS bit into the 24-bit InstanceID: triangles must be fetched
+    // from the LOD the hit BLAS was built from (LOD0 or the coarsest one).
+    bool lowLod = (committedInstanceIndex & HLSL::RTInstanceLowLodBit) != 0;
+    uint instanceIndex = committedInstanceIndex & ~HLSL::RTInstanceLowLodBit;
+
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[committedInstanceIndex];
-    
+    HLSL::Instance instance = instances[instanceIndex];
+
     StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
     HLSL::Material material = materials[instance.materialIndex];
     
@@ -1309,7 +1314,7 @@ float2 bary)
     
     StructuredBuffer<uint> indicesData = ResourceDescriptorHeap[commonResourcesIndices.indicesHeapIndex];
     
-    uint iBase = committedPrimitiveIndex * 3 + mesh.LODs[0].indexOffset;
+    uint iBase = committedPrimitiveIndex * 3 + mesh.LODs[lowLod ? mesh.lodCount - 1 : 0].indexOffset;
     uint i1 = indicesData[iBase + 0];
     uint i2 = indicesData[iBase + 1];
     uint i3 = indicesData[iBase + 2];

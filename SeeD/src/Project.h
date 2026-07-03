@@ -24,6 +24,8 @@ public:
     bool frontToBackSort = true;
     float sortMaxDistance = 512.0f;
     float lodDistanceMultiplier = 0.05f;
+    float distanceCullingValue = 6.0f;
+    float distanceCullingValueRT = 6.0f;
 
     // saved player camera (fed to Systems::Player on load). rotation is a quaternion (xyzw).
     bool hasCamera = false;
@@ -94,6 +96,8 @@ public:
         f << "frontToBackSort " << (frontToBackSort ? 1 : 0) << "\n";
         f << "sortMaxDistance " << sortMaxDistance << "\n";
         f << "lodDistanceMultiplier " << lodDistanceMultiplier << "\n";
+        f << "distanceCullingValue " << distanceCullingValue << "\n";
+        f << "distanceCullingValueRT " << distanceCullingValueRT << "\n";
         f << "camera " << cameraPos[0] << " " << cameraPos[1] << " " << cameraPos[2]
           << " " << cameraRot[0] << " " << cameraRot[1] << " " << cameraRot[2] << " " << cameraRot[3] << "\n";
         f << "[uilayout]\n";
@@ -137,6 +141,8 @@ private:
                 else if (key == "frontToBackSort") frontToBackSort = std::stoi(val) != 0;
                 else if (key == "sortMaxDistance") sortMaxDistance = std::stof(val);
                 else if (key == "lodDistanceMultiplier") lodDistanceMultiplier = std::stof(val);
+                else if (key == "distanceCullingValue") distanceCullingValue = std::stof(val);
+                else if (key == "distanceCullingValueRT") distanceCullingValueRT = std::stof(val);
                 else if (key == "camera")
                 {
                     std::istringstream ss(val);

@@ -176,6 +176,8 @@ namespace HLSL
         float textureLODBias;
         float sortMaxDistance; // world-space distance mapped to the farthest front-to-back sort bucket
         float lodDistanceMultiplier; // scales distance in mesh LOD selection (culling.hlsl); higher = drop to coarser LODs sooner
+        float distanceCullingValue; // instances whose unclamped LOD exceeds this are culled entirely (culling.hlsl); higher = keep farther instances
+        float distanceCullingValueRT; // same threshold for the raytracing instances; the TLAS entry stays (fixed count) but points at a null BLAS
     };
     
     struct Shader
@@ -255,6 +257,10 @@ namespace HLSL
         uint shaderIndex;
     };
     
+    // Packed into D3D12_RAYTRACING_INSTANCE_DESC.InstanceID (24 bits) by culling.hlsl when the
+    // instance points at the low-detail BLAS, so hit shaders fetch triangles from the matching LOD.
+    static const uint RTInstanceLowLodBit = 1u << 23;
+
     struct Instance
     {
         float4x4 current; // FFS hlsl++ does store 4x3 and 4x3 in the same way ... BS ! TODO : make the 4x3 packing work
@@ -264,8 +270,7 @@ namespace HLSL
         uint objectID; // map to entityBase
         uint pad1;
         D3D12_GPU_VIRTUAL_ADDRESS rayTracingBLAS;
-        uint pad2;
-        uint pad3;
+        D3D12_GPU_VIRTUAL_ADDRESS rayTracingBLASLow;
         
         float3 GetPosition()
         {
