@@ -85,6 +85,12 @@ struct ComponentInfo
 };
 std::vector<ComponentInfo> knownComponents;
 
+// Draws every reflected member of a component via the metadata above -- the same rendering the
+// property window falls back to when a component has no custom PropertyDraw. Defined in UI.h
+// (needs AssetLibrary/fileBrowserWindow); forward-declared here so a custom PropertyDraw (e.g.
+// Instance's, in World.h) can call it to get the default rendering alongside its own controls.
+void DefaultPropertyDraw(Components::Mask mask, char* data);
+
 String FormatComponentsArray(std::vector<String>& componentsInfo)
 {
     String out = "ComponentInfo knownComponents[] = \n{\n";

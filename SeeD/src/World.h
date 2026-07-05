@@ -217,25 +217,9 @@ namespace Components
     inline void (*requestOMMBake)(Instance&) = nullptr;
     static void InstancePropertyDraw(char* p)
     {
+        DefaultPropertyDraw(Instance::mask, p);
+
         Instance* instance = (Instance*)p;
-
-        uint pushID = 0;
-        ImGui::PushID(pushID++);
-        ImGui::Text("mesh");
-        ImGui::SameLine();
-        UIHelpers::DrawHandle(*(EntityBase*)&instance->mesh, Mesh::mask);
-        ImGui::PopID();
-        ImGui::PushID(pushID++);
-        ImGui::Text("meshRT");
-        ImGui::SameLine();
-        UIHelpers::DrawHandle(*(EntityBase*)&instance->meshRT, Mesh::mask);
-        ImGui::PopID();
-        ImGui::PushID(pushID++);
-        ImGui::Text("material");
-        ImGui::SameLine();
-        UIHelpers::DrawHandle(*(EntityBase*)&instance->material, Material::mask);
-        ImGui::PopID();
-
         ImGui::Spacing();
         // bakes this mesh against the material's albedo alpha and (re)writes the {hash}.omm
         // sidecar in the background; the BLAS reads it at load -> effective at the next run
@@ -377,7 +361,7 @@ namespace Components
         }
         if (ImGui::CollapsingHeader("Exposition", ImGuiTreeNodeFlags_DefaultOpen))
         {
-            row(RSO_expoMul, "expoMul", &v->expoMul, 0,  8, 0);
+            row(RSO_expoMul, "expoMul", &v->expoMul, 0,  16, 0);
             row(RSO_expoAdd, "expoAdd", &v->expoAdd, -1, 1, 0);
             row(RSO_P,       "P",       &v->P,       0,  2, 0);
             row(RSO_a,       "a",       &v->a,       0,  2, 0);

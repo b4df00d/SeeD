@@ -2,7 +2,8 @@
 
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define TRACING_DISTANCE                10000.0f
-#define BOUNCES_MIN                     1
+#define BOUNCES_MIN                     0
+#define BOUNCES_MAX                     10
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
 #define SHADOW_RAY_IN_RIS               0 // Enable this to cast shadow rays for each candidate during resampling. This is expensive but increases quality
 #define ENABLE_SPECULAR_LOBE            1 // Enable to use the specular lobe for splitting between diffuse and specular BRDFs
@@ -354,7 +355,7 @@ void PathTraceRays()
 //#if SHARC_QUERY
 #ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
             
-            
+            //if (bounce > BOUNCES_MIN)
             {
                 uint gridLevel = HashGridGetLevel(hitPos, sharcParameters.gridParameters);
                 float voxelSize = HashGridGetVoxelSize(gridLevel, sharcParameters.gridParameters);
@@ -428,7 +429,8 @@ void PathTraceRays()
             }
 
             // Terminate the loop early on the last bounce (we don't need to sample the BRDF)
-            if (bounce >= rtParameters.bouncesMax - 1)
+            //if (bounce > rtParameters.bouncesMax)
+            if(bounce > BOUNCES_MAX)
             {
                 break;
             }
@@ -522,7 +524,7 @@ void PathTraceRays()
             throughput *= brdfWeight;
 
             SharcSetThroughput(sharcState, throughput);
-            if (!isUpdatePass && luminance(throughput) < rtParameters.throughputThreshold)
+            if (!isUpdatePass && luminance(throughput) < rtParameters.throughputThreshold * 0.00001f)
                 break;
         }
         
@@ -537,7 +539,7 @@ void PathTraceRays()
             // Pass 1 composites DIRECT light only. The indirect radiance is resolved from
             // the reservoir AFTER spatial reuse in lighting.hlsl, which does lighted += indirect.
             UpdateSampleData(accumulatedSampleData, directLight, isDiffusePath, hitDistance);
-
+            
             if (editorContext.GIBounces)// Bounce Heatmap
                 debugColor = BounceHeatmap(bounce);
         }

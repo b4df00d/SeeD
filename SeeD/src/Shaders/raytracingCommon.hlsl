@@ -209,7 +209,7 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
         incidentVector = lightToSurface * rDistance;
         lightDistance = distance;
 
-        float attenuation = min(4.0f, 1.0f / pow(lightDistance, 2.0f));
+        float attenuation = min(100.0f, 1.0f / pow(lightDistance, 2.0f) * 10.0f);
         if (light.range > 0)
         {
             float d2 = square(distance / light.range);
@@ -301,7 +301,8 @@ bool SampleLightRIS(inout uint rngState, float3 hitPosition, float3 surfaceNorma
     const uint candidateMax = min(commonResourcesIndices.lightCount, RIS_CANDIDATES_LIGHTS);
     for (int i = 0; i < candidateMax; i++)
     {
-        uint randomLightIndex = min(commonResourcesIndices.lightCount - 1, uint(RNG(rngState) * commonResourcesIndices.lightCount));
+        uint randomLightIndex = min(commonResourcesIndices.lightCount - 1, uint((RNG(rngState) * commonResourcesIndices.lightCount + viewContext.frameNumber) % commonResourcesIndices.lightCount));
+        //randomLightIndex = (i + viewContext.frameNumber) % commonResourcesIndices.lightCount;
         HLSL::Light candidate = lights[randomLightIndex];
 
         // PDF of uniform distribution is (1 / light count). Reciprocal of that PDF (simply a light count) is a weight of this sample
@@ -320,7 +321,9 @@ bool SampleLightRIS(inout uint rngState, float3 hitPosition, float3 surfaceNorma
 #if SHADOW_RAY_IN_RIS
             // Casting a shadow ray for all candidates here is expensive, but can significantly decrease noise
             if (candidate.castShadow && any(CastShadowRay(accelerationStructure, hitPosition, surfaceNormal, lightVector, lightDistance) > 0.0f))
+            {
                 continue;
+            }
 #endif
 
             float candidatePdfG = irradiance;

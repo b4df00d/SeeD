@@ -1742,6 +1742,104 @@ public:
 };
 FileBrowserWindow fileBrowserWindow;
 
+// Forward-declared in ComponentMetaTypes.h. Draws every reflected member of the component
+// found in knownComponents for `mask`, exactly like the property window's path for components
+// with no custom PropertyDraw -- callable from a custom PropertyDraw that wants the generic
+// rendering plus its own controls (e.g. Components::InstancePropertyDraw, in World.h).
+void DefaultPropertyDraw(Components::Mask mask, char* cmpData)
+{
+    ComponentInfo* metaData = nullptr;
+    for (uint i = 0; i < knownComponents.size(); i++)
+    {
+        if (knownComponents[i].mask == mask)
+        {
+            metaData = &knownComponents[i];
+            break;
+        }
+    }
+    if (metaData == nullptr)
+        return;
+
+    uint pushID = 0;
+    for (uint memberIndex = 0; memberIndex < metaData->members.size(); memberIndex++)
+    {
+        ImGui::PushID(pushID++);
+        auto& m = metaData->members[memberIndex];
+        char* data = cmpData + m.offset;
+        ImGui::Text(m.name.c_str());
+        if (m.dataCount == 1)
+            ImGui::SameLine();
+        for (int dc = 0; dc < m.dataCount; dc++)
+        {
+            ImGui::PushID(pushID++);
+            switch (m.dataType)
+            {
+            case PropertyTypes::_int:
+            case PropertyTypes::_uint:
+                ImGui::InputInt("", &((int*)data)[dc]);
+                break;
+            case PropertyTypes::_float:
+                ImGui::DragFloat("", &((float*)data)[dc]);
+                break;
+            case PropertyTypes::_float2:
+                ImGui::DragFloat2("", &((float*)data)[dc]);
+                break;
+            case PropertyTypes::_float3:
+                ImGui::DragFloat3("", &((float*)data)[dc]);
+                break;
+            case PropertyTypes::_float4:
+                ImGui::DragFloat4("", &((float*)data)[dc]);
+                break;
+            case PropertyTypes::_quaternion:
+                ImGui::DragFloat4("", &((float*)data)[dc]);
+                break;
+            case PropertyTypes::_float4x4:
+            {
+                float4x4& mat = ((float4x4*)data)[dc];
+                ImGui::DragFloat4("x", (float*)&mat[0]);
+                ImGui::DragFloat4("y", (float*)&mat[1]);
+                ImGui::DragFloat4("z", (float*)&mat[2]);
+                ImGui::DragFloat4("pos", (float*)&mat[3]);
+            }
+            break;
+            case PropertyTypes::_assetID:
+            {
+                assetID id = ((assetID*)data)[dc];
+                if (AssetLibrary::instance->map.contains(id))
+                {
+                    if (ImGui::SmallButton("o"))
+                    {
+                        fileBrowserWindow.Open([](String selectedPath)
+                            {
+                                int toto = 0;
+                                //add the path to the assetlib
+                                //assign the new id to the assetID
+                            }
+                        );
+                    }
+                    ImGui::SameLine();
+                    ImGui::Text(AssetLibrary::instance->map[id].originalFilePath.c_str());
+                }
+            }
+            break;
+            case PropertyTypes::_Handle:
+            {
+                UIHelpers::DrawHandle(((EntityBase*)data)[dc], m.dataTemplateType);
+            }
+            break;
+            case PropertyTypes::_bool:
+                ImGui::Checkbox("", &((bool*)data)[dc]);
+            break;
+            default:
+                break;
+            }
+
+            ImGui::PopID();
+        }
+        ImGui::PopID();
+    }
+}
+
 // InitKnownComponents() is declared in ComponentMetaData.h, included from World.h.
 class PropertyWindow : public EditorWindow
 {
@@ -1839,83 +1937,7 @@ public:
                         }
                         else
                         {
-                            for (uint memberIndex = 0; memberIndex < metaData.members.size(); memberIndex++)
-                            {
-                                ImGui::PushID(pushID++);
-                                auto& m = metaData.members[memberIndex];
-                                char* data = cmpData + m.offset;
-                                ImGui::Text(m.name.c_str());
-                                if (m.dataCount == 1)
-                                    ImGui::SameLine();
-                                for (int dc = 0; dc < m.dataCount; dc++)
-                                {
-                                    ImGui::PushID(pushID++);
-                                    switch (m.dataType)
-                                    {
-                                    case PropertyTypes::_int:
-                                    case PropertyTypes::_uint:
-                                        ImGui::InputInt("", &((int*)data)[dc]);
-                                        break;
-                                    case PropertyTypes::_float:
-                                        ImGui::DragFloat("", &((float*)data)[dc]);
-                                        break;
-                                    case PropertyTypes::_float2:
-                                        ImGui::DragFloat2("", &((float*)data)[dc]);
-                                        break;
-                                    case PropertyTypes::_float3:
-                                        ImGui::DragFloat3("", &((float*)data)[dc]);
-                                        break;
-                                    case PropertyTypes::_float4:
-                                        ImGui::DragFloat4("", &((float*)data)[dc]);
-                                        break;
-                                    case PropertyTypes::_quaternion:
-                                        ImGui::DragFloat4("", &((float*)data)[dc]);
-                                        break;
-                                    case PropertyTypes::_float4x4:
-                                    {
-                                        float4x4& mat = ((float4x4*)data)[dc];
-                                        ImGui::DragFloat4("x", (float*)&mat[0]);
-                                        ImGui::DragFloat4("y", (float*)&mat[1]);
-                                        ImGui::DragFloat4("z", (float*)&mat[2]);
-                                        ImGui::DragFloat4("pos", (float*)&mat[3]);
-                                    }
-                                    break;
-                                    case PropertyTypes::_assetID:
-                                    {
-                                        assetID id = ((assetID*)data)[dc];
-                                        if (AssetLibrary::instance->map.contains(id))
-                                        {
-                                            if (ImGui::SmallButton("o"))
-                                            {
-                                                fileBrowserWindow.Open([](String selectedPath)
-                                                    {
-                                                        int toto = 0;
-                                                        //add the path to the assetlib
-                                                        //assign the new id to the assetID
-                                                    }
-                                                );
-                                            }
-                                            ImGui::SameLine();
-                                            ImGui::Text(AssetLibrary::instance->map[id].originalFilePath.c_str());
-                                        }
-                                    }
-                                    break;
-                                    case PropertyTypes::_Handle:
-                                    {
-                                        UIHelpers::DrawHandle(((EntityBase*)data)[dc], m.dataTemplateType);
-                                    }
-                                    break;
-                                    case PropertyTypes::_bool:
-                                        ImGui::Checkbox("", &((bool*)data)[dc]);
-                                    break;
-                                    default:
-                                        break;
-                                    }
-
-                                    ImGui::PopID();
-                                }
-                                ImGui::PopID();
-                            }
+                            DefaultPropertyDraw(metaData.mask, cmpData);
                         }
                         ImGui::PopID();
                     }
@@ -2277,7 +2299,7 @@ public:
             return;
         }
 
-        if (ImGui::BeginTable("lightsTable", 5,
+        if (ImGui::BeginTable("lightsTable", 8,
             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY))
         {
@@ -2286,6 +2308,9 @@ public:
             ImGui::TableSetupColumn("Type",      ImGuiTableColumnFlags_WidthFixed,   110.0f);
             ImGui::TableSetupColumn("Color",     ImGuiTableColumnFlags_WidthFixed,   200.0f);
             ImGui::TableSetupColumn("Intensity", ImGuiTableColumnFlags_WidthFixed,   90.0f);
+            ImGui::TableSetupColumn("Size",      ImGuiTableColumnFlags_WidthFixed,   80.0f);
+            ImGui::TableSetupColumn("Range",     ImGuiTableColumnFlags_WidthFixed,   80.0f);
+            ImGui::TableSetupColumn("Angle",     ImGuiTableColumnFlags_WidthFixed,   80.0f);
             ImGui::TableSetupColumn("Shadow",    ImGuiTableColumnFlags_WidthFixed,   55.0f);
             ImGui::TableHeadersRow();
 
@@ -2296,12 +2321,15 @@ public:
 
                 auto& light = result[i].Get<Components::Light>();
 
-                // Name
+                // Name (click to select the entity)
                 ImGui::TableSetColumnIndex(0);
+                char nameLabel[ECS_NAME_LENGTH + 8];
                 if (result[i].Has<Components::Name>())
-                    ImGui::TextUnformatted(result[i].Get<Components::Name>().name);
+                    strcpy(nameLabel, result[i].Get<Components::Name>().name);
                 else
-                    ImGui::Text("Light %u", i);
+                    sprintf(nameLabel, "Light %u", i);
+                if (ImGui::Selectable(nameLabel, editorState.selectedObject == result[i]))
+                    editorState.selectedObject = result[i];
 
                 // Type
                 ImGui::TableSetColumnIndex(1);
@@ -2329,8 +2357,23 @@ public:
                 ImGui::DragFloat("##intensity", &light.color.w,
                     0.05f, 0.0f, 1000000.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
 
-                // Cast shadow
+                // Size
                 ImGui::TableSetColumnIndex(4);
+                ImGui::SetNextItemWidth(-1);
+                ImGui::DragFloat("##size", &light.size, 0.01f, 0.0f, 1000000.0f);
+
+                // Range
+                ImGui::TableSetColumnIndex(5);
+                ImGui::SetNextItemWidth(-1);
+                ImGui::DragFloat("##range", &light.range, 0.05f, 0.0f, 1000000.0f);
+
+                // Angle (spot cone)
+                ImGui::TableSetColumnIndex(6);
+                ImGui::SetNextItemWidth(-1);
+                ImGui::DragFloat("##angle", &light.angle, 0.1f, 0.0f, 180.0f);
+
+                // Cast shadow
+                ImGui::TableSetColumnIndex(7);
                 ImGui::Checkbox("##castShadow", &light.castShadow);
 
                 ImGui::PopID();

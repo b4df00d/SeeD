@@ -119,7 +119,9 @@ void RayGen()
     }
     SurfaceData s = GetSurfaceData(dtid.xy);
     
-    uint seed = initRand(dtid.xy);
+    const uint2 launchIndex = DispatchRaysIndex().xy;
+    const uint2 launchDimensions = DispatchRaysDimensions().xy;
+    uint seed = InitRNG(launchIndex, launchDimensions, viewContext.frameTime);
     uint poissonDiskCount = clamp(rtParameters.spacialSampleCount, 1u, 64u); // tweakable neighbour count
     uint poissonIndexRng = nextRand(seed) * (64 - poissonDiskCount);
     
@@ -273,9 +275,9 @@ void RayGen()
     // SHARCRadianceScale here to match the direct light Pass 1 scaled in ResolveSampleData.
     float ucw = r.Wsum / max(r.Wcount * r.W, 1e-5f);
     float3 indirect = r.color * ucw * rtParameters.SHARCRadianceScale;
+    
     if (!editorContext.GIBounces && !editorContext.GIAlbedo && !editorContext.GINormals)
         lighted[dtid.xy] += float4(indirect, 0.0f);
-
 
 
     
