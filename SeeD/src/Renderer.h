@@ -1446,6 +1446,9 @@ public:
 
         view->raytracingContext.SHARCAccumulation.Barrier(commandBuffer.Get());
 
+        // close the "lightingProbes" zone (SHARC update trace) and time the resolve separately
+        Profiler::instance->EndProfile(commandBuffer.Get());
+        Profiler::instance->StartProfile(commandBuffer.Get(), "sharcResolve");
 
         Shader& resolve = *AssetLibrary::instance->Get<Shader>(resolveShader.Get().id, true);
         commandBuffer->SetCompute(resolve);
@@ -1476,9 +1479,9 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         lighted.Register("lighted", view);
-        lighted.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "lighted");
+        lighted.Get().CreateTexture(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, false, "lighted");
         specularHitDistance.Register("specularHitDistance", view);
-        specularHitDistance.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16_FLOAT, "specularHitDistance");
+        specularHitDistance.Get().CreateTexture(view->renderResolution, DXGI_FORMAT_R16_FLOAT, false, "specularHitDistance");
         albedo.Register("albedo", view);
         depth.Register("depth", view);
         normal.Register("normal", view);
@@ -1520,6 +1523,10 @@ public:
         commandBuffer->cmd->DispatchRays(&drd);
 
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
+
+        // close the "lighting" zone (trace + temporal ReSTIR) and time the second dispatch separately
+        Profiler::instance->EndProfile(commandBuffer.Get());
+        Profiler::instance->StartProfile(commandBuffer.Get(), "lightingApply");
 
         // Lighting (+ spacial ResTIR)
         Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
@@ -2036,7 +2043,7 @@ public:
     NVSDK_NGX_Parameter* ngx_parameters = nullptr;
     NVSDK_NGX_Handle* dlss_feature = nullptr;
     NVSDK_NGX_PerfQuality_Value perf_quality = NVSDK_NGX_PerfQuality_Value_Balanced;// NVSDK_NGX_PerfQuality_Value_MaxQuality;// NVSDK_NGX_PerfQuality_Value_MaxPerf;
-    float sharpness = 0.00033f;
+    float sharpness = 0.0033f;
     bool initialized = false;
     bool created = false;
     HLSL::Upscaling upscalingPreviousSetting;
@@ -2626,6 +2633,12 @@ public:
                     instance.current = instance.pack(matrixCmp.matrix);
                     instance.previous = instance.pack(previousWorldMatrix);
                     instance.objectID = ent.ToUInt();
+                    instance.rtFlags = 0;
+                    // the mesh's OMM was baked against one albedo: if the instance uses a
+                    // different texture the baked opacity states are wrong, fall back to pure any-hit
+                    if (mesh->ommTextureHash != 0
+                        && (!materialCmp.textures[0].IsValid() || materialCmp.textures[0].Get().id.hash != mesh->ommTextureHash))
+                        instance.rtFlags |= HLSL::RTInstanceFlagDisableOMMs;
                     instance.rayTracingBLAS = mesh->BLAS.GetResource()->GetGPUVirtualAddress();
                     // single-LOD meshes have no low BLAS: alias the high one so culling.hlsl can select blindly
                     instance.rayTracingBLASLow = mesh->BLASLow.GetResource() ? mesh->BLASLow.GetResource()->GetGPUVirtualAddress() : instance.rayTracingBLAS;

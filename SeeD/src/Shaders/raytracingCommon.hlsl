@@ -18,6 +18,9 @@ struct [raypayload] RayPayload
 struct [raypayload] ShadowRayPayload
 {
     float3 visibility       : read(caller, anyhit) : write(caller, closesthit, anyhit);
+    // shadow rays skip the closest-hit shader: reaching the miss shader is the only
+    // signal that the ray was NOT occluded
+    uint missed             : read(caller) : write(caller, miss);
 };
 
 struct Attributes
@@ -262,10 +265,12 @@ float3 CastShadowRay(RaytracingAccelerationStructure accelerationStructure, floa
 
     ShadowRayPayload payload;
     payload.visibility = float3(1.0f, 1.0f, 1.0f);
+    payload.missed = 0;
 
     // Cull backfaces : the ray origin can be inside the geometry when reconstructed from the gbuffer,
     // without culling the ray hits the backface of its own surface and wrongly shadows the pixel
     uint rayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+                  | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
                   | ((!rtParameters.enableBackFaceCull) ? RAY_FLAG_NONE : RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
 
 #if DISABLE_BACK_FACE_CULLING
@@ -274,7 +279,7 @@ float3 CastShadowRay(RaytracingAccelerationStructure accelerationStructure, floa
     //rayFlags &= (~RAY_FLAG_FORCE_OPAQUE);
     TraceRay(accelerationStructure, rayFlags, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
 
-    return payload.visibility;
+    return payload.missed ? payload.visibility : float3(0, 0, 0);
 }
 
 // Samples a random light from the pool of all lights using RIS (Resampled Importance Sampling)

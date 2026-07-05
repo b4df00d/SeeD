@@ -212,6 +212,36 @@ namespace Components
         Handle<Mesh> meshRT;
         Handle<Material> material;
     };
+    // set by OMMBaker::On (Loading.h, included after World.h): the "bake OMM" button in
+    // InstancePropertyDraw routes through this pointer to avoid a World -> Loading dependency
+    inline void (*requestOMMBake)(Instance&) = nullptr;
+    static void InstancePropertyDraw(char* p)
+    {
+        Instance* instance = (Instance*)p;
+
+        uint pushID = 0;
+        ImGui::PushID(pushID++);
+        ImGui::Text("mesh");
+        ImGui::SameLine();
+        UIHelpers::DrawHandle(*(EntityBase*)&instance->mesh, Mesh::mask);
+        ImGui::PopID();
+        ImGui::PushID(pushID++);
+        ImGui::Text("meshRT");
+        ImGui::SameLine();
+        UIHelpers::DrawHandle(*(EntityBase*)&instance->meshRT, Mesh::mask);
+        ImGui::PopID();
+        ImGui::PushID(pushID++);
+        ImGui::Text("material");
+        ImGui::SameLine();
+        UIHelpers::DrawHandle(*(EntityBase*)&instance->material, Material::mask);
+        ImGui::PopID();
+
+        ImGui::Spacing();
+        // bakes this mesh against the material's albedo alpha and (re)writes the {hash}.omm
+        // sidecar in the background; the BLAS reads it at load -> effective at the next run
+        if (requestOMMBake != nullptr && ImGui::Button("bake OMM"))
+            requestOMMBake(*instance);
+    }
 
     struct State : ComponentBase<State>
     {

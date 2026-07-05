@@ -2374,6 +2374,26 @@ public:
                     project.lodDistanceMultiplier = options.lodDistanceMultiplier;
                     project.distanceCullingValue = options.distanceCullingValue;
                     project.distanceCullingValueRT = options.distanceCullingValueRT;
+
+                    // push the Rendering window's "Ray Tracing" + "Upscaling" params (not Options-backed) into the project
+                    auto& rt = Renderer::instance->mainView.raytracingContext.rtParameters;
+                    project.maxFrameFilteringCount = rt.maxFrameFilteringCount;
+                    project.spacialRadius = rt.spacialRadius;
+                    project.spacialSampleCount = rt.spacialSampleCount;
+                    project.reservoirRandBias = rt.reservoirRandBias;
+                    project.reservoirSpacialRandBias = rt.reservoirSpacialRandBias;
+                    project.SHARCSceneScale = rt.SHARCSceneScale;
+                    project.SHARCRadianceScale = rt.SHARCRadianceScale;
+                    project.SHARCRoughnessThreshold = rt.SHARCRoughnessThreshold;
+                    project.SHARCSamplesPerPixel = rt.SHARCSamplesPerPixel;
+                    project.SHARCAccumulationFrameNum = rt.SHARCAccumulationFrameNum;
+
+                    MainView& mainViewRef = Renderer::instance->mainView;
+                    project.upscalingTechnique = (uint)mainViewRef.upscaling;
+                    project.dlssQuality = (int)mainViewRef.dlss.requestedQuality;
+                    project.dlssPreset = (int)mainViewRef.dlss.dlssPreset;
+                    project.dlssdPreset = (int)mainViewRef.dlss.dlssdPreset;
+
                     EditorWindow::Save(); // push editor window open-states into the project
                     project.Save();       // write the single project file
                 }

@@ -261,6 +261,11 @@ namespace HLSL
     // instance points at the low-detail BLAS, so hit shaders fetch triangles from the matching LOD.
     static const uint RTInstanceLowLodBit = 1u << 23;
 
+    // Instance::rtFlags bits (written by UpdateInstances, consumed by culling.hlsl)
+    // set when the instance's material differs from the one the mesh's OMM was baked against:
+    // culling.hlsl then adds D3D12_RAYTRACING_INSTANCE_FLAG_DISABLE_OMMS for that instance
+    static const uint RTInstanceFlagDisableOMMs = 1u << 0;
+
     struct Instance
     {
         float4x4 current; // FFS hlsl++ does store 4x3 and 4x3 in the same way ... BS ! TODO : make the 4x3 packing work
@@ -268,7 +273,7 @@ namespace HLSL
         uint meshIndex;
         uint materialIndex;
         uint objectID; // map to entityBase
-        uint pad1;
+        uint rtFlags;
         D3D12_GPU_VIRTUAL_ADDRESS rayTracingBLAS;
         D3D12_GPU_VIRTUAL_ADDRESS rayTracingBLASLow;
         

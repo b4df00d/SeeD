@@ -240,10 +240,12 @@ void RayGen()
 
             ShadowRayPayload payload;
             payload.visibility = float3(1.0f, 1.0f, 1.0f);
+            payload.missed = 0;
 
             // Cull backfaces : the ray origin comes from the gbuffer and can be inside the geometry,
             // without culling the ray hits the backface of its own surface and wrongly occludes the pixel
             uint rayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+                          | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
                           | ((!rtParameters.enableBackFaceCull) ? RAY_FLAG_NONE : RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
 
 #if DISABLE_BACK_FACE_CULLING
@@ -252,7 +254,7 @@ void RayGen()
 
             TraceRay(AccelerationStructure, rayFlags, 0xFF, SHADOW_RAY_INDEX, 0, SHADOW_RAY_INDEX, ray, payload);
 
-            if (any(payload.visibility > 0))   // unoccluded -> accept the spatially-combined reservoir
+            if (payload.missed && any(payload.visibility > 0))   // unoccluded -> accept the spatially-combined reservoir
             {
                 // The pairwise estimator's UCW is already Wsum / pHat(Y) (MIS weights sum to 1,
                 // so there is NO 1/M factor). Pin Wcount = 1 so the shared resolve below
@@ -324,10 +326,12 @@ void AnyHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib : SV_
 }
 
 
-// TODO: Delete this
+// Load-bearing: shadow rays trace with RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, so reaching
+// the miss shader is the only signal that the ray was not occluded
 [shader("miss")]
 void MissShadow(inout ShadowRayPayload payload : SV_RayPayload)
 {
+    payload.missed = 1;
 }
 
 [shader("closesthit")]

@@ -91,6 +91,11 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
                                | HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE; 
         }
         
+        // material swapped since the mesh's OMM bake: opt this instance out of the (now wrong)
+        // opacity states; its BLAS was built with ALLOW_DISABLE_OMMS so the flag is legal
+        if (instance.rtFlags & HLSL::RTInstanceFlagDisableOMMs)
+            instanceDesc.Flags |= HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_DISABLE_OMMS;
+
         instanceDesc.InstanceMask = 0xFF;
         
     

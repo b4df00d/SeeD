@@ -230,6 +230,7 @@ public:
     SceneLoader sceneLoader;
     TextureLoader textureLoader;
     ShaderLoader shaderLoader;
+    OMMBaker ommBaker;
 
     Systems::Player player;
     Systems::PrefabStreaming prefabStreaming;
@@ -251,6 +252,7 @@ public:
         sceneLoader.On();
         textureLoader.On();
         shaderLoader.On();
+        ommBaker.On();
         renderer.On(uint2(gpu.backBuffer.Get().GetResource()->GetDesc().Width, gpu.backBuffer.Get().GetResource()->GetDesc().Height));
         ui.On(&ios.window, gpu.device, gpu.swapChain);
         EditorWindow::Load();
@@ -336,6 +338,7 @@ public:
         prefabStreaming.Off();
 
         shaderLoader.Off();
+        ommBaker.Off();
         textureLoader.Off();
         meshLoader.Off();
         sceneLoader.Off();
@@ -448,6 +451,27 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     options.lodDistanceMultiplier = project.lodDistanceMultiplier;
     options.distanceCullingValue = project.distanceCullingValue;
     options.distanceCullingValueRT = project.distanceCullingValueRT;
+
+    // Rendering window "Ray Tracing" + "Upscaling" sections live directly on the view/DLSS
+    // objects rather than in Options, so restore them there instead.
+    auto& rt = engine.renderer.mainView.raytracingContext.rtParameters;
+    rt.maxFrameFilteringCount = project.maxFrameFilteringCount;
+    rt.spacialRadius = project.spacialRadius;
+    rt.spacialSampleCount = project.spacialSampleCount;
+    rt.reservoirRandBias = project.reservoirRandBias;
+    rt.reservoirSpacialRandBias = project.reservoirSpacialRandBias;
+    rt.SHARCSceneScale = project.SHARCSceneScale;
+    rt.SHARCRadianceScale = project.SHARCRadianceScale;
+    rt.SHARCRoughnessThreshold = project.SHARCRoughnessThreshold;
+    rt.SHARCSamplesPerPixel = project.SHARCSamplesPerPixel;
+    rt.SHARCAccumulationFrameNum = project.SHARCAccumulationFrameNum;
+
+    DLSS& dlss = engine.renderer.mainView.dlss;
+    engine.renderer.mainView.upscaling = (HLSL::Upscaling)project.upscalingTechnique;
+    dlss.dlssPreset = (NVSDK_NGX_DLSS_Hint_Render_Preset)project.dlssPreset;
+    dlss.dlssdPreset = (NVSDK_NGX_RayReconstruction_Hint_Render_Preset)project.dlssdPreset;
+    dlss.requestedQuality = (NVSDK_NGX_PerfQuality_Value)project.dlssQuality;
+    dlss.qualityChangePending = (dlss.requestedQuality != dlss.perf_quality); // triggers the existing rebuild path if it differs from the just-created default
 
     if (!project.startupScene.empty())
     {

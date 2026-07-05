@@ -7,6 +7,7 @@
 #define SHADOW_RAY_IN_RIS               0 // Enable this to cast shadow rays for each candidate during resampling. This is expensive but increases quality
 #define ENABLE_SPECULAR_LOBE            1 // Enable to use the specular lobe for splitting between diffuse and specular BRDFs
 #define SHARC_SEPARATE_EMISSIVE         1
+#define USE_SER                         1 // Shader Execution Reordering (SM 6.9): regroup threads by hit coherence after traversal, before the divergent shading
 
 #include "SharcCommon.h"
 
@@ -73,10 +74,12 @@ void AnyHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib : SV_
 }
 
 
-// TODO: Delete this
+// Load-bearing: shadow rays trace with RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, so reaching
+// the miss shader is the only signal that the ray was not occluded
 [shader("miss")]
 void MissShadow(inout ShadowRayPayload payload : SV_RayPayload)
 {
+    payload.missed = 1;
 }
 
 [shader("closesthit")]
@@ -256,7 +259,26 @@ void PathTraceRays()
                 //rayFlags &= (~RAY_FLAG_FORCE_OPAQUE);
                 //rayFlags &= (~RAY_FLAG_FORCE_NON_OPAQUE);
                 
+#if USE_SER
+                dx::HitObject hit = dx::HitObject::TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
+                dx::MaybeReorderThread(hit);
+                // read the hit straight from the HitObject instead of invoking the trivial
+                // closesthit/miss shaders; the payload is pre-initialized to the miss values
+                if (hit.IsHit())
+                {
+                    payload.instanceID = hit.GetInstanceID();
+                    payload.primitiveIndex = hit.GetPrimitiveIndex();
+                    payload.geometryIndex = hit.GetGeometryIndex();
+                    Attributes hitAttribs;
+                    hit.GetAttributes(hitAttribs);
+                    payload.barycentrics = hitAttribs.uv;
+                    uint packedDistance = asuint(hit.GetRayTCurrent()) & (~0x1u);
+                    packedDistance |= hit.GetHitKind() == HIT_KIND_TRIANGLE_FRONT_FACE ? 0x1 : 0x0;
+                    payload.hitDistance = asfloat(packedDistance);
+                }
+#else
                 TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
+#endif
                 hitPos = ray.Origin + ray.Direction * payload.hitDistance;
                 
                 s = GetRTSurfaceData(payload.instanceID, payload.primitiveIndex, payload.geometryIndex, payload.barycentrics);

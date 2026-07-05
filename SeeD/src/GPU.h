@@ -14,7 +14,7 @@
 #include "../../Third/D3D12MemoryAllocator-master/include/D3D12MemAlloc.h"
 
 
-extern "C" { _declspec(dllexport) extern const UINT D3D12SDKVersion = 4; }
+extern "C" { _declspec(dllexport) extern const UINT D3D12SDKVersion = D3D12_SDK_VERSION; }
 extern "C" { _declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\"; }
 
 // current version of pix and thread is not good ! do define No_Thread for pix to work
@@ -775,6 +775,7 @@ public:
         bool fullscreen : 1;
         bool meshShader : 1;
         bool raytracing : 1;
+        bool raytracingTier12 : 1;
     };
     Features features{};
 
@@ -917,6 +918,15 @@ public:
         D3D12_FEATURE_DATA_D3D12_OPTIONS7 featureData = {};
         device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &featureData, sizeof(featureData));
         features.meshShader = (featureData.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1);
+
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 featureData5 = {};
+        device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &featureData5, sizeof(featureData5));
+        features.raytracing = (featureData5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_0);
+        features.raytracingTier12 = (featureData5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_2);
+
+        D3D12_FEATURE_DATA_D3D12_OPTIONS22 featureData22 = {};
+        device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS22, &featureData22, sizeof(featureData22));
+        IOs::Log("D3D12 runtime {} | raytracing tier {} | SER reorders {}", (uint)D3D12_SDK_VERSION, (int)featureData5.RaytracingTier, featureData22.ShaderExecutionReorderingActuallyReorders ? "yes" : "no");
 
 
         D3D12_COMMAND_QUEUE_DESC commandQueueDesc;
@@ -2865,10 +2875,38 @@ struct Meshlet : HLSL::Meshlet
 {
 };
 
+// Baked opacity-micromap data loaded from a {hash}.omm sidecar (written at import by the OMM
+// bake, next to the {hash}.mesh cache entry). One section per BLAS LOD (LOD0 and the coarsest).
+struct OMMData
+{
+    struct LOD
+    {
+        uint lodIndex = 0;
+        DXGI_FORMAT indexFormat = DXGI_FORMAT_R32_UINT; // per-triangle OMM index buffer format
+        std::vector<unsigned char> indices;
+        std::vector<D3D12_RAYTRACING_OPACITY_MICROMAP_DESC> descs;
+        std::vector<D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY> histogram;
+        std::vector<unsigned char> arrayData; // raw opacity bit data (OMM array build input)
+    };
+    std::vector<LOD> LODs;
+    uint64_t textureHash = 0; // albedo texture assetID.hash the bake sampled
+    float alphaThreshold = 0.5f;
+};
+
 struct Mesh : HLSL::Mesh
 {
     Resource BLAS;
     Resource BLASLow; // coarsest-LOD BLAS, distance-swapped into the TLAS (empty when lodCount == 1)
+
+    // opacity micromaps (only set for cutout meshes with a baked {hash}.omm sidecar, tier 1.2+)
+    // the arrays and index buffers are referenced by the BLAS and must outlive them
+    Resource ommArray;
+    Resource ommArrayLow;
+    Resource ommIndices;
+    Resource ommIndicesLow;
+    Resource ommInputs;    // raw bits + per-OMM descs; only read by the OMM array build
+    Resource ommInputsLow;
+    uint64_t ommTextureHash = 0; // != 0 means the BLAS carries OMM; used for the material-mismatch DISABLE_OMMS fallback
 };
 
 struct MeshData
@@ -3050,7 +3088,7 @@ struct MeshStorage
         }
     }
 
-    Mesh Load(MeshData& meshData, CommandBuffer& commandBuffer)
+    Mesh Load(MeshData& meshData, CommandBuffer& commandBuffer, const OMMData* omm = nullptr)
     {
         ZoneScoped;
 
@@ -3194,7 +3232,7 @@ struct MeshStorage
         vertices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         indices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-        LoadBLAS(newMesh, commandBuffer);
+        LoadBLAS(newMesh, commandBuffer, omm);
 
         vertices.Transition(commandBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
         indices.Transition(commandBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
@@ -3202,46 +3240,155 @@ struct MeshStorage
         return newMesh;
     }
 
-    void LoadBLAS(Mesh& mesh, CommandBuffer& commandBuffer)
+    void LoadBLAS(Mesh& mesh, CommandBuffer& commandBuffer, const OMMData* omm = nullptr)
     {
         ZoneScoped;
 
         lock.lock();
+
+        // Opacity micromaps: build the OMM arrays first, then link them into the BLAS builds
+        // below so the RT cores can skip any-hit for known-opaque/transparent micro-triangles.
+        const OMMData::LOD* omm0 = nullptr;
+        const OMMData::LOD* ommLow = nullptr;
+        if (omm != nullptr && GPU::instance->features.raytracingTier12)
+        {
+            mesh.ommTextureHash = omm->textureHash;
+            for (auto& lod : omm->LODs)
+            {
+                if (lod.lodIndex == 0)
+                    omm0 = &lod;
+                else
+                    ommLow = &lod;
+            }
+            if (ommLow != nullptr && mesh.lodCount <= 1)
+                ommLow = nullptr;
+
+            UINT64 ommScratchUsed = 0;
+            if (omm0 != nullptr)
+                ommScratchUsed = BuildOMMArray(*omm0, mesh.ommArray, mesh.ommIndices, mesh.ommInputs, 0, commandBuffer);
+            if (ommLow != nullptr)
+                BuildOMMArray(*ommLow, mesh.ommArrayLow, mesh.ommIndicesLow, mesh.ommInputsLow, ommScratchUsed, commandBuffer);
+
+            // the BLAS builds read the OMM arrays and reuse the scratch ranges the array builds wrote
+            D3D12_RESOURCE_BARRIER uavBarrier;
+            uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            uavBarrier.UAV.pResource = nullptr;
+            uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            commandBuffer.cmd->ResourceBarrier(1, &uavBarrier);
+        }
+
         // High-detail BLAS from LOD0, low-detail BLAS from the coarsest LOD: culling.hlsl picks one
         // per instance each frame when writing the TLAS instance descs. The two builds share the
         // scratch buffer through disjoint ranges so no UAV barrier is needed between them.
-        UINT64 scratchUsed = BuildBLAS(mesh, 0, mesh.BLAS, 0, commandBuffer);
+        UINT64 scratchUsed = BuildBLAS(mesh, 0, mesh.BLAS, 0, commandBuffer, omm0 ? &mesh.ommArray : nullptr, omm0 ? &mesh.ommIndices : nullptr, omm0 ? omm0->indexFormat : DXGI_FORMAT_R32_UINT);
         if (mesh.lodCount > 1)
-            BuildBLAS(mesh, mesh.lodCount - 1, mesh.BLASLow, scratchUsed, commandBuffer);
+            BuildBLAS(mesh, mesh.lodCount - 1, mesh.BLASLow, scratchUsed, commandBuffer, ommLow ? &mesh.ommArrayLow : nullptr, ommLow ? &mesh.ommIndicesLow : nullptr, ommLow ? ommLow->indexFormat : DXGI_FORMAT_R32_UINT);
         lock.unlock();
     }
 
+    // Uploads one LOD's baked OMM data and records the OMM array build on the command buffer.
+    // Returns the 256-aligned scratch consumed so a following build can start past it.
+    UINT64 BuildOMMArray(const OMMData::LOD& omm, Resource& ommArray, Resource& ommIndexBuffer, Resource& ommInputs, UINT64 scratchOffset, CommandBuffer& commandBuffer)
+    {
+        ZoneScoped;
+
+        // one buffer for the two build inputs: [raw opacity bits][per-OMM descs]
+        uint descsOffset = (uint)ROUND_UP(omm.arrayData.size(), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        uint descsSize = (uint)(omm.descs.size() * sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC));
+        ommInputs.CreateBuffer(descsOffset + descsSize, 1, false, "OMMInputs", D3D12_RESOURCE_STATE_COPY_DEST);
+        ommInputs.UploadElements((void*)omm.arrayData.data(), (uint)omm.arrayData.size(), 0, commandBuffer);
+        ommInputs.UploadElements((void*)omm.descs.data(), descsSize, descsOffset, commandBuffer);
+        ommInputs.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        ommIndexBuffer.CreateBuffer((uint)omm.indices.size(), 1, false, "OMMIndices", D3D12_RESOURCE_STATE_COPY_DEST);
+        ommIndexBuffer.UploadElements((void*)omm.indices.data(), (uint)omm.indices.size(), 0, commandBuffer);
+        ommIndexBuffer.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC arrayDesc = {};
+        arrayDesc.NumOmmHistogramEntries = (uint)omm.histogram.size();
+        arrayDesc.pOmmHistogram = omm.histogram.data();
+        arrayDesc.InputBuffer = ommInputs.GetResource()->GetGPUVirtualAddress();
+        arrayDesc.PerOmmDescs.StartAddress = ommInputs.GetResource()->GetGPUVirtualAddress() + descsOffset;
+        arrayDesc.PerOmmDescs.StrideInBytes = sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC);
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputsDesc = {};
+        inputsDesc.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_OPACITY_MICROMAP_ARRAY;
+        inputsDesc.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputsDesc.NumDescs = 1;
+        inputsDesc.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputsDesc.pOpacityMicromapArrayDesc = &arrayDesc;
+
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
+        GPU::instance->device->GetRaytracingAccelerationStructurePrebuildInfo(&inputsDesc, &info);
+        if (info.ScratchDataSizeInBytes <= 0 || info.ResultDataMaxSizeInBytes <= 0)
+        {
+            IOs::Log("Raytracing OMM array Creation Error");
+        }
+        seedAssert(scratchOffset + info.ScratchDataSizeInBytes < maxScratchSizeInBytes);
+
+        ommArray.CreateAccelerationStructure((uint)ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT), "OMMArray");
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc;
+        buildDesc.Inputs = inputsDesc;
+        buildDesc.DestAccelerationStructureData = ommArray.GetResource()->GetGPUVirtualAddress();
+        buildDesc.ScratchAccelerationStructureData = scratchBLAS.GetResource()->GetGPUVirtualAddress() + scratchOffset;
+        buildDesc.SourceAccelerationStructureData = 0;
+
+        commandBuffer.cmd->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+
+        return ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+    }
+
     // Returns the 256-aligned scratch size consumed so a following build can start past it.
-    UINT64 BuildBLAS(Mesh& mesh, uint lodIndex, Resource& blas, UINT64 scratchOffset, CommandBuffer& commandBuffer)
+    UINT64 BuildBLAS(Mesh& mesh, uint lodIndex, Resource& blas, UINT64 scratchOffset, CommandBuffer& commandBuffer, Resource* ommArray = nullptr, Resource* ommIndexBuffer = nullptr, DXGI_FORMAT ommIndexFormat = DXGI_FORMAT_R32_UINT)
     {
         seedAssert(mesh.LODs[lodIndex].indexCount > 0);
 
         bool isOpaque = false;
-        D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};
-        descriptor.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
         // Position is the SNORM16 packedPos at offset 0 of VertexPacked; the per-mesh Transform3x4
         // below dequantizes it (q in [-1,1]) back to object space during the build.
-        descriptor.Triangles.VertexBuffer.StartAddress = vertices.GetResource()->GetGPUVirtualAddress();
-        descriptor.Triangles.VertexBuffer.StrideInBytes = vertices.stride;
-        descriptor.Triangles.VertexCount = mesh.vertexCount;
-        descriptor.Triangles.VertexFormat = DXGI_FORMAT_R16G16B16A16_SNORM;
-        descriptor.Triangles.IndexBuffer = indices.GetResource()->GetGPUVirtualAddress() + mesh.LODs[lodIndex].indexOffset * indices.stride;
-        descriptor.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
-        descriptor.Triangles.IndexCount = mesh.LODs[lodIndex].indexCount;
-        descriptor.Triangles.Transform3x4 = meshTransforms.GetResourcePtr()->GetGPUVirtualAddress() + (UINT64)mesh.storageIndex * sizeof(BLASTransform);
+        D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC triangles = {};
+        triangles.VertexBuffer.StartAddress = vertices.GetResource()->GetGPUVirtualAddress();
+        triangles.VertexBuffer.StrideInBytes = vertices.stride;
+        triangles.VertexCount = mesh.vertexCount;
+        triangles.VertexFormat = DXGI_FORMAT_R16G16B16A16_SNORM;
+        triangles.IndexBuffer = indices.GetResource()->GetGPUVirtualAddress() + mesh.LODs[lodIndex].indexOffset * indices.stride;
+        triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+        triangles.IndexCount = mesh.LODs[lodIndex].indexCount;
+        triangles.Transform3x4 = meshTransforms.GetResourcePtr()->GetGPUVirtualAddress() + (UINT64)mesh.storageIndex * sizeof(BLASTransform);
+
+        // With an OMM array linked, the RT cores resolve known-opaque/transparent micro-triangles
+        // in hardware and only invoke any-hit for the unknown border ones. Geometry stays
+        // non-opaque so those unknowns still alpha-test. ALLOW_DISABLE_OMMS enables the
+        // per-instance DISABLE_OMMS fallback culling.hlsl applies on material mismatch.
+        D3D12_RAYTRACING_GEOMETRY_OMM_LINKAGE_DESC ommLinkage = {};
+        D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};
         descriptor.Flags = isOpaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS buildFlags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        if (ommArray != nullptr && ommIndexBuffer != nullptr)
+        {
+            ommLinkage.OpacityMicromapIndexBuffer.StartAddress = ommIndexBuffer->GetResource()->GetGPUVirtualAddress();
+            ommLinkage.OpacityMicromapIndexBuffer.StrideInBytes = ommIndexFormat == DXGI_FORMAT_R16_UINT ? 2 : 4;
+            ommLinkage.OpacityMicromapIndexFormat = ommIndexFormat;
+            ommLinkage.OpacityMicromapBaseLocation = 0;
+            ommLinkage.OpacityMicromapArray = ommArray->GetResource()->GetGPUVirtualAddress();
+            descriptor.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_OMM_TRIANGLES;
+            descriptor.OmmTriangles.pTriangles = &triangles;
+            descriptor.OmmTriangles.pOmmLinkage = &ommLinkage;
+            buildFlags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_DISABLE_OMMS;
+        }
+        else
+        {
+            descriptor.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            descriptor.Triangles = triangles;
+        }
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS prebuildDesc;
         prebuildDesc.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
         prebuildDesc.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
         prebuildDesc.NumDescs = 1;
         prebuildDesc.pGeometryDescs = &descriptor;
-        prebuildDesc.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        prebuildDesc.Flags = buildFlags;
 
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info = {};
         GPU::instance->device->GetRaytracingAccelerationStructurePrebuildInfo(&prebuildDesc, &info);
@@ -3266,7 +3413,7 @@ struct MeshStorage
         buildDesc.DestAccelerationStructureData = blas.GetResource()->GetGPUVirtualAddress();
         buildDesc.ScratchAccelerationStructureData = scratchBLAS.GetResource()->GetGPUVirtualAddress() + scratchOffset;
         buildDesc.SourceAccelerationStructureData = 0;
-        buildDesc.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        buildDesc.Inputs.Flags = buildFlags;
 
         commandBuffer.cmd->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
 

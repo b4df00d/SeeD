@@ -1,13 +1,13 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <LocalDebuggerCommandArguments>G:\Work\CaveSeedProj\cave.seedproj</LocalDebuggerCommandArguments>
+    <LocalDebuggerCommandArguments>G:\Work\ArchiSeedProj\archi.seedproj</LocalDebuggerCommandArguments>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
-    <LocalDebuggerCommandArgumentsHistory>G:\Work\TempleSeedProj\cave.seedproj|G:\Work\CaveSeedProj\cave.seedproj|</LocalDebuggerCommandArgumentsHistory>
+    <LocalDebuggerCommandArgumentsHistory>G:\Work\TempleSeedProj\cave.seedproj|G:\Work\CaveSeedProj\cave.seedproj|G:\Work\ArchiSeedProj\archi.seedproj|</LocalDebuggerCommandArgumentsHistory>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <LocalDebuggerCommandArguments>G:\Work\CaveSeedProj\cave.seedproj</LocalDebuggerCommandArguments>
+    <LocalDebuggerCommandArguments>G:\Work\ArchiSeedProj\archi.seedproj</LocalDebuggerCommandArguments>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
-    <LocalDebuggerCommandArgumentsHistory>G:\Work\TempleSeedProj\cave.seedproj|G:\Work\CaveSeedProj\cave.seedproj|</LocalDebuggerCommandArgumentsHistory>
+    <LocalDebuggerCommandArgumentsHistory>G:\Work\TempleSeedProj\cave.seedproj|G:\Work\CaveSeedProj\cave.seedproj|G:\Work\ArchiSeedProj\archi.seedproj|</LocalDebuggerCommandArgumentsHistory>
   </PropertyGroup>
 </Project>

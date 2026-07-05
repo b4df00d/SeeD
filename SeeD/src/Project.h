@@ -27,6 +27,26 @@ public:
     float distanceCullingValue = 6.0f;
     float distanceCullingValueRT = 6.0f;
 
+    // Rendering window -> "Ray Tracing" section
+    uint maxFrameFilteringCount = 1;
+    float spacialRadius = 64.0f;
+    uint spacialSampleCount = 16;
+    float reservoirRandBias = 0.0f;
+    float reservoirSpacialRandBias = 0.2f;
+    float SHARCSceneScale = 20.0f;
+    float SHARCRadianceScale = 1.0f;
+    float SHARCRoughnessThreshold = 0.33f;
+    uint SHARCSamplesPerPixel = 1;
+    uint SHARCAccumulationFrameNum = 128;
+
+    // Rendering window -> "Upscaling" section; raw ints here so Project.h stays decoupled from
+    // the HLSL/NGX headers. upscalingTechnique matches HLSL::Upscaling (none=0 taa=1 dlss=2 dlssd=3),
+    // dlssQuality matches NVSDK_NGX_PerfQuality_Value, dlssPreset/dlssdPreset match the SR/RR preset enums.
+    uint upscalingTechnique = 1;
+    int dlssQuality = 1;
+    int dlssPreset = 0;
+    int dlssdPreset = 0;
+
     // saved player camera (fed to Systems::Player on load). rotation is a quaternion (xyzw).
     bool hasCamera = false;
     float cameraPos[3] = { 0, 1, -2 };
@@ -98,6 +118,20 @@ public:
         f << "lodDistanceMultiplier " << lodDistanceMultiplier << "\n";
         f << "distanceCullingValue " << distanceCullingValue << "\n";
         f << "distanceCullingValueRT " << distanceCullingValueRT << "\n";
+        f << "maxFrameFilteringCount " << maxFrameFilteringCount << "\n";
+        f << "spacialRadius " << spacialRadius << "\n";
+        f << "spacialSampleCount " << spacialSampleCount << "\n";
+        f << "reservoirRandBias " << reservoirRandBias << "\n";
+        f << "reservoirSpacialRandBias " << reservoirSpacialRandBias << "\n";
+        f << "SHARCSceneScale " << SHARCSceneScale << "\n";
+        f << "SHARCRadianceScale " << SHARCRadianceScale << "\n";
+        f << "SHARCRoughnessThreshold " << SHARCRoughnessThreshold << "\n";
+        f << "SHARCSamplesPerPixel " << SHARCSamplesPerPixel << "\n";
+        f << "SHARCAccumulationFrameNum " << SHARCAccumulationFrameNum << "\n";
+        f << "upscalingTechnique " << upscalingTechnique << "\n";
+        f << "dlssQuality " << dlssQuality << "\n";
+        f << "dlssPreset " << dlssPreset << "\n";
+        f << "dlssdPreset " << dlssdPreset << "\n";
         f << "camera " << cameraPos[0] << " " << cameraPos[1] << " " << cameraPos[2]
           << " " << cameraRot[0] << " " << cameraRot[1] << " " << cameraRot[2] << " " << cameraRot[3] << "\n";
         f << "[uilayout]\n";
@@ -143,6 +177,20 @@ private:
                 else if (key == "lodDistanceMultiplier") lodDistanceMultiplier = std::stof(val);
                 else if (key == "distanceCullingValue") distanceCullingValue = std::stof(val);
                 else if (key == "distanceCullingValueRT") distanceCullingValueRT = std::stof(val);
+                else if (key == "maxFrameFilteringCount") maxFrameFilteringCount = (uint)std::stoul(val);
+                else if (key == "spacialRadius") spacialRadius = std::stof(val);
+                else if (key == "spacialSampleCount") spacialSampleCount = (uint)std::stoul(val);
+                else if (key == "reservoirRandBias") reservoirRandBias = std::stof(val);
+                else if (key == "reservoirSpacialRandBias") reservoirSpacialRandBias = std::stof(val);
+                else if (key == "SHARCSceneScale") SHARCSceneScale = std::stof(val);
+                else if (key == "SHARCRadianceScale") SHARCRadianceScale = std::stof(val);
+                else if (key == "SHARCRoughnessThreshold") SHARCRoughnessThreshold = std::stof(val);
+                else if (key == "SHARCSamplesPerPixel") SHARCSamplesPerPixel = (uint)std::stoul(val);
+                else if (key == "SHARCAccumulationFrameNum") SHARCAccumulationFrameNum = (uint)std::stoul(val);
+                else if (key == "upscalingTechnique") upscalingTechnique = (uint)std::stoul(val);
+                else if (key == "dlssQuality") dlssQuality = std::stoi(val);
+                else if (key == "dlssPreset") dlssPreset = std::stoi(val);
+                else if (key == "dlssdPreset") dlssdPreset = std::stoi(val);
                 else if (key == "camera")
                 {
                     std::istringstream ss(val);

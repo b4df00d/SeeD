@@ -134,10 +134,12 @@ void AnyHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib : SV_
     // AcceptHit but continue looking for the closest hit
 }
 
-// TODO: Delete this
+// Load-bearing: shadow rays trace with RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, so reaching
+// the miss shader is the only signal that the ray was not occluded
 [shader("miss")]
 void MissShadow(inout ShadowRayPayload payload : SV_RayPayload)
 {
+    payload.missed = 1;
 }
 
 [shader("closesthit")]

@@ -59,7 +59,7 @@ knownComponents.push_back(
 		}
  	});
 knownComponents.push_back(
- 	{ "Instance", Components::Instance::mask, nullptr,
+ 	{ "Instance", Components::Instance::mask, Components::InstancePropertyDraw,
  		{
 			{ "mesh", PropertyTypes::_Handle, Components::Mesh::mask, 1, offsetof(Components::Instance, mesh) },
 			{ "meshRT", PropertyTypes::_Handle, Components::Mesh::mask, 1, offsetof(Components::Instance, meshRT) },

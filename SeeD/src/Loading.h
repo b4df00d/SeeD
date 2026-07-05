@@ -73,8 +73,15 @@ public:
                 if (item.second.type == AssetLibrary::AssetType::mesh)
                 {
                     // TODO : a real release in meshStorage
-                    ((Mesh*)item.second.data)->BLAS.Release();
-                    ((Mesh*)item.second.data)->BLASLow.Release();
+                    Mesh* mesh = (Mesh*)item.second.data;
+                    mesh->BLAS.Release();
+                    mesh->BLASLow.Release();
+                    mesh->ommArray.Release();
+                    mesh->ommArrayLow.Release();
+                    mesh->ommIndices.Release();
+                    mesh->ommIndicesLow.Release();
+                    mesh->ommInputs.Release();
+                    mesh->ommInputsLow.Release();
                 }
                 else if (item.second.type == AssetLibrary::AssetType::shader)
                 {
@@ -878,6 +885,69 @@ public:
         return AssetLibrary::instance->Add(path, name, id);
     }
 
+    // {hash}.omm sidecar next to the {hash}.mesh cache entry: baked opacity-micromap data,
+    // written at import by the OMM bake and consumed by MeshStorage::LoadBLAS.
+    static constexpr uint32_t ommMagic = 0x4D4D4F53; // 'SOMM'
+    static constexpr uint32_t ommVersion = 1;
+
+    String OMMPath(String meshPath)
+    {
+        std::string p = meshPath;
+        return String(p.substr(0, p.find_last_of('.')) + ".omm");
+    }
+
+    bool ReadOMM(String meshPath, OMMData& omm)
+    {
+        ZoneScoped;
+        std::ifstream fin((std::string)OMMPath(meshPath), std::ios::binary);
+        if (!fin.is_open())
+            return false;
+
+        uint32_t magic = 0, version = 0, lodCount = 0;
+        fin.read((char*)&magic, sizeof(magic));
+        fin.read((char*)&version, sizeof(version));
+        if (magic != ommMagic || version != ommVersion)
+            return false;
+        fin.read((char*)&omm.textureHash, sizeof(omm.textureHash));
+        fin.read((char*)&omm.alphaThreshold, sizeof(omm.alphaThreshold));
+        fin.read((char*)&lodCount, sizeof(lodCount));
+        omm.LODs.resize(lodCount);
+        for (auto& lod : omm.LODs)
+        {
+            fin.read((char*)&lod.lodIndex, sizeof(lod.lodIndex));
+            fin.read((char*)&lod.indexFormat, sizeof(lod.indexFormat));
+            READ_VECTOR(lod.indices);
+            READ_VECTOR(lod.descs);
+            READ_VECTOR(lod.histogram);
+            READ_VECTOR(lod.arrayData);
+        }
+        return fin.good() && lodCount > 0;
+    }
+
+    void WriteOMM(String meshPath, OMMData& omm)
+    {
+        ZoneScoped;
+        std::ofstream fout((std::string)OMMPath(meshPath), std::ios::binary);
+        if (!fout.is_open())
+            return;
+
+        uint32_t lodCount = (uint32_t)omm.LODs.size();
+        fout.write((char*)&ommMagic, sizeof(ommMagic));
+        fout.write((char*)&ommVersion, sizeof(ommVersion));
+        fout.write((char*)&omm.textureHash, sizeof(omm.textureHash));
+        fout.write((char*)&omm.alphaThreshold, sizeof(omm.alphaThreshold));
+        fout.write((char*)&lodCount, sizeof(lodCount));
+        for (auto& lod : omm.LODs)
+        {
+            fout.write((char*)&lod.lodIndex, sizeof(lod.lodIndex));
+            fout.write((char*)&lod.indexFormat, sizeof(lod.indexFormat));
+            WRITE_VECTOR(lod.indices);
+            WRITE_VECTOR(lod.descs);
+            WRITE_VECTOR(lod.histogram);
+            WRITE_VECTOR(lod.arrayData);
+        }
+    }
+
     // also DirectXMesh can do meshlets https://github.com/microsoft/DirectXMesh
     MeshData Process(MeshOriginal& originalMesh, uint LODLevelMin, uint LODLevelMax)
     {
@@ -958,6 +1028,165 @@ MeshLoader* MeshLoader::instance = nullptr;
 #include "../../Third/assimp-master/include/assimp/Exporter.hpp"
 #include "../../Third/assimp-master/include/assimp/scene.h"
 #include "../../Third/assimp-master/include/assimp/postprocess.h"
+#include "../../Third/assimp-master/include/assimp/GltfMaterial.h"
+#include "../../Third/omm-main/include/omm.hpp"
+
+// ---------------- OMM bake core ----------------
+// Shared by the import-time bake (SceneLoader::BakeOMM, for sources that reference their albedo)
+// and the runtime OMMBaker (for textures assigned in-engine, where the mesh<->texture pairing
+// only exists in the world). Bakes opacity micromaps against the albedo alpha and writes the
+// {hash}.omm sidecar consumed by MeshStorage::LoadBLAS.
+namespace OMMBake
+{
+    inline bool LoadImageFile(String path, DirectX::ScratchImage& imageOut)
+    {
+        ZoneScoped;
+        DirectX::TexMetadata metadata;
+        HRESULT hr;
+        if (path.find(".dds") != -1)
+            hr = DirectX::LoadFromDDSFile(path.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, imageOut);
+        else if (path.find(".tga") != -1)
+            hr = DirectX::LoadFromTGAFile(path.ToWString().c_str(), DirectX::TGA_FLAGS_NONE, &metadata, imageOut);
+        else
+            hr = DirectX::LoadFromWICFile(path.ToWString().c_str(), DirectX::WIC_FLAGS_NONE, &metadata, imageOut);
+        return SUCCEEDED(hr);
+    }
+
+    // Bakes one LOD's index list; returns true only when the bake produced actual OMM data
+    // (an all-opaque texture bakes to special indices only and is not worth a section).
+    inline bool BakeLOD(omm::Baker baker, omm::Cpu::Texture texture, MeshData& mesh, uint lodIndex, OMMData::LOD& out)
+    {
+        ZoneScoped;
+        auto& lod = mesh.LODs[lodIndex];
+
+        omm::Cpu::BakeInputDesc input;
+        input.bakeFlags = omm::Cpu::BakeFlags::EnableInternalThreads;
+        input.texture = texture;
+        // must match the runtime any-hit sampling: samplerLinear = s0 = linear, WRAP
+        input.runtimeSamplerDesc = { omm::TextureAddressMode::Wrap, omm::TextureFilterMode::Linear, 0 };
+        input.alphaMode = omm::AlphaMode::Test;
+        input.texCoordFormat = omm::TexCoordFormat::UV32_FLOAT;
+        input.texCoords = (const uint8_t*)mesh.vertices.data() + offsetof(Vertex, u);
+        input.texCoordStrideInBytes = sizeof(Vertex);
+        input.indexFormat = omm::IndexFormat::UINT_32;
+        input.indexBuffer = lod.indices.data();
+        input.indexCount = (uint32_t)lod.indices.size();
+        input.alphaCutoff = 0.5f; // must match the any-hit alpha test
+        input.format = omm::Format::OC1_4_State;
+        input.maxSubdivisionLevel = 6;
+
+        omm::Cpu::BakeResult result = 0;
+        if (omm::Cpu::Bake(baker, input, &result) != omm::Result::SUCCESS)
+            return false;
+
+        const omm::Cpu::BakeResultDesc* res = nullptr;
+        omm::Cpu::GetBakeResultDesc(result, &res);
+        bool ok = res != nullptr && res->arrayDataSize > 0 && res->descArrayCount > 0 && res->indexCount > 0;
+        if (ok)
+        {
+            out.lodIndex = lodIndex;
+            out.indexFormat = res->indexFormat == omm::IndexFormat::UINT_16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+            uint indexStride = res->indexFormat == omm::IndexFormat::UINT_16 ? 2 : 4;
+            out.indices.assign((uint8_t*)res->indexBuffer, (uint8_t*)res->indexBuffer + (size_t)res->indexCount * indexStride);
+            static_assert(sizeof(omm::Cpu::OpacityMicromapDesc) == sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC), "OMM SDK desc must alias the D3D12 desc");
+            out.descs.assign((D3D12_RAYTRACING_OPACITY_MICROMAP_DESC*)res->descArray, (D3D12_RAYTRACING_OPACITY_MICROMAP_DESC*)res->descArray + res->descArrayCount);
+            out.histogram.resize(res->descArrayHistogramCount);
+            for (uint h = 0; h < res->descArrayHistogramCount; h++)
+            {
+                out.histogram[h].Count = res->descArrayHistogram[h].count;
+                out.histogram[h].SubdivisionLevel = res->descArrayHistogram[h].subdivisionLevel;
+                out.histogram[h].Format = (D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT)res->descArrayHistogram[h].format;
+            }
+            out.arrayData.assign((uint8_t*)res->arrayData, (uint8_t*)res->arrayData + res->arrayDataSize);
+        }
+        omm::Cpu::DestroyBakeResult(result);
+        return ok;
+    }
+
+    // image is consumed. ALWAYS writes the sidecar: one with zero sections is the
+    // "checked, nothing to gain" marker that stops the runtime baker from retrying every run.
+    inline void BakeAndWrite(DirectX::ScratchImage&& image, uint64_t textureHash, MeshData& mesh, String meshPath)
+    {
+        ZoneScoped;
+        OMMData ommData;
+        ommData.textureHash = textureHash;
+        ommData.alphaThreshold = 0.5f;
+
+        if (DirectX::HasAlpha(image.GetMetadata().format))
+        {
+            // decompress/convert to RGBA8 and generate the full mip chain: the any-hit samples
+            // mip 1, and feeding every mip keeps the bake conservative for any runtime mip
+            DirectX::ScratchImage rgba;
+            if (DirectX::IsCompressed(image.GetMetadata().format))
+            {
+                if (FAILED(DirectX::Decompress(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DXGI_FORMAT_R8G8B8A8_UNORM, rgba)))
+                    return;
+            }
+            else if (image.GetMetadata().format != DXGI_FORMAT_R8G8B8A8_UNORM)
+            {
+                if (FAILED(DirectX::Convert(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, rgba)))
+                    return;
+            }
+            else
+                rgba = std::move(image);
+
+            DirectX::ScratchImage mipChain;
+            if (rgba.GetMetadata().mipLevels > 1)
+                mipChain = std::move(rgba);
+            else if (FAILED(DirectX::GenerateMipMaps(*rgba.GetImage(0, 0, 0), DirectX::TEX_FILTER_DEFAULT, 0, mipChain)))
+                return;
+
+            uint mipCount = (uint)mipChain.GetMetadata().mipLevels;
+            std::vector<std::vector<uint8_t>> alphaMips(mipCount);
+            std::vector<omm::Cpu::TextureMipDesc> mipDescs(mipCount);
+            for (uint i = 0; i < mipCount; i++)
+            {
+                const DirectX::Image* mip = mipChain.GetImage(i, 0, 0);
+                alphaMips[i].resize(mip->width * mip->height);
+                for (uint y = 0; y < mip->height; y++)
+                    for (uint x = 0; x < mip->width; x++)
+                        alphaMips[i][y * mip->width + x] = mip->pixels[y * mip->rowPitch + x * 4 + 3];
+                mipDescs[i].width = (uint32_t)mip->width;
+                mipDescs[i].height = (uint32_t)mip->height;
+                mipDescs[i].rowPitch = (uint32_t)mip->width;
+                mipDescs[i].textureData = alphaMips[i].data();
+            }
+
+            omm::BakerCreationDesc bakerDesc;
+            bakerDesc.type = omm::BakerType::CPU;
+            omm::Baker baker = 0;
+            if (omm::CreateBaker(bakerDesc, &baker) != omm::Result::SUCCESS)
+                return;
+
+            omm::Cpu::TextureDesc texDesc;
+            texDesc.format = omm::Cpu::TextureFormat::UNORM8;
+            texDesc.mips = mipDescs.data();
+            texDesc.mipCount = mipCount;
+            texDesc.alphaCutoff = 0.5f;
+            omm::Cpu::Texture bakeTexture = 0;
+            if (omm::Cpu::CreateTexture(baker, texDesc, &bakeTexture) == omm::Result::SUCCESS)
+            {
+                OMMData::LOD lod0;
+                if (BakeLOD(baker, bakeTexture, mesh, 0, lod0))
+                    ommData.LODs.push_back(std::move(lod0));
+                if (mesh.LODs.size() > 1)
+                {
+                    OMMData::LOD lodLow;
+                    if (BakeLOD(baker, bakeTexture, mesh, (uint)mesh.LODs.size() - 1, lodLow))
+                        ommData.LODs.push_back(std::move(lodLow));
+                }
+                omm::Cpu::DestroyTexture(baker, bakeTexture);
+            }
+            omm::DestroyBaker(baker);
+        }
+
+        MeshLoader::instance->WriteOMM(meshPath, ommData);
+        if (ommData.LODs.size() > 0)
+            IOs::Log("baked OMM ({} lods) -> {}", ommData.LODs.size(), meshPath.c_str());
+        else
+            IOs::Log("baked OMM: nothing to gain (alpha is uniform), wrote empty marker -> {}", meshPath.c_str());
+    }
+}
 #include <cstdarg>
 class SceneLoader
 {
@@ -1222,6 +1451,8 @@ public:
 
                     MeshData meshRT = MeshLoader::instance->Process(originalMesh, 2, 2);
                     idRT = MeshLoader::instance->Write(mesh, std::format("{}{}_RTMesh", m->mName.C_Str(), i));
+
+                    BakeOMM(_scene, m, mesh, id);
                 }
                 World::Entity ent;
                 ent.Make(Components::Mesh::mask);
@@ -1237,6 +1468,74 @@ public:
                 meshIndexToEntity.push_back(entRT);
             }
         }
+    }
+
+    // Resolves the material's albedo the same way CreateOrLoadTexture does (extension retries,
+    // Unity .srgb case) and loads the source image. texNameOut is the final name whose
+    // std::hash matches Components::Texture.id.hash for the DISABLE_OMMS mismatch check.
+    bool LoadAlbedoImageForOMM(aiMaterial* m, String& texNameOut, DirectX::ScratchImage& imageOut)
+    {
+        ZoneScoped;
+        aiString aitexName("");
+        if (m->GetTextureCount(aiTextureType_BASE_COLOR))
+            m->GetTexture(aiTextureType_BASE_COLOR, 0, &aitexName);
+        else if (m->GetTextureCount(aiTextureType_DIFFUSE))
+            m->GetTexture(aiTextureType_DIFFUSE, 0, &aitexName);
+
+        String texName(aitexName.C_Str());
+        if (texName.size() == 0)
+            return false;
+
+        int extensionTested = 0;
+        String exts[] = { "jpg", "jpeg", "tif", "png" };
+        while (true)
+        {
+            String originalPath = AssetLibrary::instance->FindInImportPath(texName);
+            if (originalPath.size() > 0 && OMMBake::LoadImageFile(originalPath, imageOut))
+            {
+                texNameOut = texName;
+                return true;
+            }
+            if (extensionTested >= _countof(exts))
+                return false;
+            size_t unityStuff = texName.find(".srgb");
+            if (unityStuff != std::string::npos)
+                texName = texName.substr(0, unityStuff + 1);
+            else
+                texName = texName.substr(0, (uint)texName.find_last_of('.') + 1);
+            texName += exts[extensionTested];
+            extensionTested++;
+        }
+    }
+
+    // Import-time OMM bake, for sources whose materials reference their albedo directly.
+    // Sources with in-engine assigned textures (no texture in the file) are handled by the
+    // runtime OMMBaker instead, which sees the live world's mesh<->material pairing.
+    void BakeOMM(const aiScene* _scene, aiMesh* m, MeshData& mesh, assetID meshId)
+    {
+        ZoneScoped;
+        aiMaterial* mat = _scene->mMaterials[m->mMaterialIndex];
+
+        // cutout determination: the legacy opacity keys OR the glTF alphaMode. assimp maps
+        // glTF alphaMode only to AI_MATKEY_GLTF_ALPHAMODE; AI_MATKEY_OPACITY is just
+        // baseColorFactor.a, which stays 1 for MASK foliage.
+        float opacity = 1.0f;
+        mat->Get(AI_MATKEY_OPACITY, opacity);
+        float transparency = 0.0f;
+        mat->Get(AI_MATKEY_TRANSPARENCYFACTOR, transparency);
+        aiString alphaMode("");
+        mat->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode);
+        bool alphaTested = strcmp(alphaMode.C_Str(), "MASK") == 0 || strcmp(alphaMode.C_Str(), "BLEND") == 0;
+        if (opacity * (1.0f - transparency) >= 0.99f && !alphaTested)
+            return;
+
+        String texName;
+        DirectX::ScratchImage image;
+        if (!LoadAlbedoImageForOMM(mat, texName, image))
+            return;
+
+        String meshPath = std::format("{}{}.mesh", AssetLibrary::instance->assetsPath.c_str(), meshId.hash);
+        OMMBake::BakeAndWrite(std::move(image), std::hash<std::string>{}(texName), mesh, meshPath);
     }
 
     Components::Handle<Components::Texture> CreateOrLoadTexture(aiMaterial* m, int channelCount, aiTextureType channels...)
@@ -1463,6 +1762,121 @@ public:
 };
 SceneLoader* SceneLoader::instance = nullptr;
 
+#include <deque>
+#include <unordered_set>
+#include <atomic>
+
+// OMM baker behind the "bake OMM" button on the Instance component (for meshes whose alpha
+// texture is assigned in-engine, where the import-time bake can't see the pairing, or to force
+// a re-bake). Bakes on a worker thread and (re)writes the {hash}.omm sidecar, which
+// MeshStorage::LoadBLAS picks up on the NEXT run (no live BLAS reload).
+class OMMBaker
+{
+public:
+    static OMMBaker* instance;
+
+    void On()
+    {
+        instance = this;
+        // populate AssetLibrary's lazy import-file map now, on the main thread: afterwards
+        // FindInImportPath is read-only and safe to call from the worker
+        AssetLibrary::instance->FindInImportPath("");
+        Components::requestOMMBake = [](Components::Instance& instanceCmp) { OMMBaker::instance->RequestBake(instanceCmp); };
+    }
+
+    void Off()
+    {
+        Components::requestOMMBake = nullptr;
+        stop = true;
+        if (worker.joinable())
+            worker.join();
+        instance = nullptr;
+    }
+
+    // called from the editor UI (main thread): resolve everything that touches the world
+    // here, so the worker never reads components
+    void RequestBake(Components::Instance& instanceCmp)
+    {
+        if (!instanceCmp.mesh.IsValid() || !instanceCmp.material.IsValid())
+            return;
+        Components::Material& materialCmp = instanceCmp.material.Get();
+        if (!materialCmp.textures[0].IsValid())
+        {
+            IOs::Log("bake OMM: the material has no albedo texture");
+            return;
+        }
+        assetID meshId = instanceCmp.mesh.Get().id;
+        if (!AssetLibrary::instance->map.contains(meshId))
+        {
+            IOs::Log("bake OMM: mesh is not in the asset library");
+            return;
+        }
+
+        Request req;
+        req.meshPath = AssetLibrary::instance->GetPath(meshId);
+        req.texName = World::Entity(materialCmp.textures[0]).Get<Components::Name>().name;
+        IOs::Log("bake OMM: queued {} <- {}", req.meshPath.c_str(), req.texName.c_str());
+
+        std::lock_guard<std::mutex> guard(lock);
+        queue.push_back(req);
+        if (!worker.joinable())
+            worker = std::thread([this]() { Work(); });
+    }
+
+private:
+    struct Request
+    {
+        String meshPath; // {hash}.mesh cache path
+        String texName;  // texture name: FindInImportPath key, and its hash is Components::Texture.id.hash
+    };
+
+    void Work()
+    {
+        while (!stop)
+        {
+            Request req;
+            bool has = false;
+            {
+                std::lock_guard<std::mutex> guard(lock);
+                if (!queue.empty())
+                {
+                    req = queue.front();
+                    queue.pop_front();
+                    has = true;
+                }
+            }
+            if (!has)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                continue;
+            }
+
+            String srcPath = AssetLibrary::instance->FindInImportPath(req.texName);
+            if (srcPath.size() == 0)
+            {
+                IOs::Log("bake OMM: source image not found for {}", req.texName.c_str());
+                continue;
+            }
+            DirectX::ScratchImage image;
+            if (!OMMBake::LoadImageFile(srcPath, image))
+            {
+                IOs::Log("bake OMM: failed to load {}", srcPath.c_str());
+                continue;
+            }
+            MeshData mesh = MeshLoader::instance->Read(req.meshPath);
+            if (mesh.vertices.size() == 0 || mesh.LODs.size() == 0)
+                continue;
+            OMMBake::BakeAndWrite(std::move(image), std::hash<std::string>{}(req.texName), mesh, req.meshPath);
+        }
+    }
+
+    std::thread worker;
+    std::atomic<bool> stop = false;
+    std::mutex lock;
+    std::deque<Request> queue;
+};
+OMMBaker* OMMBaker::instance = nullptr;
+
 #pragma comment(lib, "dxcompiler.lib")
 #include "../../Third/DirectXShaderCompiler-main/inc/dxcapi.h"
 
@@ -1490,7 +1904,7 @@ struct ShaderStatsCollector
     struct Stage
     {
         String entry;
-        String stage;          // ms_6_6 / ps_6_6 / cs_6_6 / vs_6_6 / lib_6_6
+        String stage;          // ms_6_9 / ps_6_9 / cs_6_9 / vs_6_9 / lib_6_9
         ReflectionStats refl;
         uint dxilBytes = 0;
     };
@@ -2180,11 +2594,14 @@ public :
         subobjects[currentIndex++] = dummyLocalRootSig;
 
         // Add a subobject for the ray tracing pipeline configuration
-        D3D12_RAYTRACING_PIPELINE_CONFIG pipelineConfig = {};
+        // CONFIG1 so the pipeline can opt into opacity micromaps (required to trace a TLAS
+        // referencing OMM-linked BLAS); plain CONFIG on pre-1.2 tiers
+        D3D12_RAYTRACING_PIPELINE_CONFIG1 pipelineConfig = {};
         pipelineConfig.MaxTraceRecursionDepth = HLSL::maxRTDepth;
+        pipelineConfig.Flags = GPU::instance->features.raytracingTier12 ? D3D12_RAYTRACING_PIPELINE_FLAG_ALLOW_OPACITY_MICROMAPS : D3D12_RAYTRACING_PIPELINE_FLAG_NONE;
 
         D3D12_STATE_SUBOBJECT pipelineConfigObject = {};
-        pipelineConfigObject.Type = D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;
+        pipelineConfigObject.Type = GPU::instance->features.raytracingTier12 ? D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG1 : D3D12_STATE_SUBOBJECT_TYPE_RAYTRACING_PIPELINE_CONFIG;
         pipelineConfigObject.pDesc = &pipelineConfig;
         subobjects[currentIndex++] = pipelineConfigObject;
 
@@ -2505,9 +2922,9 @@ public :
                             auto defines = tokens[5].Split(",");
 
                             shader.type = Shader::Type::Mesh;
-                            //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
-                            D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", nullptr, &defines);
-                            D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader, &defines);
+                            //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_9", &shader);
+                            D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_9", nullptr, &defines);
+                            D3D12_SHADER_BYTECODE bufferShaderBytecode = Compile(file, tokens[4], "ps_6_9", &shader, &defines);
                             PipelineStateStream stream{};
                             D3D12_RT_FORMAT_ARRAY RTVFormats = {};
                             RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
@@ -2543,7 +2960,7 @@ public :
                             auto defines = tokens[4].Split(",");
 
                             shader.type = Shader::Type::Mesh;
-                            D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", &shader, &defines);
+                            D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_9", &shader, &defines);
                             PipelineStateStream stream{};
                             stream.MS = meshShaderBytecode;
                             shader.pso = CreatePSO(stream);
@@ -2554,9 +2971,9 @@ public :
                             auto defines = tokens[5].Split(",");
 
                             shader.type = Shader::Type::Mesh;
-                            //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_6", &shader);
-                            D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_6", nullptr, &defines);
-                            D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader, &defines);
+                            //D3D12_SHADER_BYTECODE amplificationShaderBytecode = Compile(file, tokens[2], "as_6_9", &shader);
+                            D3D12_SHADER_BYTECODE meshShaderBytecode = Compile(file, tokens[3], "ms_6_9", nullptr, &defines);
+                            D3D12_SHADER_BYTECODE forwardShaderBytecode = Compile(file, tokens[4], "ps_6_9", &shader, &defines);
                             PipelineStateStream stream;
                             D3D12_RT_FORMAT_ARRAY RTVFormats = {};
                             RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
@@ -2580,8 +2997,8 @@ public :
                             auto defines = tokens[5].Split(",");
 
                             shader.type = Shader::Type::Graphic;
-                            D3D12_SHADER_BYTECODE vertexShaderBytecode = Compile(file, tokens[3], "vs_6_6", nullptr, &defines);
-                            D3D12_SHADER_BYTECODE pixelShaderBytecode = Compile(file, tokens[4], "ps_6_6", &shader, &defines);
+                            D3D12_SHADER_BYTECODE vertexShaderBytecode = Compile(file, tokens[3], "vs_6_9", nullptr, &defines);
+                            D3D12_SHADER_BYTECODE pixelShaderBytecode = Compile(file, tokens[4], "ps_6_9", &shader, &defines);
                             PipelineStateStream stream{};
                             D3D12_RT_FORMAT_ARRAY RTVFormats = {};
                             RTVFormats.NumRenderTargets = (uint)shader.outputs.size();
@@ -2607,7 +3024,7 @@ public :
                             auto defines = tokens[4].Split(",");
 
                             shader.type = Shader::Type::Compute;
-                            D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, tokens[3], "cs_6_6", &shader, &defines);
+                            D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, tokens[3], "cs_6_9", &shader, &defines);
                             PipelineStateStream stream;
                             stream.CS = computeShaderBytecode;
                             stream.pRootSignature = shader.rootSignature;
@@ -2620,7 +3037,7 @@ public :
                             auto defines = tokens[3].Split(",");
 
                             shader.type = Shader::Type::Raytracing;
-                            D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, "", "lib_6_6", &shader, &defines);
+                            D3D12_SHADER_BYTECODE computeShaderBytecode = Compile(file, "", "lib_6_9", &shader, &defines);
                             PipelineStateStream stream = {};
                             stream.pRootSignature = shader.rootSignature;
                             shader.pso = nullptr;
@@ -2679,7 +3096,9 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             MeshData meshData = MeshLoader::instance->Read(map[id].path);
             if (meshData.vertices.size() > 0)
             {
-                Mesh mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get());
+                OMMData ommData;
+                bool hasOMM = MeshLoader::instance->ReadOMM(map[id].path, ommData);
+                Mesh mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get(), hasOMM ? &ommData : nullptr);
                 lock.lock();
                 map[id].data = new Mesh(mesh);
                 map[id].lastGetFrameCount = 0;
