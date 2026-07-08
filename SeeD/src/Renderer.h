@@ -387,7 +387,7 @@ struct RayTracingContext
         rtParameters.bouncesMax = 5;
         rtParameters.enableRussianRoulette = true;
         rtParameters.enableSoftShadows = true;
-        rtParameters.throughputThreshold = 0.01f;
+        rtParameters.throughputThreshold = 0.0001f;
         rtParameters.probeDownsampling = 6.0f;
     }
 

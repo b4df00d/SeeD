@@ -2,7 +2,7 @@
 // TODO list  
 // ============================================================================
 //
-// [ ] 1. Shader Execution Reordering (SER)
+// [X] 1. Shader Execution Reordering (SER)
 //        https://devblogs.microsoft.com/directx/shader-execution-reordering/
 //        - Target the EXISTING DXR pipeline. raytracing2.hlsl already has
 //          raygeneration/miss/closesthit/anyhit shaders + TraceRay/DispatchRays,
@@ -12,7 +12,7 @@
 //          hit different materials/closest-hit paths get regrouped).
 //        - Biggest win is exactly this multi-material pipeline case.
 //
-// [ ] 2. Opacity Micro Map (OMM)
+// [X] 2. Opacity Micro Map (OMM)
 //        https://github.com/NVIDIA-RTX/OMM
 //        - Cutout already works in RT but is costly: it goes through the any-hit
 //          shaders in raytracing2.hlsl (alpha test in any-hit).
@@ -27,11 +27,20 @@
 //          GPU and store the result into a final heightmap texture.
 //        - Geometry: ONE clustered terrain grid mesh stored ONCE in mesh storage,
 //          instanced across a quadtree (the quadtree drives instance/LOD
-//          selection and per-node world extents).
+//          selection and per-node world extents). Think a clean mesh separation
+//          from the pixel shader and height deformation so we can swap the quadtree
+//          for a Concurent Binary Tree https://github.com/AnisB/large_cbt
 //        - Deformation: displace vertices in the MESH SHADER by sampling the
 //          final heightmap at render time (no baked geometry, no duplicated
 //          storage per node).
-//        - The base grid can reuse the lighter mesh format from point 4.
+//        - The terrain will be an ECS component. The base heightmap (before erosion) 
+//          will be computed from an initial map plus some additionnal brushes, also
+//          ECS components with a local heightmap texture that will be blended into 
+//          the base heightmap via a compute shader.
+//        - The brushes will be painted in the editor, and the terrain will be updated
+//          in real time when a toggle is set to true on the terrain component.
+//        - Once the terrain is finalized, the toggle will be set to false and the 
+//          terrain will be baked into a final heightmap texture.
 //
 // [X] 4. Reduce mesh storage and vertex strides  (FULL commit, no fallback)
 //        - Meshlet indices on 8 bits.
@@ -76,6 +85,9 @@
 // [ ] 12. Do a better component metadata parsing
 //         for the moment it´s only getting components in world.h, but it should
 //         be able to parse any header file and get all the components in it.
+// 
+// [ ] 13. Particule system that will be able to feed some atmospheric scattering
+//         data in the froxels (via simple spheres at first)
 //
 // ============================================================================
 
