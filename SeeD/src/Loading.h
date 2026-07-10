@@ -322,6 +322,19 @@ AssetLibrary* AssetLibrary::instance = nullptr;
 //#include "../../Third/DirectXTex-main/DDSTextureLoader/DDSTextureLoader12.h"
 #include "../../Third/DirectXTex-main/DirectXTex/DirectXTex.h"
 #include <dstorage.h>
+
+inline bool LoadImageFromDisk(String path, DirectX::ScratchImage& imageOut, DirectX::TexMetadata* metadataOut = nullptr)
+{
+    ZoneScoped;
+    DirectX::TexMetadata metadata;
+    HRESULT hr;
+    if (path.find(".dds") != -1)      hr = DirectX::LoadFromDDSFile(path.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, imageOut);
+    else if (path.find(".tga") != -1) hr = DirectX::LoadFromTGAFile(path.ToWString().c_str(), DirectX::TGA_FLAGS_NONE, &metadata, imageOut);
+    else                               hr = DirectX::LoadFromWICFile(path.ToWString().c_str(), DirectX::WIC_FLAGS_NONE, &metadata, imageOut);
+    if (metadataOut) *metadataOut = metadata;
+    return SUCCEEDED(hr);
+}
+
 class TextureLoader
 {
 public:
@@ -567,28 +580,14 @@ public:
 
         String originalPath = AssetLibrary::instance->FindInImportPath(name);
 
-        HRESULT hr;
         DirectX::TexMetadata metadata;
         DirectX::ScratchImage imageOriginal;
-        bool needCompression = false;
+        bool needCompression = originalPath.find(".dds") == -1;
 
-        if (originalPath.find(".dds") != -1)
+        HRESULT hr;
         {
-            ZoneScopedN("DDS");
-            hr = DirectX::LoadFromDDSFile(originalPath.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, imageOriginal);
-            needCompression = false;
-        }
-        else if (originalPath.find(".tga") != -1)
-        {
-            ZoneScopedN("TGA");
-            hr = DirectX::LoadFromTGAFile(originalPath.ToWString().c_str(), DirectX::TGA_FLAGS_NONE, &metadata, imageOriginal);
-            needCompression = true;
-        }
-        else
-        {
-            ZoneScopedN("WIC");
-            hr = DirectX::LoadFromWICFile(originalPath.ToWString().c_str(), DirectX::WIC_FLAGS_NONE, &metadata, imageOriginal);
-            needCompression = true;
+            ZoneScopedN("LoadImage");
+            hr = LoadImageFromDisk(originalPath, imageOriginal, &metadata) ? S_OK : E_FAIL;
         }
         if (FAILED(hr))
         {
@@ -787,6 +786,28 @@ public:
         path = std::format("{}{}.tex", AssetLibrary::instance->assetsPath.c_str(), id.hash);
         return AssetLibrary::instance->Add(path, name, id);
     }
+
+    // Generic "import this file (by name, resolved via FindInImportPath) as a texture asset"
+    // entry point, factored out of MeshLoader::CreateOrLoadTexture's IsCached/Write/entity-creation
+    // sequence so non-Assimp callers (e.g. the editor's texture picker) can reuse it directly.
+    Components::Handle<Components::Texture> ImportByName(String texName)
+    {
+        ZoneScoped;
+        assetID id = IsCached(texName);
+        if (id == assetID::Invalid)
+            id = Write(texName);
+        if (id == assetID::Invalid)
+        {
+            IOs::Log("Fail to import texture {}", texName.c_str());
+            return Components::Handle<Components::Texture>{ entityInvalid };
+        }
+
+        World::Entity ent;
+        ent.Make(Components::Texture::mask | Components::Name::mask);
+        strcpy_s(ent.Get<Components::Name>().name, 256, texName.c_str());
+        ent.Get<Components::Texture>().id = id;
+        return Components::Handle<Components::Texture>{ ent };
+    }
 };
 TextureLoader* TextureLoader::instance = nullptr;
 
@@ -807,11 +828,15 @@ public:
 	{
 		ZoneScoped;
         instance = this;
+        // "Build Grid Mesh" button on the Terrain component (World.h TerrainPropertyDraw) routes
+        // through this pointer to avoid a World -> MeshLoader dependency, same pattern as requestOMMBake.
+        Components::buildTerrainGridMesh = [](float spacing, float size) { return MeshLoader::instance->BuildTerrainGridMesh(spacing, size); };
 	}
 
 	void Off()
 	{
 		ZoneScoped;
+        Components::buildTerrainGridMesh = nullptr;
         instance = nullptr;
 	}
 
@@ -1021,6 +1046,91 @@ public:
 
         //use if (dot(normalize(cone_apex - camera_position), cone_axis) >= cone_cutoff) reject(); in mesh shader for cone culling
     }
+
+    // Milestone 1 terrain (plan step 2): generates a flat XZ-plane grid (Y=0), spacing meters/vertex,
+    // 'size' meters square, and registers it through the SAME upload path as imported meshes
+    // (Process -> Write -> AssetLibrary) so it gets meshlet-ized identically (8-bit meshlet indices,
+    // SNORM16 quantized positions -- no new mesh format code). Grid is centered on the origin so the
+    // quadtree (World.h Systems::TerrainStreaming) can position/scale instances of it directly.
+    // Called from the "Build Grid Mesh" editor button (Components::buildTerrainGridMesh, wired
+    // in On() below) and re-running it replaces the terrain's Handle<Mesh>.
+    Components::Handle<Components::Mesh> BuildTerrainGridMesh(float spacing, float size)
+    {
+        ZoneScoped;
+
+        if (spacing < 0.001f) spacing = 0.001f;
+        if (size < spacing) size = spacing;
+
+        uint count = (uint)roundf(size / spacing) + 1;
+        if (count < 2) count = 2;
+
+        // The requested spacing only sets the vertex COUNT; the actual per-vertex step must be
+        // recomputed from size/(count-1) so the grid exactly spans [-size/2, size/2]. Using the
+        // requested spacing directly here would fall short (or overshoot) whenever size isn't an
+        // exact multiple of it, since (count-1)*spacing != size in that case -- the mesh would then
+        // cover less (or more) than its authored "size", which every quadtree node's Transform scale
+        // assumes it does exactly, producing gaps (or overlaps) between neighboring node patches.
+        float actualSpacing = size / (float)(count - 1);
+
+        MeshOriginal originalMesh;
+        originalMesh.vertices.resize((size_t)count * (size_t)count);
+
+        float half = size * 0.5f;
+        for (uint z = 0; z < count; z++)
+        {
+            for (uint x = 0; x < count; x++)
+            {
+                Vertex& v = originalMesh.vertices[z * count + x];
+                v = {};
+                v.px = -half + x * actualSpacing;
+                v.py = 0.0f;
+                v.pz = -half + z * actualSpacing;
+                v.nx = 0; v.ny = 1; v.nz = 0;
+                v.tx = 1; v.ty = 0; v.tz = 0;
+                v.bx = 0; v.by = 0; v.bz = 1;
+                v.u = (float)x / (float)(count - 1);
+                v.v = (float)z / (float)(count - 1);
+                v.u1 = v.u; v.v1 = v.v;
+            }
+        }
+
+        originalMesh.indices.resize((size_t)(count - 1) * (size_t)(count - 1) * 6);
+        uint idx = 0;
+        for (uint z = 0; z < count - 1; z++)
+        {
+            for (uint x = 0; x < count - 1; x++)
+            {
+                uint i0 = z * count + x;
+                uint i1 = z * count + x + 1;
+                uint i2 = (z + 1) * count + x;
+                uint i3 = (z + 1) * count + x + 1;
+                originalMesh.indices[idx++] = i0;
+                originalMesh.indices[idx++] = i2;
+                originalMesh.indices[idx++] = i1;
+                originalMesh.indices[idx++] = i1;
+                originalMesh.indices[idx++] = i2;
+                originalMesh.indices[idx++] = i3;
+            }
+        }
+
+        float3 minBB(-half, 0.0f, -half);
+        float3 maxBB(half, 0.0f, half);
+        float3 center = (minBB + maxBB) * 0.5f;
+        float radius = length(minBB - maxBB) * 0.5f;
+        originalMesh.boundingSphere = float4(center, radius);
+
+        // Single LOD (0..0): the quadtree supplies LOD via node footprint / instance scale (coarser
+        // nodes reuse this same mesh at a larger world-space scale -- the clipmap trick), so a
+        // mesh-level LOD chain isn't needed for this milestone.
+        MeshData meshData = Process(originalMesh, 0, 0);
+        assetID id = Write(meshData, std::format("TerrainGrid_{}_{}", spacing, size));
+
+        World::Entity ent;
+        ent.Make(Components::Mesh::mask);
+        ent.Get<Components::Mesh>().id = id;
+
+        return Components::Handle<Components::Mesh>{ ent };
+    }
 };
 MeshLoader* MeshLoader::instance = nullptr;
 
@@ -1038,20 +1148,6 @@ MeshLoader* MeshLoader::instance = nullptr;
 // {hash}.omm sidecar consumed by MeshStorage::LoadBLAS.
 namespace OMMBake
 {
-    inline bool LoadImageFile(String path, DirectX::ScratchImage& imageOut)
-    {
-        ZoneScoped;
-        DirectX::TexMetadata metadata;
-        HRESULT hr;
-        if (path.find(".dds") != -1)
-            hr = DirectX::LoadFromDDSFile(path.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, imageOut);
-        else if (path.find(".tga") != -1)
-            hr = DirectX::LoadFromTGAFile(path.ToWString().c_str(), DirectX::TGA_FLAGS_NONE, &metadata, imageOut);
-        else
-            hr = DirectX::LoadFromWICFile(path.ToWString().c_str(), DirectX::WIC_FLAGS_NONE, &metadata, imageOut);
-        return SUCCEEDED(hr);
-    }
-
     // Bakes one LOD's index list; returns true only when the bake produced actual OMM data
     // (an all-opaque texture bakes to special indices only and is not worth a section).
     inline bool BakeLOD(omm::Baker baker, omm::Cpu::Texture texture, MeshData& mesh, uint lodIndex, OMMData::LOD& out)
@@ -1358,6 +1454,7 @@ public:
                 instance.mesh = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i] * meshCount + 0] };
                 instance.meshRT = Components::Handle<Components::Mesh>{ meshIndexToEntity[node->mMeshes[i] * meshCount + 1] };
                 instance.material = Components::Handle<Components::Material>{ matIndexToEntity[_scene->mMeshes[node->mMeshes[i]]->mMaterialIndex] };
+                instance.boundingSphereOverride = float4(0); // no override: use the mesh-derived sphere
             }
         }
 
@@ -1491,7 +1588,7 @@ public:
         while (true)
         {
             String originalPath = AssetLibrary::instance->FindInImportPath(texName);
-            if (originalPath.size() > 0 && OMMBake::LoadImageFile(originalPath, imageOut))
+            if (originalPath.size() > 0 && LoadImageFromDisk(originalPath, imageOut))
             {
                 texNameOut = texName;
                 return true;
@@ -1621,9 +1718,17 @@ public:
     {
         ZoneScoped;
 
+        // Registered locally (mirrors the single-entity registration this used to be); the shader
+        // routing decision (which of these two a given material points at) now happens after the
+        // cutout parameter is computed below, since the new generic multi-shader GBuffer draw
+        // buckets by Material::shader rather than by parameters[4] at cull time.
         World::Entity shader;
         shader.Make(Components::Shader::mask);
         shader.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl|DefaultG", "src\\Shaders\\mesh.hlsl|DefaultG");
+
+        World::Entity shaderCutout;
+        shaderCutout.Make(Components::Shader::mask);
+        shaderCutout.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl|DefaultGCutout", "src\\Shaders\\mesh.hlsl|DefaultGCutout");
 
         IOs::Log("  materials : {}", _scene->mNumMaterials);
         for (unsigned int i = 0; i < _scene->mNumMaterials; i++)
@@ -1637,7 +1742,6 @@ public:
             strcpy_s(name.name, 256, m->GetName().C_Str());
 
             auto& newMat = ent.Get<Components::Material>();
-            newMat.shader = { shader };
 
             for (uint j = 0; j < HLSL::MaterialTextureCount; j++)
             {
@@ -1696,6 +1800,11 @@ public:
             float effectiveOpacity = opacity * (1.0f - transparency);
             if (effectiveOpacity < 0.99f)
                 newMat.parameters[4] = effectiveOpacity;
+
+            // Route to the cutout mesh shader so bucketing by Material::shader (the generic
+            // multi-shader GBuffer draw) picks up the alpha-test PSO; parameters[4] keeps its
+            // shading-threshold role in the cutout pixel shader regardless.
+            newMat.shader = (newMat.parameters[4] != 0.0f) ? Components::Handle<Components::Shader>{ shaderCutout } : Components::Handle<Components::Shader>{ shader };
 
             matIndexToEntity.push_back(ent);
         }
@@ -1858,7 +1967,7 @@ private:
                 continue;
             }
             DirectX::ScratchImage image;
-            if (!OMMBake::LoadImageFile(srcPath, image))
+            if (!LoadImageFromDisk(srcPath, image))
             {
                 IOs::Log("bake OMM: failed to load {}", srcPath.c_str());
                 continue;

@@ -6,6 +6,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
+#include <deque>
+#include <vector>
+#include <cmath>
+#include <cfloat>
 
 #define SUBTASKWORLD(system) tf::Task system##Task = subflow.emplace([this, &system](){system->Update(this);}).name(#system)
 
@@ -194,6 +198,17 @@ namespace Components
         }
     }
 
+    // Milestone 1 terrain (see Components::Terrain below): the heightmap + decode params ride on
+    // the material's otherwise-unused texture/parameter slots instead of adding new
+    // per-instance/per-mesh fields. Mirrored as raw indices in structs.hlsl (culling.hlsl /
+    // terrainmesh.hlsl read them the same way) -- keep both sides in sync. Shading-bucket routing
+    // is via Material::shader/shaderIndex (generic multi-shader GBuffer draw), not a parameter flag
+    // -- param slot 7 is free/unused.
+    static constexpr uint TerrainHeightmapTextureSlot = 4;
+    static constexpr uint TerrainHeightScaleParam = 5;
+    static constexpr uint TerrainHeightOffsetParam = 6;
+    static constexpr uint TerrainWorldSizeParam = 8; // world-space XZ footprint the heightmap covers (UV = worldPos.xz / this + 0.5), so all quadtree nodes sample one consistent heightmap regardless of their own footprint
+
     struct Transform : ComponentBase<Transform>
     {
         float3 position;
@@ -211,6 +226,14 @@ namespace Components
         Handle<Mesh> mesh;
         Handle<Mesh> meshRT;
         Handle<Material> material;
+        // World-space bounding-sphere override for CPU-computed culling volumes the generic
+        // mesh-AABB-derived sphere can't express (currently: terrain quadtree nodes, see
+        // Systems::TerrainStreaming::CreateNodeInstance). w <= 0 means "no override, use
+        // mesh.GetBoundingSphere() transformed by worldMatrix" (culling.hlsl CullingInstances /
+        // CullingMeshlets, MainView::UpdateInstances). IMPORTANT: World::Pool allocates component
+        // storage with raw malloc (Pool::On) -- there is NO implicit zero-init for a new component
+        // slot, so every site that creates an Instance component MUST explicitly set this field.
+        float4 boundingSphereOverride;
     };
     // set by OMMBaker::On (Loading.h, included after World.h): the "bake OMM" button in
     // InstancePropertyDraw routes through this pointer to avoid a World -> Loading dependency
@@ -233,7 +256,12 @@ namespace Components
         {
             loaded = 1 << 0,
             dirty = 1 << 1,
-            BLAS = 1 << 2
+            BLAS = 1 << 2,
+            // per-entity (not per-component-type like Components::transient above): entity is
+            // regenerated every frame by a system (e.g. TerrainStreaming's quadtree instances) and
+            // should be invisible to the hierarchy window and skipped by World::Save -- there's
+            // nothing meaningful to show/persist about it, it's rebuilt from its owning component.
+            transient = 1 << 3
         };
         BitFlags<Flags> flags;
     };
@@ -260,6 +288,10 @@ namespace Components
         float nearClip;
         float farClip;
     };
+    // set by MainView::UpdateCameras (Renderer.h): returns the same HLSL::Camera (world-space
+    // frustum planes, worldPos, fovY, ...) already computed once per frame for GPU culling, so
+    // TerrainStreaming's CPU-side frustum test agrees exactly with common.hlsl's FrustumCulling.
+    inline HLSL::Camera (*getMainCamera)() = nullptr;
 
     // Streaming placeholder. An entity with Prefab + Transform additively loads `file`
     // (a .seed produced by World::SavePrefab) when the camera comes within loadDistance,
@@ -370,6 +402,35 @@ namespace Components
             row(RSO_c,       "c",       &v->c,       0,  3, 0);
             row(RSO_b,       "b",       &v->b,       0,  1, 0);
         }
+    }
+
+    // Milestone 1 (static grid + heightmap displacement, no erosion/brushes yet): one baked
+    // heightmap texture drives mesh-shader displacement of a shared grid mesh, instanced across
+    // a CPU-walked quadtree (built each frame in World::Update, see Systems below).
+    struct Terrain : ComponentBase<Terrain>
+    {
+        Handle<Texture> heightmap;
+        Handle<Mesh> gridMesh;
+        Handle<Material> material;
+        float heightScale = 50.0f;
+        float heightOffset = 0.0f;
+        float worldExtent = 1024.0f;   // total terrain footprint (world units), centered on Transform
+        uint  quadtreeDepth = 4;       // leaf node size = worldExtent / 2^quadtreeDepth
+        float targetScreenSize = 0.15f; // fraction of viewport height (NDC-style, resolution-independent): a visible node subdivides while its estimated on-screen footprint exceeds this
+        // grid mesh build params (used by the "Build Grid Mesh" button)
+        float gridSpacing = 0.1f;      // meters/vertex at the most detailed quadtree level
+        float gridSize = 64.0f;        // meters, most detailed quadtree level patch size
+    };
+    inline Handle<Mesh> (*buildTerrainGridMesh)(float spacing, float size) = nullptr;
+    static void TerrainPropertyDraw(char* p)
+    {
+        DefaultPropertyDraw(Terrain::mask, p);
+
+        Terrain* t = (Terrain*)p;
+        // built via a function pointer (set by Loading.h after MeshStorage is available) to
+        // avoid a World -> MeshStorage dependency, same pattern as requestOMMBake above.
+        if (buildTerrainGridMesh != nullptr && ImGui::Button("Build Grid Mesh"))
+            t->gridMesh = buildTerrainGridMesh(t->gridSpacing, t->gridSize);
     }
 }
 
@@ -559,6 +620,48 @@ public:
                     }
                 }
             }
+        }
+
+        // Same as Release(), but reclaims the pool slot right now instead of queuing it for
+        // World::DeferredRelease() at the end of the frame -- i.e. it inlines exactly what
+        // DeferredRelease() does for a single entity (see World.h, the swap-the-last-slot-in
+        // compaction). Needed by systems that Release() and immediately Make() again within the
+        // same Update() call (e.g. Systems::TerrainStreaming rebuilding every frame): without this,
+        // freed ids/slots aren't available again until next frame's DeferredRelease() runs, so
+        // same-frame Make() calls would just keep growing the pool instead of reusing slots.
+        void ReleaseImmediately()
+        {
+            seedAssert(IsValid());
+
+            auto mask = GetMask();
+            for (uint i = 0; i < Components::componentMaxCount; i++)
+            {
+                if (mask[i])
+                {
+                    if (Components::RemoveCallback[i])
+                    {
+                        Components::RemoveCallback[i](*this);
+                    }
+                }
+            }
+
+            EntitySlot& thisSlot = World::instance->entitySlots[id];
+            Pool& pool = World::instance->components[thisSlot.pool];
+            if (pool.count > 1 && thisSlot.index < pool.count - 1)
+            {
+                EntitySlot tmpSlot = thisSlot; // only interested in pool and index, permanent and rev are not relevant right now
+                tmpSlot.index = pool.count - 1;
+                Entity entityOfLastSlot = tmpSlot.Get<Components::Entity>();
+                EntitySlot& lastSlot = World::instance->entitySlots[entityOfLastSlot.id]; // now the permanent and rev are correct
+                Entity::Copy(lastSlot, thisSlot);
+                thisSlot.permanent = lastSlot.permanent;
+                thisSlot.rev = lastSlot.rev;
+                seedAssert(entityOfLastSlot.rev == thisSlot.rev);
+                World::instance->entitySlots[entityOfLastSlot.id] = thisSlot;
+            }
+            pool.count--;
+            thisSlot.pool = poolInvalid;
+            World::instance->entityFreeSlots.push_back(id);
         }
 
         Components::Mask GetMask()
@@ -1112,6 +1215,12 @@ public:
             for (uint j = 0; j < pool.count; j++)
             {
                 EntitySlot slot{ 0, 0, p, j };
+                // skip entities regenerated every frame by a system (e.g. TerrainStreaming's
+                // quadtree instances) -- they carry nothing worth persisting, they're rebuilt from
+                // their owning Terrain component on load.
+                if (pool.mask[Components::State::bucketIndex]
+                    && (slot.Get<Components::State>().flags & Components::State::Flags::transient))
+                    continue;
                 all.push_back(slot.Get<Components::Entity>());
             }
         }
@@ -1283,7 +1392,7 @@ public:
         deferredRelease.clear();
     }
 
-    uint Query(Components::Mask include, Components::Mask exclude)
+    uint Query(Components::Mask include, Components::Mask exclude, bool includeTransient)
     {
         ZoneScoped;
         uint queryIndex = frameQueriesIndex++;
@@ -1299,6 +1408,8 @@ public:
                 for (uint j = 0; j < pool.count; j++)
                 {
                     World::EntitySlot slot{ 0, 0, i, j };
+                    if (!includeTransient && slot.Get<Components::State>().flags & Components::State::Flags::transient)
+                        continue;
                     queryResult.push_back(slot.Get<Components::Entity>());
                 }
             }
@@ -1436,6 +1547,7 @@ namespace Systems
             trans.position = float3(0, 1, -2);
             trans.rotation = quaternion::identity();
             trans.scale = 1;
+            camera.Get<Components::State>().flags |= Components::State::Flags::transient;
 
             World::instance->systems.push_back(this);
         }
@@ -1589,7 +1701,7 @@ namespace Systems
             uint prefabBucket = Components::MaskToBucket(Components::Prefab::mask);
             uint trBucket = Components::MaskToBucket(Components::Transform::mask);
 
-            uint instanceQueryIndex = world->Query(Components::Prefab::mask, 0);
+            uint instanceQueryIndex = world->Query(Components::Prefab::mask, 0, true);
             auto& placeholders = world->frameQueries[instanceQueryIndex];
             for (auto& eb : placeholders)
             {
@@ -1640,4 +1752,5 @@ namespace Systems
             }
         }
     };
+
 }

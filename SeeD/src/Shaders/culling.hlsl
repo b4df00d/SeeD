@@ -22,8 +22,8 @@ void CullingReset(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadI
     isntancesCounters[1] = 0;
     
     RWStructuredBuffer<uint> meshletsCounters = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
-    meshletsCounters[0] = 0; // opaque (early-Z) draw count
-    meshletsCounters[1] = 0; // cutout (late-Z) draw count
+    for (uint b0 = 0; b0 < viewContext.shaderBucketCount; b0++)
+        meshletsCounters[b0] = 0; // one draw count per shader bucket (bucket 0 = sort-eligible default opaque shader)
 
     RWStructuredBuffer<uint> instanceRaytracingCounter = ResourceDescriptorHeap[rtParameters.instancesRaytracingCountHeapIndex];
     instanceRaytracingCounter[0] = 0;
@@ -60,13 +60,16 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
     RWStructuredBuffer<HLSL::InstanceCullingDispatch> instancesCulledArgs = ResourceDescriptorHeap[viewContext.instancesCulledArgsIndex];
     
     float4x4 worldMatrix = instance.unpack(instance.current);
+    // CPU-computed world-space override (currently: terrain quadtree nodes, see World.h
+    // Systems::TerrainStreaming::CreateNodeInstance) takes the real per-node height range into
+    // account, which the shared mesh AABB can't (terrain's grid mesh is flat, displaced only in the
+    // mesh shader). w <= 0 means no override -- fall back to the mesh-derived sphere as before.
     float4 meshBS = mesh.GetBoundingSphere();
-    float3 center = mul(worldMatrix, float4(meshBS.xyz, 1)).xyz;
-    float radius = abs(instance.GetScale() * meshBS.w); // assume uniform scaling
-    float4 boundingSphere = float4(center, radius);
-    float dist = length(camera.worldPos.xyz - center.xyz);
+    float4 meshDerivedSphere = float4(mul(worldMatrix, float4(meshBS.xyz, 1)).xyz, abs(instance.GetScale() * meshBS.w)); // assume uniform scaling
+    float4 boundingSphere = (instance.boundingSphereOverride.w > 0) ? instance.boundingSphereOverride : meshDerivedSphere;
+    float dist = length(camera.worldPos.xyz - boundingSphere.xyz);
     // mesh LOD from distance; also picks which of the two BLAS the TLAS instance references
-    float rawLod = log2(dist * viewContext.lodDistanceMultiplier / radius + 1) * 3;
+    float rawLod = log2(dist * viewContext.lodDistanceMultiplier / boundingSphere.w + 1) * 3;
     uint lodIndex = max(min(rawLod, 3), 0);
     
     
@@ -135,6 +138,8 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
     bool culled = FrustumCulling(camera, boundingSphere);
     if(!culled) culled = OcclusionCulling(camera, boundingSphere);
     culled |= rawLod > viewContext.distanceCullingValue;
+    
+    lodIndex = min(lodIndex, mesh.lodCount - 1);
     
     if (!culled)
     {
@@ -233,10 +238,13 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     HLSL::Meshlet meshlet = meshlets[meshletToCull.meshletIndex];
     
     float4x4 worldMatrix = instance.unpack(instance.current);
-    float3 center = mul(worldMatrix, float4(meshlet.boundingSphere.xyz, 1)).xyz;
-    float radius = abs(max(max(length(worldMatrix[0].xyz), length(worldMatrix[1].xyz)), length(worldMatrix[2].xyz)) * meshlet.boundingSphere.w); // assume uniform scaling
-    float4 boundingSphere = float4(center, radius);
-    
+    // Same CPU-computed world-space override as CullingInstances: when present, terrain gets
+    // per-instance/per-node culling granularity here rather than per-meshlet (every meshlet of one
+    // leaf node shares that node's sphere) -- terrain patches are already coarse, see terrainmesh.hlsl.
+    float3 meshletCenter = mul(worldMatrix, float4(meshlet.boundingSphere.xyz, 1)).xyz;
+    float meshletRadius = abs(max(max(length(worldMatrix[0].xyz), length(worldMatrix[1].xyz)), length(worldMatrix[2].xyz)) * meshlet.boundingSphere.w); // assume uniform scaling
+    float4 boundingSphere = (instance.boundingSphereOverride.w > 0) ? instance.boundingSphereOverride : float4(meshletCenter, meshletRadius);
+
     bool culled = FrustumCulling(camera, boundingSphere);
     if (!culled)  culled = OcclusionCulling(camera, boundingSphere);
     
@@ -251,57 +259,54 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
         mdc.ThreadGroupCountY = 1;
         mdc.ThreadGroupCountZ = 1;
 
-        // Split the draw list by shading domain, mirroring the RT path (parameters[4] != 0 == cutout):
-        // opaque meshlets go to the early-Z list, cutout meshlets to a separate late-Z list so their
-        // alpha-test discard can prevent depth writes. Cutout draws skip the front-to-back sort.
+        // Route this meshlet to its material's shader bucket -- a stable per-Shader-asset index
+        // assigned by the CPU-side registry (Renderer.h MainView::GetOrRegisterShaderBucket) and
+        // written into HLSL::Material.shaderIndex by UpdateMaterials. Bucket 0 is always the
+        // sort-eligible default opaque shader (reserved unconditionally in MainView::On()); every
+        // other bucket (cutout, terrain, or any future mesh-shader variant) draws unsorted from its
+        // own exact region of the single shared meshletsCulledArgs buffer.
         StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
-        bool cutout = materials[instance.materialIndex].parameters[4] != 0;
+        HLSL::Material meshletMaterial = materials[instance.materialIndex];
+        uint shaderBucket = meshletMaterial.shaderIndex;
 
-        if (cutout)
-        {
-            RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgsCutout = ResourceDescriptorHeap[viewContext.meshletsCulledArgsCutoutIndex];
-            // Reserve one slot per active lane with a single wave-aggregated atomic on counter[1].
-            uint waveOffset = WavePrefixCountBits(true);
-            uint waveTotal = WaveActiveCountBits(true);
-            uint waveBase = 0;
-            if (WaveIsFirstLane())
-                InterlockedAdd(meshletCounter[1], waveTotal, waveBase);
-            waveBase = WaveReadLaneFirst(waveBase);
-            meshletsCulledArgsCutout[waveBase + waveOffset] = mdc;
-        }
-        else
-        {
-            RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
-            // Each active lane writes one draw call: the first active lane reserves
-            // a contiguous block for the whole wave, and each lane takes its slot
-            // from the count of active lanes preceding it.
-            uint waveOffset = WavePrefixCountBits(true);
-            uint waveTotal = WaveActiveCountBits(true);
-            uint waveBase = 0;
-            if (WaveIsFirstLane())
-                InterlockedAdd(meshletCounter[0], waveTotal, waveBase);
-            waveBase = WaveReadLaneFirst(waveBase);
-            uint index = waveBase + waveOffset;
-            meshletsCulledArgs[index] = mdc;
+        StructuredBuffer<uint> shaderBucketOffsets = ResourceDescriptorHeap[viewContext.shaderBucketOffsetsIndex];
+        uint bucketBase = shaderBucketOffsets[shaderBucket];
 
-            if (viewContext.frontToBackSort)
+        RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
+        // Each active lane writes one draw call: the first active lane reserves a contiguous block
+        // for the whole wave (within this bucket's own counter), and each lane takes its slot from
+        // the count of active lanes preceding it.
+        uint waveOffset = WavePrefixCountBits(true);
+        uint waveTotal = WaveActiveCountBits(true);
+        uint waveBase = 0;
+        if (WaveIsFirstLane())
+            InterlockedAdd(meshletCounter[shaderBucket], waveTotal, waveBase);
+        waveBase = WaveReadLaneFirst(waveBase);
+        uint index = bucketBase + waveBase + waveOffset;
+        meshletsCulledArgs[index] = mdc;
+
+        // Front-to-back sort only ever applies to bucket 0 (the default opaque shader): its region
+        // always starts at buffer offset 0 by construction (first in the prefix sum), so
+        // DrawSortPrefix/DrawSortScatter (which operate on meshletCounter[0] / offset 0
+        // unconditionally) need no changes at all.
+        if (shaderBucket == 0 && viewContext.frontToBackSort)
+        {
+            // We already have this meshlet's world-space center (boundingSphere.xyz, whether from the
+            // override or the mesh-derived path), so derive its depth bucket here for free. Stash it
+            // for the scatter pass and accumulate the histogram.
+            uint depthBucket = DepthBucketFromCenter(boundingSphere.xyz, camera);
+            RWStructuredBuffer<uint> meshletBuckets = ResourceDescriptorHeap[viewContext.meshletBucketsIndex];
+            meshletBuckets[index] = depthBucket;
+
+            RWStructuredBuffer<uint> sortHistogram = ResourceDescriptorHeap[viewContext.sortHistogramIndex];
+            // Wave-aggregate the histogram: lanes sharing a bucket collapse into a single global
+            // atomic (one per distinct bucket per wave) instead of one atomic per meshlet.
+            uint repLane, bucketLanes;
+            WaveBucketBallot(depthBucket, repLane, bucketLanes);
+            if (WaveGetLaneIndex() == repLane)
             {
-                // We already have this meshlet's world-space center, so derive its depth bucket
-                // here for free. Stash it for the scatter pass and accumulate the histogram.
-                uint bucket = DepthBucketFromCenter(center, camera);
-                RWStructuredBuffer<uint> meshletBuckets = ResourceDescriptorHeap[viewContext.meshletBucketsIndex];
-                meshletBuckets[index] = bucket;
-
-                RWStructuredBuffer<uint> sortHistogram = ResourceDescriptorHeap[viewContext.sortHistogramIndex];
-                // Wave-aggregate the histogram: lanes sharing a bucket collapse into a single global
-                // atomic (one per distinct bucket per wave) instead of one atomic per meshlet.
-                uint repLane, bucketLanes;
-                WaveBucketBallot(bucket, repLane, bucketLanes);
-                if (WaveGetLaneIndex() == repLane)
-                {
-                    uint base;
-                    InterlockedAdd(sortHistogram[bucket], bucketLanes, base);
-                }
+                uint sortBase;
+                InterlockedAdd(sortHistogram[depthBucket], bucketLanes, sortBase);
             }
         }
     }

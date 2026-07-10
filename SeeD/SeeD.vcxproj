@@ -189,6 +189,7 @@ copy /Y "..\Third\omm-main\bin\*.*" "..\x64\Release\"</Command>
     <ClInclude Include="src\Shaders\SharcTypes.h" />
     <ClInclude Include="src\String.h" />
     <ClInclude Include="src\Tasks.h" />
+    <ClInclude Include="src\Terrain.h" />
     <ClInclude Include="src\Time.h" />
     <ClInclude Include="src\UI.h" />
     <ClInclude Include="src\UIHelpers.h" />
@@ -289,6 +290,10 @@ copy /Y "..\Third\omm-main\bin\*.*" "..\x64\Release\"</Command>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
     </FxCompile>
     <FxCompile Include="src\Shaders\TAA.hlsl">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    </FxCompile>
+    <FxCompile Include="src\Shaders\terrainmesh.hlsl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
     </FxCompile>

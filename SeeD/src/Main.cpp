@@ -88,6 +88,14 @@
 // 
 // [ ] 13. Particule system that will be able to feed some atmospheric scattering
 //         data in the froxels (via simple spheres at first)
+// 
+// [ ] 14. texture importer does not work correctly when terxture is not 32bits and pow2
+// 
+// [ ] 15. deal with this comment in renderer.h :
+//         // Path registration only (no entity, no bucket) for the other built-in mesh-shader variants.....
+// 
+// [ ] 16. All task scheduling allocates a lot. 
+//         See to recreate the scheduling only when not the same as the previous frame.
 //
 // ============================================================================
 
@@ -164,7 +172,11 @@ struct Options
     bool stopBufferUpload = false;
     bool enableStructuredCommandBuffersReadback = false;
     bool stepMotion = false;
+#ifdef _DEBUG
     bool shaderReload = true;
+#else
+    bool shaderReload = false;
+#endif
     bool shaderStatsCsv = true; // dump ..\shaderStats.csv for the live edit/profile loop
     bool frontToBackSort = true;
     float sortMaxDistance = 512.0f;
@@ -222,6 +234,7 @@ EditorState editorState;
 Project project;
 
 #include "Loading.h"
+#include "Terrain.h"
 #include "Renderer.h"
 #include "UI.h"
 
@@ -246,6 +259,7 @@ public:
 
     Systems::Player player;
     Systems::PrefabStreaming prefabStreaming;
+    Systems::TerrainStreaming terrainStreaming; // Milestone 1 CPU quadtree, see World.h
 
     // live shader stats (edit -> hot-reload -> profile loop)
     float shaderStatsSecondsSinceReload = 0.0f;
@@ -271,6 +285,7 @@ public:
 
         player.On(float3(project.cameraPos[0], project.cameraPos[1], project.cameraPos[2]), quaternion(project.cameraRot[0], project.cameraRot[1], project.cameraRot[2], project.cameraRot[3]));
         prefabStreaming.On();
+        terrainStreaming.On();
     }
 
     void Loop()
@@ -291,6 +306,7 @@ public:
             // unload's entities are fully removed before the hierarchy rebuilds.
             world.structureChanged = false;
             prefabStreaming.Update(&world);
+            terrainStreaming.Update(&world);
             world.DeferredRelease(); // thread this ?
 
             TASK(UpdateWindow);
@@ -348,6 +364,7 @@ public:
 
         player.Off();
         prefabStreaming.Off();
+        terrainStreaming.Off();
 
         shaderLoader.Off();
         ommBaker.Off();

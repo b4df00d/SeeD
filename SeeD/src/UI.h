@@ -375,7 +375,7 @@ public:
             Components::Mask mask = Components::Entity::mask;
             if(knownComponents.size() > 0)
                 mask = knownComponents[componentFilterIndex].mask;
-            uint instanceQueryIndex = World::instance->Query(mask, 0);
+            uint instanceQueryIndex = World::instance->Query(mask, 0, false);
             auto& result = World::instance->frameQueries[instanceQueryIndex];
 
             for (uint i = 0; i < result.size(); i++)
@@ -1367,7 +1367,7 @@ public:
     void Open(Components::Mask mask, EntityBase* _handle)
     {
         uint resCount = World::instance->CountQuery(mask, 0);
-        uint instanceQueryIndex = World::instance->Query(mask, 0);
+        uint instanceQueryIndex = World::instance->Query(mask, 0, false);
         auto& result = World::instance->frameQueries[instanceQueryIndex];
 
         entries.clear();
@@ -1741,6 +1741,10 @@ public:
     }
 };
 FileBrowserWindow fileBrowserWindow;
+// Set right before opening fileBrowserWindow for a texture import (DrawHandle below); the
+// FileBrowserWindow result callback is a plain function pointer (no captures), so the target
+// handle to write into rides on this global instead. Cleared once consumed.
+static World::Entity* pendingTextureImportTarget = nullptr;
 
 // Forward-declared in ComponentMetaTypes.h. Draws every reflected member of the component
 // found in knownComponents for `mask`, exactly like the property window's path for components
@@ -2289,7 +2293,7 @@ public:
 
         ImGui::Separator();
 
-        uint queryIndex = World::instance->Query(Components::Light::mask, 0);
+        uint queryIndex = World::instance->Query(Components::Light::mask, 0, true);
         auto& result = World::instance->frameQueries[queryIndex];
 
         if (result.empty())
@@ -2402,7 +2406,7 @@ public:
                 if (ImGui::MenuItem("Save Project"))
                 {
                     // capture the current camera pose into the project
-                    uint q = World::instance->Query(Components::Camera::mask | Components::Transform::mask, 0);
+                    uint q = World::instance->Query(Components::Camera::mask | Components::Transform::mask, 0, true);
                     auto& cams = World::instance->frameQueries[q];
                     if (!cams.empty())
                     {
@@ -2526,6 +2530,44 @@ public:
                         pf.loadDistance = 50.0f;
                         editorState.dirtyHierarchy = true;
                     }
+                    if (ImGui::MenuItem("Terrain"))
+                    {
+                        World::Entity ent;
+                        editorState.selectedObject = ent.Make(Components::Terrain::mask | Components::Transform::mask, "Terrain");
+                        auto& trans = ent.Get<Components::Transform>();
+                        trans.position = float3(0);
+                        trans.rotation = quaternion::identity();
+                        trans.scale = float3(1);
+                        World::Entity matEnt;
+                        matEnt.Make(Components::Material::mask | Components::Name::mask, "Terrain Material");
+                        auto& mat = matEnt.Get<Components::Material>();
+                        for (uint i = 0; i < HLSL::MaterialTextureCount; i++)
+                            mat.textures[i] = Components::Handle<Components::Texture>{ entityInvalid };
+                        for (uint i = 0; i < HLSL::MaterialParametersCount; i++)
+                            mat.parameters[i] = 0.0f;
+                        // Routes this material's meshlets to the terrain shading bucket (generic
+                        // multi-shader GBuffer draw buckets by Material::shader / shaderIndex, not a
+                        // parameter flag): AddHardCoded is keyed by path, so this resolves to the
+                        // same assetID GBuffers registers/discovers regardless of which Shader
+                        // entity holds it.
+                        Components::Handle<Components::Shader> terrainShader;
+                        terrainShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\terrainmesh.hlsl|DefaultGTerrain");
+                        mat.shader = terrainShader;
+
+                        auto& terrain = ent.Get<Components::Terrain>();
+                        terrain.heightmap = Components::Handle<Components::Texture>{ entityInvalid };
+                        terrain.material = Components::Handle<Components::Material>{ matEnt };
+                        terrain.heightScale = 50.0f;
+                        terrain.heightOffset = 0.0f;
+                        terrain.worldExtent = 8192.0f;
+                        terrain.quadtreeDepth = 6;
+                        terrain.targetScreenSize = 0.15f;
+                        terrain.gridSpacing = 0.66f;
+                        terrain.gridSize = 8.0f;
+                        if (Components::buildTerrainGridMesh != nullptr)
+                            terrain.gridMesh = Components::buildTerrainGridMesh(terrain.gridSpacing, terrain.gridSize);
+                        editorState.dirtyHierarchy = true;
+                    }
                     ImGui::EndMenu();
                 }
                 if (ImGui::MenuItem("Generate components Metadata"))
@@ -2601,6 +2643,27 @@ void UIHelpers::DrawHandle(EntityBase& target, Components::Mask dataTemplateType
         handlePickingWindow.Open(dataTemplateType, &handleTarget);
     }
     ImGui::SameLine();
+    // Texture handles can additionally import a source file (e.g. a heightmap PNG) straight
+    // from the project directory, instead of only picking among already-imported textures.
+    if (dataTemplateType == Components::Texture::mask)
+    {
+        if (ImGui::SmallButton("Import..."))
+        {
+            pendingTextureImportTarget = &handleTarget;
+            fileBrowserWindow.OpenLoad(AssetLibrary::instance->importPath,
+                { ".png", ".jpg", ".jpeg", ".tga", ".dds", ".tif" },
+                [](String path)
+                {
+                    if (path.empty() || pendingTextureImportTarget == nullptr)
+                        return;
+                    std::filesystem::path p(path.c_str());
+                    Components::Handle<Components::Texture> tex = TextureLoader::instance->ImportByName(String(p.filename().string()));
+                    *pendingTextureImportTarget = World::Entity(tex);
+                    pendingTextureImportTarget = nullptr;
+                });
+        }
+        ImGui::SameLine();
+    }
     ImGui::Text(handleName.c_str());
 }
 

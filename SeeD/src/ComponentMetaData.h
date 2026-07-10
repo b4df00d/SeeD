@@ -99,6 +99,21 @@ knownComponents.push_back(
 		}
  	});
 knownComponents.push_back(
+ 	{ "Terrain", Components::Terrain::mask, Components::TerrainPropertyDraw,
+ 		{
+			{ "heightmap", PropertyTypes::_Handle, Components::Texture::mask, 1, offsetof(Components::Terrain, heightmap) },
+			{ "gridMesh", PropertyTypes::_Handle, Components::Mesh::mask, 1, offsetof(Components::Terrain, gridMesh) },
+			{ "material", PropertyTypes::_Handle, Components::Material::mask, 1, offsetof(Components::Terrain, material) },
+			{ "heightScale", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, heightScale) },
+			{ "heightOffset", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, heightOffset) },
+			{ "worldExtent", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, worldExtent) },
+			{ "quadtreeDepth", PropertyTypes::_uint, NULL, 1, offsetof(Components::Terrain, quadtreeDepth) },
+			{ "targetScreenSize", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, targetScreenSize) },
+			{ "gridSpacing", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, gridSpacing) },
+			{ "gridSize", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, gridSize) },
+		}
+ 	});
+knownComponents.push_back(
  	{ "RenderSettingsVolume", Components::RenderSettingsVolume::mask, Components::RenderSettingsVolumePropertyDraw,
  		{
 			{ "shape", PropertyTypes::_uint, NULL, 1, offsetof(Components::RenderSettingsVolume, shape) },

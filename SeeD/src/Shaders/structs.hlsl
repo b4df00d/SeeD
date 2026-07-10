@@ -155,14 +155,15 @@ namespace HLSL
         uint lightsIndex;
         uint instancesCulledArgsIndex;
         uint meshletsToCullIndex;
-        uint meshletsCulledArgsIndex;
-        uint meshletsCulledArgsCutoutIndex; // late-Z cutout draw list (parallel to meshletsCulledArgs)
+        uint meshletsCulledArgsIndex; // single shared draw-args buffer; each shader bucket owns a region at its prefix-sum base offset (see shaderBucketOffsetsIndex)
         uint meshletsCulledArgsSortedIndex;
         uint sortHistogramIndex;
         uint meshletBucketsIndex;
         uint frontToBackSort;
         uint instancesCounterIndex;
-        uint meshletsCounterIndex;
+        uint meshletsCounterIndex; // one counter per shader bucket now (was fixed 3: opaque/cutout/terrain)
+        uint shaderBucketOffsetsIndex; // heap index of a StructuredBuffer<uint>: exclusive-prefix-sum base offset per shader bucket, into meshletsCulledArgs
+        uint shaderBucketCount; // number of shader buckets this frame (CullingReset zeroes exactly this many meshletsCounters entries)
         uint albedoIndex;
         uint metalnessIndex;
         uint normalIndex; // gbuffer normal, a = roughness (DLSS-RR packed mode)
@@ -254,8 +255,16 @@ namespace HLSL
     {
         float parameters[MaterialParametersCount];
         uint textures[MaterialTextureCount];
-        uint shaderIndex;
+        uint shaderIndex; // stable per-shader-bucket index (Renderer.h MainView shader-bucket registry); routes this material's meshlets to the matching draw bucket in culling.hlsl instead of the old cutout/terrain bool flags
     };
+    // Milestone 1 terrain (see World.h Components::Terrain*Slot/Param, must match): the heightmap
+    // heap index + height decode params ride on the material's otherwise-unused texture/parameter
+    // slots instead of adding new per-instance/per-mesh fields. Shading-bucket routing is via
+    // Material::shader/shaderIndex now, not a parameter flag (param slot 7 is free/unused).
+    static const uint TerrainHeightmapTextureSlot = 4;
+    static const uint TerrainHeightScaleParam = 5;
+    static const uint TerrainHeightOffsetParam = 6;
+    static const uint TerrainWorldSizeParam = 8; // world-space XZ footprint the heightmap covers (UV = worldPos.xz / this + 0.5), so all quadtree nodes sample one consistent heightmap regardless of their own footprint
     
     // Packed into D3D12_RAYTRACING_INSTANCE_DESC.InstanceID (24 bits) by culling.hlsl when the
     // instance points at the low-detail BLAS, so hit shaders fetch triangles from the matching LOD.
@@ -276,7 +285,13 @@ namespace HLSL
         uint rtFlags;
         D3D12_GPU_VIRTUAL_ADDRESS rayTracingBLAS;
         D3D12_GPU_VIRTUAL_ADDRESS rayTracingBLASLow;
-        
+        // World-space bounding-sphere override for CPU-computed culling volumes the generic
+        // mesh-AABB-derived sphere can't express (currently: terrain quadtree nodes, see World.h
+        // Systems::TerrainStreaming::CreateNodeInstance). w <= 0 means "no override, use
+        // mesh.GetBoundingSphere() transformed by worldMatrix" (culling.hlsl CullingInstances /
+        // CullingMeshlets).
+        float4 boundingSphereOverride;
+
         float3 GetPosition()
         {
             return float3(current[0][3], current[1][3], current[2][3]);

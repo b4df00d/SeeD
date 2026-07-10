@@ -1,6 +1,7 @@
 #include "structs.hlsl"
 #include "binding.hlsl"
 #include "common.hlsl"
+#include "meshCommon.hlsli"
 
 // define the output of shader before the call to shader so that the parser can know it before compiling
 // the comment after the SV_target is important
@@ -18,62 +19,20 @@ struct PS_OUTPUT
 #pragma gBuffer DefaultGCutout MeshMain PixelgBuffer CUTOUT
 #pragma forward DefaultF MeshMain PixelForward
 
-struct MSVert
-{
-    float4 pos : SV_Position;
-    float4 currentPos : TEXCOORD0;
-    float4 previousPos : TEXCOORD1;
-    float3 normal : NORMAL;
-    float4 tangent : TEXCOORD2; // xyz = tangent, w = world-space handedness (binormal sign)
-    float2 uv : TEXCOORD3;
-};
-
-// Mesh pipelines don't auto-generate SV_PrimitiveID for the pixel shader: the mesh shader
-// must export it as a per-primitive attribute (used by the 'triangles' debug view).
-struct MSPrim
-{
-    uint primitiveID : SV_PrimitiveID; // triangle index within the meshlet
-};
-
-groupshared HLSL::Mesh mesh;
-groupshared HLSL::Meshlet meshlet;
-groupshared float4x4 worldMatrix;     // object->world (for normal/tangent)
-groupshared float4x4 mvp;             // viewProj * world
-groupshared float4x4 previousMvp;     // previousViewProj * previousWorld
-groupshared float worldDetSign;       // sign(det(world)) -> keeps binormal handedness correct on mirrored instances
+// MSVert/MSPrim, the groupshared meshlet/instance state, and the fetch/decode/output helpers
+// (LoadMeshletShared, DecodeVertex*, BuildOutputVertex, DecodeMeshletTriangle) live in
+// meshCommon.hlsli, shared with terrainmesh.hlsl (Milestone 1 terrain, plan step 6).
 
 [RootSignature(SeeDRootSignature)]
 [outputtopology("triangle")]
 [numthreads(HLSL::max_triangles, 1, 1)]
 void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, out vertices MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles], out primitives MSPrim outPrims[HLSL::max_triangles])
-{   
-    if(groupThreadId.x == 0)
-    {
-        StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-        HLSL::Camera camera = cameras[0]; //viewContext.cameraIndex];
-
-        StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-        HLSL::Instance instance = instances[instanceIndexIndirect];
-        worldMatrix = instance.unpack(instance.current);
-        float4x4 previousWorldMatrix = instance.unpack(instance.previous);
-
-        // Concatenate once per group so each vertex does a single matrix*vector (no intermediate worldPos).
-        mvp = mul(camera.viewProj, worldMatrix);
-        previousMvp = mul(camera.previousViewProj, previousWorldMatrix);
-        worldDetSign = determinant((float3x3)worldMatrix) >= 0.0f ? 1.0f : -1.0f;
-
-        StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
-        mesh = meshes[instance.meshIndex]; // for SNORM16 position decode (aabbMin / aabbExtent)
-
-        StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
-        meshlet = meshlets[meshletIndexIndirect];
-        meshlet.vertexCount = min(HLSL::max_vertices, meshlet.vertexCount);
-        meshlet.triangleCount = min(HLSL::max_triangles, meshlet.triangleCount);
-    }
+{
+    LoadMeshletShared(groupThreadId.x);
     GroupMemoryBarrierWithGroupSync();
-    
+
     SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
-    
+
     StructuredBuffer<uint> meshletVertices = ResourceDescriptorHeap[commonResourcesIndices.meshletVerticesHeapIndex];
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
     if (groupThreadId.x < meshlet.vertexCount)
@@ -81,41 +40,17 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
         uint index = meshletVertices[meshlet.vertexOffset + groupThreadId.x];
         HLSL::Vertex v = verticesData[index]; // single fetch
 
-        // Decode SNORM16 position (local to mesh AABB). packedPos.x = [x|y<<16], packedPos.y = [z|handedness<<16].
-        int3 qi = int3(int(v.packedPos.x << 16) >> 16, int(v.packedPos.x) >> 16, int(v.packedPos.y << 16) >> 16);
-        float3 q = max(float3(qi) / 32767.0f, -1.0f);
-        float3 objectPos = mesh.aabbMin.xyz + (q * 0.5f + 0.5f) * mesh.aabbExtent.xyz;
-        float4 pos = float4(objectPos, 1);
-
-        float4 clipPos = mul(mvp, pos);
-        outVerts[groupThreadId.x].currentPos = clipPos;
-        clipPos.xy += viewContext.jitter.xy * clipPos.w;
-        outVerts[groupThreadId.x].pos = clipPos;
-
-        outVerts[groupThreadId.x].previousPos = mul(previousMvp, pos);
-
-        // Not normalized here: GetSurfaceData renormalizes after interpolation anyway.
-        float3 normal = i_octahedral_32(v.normalOct, 16);
-        outVerts[groupThreadId.x].normal = mul((float3x3)worldMatrix, normal);
-
+        float3 objectPos = DecodeVertexPositionOS(v);
+        float3 normalOS = DecodeVertexNormalOS(v);
+        float3 tangentOS = DecodeVertexTangentOS(v);
         // Pass tangent + world-space handedness; the binormal is rebuilt in the pixel shader.
-        float3 tangent = i_octahedral_32(v.tangentOct, 16);
-        float handedness = ((int(v.packedPos.y) >> 16) >= 0 ? 1.0f : -1.0f) * worldDetSign;
-        outVerts[groupThreadId.x].tangent = float4(mul((float3x3)worldMatrix, tangent), handedness);
+        float handedness = DecodeVertexHandedness(v);
 
-        outVerts[groupThreadId.x].uv = v.uv;
+        outVerts[groupThreadId.x] = BuildOutputVertex(objectPos, normalOS, tangentOS, handedness, v.uv);
     }
-    ByteAddressBuffer trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
     if (groupThreadId.x < meshlet.triangleCount)
     {
-        uint offset = meshlet.triangleOffset + groupThreadId.x * 3;
-        uint alignedOffset = offset & ~3;
-        uint shift = (offset - alignedOffset) * 8;
-        uint2 packedData = trianglesData.Load2(alignedOffset);
-
-        // Funnel-shift the 3 index bytes down to bit 0 (HLSL shifts are mod-32: guard shift==0).
-        uint tri3 = (packedData.x >> shift) | (shift == 0 ? 0 : packedData.y << (32 - shift));
-        outIndices[groupThreadId.x] = uint3(tri3 & 0xff, (tri3 >> 8) & 0xff, (tri3 >> 16) & 0xff);
+        outIndices[groupThreadId.x] = DecodeMeshletTriangle(groupThreadId.x);
         outPrims[groupThreadId.x].primitiveID = groupThreadId.x;
     }
 }
