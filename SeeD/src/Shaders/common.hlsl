@@ -453,21 +453,15 @@ float FroxelToZ(float froxelZ, float froxelsZSize, float froxelsNear, float farC
 
 float3 FroxelToWorld(float3 froxel, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
 {
-    float4 clipPos = float4((froxel + float3(0.5, 0.5, 0.5)) / froxelsSize, 1);
-    
-    clipPos.xy = clipPos.xy * 2 - 1;
-    float4 worldPos = mul(camera.viewProj_inv, float4(clipPos.x, -clipPos.y, clipPos.z, 1));
-    worldPos.xyz /= worldPos.w;
+    // Careful of precision issue with large viewPos values
+    float2 ndc = (froxel.xy + 0.5) / froxelsSize.xy * 2 - 1;
+    float4 viewPos = mul(camera.proj_inv, float4(ndc.x, -ndc.y, 1, 1));
+    viewPos.xyz /= viewPos.w;
+    float3 viewDir = normalize(mul(camera.view_inv, float4(viewPos.xyz, 0)).xyz);
 
-    float3 viewDir = worldPos.xyz - camera.worldPos.xyz;
-    float viewDist = length(viewDir);
-    viewDir = viewDir / viewDist;
+    float viewDist = FroxelToZ(froxel.z, froxelsSize.z, froxelsNear, camera.farClip);
 
-    viewDist = FroxelToZ(froxel.z, froxelsSize.z, froxelsNear, camera.farClip);
-
-    worldPos.xyz = camera.worldPos.xyz + viewDir * viewDist;
-
-    return worldPos.xyz;
+    return camera.worldPos.xyz + viewDir * viewDist;
 }
 
 float3 WorldToFroxelUVW(float3 pixelWorldPos, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
@@ -486,7 +480,7 @@ float3 WorldTohistoryFroxelUVW(float3 pixelWorldPos, float3 froxelsSize, float f
     float4 uvw = mul(camera.previousViewProj, float4(pixelWorldPos, 1));
     uvw.xyz = uvw.xyz / uvw.w;
     uvw.xy = uvw.xy * 0.5 + 0.5;
-    float linearDepth = length(pixelWorldPos - camera.worldPos.xyz) / camera.farClip;
+    float linearDepth = length(pixelWorldPos - camera.previousWorldPos.xyz) / camera.farClip;
     uvw.z = ZToFroxel(linearDepth, froxelsSize.z, froxelsNear, camera.farClip) / froxelsSize.z;
     uvw.y = 1-uvw.y;
     return uvw.xyz;

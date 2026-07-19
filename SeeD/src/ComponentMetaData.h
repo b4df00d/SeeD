@@ -111,6 +111,18 @@ knownComponents.push_back(
 			{ "targetScreenSize", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, targetScreenSize) },
 			{ "gridSpacing", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, gridSpacing) },
 			{ "gridSize", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, gridSize) },
+			{ "erosionEnabled", PropertyTypes::_uint, NULL, 1, offsetof(Components::Terrain, erosionEnabled) },
+			{ "erosionOctaves", PropertyTypes::_uint, NULL, 1, offsetof(Components::Terrain, erosionOctaves) },
+			{ "erosionScale", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionScale) },
+			{ "erosionStrength", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionStrength) },
+			{ "erosionGullyWeight", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionGullyWeight) },
+			{ "erosionDetail", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionDetail) },
+			{ "erosionLacunarity", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionLacunarity) },
+			{ "erosionGain", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionGain) },
+			{ "erosionCellScale", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionCellScale) },
+			{ "erosionNormalization", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionNormalization) },
+			{ "erosionRidgeRounding", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionRidgeRounding) },
+			{ "erosionCreaseRounding", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionCreaseRounding) },
 		}
  	});
 knownComponents.push_back(

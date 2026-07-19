@@ -34,7 +34,7 @@ void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchT
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[viewContext.cameraIndex];
-    float3 froUV = WorldToFroxelUVW(cd.worldPos, currentFroxel.resolution.xyz, 0.2, camera);
+    float3 froUV = WorldToFroxelUVW(cd.worldPos, currentFroxel.resolution.xyz, asParameters.specialNear, camera);
     
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[pphrParameters.lightedIndex];
     float4 input = lighted[renderPixel.xy];

@@ -58,6 +58,9 @@ void MeshMainTerrain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_
         float heightScale = material.parameters[HLSL::TerrainHeightScaleParam];
         float heightOffset = material.parameters[HLSL::TerrainHeightOffsetParam];
         float terrainWorldSize = material.parameters[HLSL::TerrainWorldSizeParam];
+        float erodedIndexParam = material.parameters[HLSL::TerrainErodedHeightmapParam];// eroded heightmap index is a float param because a pass-created resource has no Handle<Texture>
+        if (erodedIndexParam >= 0.0f)
+            heightmapIndex = (uint)erodedIndexParam;
 
         if (heightmapIndex != HLSL::invalidUINT)
         {
@@ -87,18 +90,14 @@ void MeshMainTerrain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_
 
             objectPos.y += hC * heightScale + heightOffset;
 
-            // World-space texel size along X/Z (mesh AABB extent * uv-space texel), to turn the
-            // finite-difference height delta into a proper slope before building the normal.
-            float2 objectExtentXZ = float2(mesh.aabbExtent.x, mesh.aabbExtent.z);
-            float2 worldTexel = max(objectExtentXZ * texel, float2(1e-5f, 1e-5f));
+            float2 worldTexel = max(terrainWorldSize * texel, float2(1e-5f, 1e-5f));
+            float scaleXZ = max(length(float3(worldMatrix[0].x, worldMatrix[1].x, worldMatrix[2].x)), 1e-5f);
 
             float dHdx = ((hX1 - hX0) * heightScale) / (2.0f * worldTexel.x);
             float dHdz = ((hZ1 - hZ0) * heightScale) / (2.0f * worldTexel.y);
-            normalOS = normalize(float3(-dHdx, 1.0f, -dHdz));
-
-            // Re-orthogonalize the (flat-grid authored) tangent against the displaced normal so the
-            // TBN stays sane on slopes.
-            tangentOS = normalize(tangentOS - normalOS * dot(tangentOS, normalOS));
+            float3 normalObj = normalize(float3(-dHdx * scaleXZ, 1.0f, -dHdz * scaleXZ));
+            tangentOS = normalize(tangentOS - normalObj * dot(tangentOS, normalObj));
+            normalOS = float3(-dHdx / scaleXZ, 1.0f, -dHdz / scaleXZ);
         }
 
         outVerts[groupThreadId.x] = BuildOutputVertex(objectPos, normalOS, tangentOS, handedness, v.uv);
@@ -129,14 +128,26 @@ PS_OUTPUT PixelgBufferTerrain(MSVert inVerts, uint primitiveID : SV_PrimitiveID)
     o.albedo.xy = inVerts.uv.xy;
     
     uint heightmapIndex = material.textures[HLSL::TerrainHeightmapTextureSlot];
+    float erodedIndexParam = material.parameters[HLSL::TerrainErodedHeightmapParam];
+    if (erodedIndexParam >= 0.0f)
+        heightmapIndex = (uint)erodedIndexParam;
 
-    if (heightmapIndex != HLSL::invalidUINT)
+    float diffIndexParam = material.parameters[HLSL::TerrainErosionDiffParam];
+    if (diffIndexParam >= 0.0f)
     {
-            Texture2D<float4> heightmapTex = ResourceDescriptorHeap[heightmapIndex];
-           o.albedo  = heightmapTex.SampleLevel(samplerLinearClamp, inVerts.uv.xy, 0).x;
+        Texture2D<float4> diffTex = ResourceDescriptorHeap[(uint)diffIndexParam];
+        float diff = diffTex.SampleLevel(samplerLinearClamp, inVerts.uv.xy, 0).x;
+        diff = smoothstep(0.5, 0.6, diff);
+        o.albedo.xyz = lerp(float3(110, 122, 47) / 255.0f, float3(107, 99, 80) / 255.0, diff);
+    }
+    else if (heightmapIndex != HLSL::invalidUINT)
+    {
+        Texture2D<float4> heightmapTex = ResourceDescriptorHeap[heightmapIndex];
+        o.albedo  = heightmapTex.SampleLevel(samplerLinearClamp, inVerts.uv.xy, 0).x;
+        o.albedo.xyz = float3(110, 122, 47) / 255.0f;
+
     }
         
-
     if (editorContext.clusters)
     {
         o.albedo = 1;

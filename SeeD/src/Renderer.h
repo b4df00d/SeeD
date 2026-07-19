@@ -1746,6 +1746,141 @@ public:
     }
 };
 
+class TerrainErosion : public Pass
+{
+    Components::Handle<Components::Shader> erosionShader;
+public:
+    static constexpr uint ErodedResolution = 8192; // 8k R16_UNORM + R8_UNORM = 192 MiB of VRAM PER TERRAIN
+
+    struct ErodedMaps
+    {
+        Resource height; // R16_UNORM eroded heightmap (mesh displacement)
+        Resource diff;   // R8_UNORM difference vs the original map, 0.5 = untouched (albedo debug/blending)
+        assetID bakedInput = assetID::Invalid; // input heightmap of the last completed bake, for the bake-once (erosionEnabled == 1) skip
+    };
+    std::unordered_map<uint, ErodedMaps> erodedMaps;
+
+    virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        erosionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\terrainErosion.hlsl|Erosion");
+    }
+    void Off() override
+    {
+        for (auto& erodedMap : erodedMaps)
+        {
+            erodedMap.second.height.Release();
+            erodedMap.second.diff.Release();
+        }
+        erodedMaps.clear();
+        Pass::Off();
+    }
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        std::vector<uint> aliveTerrains; // terrains that keep their eroded map this frame
+        World& world = *World::instance;
+        uint queryIndex = world.Query(Components::Terrain::mask, 0, true);
+        auto& queryResult = world.frameQueries[queryIndex];
+
+        for (auto& eb : queryResult)
+        {
+            World::Entity e = eb;
+            auto& terrainCmp = e.Get<Components::Terrain>();
+            if (!terrainCmp.material.IsValid())
+                continue; // nothing can consume the maps -> also skip the dispatch, the scan below frees them
+
+            // erosionEnabled: 0 = off, 1 = bake once, 2 = bake continuously (see World.h)
+            bool eroding = terrainCmp.erosionEnabled != 0 && terrainCmp.heightmap.IsValid();
+            if (eroding)
+            {
+                aliveTerrains.push_back(e.id);
+                Resource* input = AssetLibrary::instance->Get<Resource>(terrainCmp.heightmap.Get().id);
+                if (input != nullptr)
+                {
+                    ErodedMaps& maps = erodedMaps[e.id];
+                    if (!(terrainCmp.erosionEnabled == 1 && maps.bakedInput == terrainCmp.heightmap.Get().id))
+                    {
+                        Shader* erosion = AssetLibrary::instance->Get<Shader>(erosionShader.Get().id, true);
+                        D3D12_GPU_VIRTUAL_ADDRESS commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
+                        D3D12_GPU_VIRTUAL_ADDRESS viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+
+                        if (maps.height.GetResource() == nullptr)
+                            maps.height.CreateTexture(uint2(ErodedResolution, ErodedResolution), DXGI_FORMAT_R16_UNORM, false, "terrainEroded_" + std::to_string(e.id));
+                        if (maps.diff.GetResource() == nullptr)
+                            maps.diff.CreateTexture(uint2(ErodedResolution, ErodedResolution), DXGI_FORMAT_R8_UNORM, false, "terrainErosionDiff_" + std::to_string(e.id));
+                            
+                        HLSL::TerrainErosionParameters params;
+                        params.inputHeightmapIndex = input->srv.offset;
+                        params.outputResolution = ErodedResolution;
+                        params.octaves = terrainCmp.erosionOctaves;
+                        params.scale = terrainCmp.erosionScale;
+                        params.strength = terrainCmp.erosionStrength;
+                        params.gullyWeight = terrainCmp.erosionGullyWeight;
+                        params.detail = terrainCmp.erosionDetail;
+                        params.lacunarity = terrainCmp.erosionLacunarity;
+                        params.gain = terrainCmp.erosionGain;
+                        params.cellScale = terrainCmp.erosionCellScale;
+                        params.normalization = terrainCmp.erosionNormalization;
+                        params.ridgeRounding = terrainCmp.erosionRidgeRounding;
+                        params.creaseRounding = terrainCmp.erosionCreaseRounding;
+                        params.outputHeightmapIndex = maps.height.uav.offset;
+                        params.outputDiffIndex = maps.diff.uav.offset;
+                        params.pad0 = 0;
+
+                        maps.height.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                        maps.diff.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                        commandBuffer->SetCompute(*erosion);
+                        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+                        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+                        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&params));
+                        commandBuffer->cmd->Dispatch(erosion->DispatchX(ErodedResolution), erosion->DispatchY(ErodedResolution), 1);
+                        maps.height.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+                        maps.diff.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+
+                        maps.bakedInput = terrainCmp.heightmap.Get().id;
+                    }
+                }
+            }
+
+            float erodedParam = -1.0f;
+            float diffParam = -1.0f;
+            auto mapsIt = erodedMaps.find(e.id);
+            if (eroding && mapsIt != erodedMaps.end())
+            {
+                if (mapsIt->second.height.GetResource() != nullptr)
+                    erodedParam = (float)mapsIt->second.height.srv.offset;
+                if (mapsIt->second.diff.GetResource() != nullptr)
+                    diffParam = (float)mapsIt->second.diff.srv.offset;
+            }
+            auto& mat = terrainCmp.material.Get();
+            mat.parameters[Components::TerrainErodedHeightmapParam] = erodedParam;
+            mat.parameters[Components::TerrainErosionDiffParam] = diffParam;
+        }
+
+        for (auto it = erodedMaps.begin(); it != erodedMaps.end();)
+        {
+            if (std::find(aliveTerrains.begin(), aliveTerrains.end(), it->first) == aliveTerrains.end())
+            {
+                it->second.height.Release(true);
+                it->second.diff.Release(true);
+                it = erodedMaps.erase(it);
+            }
+            else
+                ++it;
+        }
+
+        Close();
+    }
+};
+
 class AtmosphericScattering : public Pass
 {
     ViewResource froxelsBuffer;
@@ -1900,11 +2035,16 @@ class PostProcessHalfRes : public Pass
 
 public:
     HLSL::PostProcessHalfResParameters pphrparams;
+    // Copy of the blended AtmosphericScattering params, written by MainView::UpdateRenderSettings
+    // (MainView is not declared yet at this point in the header). The shader samples the froxel
+    // volume and must use the same specialNear the volume was built with.
+    HLSL::AtmosphericScatteringParameters asparams = {};
 
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
+        asparams.specialNear = 0.25f; // must match AtmosphericScattering::On until the first UpdateRenderSettings overwrites it
         transparencyLayer.Register("transparencyLayer", view);
         transparencyLayer.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "transparencyLayer"); // must be the same as Lighted input
         lighted.Register("lighted", view);
@@ -1946,6 +2086,7 @@ public:
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&pphrparams));
+        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom2Register, ConstantBuffer::instance->PushConstantBuffer(&asparams));
         commandBuffer->cmd->Dispatch(postProcessHalfRes.DispatchX(view->renderResolution.x), postProcessHalfRes.DispatchY(view->renderResolution.y), 1);
 
         Close();
@@ -2542,6 +2683,7 @@ public:
     Skinning skinning;
     Particles particles;
     Spawning spawning;
+    TerrainErosion terrain;
     Culling culling;
     ZPrepass zPrepass;
     AccelerationStructure accelerationStructure;
@@ -2584,6 +2726,7 @@ public:
         hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr, nullptr);
         structuredCommandBufferUpdate.On(this, GPU::instance->computeQueue, "structuredCommandBufferUpdate", nullptr, nullptr);
         gpuDebugInit.On(this, GPU::instance->graphicQueue, "gpuDebugInit", &hzb.commandBuffer, nullptr);
+        terrain.On(this, GPU::instance->graphicQueue, "terrain", &AssetLibrary::instance->commandBuffer, nullptr);
         skinning.On(this, GPU::instance->computeQueue, "skinning", &AssetLibrary::instance->commandBuffer, &structuredCommandBufferUpdate.commandBuffer);
         particles.On(this, GPU::instance->computeQueue, "particles", &AssetLibrary::instance->commandBuffer, nullptr);
         spawning.On(this, GPU::instance->computeQueue, "spawning", &AssetLibrary::instance->commandBuffer, nullptr);
@@ -2616,6 +2759,7 @@ public:
         skinning.Off();
         particles.Off();
         spawning.Off();
+        terrain.Off();
         culling.Off();
         zPrepass.Off();
         accelerationStructure.Off();
@@ -2652,6 +2796,7 @@ public:
         SUBTASKVIEWPASS(skinning);
         SUBTASKVIEWPASS(particles);
         SUBTASKVIEWPASS(spawning);
+        SUBTASKVIEWPASS(terrain);
         SUBTASKVIEWPASS(culling);
         SUBTASKVIEWPASS(zPrepass);
         SUBTASKVIEWPASS(accelerationStructure);
@@ -2673,7 +2818,7 @@ public:
         updateRenderSettings.precede(atmospehricScatteringTask, postProcessHalfResTask, postProcessTask);
         // no need to put unnecessary dependencies on upload and setup (passes that do not use the view world data)
         // weeeelllll for all passes that use the camera need to wait for upload and setup to be sure the camera data is updated (just in case the buffers used are new because they are bigger)
-        uploadAndSetup.precede(skinningTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, atmospehricScatteringTask, postProcessHalfResTask, forwardTask, dlssTask, postProcessTask);
+        uploadAndSetup.precede(skinningTask, terrainTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, atmospehricScatteringTask, postProcessHalfResTask, forwardTask, dlssTask, postProcessTask);
 
         presentTask.succeed(uploadAndSetup,
             structuredCommandBufferUpdateTask,
@@ -2681,6 +2826,7 @@ public:
             skinningTask,
             particlesTask,
             spawningTask,
+            terrainTask,
             accelerationStructureTask,
             cullingTask,
             zPrepassTask,
@@ -3048,7 +3194,9 @@ public:
                     hlslcam.proj = proj;
                     hlslcam.proj_inv = inverse(proj);
                     hlslcam.viewProj = viewProj;
-                    hlslcam.viewProj_inv = inverse(hlslcam.viewProj);
+                    // inverse(view*proj) built analytically as proj_inv * camWorldMatrix: a general
+                    // fp32 inverse of the composed matrix degrades with the camera translation magnitude.
+                    hlslcam.viewProj_inv = mul(hlslcam.proj_inv, mat.matrix);
                     hlslcam.planes[0] = planes[0];
                     hlslcam.planes[1] = planes[1];
                     hlslcam.planes[2] = planes[2];
@@ -3058,7 +3206,7 @@ public:
                     hlslcam.worldPos = worldPos;
 
                     hlslcam.previousViewProj = previousViewProj;
-                    hlslcam.previousViewProj_inv = inverse(hlslcam.previousViewProj);
+                    hlslcam.previousViewProj_inv = mul(hlslcam.proj_inv, previousMat);
                     hlslcam.previousWorldPos = previousWorldPos;
 
                     hlslcam.sizeCulling = 1;
@@ -3213,6 +3361,10 @@ public:
                 as.noiseThresholdLow = result.noiseThresholdLow;
                 as.noiseThresholdHigh = result.noiseThresholdHigh;
                 as.animationSpeed = result.animationSpeed;
+                // The composite pass samples the froxel volume and needs the same specialNear
+                // it was built with; copied here (single-threaded update phase) to avoid racing
+                // the AtmosphericScattering pass's writes to its own asparams during render.
+                postProcessHalfRes.asparams = as;
 
                 pp.expoMul = result.expoMul;
                 pp.expoAdd = result.expoAdd;

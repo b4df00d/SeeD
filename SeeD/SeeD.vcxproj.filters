@@ -198,5 +198,8 @@
     <FxCompile Include="src\Shaders\terrainmesh.hlsl">
       <Filter>Source Files\Shaders</Filter>
     </FxCompile>
+    <FxCompile Include="src\Shaders\terrainErosion.hlsl">
+      <Filter>Source Files\Shaders</Filter>
+    </FxCompile>
   </ItemGroup>
 </Project>

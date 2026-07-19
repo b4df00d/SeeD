@@ -257,6 +257,20 @@ namespace Systems
             float minRaw, maxRaw;
             pyramid.QueryRange(uvCenter - float2(uvHalf, uvHalf), uvCenter + float2(uvHalf, uvHalf), node.depth, minRaw, maxRaw);
 
+            // The pyramid bounds the RAW heightmap, but the mesh shader displaces with the
+            // GPU-eroded map (TerrainErosion pass), so pad by the filter's hard bound so
+            // eroded-but-still-visible nodes are never culled 
+            if (terrain.erosionEnabled != 0)
+            {
+                float gain = terrain.erosionGain;
+                float octaveSum = std::abs(gain - 1.0f) < 1e-4f
+                    ? (float)terrain.erosionOctaves
+                    : (1.0f - std::pow(gain, (float)terrain.erosionOctaves)) / (1.0f - gain);
+                float maxDelta = terrain.erosionStrength * terrain.erosionScale * octaveSum * std::max(1.0f, terrain.erosionGullyWeight);
+                minRaw = std::max(0.0f, minRaw - maxDelta);
+                maxRaw = std::min(1.0f, maxRaw + maxDelta);
+            }
+
             float y0 = terrainY + minRaw * terrain.heightScale + terrain.heightOffset;
             float y1 = terrainY + maxRaw * terrain.heightScale + terrain.heightOffset;
             float minY = std::min(y0, y1), maxY = std::max(y0, y1); // heightScale may be negative
@@ -423,6 +437,8 @@ namespace Systems
                     mat.parameters[Components::TerrainHeightScaleParam] = terrain.heightScale;
                     mat.parameters[Components::TerrainHeightOffsetParam] = terrain.heightOffset;
                     mat.parameters[Components::TerrainWorldSizeParam] = terrain.worldExtent;
+                    // params TerrainErodedHeightmapParam (7) / TerrainErosionDiffParam (9) are
+                    // owned and written by the TerrainErosion pass (Renderer.h), not here.
                 }
 
                 // Rebuild the height pyramid synchronously, immediately, only when the heightmap

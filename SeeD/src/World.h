@@ -198,17 +198,6 @@ namespace Components
         }
     }
 
-    // Milestone 1 terrain (see Components::Terrain below): the heightmap + decode params ride on
-    // the material's otherwise-unused texture/parameter slots instead of adding new
-    // per-instance/per-mesh fields. Mirrored as raw indices in structs.hlsl (culling.hlsl /
-    // terrainmesh.hlsl read them the same way) -- keep both sides in sync. Shading-bucket routing
-    // is via Material::shader/shaderIndex (generic multi-shader GBuffer draw), not a parameter flag
-    // -- param slot 7 is free/unused.
-    static constexpr uint TerrainHeightmapTextureSlot = 4;
-    static constexpr uint TerrainHeightScaleParam = 5;
-    static constexpr uint TerrainHeightOffsetParam = 6;
-    static constexpr uint TerrainWorldSizeParam = 8; // world-space XZ footprint the heightmap covers (UV = worldPos.xz / this + 0.5), so all quadtree nodes sample one consistent heightmap regardless of their own footprint
-
     struct Transform : ComponentBase<Transform>
     {
         float3 position;
@@ -404,6 +393,17 @@ namespace Components
         }
     }
 
+    // Milestone 1 terrain (see Components::Terrain below): the heightmap + decode params ride on
+    // the material's otherwise-unused texture/parameter slots instead of adding new
+    // per-instance/per-mesh fields. Mirrored as raw indices in structs.hlsl (culling.hlsl /
+    // terrainmesh.hlsl read them the same way) -- keep both sides in sync. Shading-bucket routing
+    // is via Material::shader/shaderIndex (generic multi-shader GBuffer draw), not a parameter flag.
+    static constexpr uint TerrainHeightmapTextureSlot = 4;
+    static constexpr uint TerrainHeightScaleParam = 5;
+    static constexpr uint TerrainHeightOffsetParam = 6;
+    static constexpr uint TerrainErodedHeightmapParam = 7; // srv heap index of the GPU-eroded heightmap AS FLOAT (exact, heap max 65535 < 2^24), -1 = none. See structs.hlsl for why an index and not a Handle<Texture>: the eroded map is a raw render Resource with no assetID. Written (with slot 9) by the TerrainErosion pass (Renderer.h) directly into the material component; TerrainStreaming owns slots 4/5/6/8.
+    static constexpr uint TerrainWorldSizeParam = 8; // world-space XZ footprint the heightmap covers (UV = worldPos.xz / this + 0.5), so all quadtree nodes sample one consistent heightmap regardless of their own footprint
+    static constexpr uint TerrainErosionDiffParam = 9; // srv heap index AS FLOAT (-1 = none, same detour as slot 7) of the R8 erosion difference map (0.5 = untouched), displayed on the terrain albedo
     // Milestone 1 (static grid + heightmap displacement, no erosion/brushes yet): one baked
     // heightmap texture drives mesh-shader displacement of a shared grid mesh, instanced across
     // a CPU-walked quadtree (built each frame in World::Update, see Systems below).
@@ -420,6 +420,22 @@ namespace Components
         // grid mesh build params (used by the "Build Grid Mesh" button)
         float gridSpacing = 0.1f;      // meters/vertex at the most detailed quadtree level
         float gridSize = 64.0f;        // meters, most detailed quadtree level patch size
+        // GPU erosion (runevision "Advanced Terrain Erosion Filter", ported 1:1 from the shadertoy
+        // reference into terrainErosion.hlsl -- TerrainErosion pass in Renderer.h). Names and
+        // defaults match the shadertoy's EROSION_* constants; params mirror
+        // HLSL::TerrainErosionParameters.
+        uint  erosionEnabled = 1;      // 0 = off (maps freed), 1 = bake once (freezes after the first bake; a heightmap swap re-bakes, param edits don't), 2 = bake continuously (every frame, for live iteration)
+        uint  erosionOctaves = 5;
+        float erosionScale = 0.15f;    // horizontal+vertical erosion scale, fraction of the terrain footprint
+        float erosionStrength = 0.22f; // culling pad = strength * scale * sum(gain^o) * max(1, gullyWeight) (ComputeNodeBoundingSphere)
+        float erosionGullyWeight = 0.5f;
+        float erosionDetail = 1.5f;    // lower restricts high-frequency gullies to steeper slopes
+        float erosionLacunarity = 2.0f;
+        float erosionGain = 0.5f;      // per-octave strength multiplier
+        float erosionCellScale = 0.7f; // phacelle cell size relative to erosion scale, keep close to 1
+        float erosionNormalization = 0.5f; // phacelle magnitude normalization degree, 0..1
+        float erosionRidgeRounding = 0.1f;
+        float erosionCreaseRounding = 0.0f;
     };
     inline Handle<Mesh> (*buildTerrainGridMesh)(float spacing, float size) = nullptr;
     static void TerrainPropertyDraw(char* p)
