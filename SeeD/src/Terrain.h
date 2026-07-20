@@ -1,23 +1,6 @@
 #pragma once
 namespace Systems
 {
-    // Frustum + screen-space-size CPU quadtree (see Components::Terrain / plan step 4): each
-    // frame, re-derive every Terrain's leaf set by walking the quadtree, reusing last frame's
-    // instances as a pool in emission order -- a reused entity is only rewritten (transform +
-    // bounding sphere, flagged State::dirty for the renderer's UpdateInstances re-upload) when
-    // its node actually changed, extra nodes Make() new entities, leftover instances are
-    // released after the walk (see EmitNodeInstance). The walk itself goes level by level:
-    // cull nodes entirely outside the main camera's frustum (a culled
-    // node's children can't be more visible than its own bounding volume, so they're dropped
-    // without being subdivided), and subdivide visible nodes while their estimated on-screen
-    // footprint exceeds Terrain::targetScreenSize (assuming a node's AABB height == heightScale,
-    // per the current milestone's simplification) and the max quadtree depth hasn't been reached;
-    // otherwise emit a leaf instance of the shared grid mesh scaled to that node's footprint
-    // (coarser nodes reuse the same vertex mesh at a larger world-space scale -- the standard
-    // clipmap/quadtree LOD trick, see plan). NOT registered in World::systems (those run in
-    // parallel): it creates/destroys entities, so it must run single-threaded -- call Update()
-    // once per frame from the main loop, same slot as PrefabStreaming (after DeferredRelease,
-    // before the ECS systems and the editor read the world).
     struct TerrainStreaming : SystemBase
     {
         struct Node
@@ -25,31 +8,27 @@ namespace Systems
             float2 center;
             float size;
             uint depth;
+            uint2 coord;
         };
 
-        // CPU-only min/max height pyramid, quadtree-cell-aligned to a Terrain's own subdivision (level d
-        // is a (1<<d) x (1<<d) grid of {min,max} cells covering the full heightmap UV square). Values are
-        // the heightmap's RAW sampled red-channel value (matching terrainmesh.hlsl's .x read), BEFORE
-        // heightScale/heightOffset -- those are per-Terrain and applied at lookup time (see
-        // Systems::TerrainStreaming::ComputeNodeBoundingSphere). Not cached/shared across Terrains: built
-        // synchronously and directly by Systems::TerrainStreaming whenever a Terrain's heightmap handle
-        // changes, and owned by that system (see TerrainStreaming::heightPyramids) rather than living on
-        // this (or any) ECS component, since the ECS pool allocates component storage with raw malloc and
-        // migrates it via memcpy/memset (World::Pool::On, EntitySlot::Copy) -- unsafe for a
-        // std::vector-owning struct.
+        static uint64_t NodeKey(const Node& node)
+        {
+            seedAssert(node.coord.x < (1u << 28) && node.coord.y < (1u << 28));
+            return ((uint64_t)node.depth << 56) | ((uint64_t)node.coord.x << 28) | (uint64_t)node.coord.y;
+        }
+
+        struct PooledNodeInstance
+        {
+            EntityBase entity;
+            uint32_t lastTouchedFrame = 0;
+        };
+
         struct TerrainHeightPyramid
         {
-            // Default-constructs as the conservative depth-0 full-[0,1]-range pyramid, so a
-            // not-yet-built (or never-built, e.g. no heightmap assigned) instance is always safe to
-            // QueryRange() without a separate null/"not ready" check.
             uint depthBuilt = 0;
             std::vector<std::vector<float>> levelMin = { { 0.0f } }; // level d: row-major [z*(1<<d)+x]
             std::vector<std::vector<float>> levelMax = { { 1.0f } };
 
-            // Conservative union of whichever cells the UV rect overlaps at min(desiredDepth, depthBuilt):
-            // a node whose true depth exceeds depthBuilt is bounded by the coarsest/deepest level actually
-            // built, which is itself a valid (just looser) bound by construction (bottom-up min/max
-            // reduction).
             void QueryRange(float2 uvMin, float2 uvMax, uint desiredDepth, float& outMin, float& outMax) const
             {
                 uint level = std::min(desiredDepth, depthBuilt);
@@ -77,25 +56,37 @@ namespace Systems
             }
         };
 
-        std::unordered_map<uint, std::vector<EntityBase>> instancesPerTerrain; // key = Terrain entity id
+        std::unordered_map<uint, std::unordered_map<uint64_t, PooledNodeInstance>> instancesPerTerrain;
+        uint32_t frameCounter = 0;
 
-        // Per-terrain min/max height pyramid bookkeeping, sibling to instancesPerTerrain above (same
-        // key, same lifetime) -- kept outside the ECS component system since it owns std::vectors and
-        // the ECS pool is raw-malloc/memcpy-based (see Components::TerrainHeightPyramid). Rebuilt
-        // synchronously, immediately, whenever a Terrain's heightmap handle changes (see Update()).
         struct TerrainHeightData
         {
-            Components::Handle<Components::Texture> builtForHeightmap; // invalid = not built yet
-            TerrainHeightPyramid pyramid; // defaults to the conservative [0,1] pyramid
+            Components::Handle<Components::Texture> builtForHeightmap;
+            TerrainHeightPyramid pyramid;
         };
-        std::unordered_map<uint, TerrainHeightData> heightPyramids; // key = Terrain entity id
+        std::unordered_map<uint, TerrainHeightData> heightPyramids;
 
-        // Persistent scratch buffers reused across frames (clear() keeps capacity) so the
-        // steady-state per-frame quadtree walk performs zero heap allocations: nodeScratch[0]/[1]
-        // ping-pong as the current/next subdivision level in Update(), presentTerrains replaces a
-        // per-frame unordered_set (a handful of ids at most, a linear scan beats hashing anyway).
         std::vector<Node> nodeScratch[2];
         std::vector<uint> presentTerrains;
+
+        struct ChurnCounters
+        {
+            uint reusedUnchanged = 0; // pool slot kept as-is, nothing written
+            uint reusedRewritten = 0; // pool slot kept, transform/sphere rewritten (State::dirty)
+            uint created = 0;         // entity Make()'d (incl. the retire+remake mesh/material swap)
+            uint released = 0;        // entity released (leftovers, swaps, terrain removal, ClearAll)
+        };
+        ChurnCounters churn;
+
+        void PublishChurn()
+        {
+            if (Profiler::instance == nullptr)
+                return;
+            Profiler::instance->frameData.terrainReusedUnchanged = churn.reusedUnchanged;
+            Profiler::instance->frameData.terrainReusedRewritten = churn.reusedRewritten;
+            Profiler::instance->frameData.terrainCreated = churn.created;
+            Profiler::instance->frameData.terrainReleased = churn.released;
+        }
 
         void On() override {}
         void Off() override { ClearAll(); }
@@ -104,28 +95,24 @@ namespace Systems
         {
             ZoneScoped;
             for (auto& kv : instancesPerTerrain)
-                for (auto& eb : kv.second)
+                for (auto& nodeKv : kv.second)
                 {
-                    World::Entity e = eb;
-                    if (e.IsValid()) e.ReleaseImmediately();
+                    World::Entity e = nodeKv.second.entity;
+                    if (e.IsValid())
+                    {
+                        e.ReleaseImmediately();
+                        churn.released++;
+                    }
                 }
             instancesPerTerrain.clear();
             heightPyramids.clear();
         }
 
-        // Builds a CPU-only min/max height pyramid for a terrain heightmap: resolves the heightmap's
-        // original source file (same Name -> FindInImportPath -> decode pattern as OMMBaker::RequestBake)
-        // and reduces it bottom-up into Components::TerrainHeightPyramid levels. Called synchronously,
-        // directly, by Systems::TerrainStreaming::Update whenever a Terrain's heightmap handle changes
-        // (see World.h Components::buildTerrainHeightPyramid) -- always returns a usable pyramid,
-        // degrading to a conservative full-[0,1]-range depth-0 pyramid on any failure.
         TerrainHeightPyramid BuildTerrainHeightPyramid(Components::Handle<Components::Texture> heightmap)
         {
             ZoneScoped;
-            static constexpr uint MaxDepth = 10; // finest level = 1024x1024 cells, ~10-11MB worst case total
+            static constexpr uint MaxDepth = 10;
 
-            // Components::TerrainHeightPyramid default-constructs as the conservative depth-0
-            // full-[0,1]-range pyramid, so every failure path below can just return {}.
             auto conservativeFallback = []() { return TerrainHeightPyramid{}; };
 
             if (!heightmap.IsValid())
@@ -147,8 +134,6 @@ namespace Systems
                 return conservativeFallback();
             }
 
-            // Normalize to full-precision RGBA regardless of source format/bit-depth: heightScale/
-            // heightOffset amplify quantization error, so keep float precision rather than truncating.
             DirectX::ScratchImage converted;
             const DirectX::Image* img = image.GetImage(0, 0, 0);
             if (img == nullptr || img->width == 0 || img->height == 0)
@@ -175,7 +160,6 @@ namespace Systems
             pyramid.levelMin.resize(maxDepth + 1);
             pyramid.levelMax.resize(maxDepth + 1);
 
-            // ---- finest level: reduce real texels (red channel, matching terrainmesh.hlsl's .x read) ----
             uint dim = 1u << maxDepth;
             auto& fMin = pyramid.levelMin[maxDepth];
             auto& fMax = pyramid.levelMax[maxDepth];
@@ -196,7 +180,6 @@ namespace Systems
                 }
             }
 
-            // ---- coarser levels: each parent cell = min/max of its 4 children ----
             for (int d = (int)maxDepth - 1; d >= 0; d--)
             {
                 uint pdim = 1u << d, cdim = pdim * 2;
@@ -222,9 +205,6 @@ namespace Systems
             return pyramid;
         }
 
-        // Mirrors common.hlsl's FrustumCulling(camera, boundingSphere) exactly (same plane
-        // convention, same near-camera-sphere-intersection guard) so CPU-side node culling agrees
-        // with the GPU meshlet culling that eventually draws the surviving instances.
         bool FrustumCulled(const HLSL::Camera& camera, float4 boundingSphere)
         {
             float radius = (float)boundingSphere.w;
@@ -239,27 +219,15 @@ namespace Systems
             return culled;
         }
 
-        // Builds a TRUE 3D world-space bounding sphere for a quadtree node: the existing XZ
-        // half-diagonal term combined via Pythagoras with the node's real height half-extent, looked
-        // up from the heightmap's min/max pyramid. pyramid is always safe to query (defaults to the
-        // conservative full-[0,1]-range pyramid when no heightmap is assigned yet, see
-        // Components::TerrainHeightPyramid / Update() below).
         float4 ComputeNodeBoundingSphere(Components::Terrain& terrain, float terrainY, const TerrainHeightPyramid& pyramid, const Node& node)
         {
             float worldExtent = std::max(terrain.worldExtent, 1e-5f);
-            // Matches terrainmesh.hlsl's UV formula exactly (uv = worldPosXZ.xz / terrainWorldSize +
-            // 0.5, using ABSOLUTE world position) -- node.center is already absolute (root pushed as
-            // float2(origin.x, origin.z) in Update()), so this samples the same heightmap region the
-            // mesh shader will displace.
             float2 uvCenter = node.center / worldExtent + float2(0.5f, 0.5f);
             float uvHalf = (node.size / worldExtent) * 0.5f;
 
             float minRaw, maxRaw;
             pyramid.QueryRange(uvCenter - float2(uvHalf, uvHalf), uvCenter + float2(uvHalf, uvHalf), node.depth, minRaw, maxRaw);
 
-            // The pyramid bounds the RAW heightmap, but the mesh shader displaces with the
-            // GPU-eroded map (TerrainErosion pass), so pad by the filter's hard bound so
-            // eroded-but-still-visible nodes are never culled 
             if (terrain.erosionEnabled != 0)
             {
                 float gain = terrain.erosionGain;
@@ -273,18 +241,15 @@ namespace Systems
 
             float y0 = terrainY + minRaw * terrain.heightScale + terrain.heightOffset;
             float y1 = terrainY + maxRaw * terrain.heightScale + terrain.heightOffset;
-            float minY = std::min(y0, y1), maxY = std::max(y0, y1); // heightScale may be negative
+            float minY = std::min(y0, y1), maxY = std::max(y0, y1);
 
             float3 sphereCenter(node.center.x, (minY + maxY) * 0.5f, node.center.y);
-            float halfDiag = node.size * 0.70710678f;   // half-diagonal of a size x size square
+            float halfDiag = node.size * 0.70710678f;
             float halfHeight = (maxY - minY) * 0.5f;
-            float radius = length(float2(halfDiag, halfHeight)); // Pythagorean combination
+            float radius = length(float2(halfDiag, halfHeight));
             return float4(sphereCenter, radius);
         }
 
-        // Returns the node's estimated on-screen size as a fraction of the viewport's vertical
-        // extent (resolution-independent), or a negative value if the node is entirely outside the
-        // frustum.
         float CullNodeAndGetNDCSize(const HLSL::Camera& camera, float invTanHalfFovY, const Node& node, float4 boundingSphere)
         {
             if (FrustumCulled(camera, boundingSphere))
@@ -300,7 +265,10 @@ namespace Systems
             float half = node.size * 0.5f;
             static const float2 dirs[4] = { {-1,-1}, {1,-1}, {-1,1}, {1,1} };
             for (uint i = 0; i < 4; i++)
-                out.push_back({ node.center + dirs[i] * quarter, half, node.depth + 1 });
+            {
+                uint2 childCoord = node.coord * 2u + uint2(dirs[i].x > 0.0f ? 1u : 0u, dirs[i].y > 0.0f ? 1u : 0u);
+                out.push_back({ node.center + dirs[i] * quarter, half, node.depth + 1, childCoord });
+            }
         }
 
         EntityBase MakeNodeInstance(Components::Terrain& terrain, float3 position, float scaleXZ, float4 boundingSphere)
@@ -321,18 +289,7 @@ namespace Systems
             return ent;
         }
 
-        // Emits the leaf instance for a quadtree node by claiming pool[usedCount] (last frame's
-        // instances, in emission order -- the walk is deterministic, so a static camera re-emits
-        // identical nodes in identical order and every slot matches its previous content): a
-        // reused entity is only rewritten (transform + bounding sphere) and flagged State::dirty
-        // -- picked up by the renderer's UpdateInstances, which clears the flag once consumed --
-        // when the node actually changed, otherwise it's left untouched and the renderer skips it
-        // entirely (loaded && !dirty). Only when this frame emits more leaves than last frame are
-        // new entities Make()'d; leftovers are released after the walk (see Update()). A mesh/
-        // material swap releases + remakes the entity instead of mutating it in place:
-        // UpdateInstances accounts per-shader-bucket meshlet contributions on first load only
-        // (documented limitation there).
-        void EmitNodeInstance(Components::Terrain& terrain, float terrainY, const Node& node, float4 boundingSphere, std::vector<EntityBase>& pool, uint& usedCount)
+        void EmitNodeInstance(Components::Terrain& terrain, float terrainY, const Node& node, float4 boundingSphere, std::unordered_map<uint64_t, PooledNodeInstance>& pool)
         {
             if (!terrain.gridMesh.IsValid() || !terrain.material.IsValid())
                 return;
@@ -340,10 +297,12 @@ namespace Systems
             float gridSize = terrain.gridSize > 0.001f ? terrain.gridSize : 0.001f;
             float3 position = float3(node.center.x, terrainY, node.center.y);
             float scaleXZ = node.size / gridSize;
+            uint64_t key = NodeKey(node);
 
-            if (usedCount < pool.size())
+            auto it = pool.find(key);
+            if (it != pool.end())
             {
-                World::Entity ent = pool[usedCount];
+                World::Entity ent = it->second.entity;
                 if (ent.IsValid())
                 {
                     auto& inst = ent.Get<Components::Instance>();
@@ -365,27 +324,29 @@ namespace Systems
                             tr.scale = float3(scaleXZ, 1.0f, scaleXZ);
                             inst.boundingSphereOverride = boundingSphere;
                             ent.Get<Components::State>().flags |= Components::State::Flags::dirty;
+                            churn.reusedRewritten++;
                         }
-                        usedCount++;
+                        else
+                            churn.reusedUnchanged++;
+                        it->second.lastTouchedFrame = frameCounter;
                         return;
                     }
                     ent.ReleaseImmediately(); // mesh/material swapped: retire, remake fresh below
+                    churn.released++;
                 }
-                pool[usedCount++] = MakeNodeInstance(terrain, position, scaleXZ, boundingSphere);
+                it->second.entity = MakeNodeInstance(terrain, position, scaleXZ, boundingSphere);
+                it->second.lastTouchedFrame = frameCounter;
+                churn.created++;
                 return;
             }
-            pool.push_back(MakeNodeInstance(terrain, position, scaleXZ, boundingSphere));
-            usedCount++;
+            pool.emplace(key, PooledNodeInstance{ MakeNodeInstance(terrain, position, scaleXZ, boundingSphere), frameCounter });
+            churn.created++;
         }
 
-        // Processes one quadtree level: nodes still too big get subdivided into newNodesToSubdivide
-        // (fed back in as the next level by the caller's loop), nodes that are the right size or
-        // hit the depth cap become leaf instances, culled nodes are dropped entirely. Computes each
-        // node's bounding sphere once and reuses it for both the cull/size test and the leaf instance.
         void CullQuadtree(Components::Terrain& terrain, float terrainY, const TerrainHeightPyramid& pyramid,
             const HLSL::Camera& camera, float invTanHalfFovY,
             std::vector<Node>& nodesToSubdivide, std::vector<Node>& newNodesToSubdivide,
-            std::vector<EntityBase>& pool, uint& usedCount)
+            std::unordered_map<uint64_t, PooledNodeInstance>& pool)
         {
             ZoneScoped;
             for (auto& node : nodesToSubdivide)
@@ -398,7 +359,7 @@ namespace Systems
                 if (size > terrain.targetScreenSize && node.depth < terrain.quadtreeDepth)
                     Subdivide(node, newNodesToSubdivide);
                 else
-                    EmitNodeInstance(terrain, terrainY, node, boundingSphere, pool, usedCount);
+                    EmitNodeInstance(terrain, terrainY, node, boundingSphere, pool);
             }
         }
 
@@ -406,14 +367,18 @@ namespace Systems
         {
             ZoneScoped;
 
+            churn = {};
+            frameCounter++;
+
             uint terrainQueryIndex = world->Query(Components::Terrain::mask, 0, true);
             auto& terrains = world->frameQueries[terrainQueryIndex];
-            if (terrains.empty()) { ClearAll(); return; }
+            if (terrains.empty()) { ClearAll(); PublishChurn(); return; }
 
-            // Bridged from Renderer.h (UpdateCameras) -- not yet available during the first frame
-            // or two before the renderer finishes initializing.
             if (Components::getMainCamera == nullptr)
+            {
+                PublishChurn();
                 return;
+            }
             HLSL::Camera camera = Components::getMainCamera();
             float invTanHalfFovY = 1.0f / tanf(camera.fovY * (3.14159265f / 180.0f) * 0.5f);
 
@@ -427,9 +392,7 @@ namespace Systems
 
                 auto& terrain = e.Get<Components::Terrain>();
 
-                // Ride the heightmap + decode params on the shared material so terrainmesh.hlsl can
-                // read them. Shading-bucket routing is via the material's shader (already set to
-                // DefaultGTerrain at Terrain creation, see UI.h), not a parameter flag.
+
                 if (terrain.material.IsValid())
                 {
                     auto& mat = terrain.material.Get();
@@ -441,12 +404,6 @@ namespace Systems
                     // owned and written by the TerrainErosion pass (Renderer.h), not here.
                 }
 
-                // Rebuild the height pyramid synchronously, immediately, only when the heightmap
-                // handle actually changed (cheap handle-equality check otherwise) -- guaranteed ready
-                // for this SAME frame's quadtree walk below, no "pending" state to handle. A cleared
-                // heightmap resets to the default conservative pyramid rather than keeping stale
-                // data -- but only ONCE (reconstructing TerrainHeightData allocates its default
-                // pyramid vectors, so don't redo it every frame the heightmap stays unassigned).
                 auto& heightData = heightPyramids[e.id];
                 if (!terrain.heightmap.IsValid())
                 {
@@ -461,41 +418,45 @@ namespace Systems
 
                 float3 origin = e.Has<Components::Transform>() ? e.Get<Components::Transform>().position : float3(0);
 
-                // last frame's leaves double as this frame's reuse pool: the walk below claims
-                // pool[0..usedCount) in emission order (see EmitNodeInstance), leftovers past
-                // usedCount found no node this frame and are released after the walk.
                 auto& pool = instancesPerTerrain[e.id];
-                uint usedCount = 0;
 
                 auto& nodesToSubdivide = nodeScratch[0];
                 auto& newNodesToSubdivide = nodeScratch[1];
                 nodesToSubdivide.clear();
-                nodesToSubdivide.push_back({ float2(origin.x, origin.z), terrain.worldExtent, 0 });
+                nodesToSubdivide.push_back({ float2(origin.x, origin.z), terrain.worldExtent, 0, uint2(0, 0) });
                 while (!nodesToSubdivide.empty())
                 {
                     newNodesToSubdivide.clear();
-                    CullQuadtree(terrain, origin.y, heightData.pyramid, camera, invTanHalfFovY, nodesToSubdivide, newNodesToSubdivide, pool, usedCount);
-                    std::swap(nodesToSubdivide, newNodesToSubdivide); // pointer swap, both keep capacity
+                    CullQuadtree(terrain, origin.y, heightData.pyramid, camera, invTanHalfFovY, nodesToSubdivide, newNodesToSubdivide, pool);
+                    std::swap(nodesToSubdivide, newNodesToSubdivide);
                 }
 
                 {
                     ZoneScopedN("ReleaseLeftoverInstances");
-                    for (size_t i = usedCount; i < pool.size(); i++)
+                    for (auto it = pool.begin(); it != pool.end();)
                     {
-                        World::Entity c = pool[i];
-                        if (c.IsValid()) c.ReleaseImmediately();
+                        if (it->second.lastTouchedFrame != frameCounter)
+                        {
+                            World::Entity c = it->second.entity;
+                            if (c.IsValid())
+                            {
+                                c.ReleaseImmediately();
+                                churn.released++;
+                            }
+                            it = pool.erase(it);
+                        }
+                        else
+                            ++it;
                     }
-                    pool.resize(usedCount);
                 }
             }
 
-            // drop bookkeeping (and release orphaned instances) for terrains removed since last frame
             auto stillPresent = [&](uint id) { return std::find(presentTerrains.begin(), presentTerrains.end(), id) != presentTerrains.end(); };
             for (auto it = instancesPerTerrain.begin(); it != instancesPerTerrain.end();)
             {
                 if (!stillPresent(it->first))
                 {
-                    for (auto& eb : it->second) { World::Entity c = eb; if (c.IsValid()) c.ReleaseImmediately(); }
+                    for (auto& nodeKv : it->second) { World::Entity c = nodeKv.second.entity; if (c.IsValid()) { c.ReleaseImmediately(); churn.released++; } }
                     it = instancesPerTerrain.erase(it);
                 }
                 else ++it;
@@ -505,6 +466,8 @@ namespace Systems
                 if (!stillPresent(it->first)) it = heightPyramids.erase(it);
                 else ++it;
             }
+
+            PublishChurn();
 
             //world->structureChanged = true;
         }

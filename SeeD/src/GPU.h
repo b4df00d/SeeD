@@ -2627,6 +2627,13 @@ struct Profiler
         uint instancesCount;
         uint meshletsCount;
         uint verticesCount;
+        // terrain quadtree instance churn (written by Systems::TerrainStreaming::Update, shown in
+        // ProfilerWindow): baseline for the override-mesh work, where rewritten+created becomes
+        // the per-frame vertex-bake + BLAS-build count
+        uint terrainReusedUnchanged;
+        uint terrainReusedRewritten;
+        uint terrainCreated;
+        uint terrainReleased;
     };
     FrameData frameData;
 
@@ -3157,14 +3164,6 @@ struct MeshStorage
                 lod.meshlets[i].triangleOffset += _nextMeshletTriangleOffset;
                 lod.meshlets[i].vertexOffset += _nextMeshletVertexOffset;
             }
-            for (uint j = 0; j < lod.meshlet_vertices.size(); j++)
-            {
-                lod.meshlet_vertices[j] += _nextVertexOffset;
-            }
-            for (uint j = 0; j < lod.indices.size(); j++)
-            {
-                lod.indices[j] += _nextVertexOffset;
-            }
 
             meshlets.UploadElements(lod.meshlets.data(), (uint)lod.meshlets.size(), _nextMeshletOffset, commandBuffer);
             meshletVertices.UploadElements(lod.meshlet_vertices.data(), (uint)lod.meshlet_vertices.size(), _nextMeshletVertexOffset, commandBuffer);
@@ -3348,7 +3347,7 @@ struct MeshStorage
         // Position is the SNORM16 packedPos at offset 0 of VertexPacked; the per-mesh Transform3x4
         // below dequantizes it (q in [-1,1]) back to object space during the build.
         D3D12_RAYTRACING_GEOMETRY_TRIANGLES_DESC triangles = {};
-        triangles.VertexBuffer.StartAddress = vertices.GetResource()->GetGPUVirtualAddress();
+        triangles.VertexBuffer.StartAddress = vertices.GetResource()->GetGPUVirtualAddress() + (UINT64)mesh.vertexOffset * vertices.stride;
         triangles.VertexBuffer.StrideInBytes = vertices.stride;
         triangles.VertexCount = mesh.vertexCount;
         triangles.VertexFormat = DXGI_FORMAT_R16G16B16A16_SNORM;

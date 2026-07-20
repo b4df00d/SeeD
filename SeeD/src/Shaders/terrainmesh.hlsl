@@ -42,7 +42,7 @@ void MeshMainTerrain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_
     if (groupThreadId.x < meshlet.vertexCount)
     {
         uint index = meshletVertices[meshlet.vertexOffset + groupThreadId.x];
-        HLSL::Vertex v = verticesData[index]; // single fetch
+        HLSL::Vertex v = verticesData[index + mesh.vertexOffset];
 
         float3 objectPos = DecodeVertexPositionOS(v);
         float3 tangentOS = DecodeVertexTangentOS(v);

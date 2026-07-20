@@ -1309,9 +1309,9 @@ float2 bary)
     StructuredBuffer<uint> indicesData = ResourceDescriptorHeap[commonResourcesIndices.indicesHeapIndex];
     
     uint iBase = committedPrimitiveIndex * 3 + mesh.LODs[lowLod ? mesh.lodCount - 1 : 0].indexOffset;
-    uint i1 = indicesData[iBase + 0];
-    uint i2 = indicesData[iBase + 1];
-    uint i3 = indicesData[iBase + 2];
+    uint i1 = indicesData[iBase + 0] + mesh.vertexOffset;
+    uint i2 = indicesData[iBase + 1] + mesh.vertexOffset;
+    uint i3 = indicesData[iBase + 2] + mesh.vertexOffset;
 
     float2 uv1 = verticesData[i1].uv;
     float2 uv2 = verticesData[i2].uv;
