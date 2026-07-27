@@ -1319,13 +1319,17 @@ public:
         uint cap = ms->verticesAllocatedCount;
         if (cap > 0)
         {
-            for (size_t i = 0; i < ms->allMeshes.size(); i++)
+            // allMeshes is a sparse unordered_map (holds both regular and override meshes,
+            // recycled slots leave holes) -- iterate it directly rather than by numeric index.
+            uint i = 0;
+            for (auto& kv : ms->allMeshes)
             {
-                auto& m = ms->allMeshes[i];
+                auto& m = kv.second;
                 float x0 = p0.x + width * ((float)m.vertexOffset / cap);
                 float x1 = p0.x + width * ((float)(m.vertexOffset + m.vertexCount) / cap);
                 ImU32 col = (ImU32)ImColor::HSV((float)((i * 0.137f) - (int)(i * 0.137f)), 0.6f, 0.85f);
                 dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(max(x1, x0 + 1.0f), p1.y), col);
+                i++;
             }
         }
         dl->AddRect(p0, p1, IM_COL32(120, 120, 120, 255));

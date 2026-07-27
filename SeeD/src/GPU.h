@@ -2958,9 +2958,19 @@ struct MeshStorage
     uint nextIndexOffset = 0;
     Resource indices;
 
-    // just to keep the BLAS so it can be released
-    // could we just store BLASes in big bulk resources like above ?
-    std::vector<Mesh> allMeshes;
+    // The CPU-side owner of every Mesh (BLAS Resources included), both regular AND override
+    // (terrain node displacement baking; later shared by skinning, roadmap item 6): keyed by the
+    // SAME index namespace as HLSL::Mesh.storageIndex (both come from nextMeshOffset, into the
+    // same `meshes` GPU buffer), so `meshes[instance.meshIndex]` resolves identically either way.
+    // unordered_map (not vector): element addresses stay stable across insertions, which is what
+    // lets AssetLibrary::Asset::data hold a raw pointer directly into this container.
+    std::unordered_map<uint, Mesh> allMeshes;
+    // Free list of override slots PER SOURCE mesh storageIndex: a freed slot is only safe to
+    // reuse for ANOTHER override of the SAME source (identical vertexCount -> its vertex range,
+    // mesh-buffer slot, and BLAS/BLASLow buffers are already exactly sized). Regular (non-override)
+    // meshes are never freed this way -- see Off()/AssetLibrary's deferred mesh-eviction note.
+    std::unordered_map<uint, std::vector<uint>> overrideFreeListBySource;
+
     Resource scratchBLAS;
     uint maxScratchSizeInBytes = 150 * 1024 * 1024; // 150 MB of wasted mem for BLAS compute ? a little much na ?
 
@@ -3029,6 +3039,20 @@ struct MeshStorage
         scratchBLAS.Release();
         identityMatrix.Release();
         meshTransforms.Release();
+        for (auto& kv : allMeshes)
+        {
+            Mesh& mesh = kv.second;
+            mesh.BLAS.Release();
+            mesh.BLASLow.Release();
+            mesh.ommArray.Release();
+            mesh.ommArrayLow.Release();
+            mesh.ommIndices.Release();
+            mesh.ommIndicesLow.Release();
+            mesh.ommInputs.Release();
+            mesh.ommInputsLow.Release();
+        }
+        allMeshes.clear();
+        overrideFreeListBySource.clear();
         instance = nullptr;
     }
 
@@ -3068,11 +3092,9 @@ struct MeshStorage
             {
                 IOs::Log("  Copying {} existing elements ({} bytes) to new buffer", allocatedCount, oldByteSize);
 
-                // Transition both buffers for copy operation
-                oldResource.Transition(commandBuffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                oldResource.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
                 resource.Transition(commandBuffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
 
-                // Copy all old data to new buffer
                 commandBuffer.cmd->CopyBufferRegion(
                     resource.GetResource(),      // destination
                     0,                            // destination offset
@@ -3081,7 +3103,6 @@ struct MeshStorage
                     oldByteSize                   // size to copy
                 );
 
-                // Transition new buffer back to common state for usage
                 resource.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
 
                 // Old resource will be released after transitions
@@ -3095,18 +3116,19 @@ struct MeshStorage
         }
     }
 
-    Mesh Load(MeshData& meshData, CommandBuffer& commandBuffer, const OMMData* omm = nullptr)
+    Mesh& Load(MeshData& meshData, CommandBuffer& commandBuffer, const OMMData* omm = nullptr)
     {
         ZoneScoped;
 
         lock.lock();
-        Mesh newMesh;
 
         uint _nextMeshOffset = nextMeshOffset;
         uint _nextVertexOffset = nextVertexOffset;
 
         nextMeshOffset += 1;
         nextVertexOffset += (uint)meshData.vertices.size();
+
+        Mesh& newMesh = allMeshes[_nextMeshOffset];
 
         // Ensure mesh buffer has capacity
         EnsureBufferCapacity(meshes, meshesAllocatedCount, nextMeshOffset, sizeof(HLSL::Mesh), "meshes", commandBuffer);
@@ -3170,7 +3192,6 @@ struct MeshStorage
             meshletTriangles.UploadElements(lod.meshlet_triangles.data(), (uint)lod.meshlet_triangles.size(), _nextMeshletTriangleOffset, commandBuffer);
             indices.UploadElements(lod.indices.data(), (uint)lod.indices.size(), _nextIndexOffset, commandBuffer);
         }
-        lock.unlock();
 
         // Pack vertices: SNORM16 position (local to the mesh AABB) + octahedral normal/tangent + uv.
         // The binormal is dropped and rebuilt on the GPU from the handedness sign stored in packedPos.w.
@@ -3203,39 +3224,38 @@ struct MeshStorage
             }
         }
 
-        // Per-mesh BLAS dequant transform: objectPos = diag(halfExtent) * q + center, q in [-1,1].
+        // Per-mesh BLAS dequant transform: objectPos = diag(halfExtent) * q + center, q in [-1,1].    
         {
             ZoneScopedN("BLAS transform");
-            {
-                float hx = ex * 0.5f, hy = ey * 0.5f, hz = ez * 0.5f;
-                BLASTransform xf = {};
-                xf.m[0] = hx;  xf.m[3]  = mnx + hx;
-                xf.m[5] = hy;  xf.m[7]  = mny + hy;
-                xf.m[10] = hz; xf.m[11] = mnz + hz;
-                if (_nextMeshOffset >= meshTransforms.Size())
-                    meshTransforms.Resize(_nextMeshOffset + 64);
-                meshTransforms[_nextMeshOffset] = xf;
-                meshTransforms.Upload();
-            }
+            float hx = ex * 0.5f, hy = ey * 0.5f, hz = ez * 0.5f;
+            BLASTransform xf = {};
+            xf.m[0] = hx;  xf.m[3]  = mnx + hx;
+            xf.m[5] = hy;  xf.m[7]  = mny + hy;
+            xf.m[10] = hz; xf.m[11] = mnz + hz;
+            if (_nextMeshOffset >= meshTransforms.Size())
+                meshTransforms.Resize(_nextMeshOffset + 64);
+            meshTransforms[_nextMeshOffset] = xf;
+            meshTransforms.Upload();
         }
 
         meshes.UploadElements(&newMesh, 1, _nextMeshOffset, commandBuffer);
         vertices.UploadElements(packed.data(), (uint)packed.size(), _nextVertexOffset, commandBuffer);
-
-
+        
+        
         meshes.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         meshlets.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         meshletVertices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         meshletTriangles.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
-
+        
         vertices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         indices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
+        
         LoadBLAS(newMesh, commandBuffer, omm);
-
+        
         vertices.Transition(commandBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
         indices.Transition(commandBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
-
+        
+        lock.unlock();
         return newMesh;
     }
 
@@ -3338,8 +3358,7 @@ struct MeshStorage
         return ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
     }
 
-    // Returns the 256-aligned scratch size consumed so a following build can start past it.
-    UINT64 BuildBLAS(Mesh& mesh, uint lodIndex, Resource& blas, UINT64 scratchOffset, CommandBuffer& commandBuffer, Resource* ommArray = nullptr, Resource* ommIndexBuffer = nullptr, DXGI_FORMAT ommIndexFormat = DXGI_FORMAT_R32_UINT)
+    UINT64 BuildBLAS(Mesh& mesh, uint lodIndex, Resource& blas, UINT64 scratchOffset, CommandBuffer& commandBuffer, Resource* ommArray = nullptr, Resource* ommIndexBuffer = nullptr, DXGI_FORMAT ommIndexFormat = DXGI_FORMAT_R32_UINT, bool allowInPlaceRebuild = false)
     {
         seedAssert(mesh.LODs[lodIndex].indexCount > 0);
 
@@ -3402,7 +3421,8 @@ struct MeshStorage
         UINT64 scratchSizeInBytes = ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
         UINT64 resultSizeInBytes = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
 
-        blas.CreateAccelerationStructure((uint)resultSizeInBytes, lodIndex == 0 ? "BLAS" : "BLASLow");
+        if (!(allowInPlaceRebuild && blas.GetResource() != nullptr))
+            blas.CreateAccelerationStructure((uint)resultSizeInBytes, lodIndex == 0 ? "BLAS" : "BLASLow");
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc;
         buildDesc.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
@@ -3425,6 +3445,120 @@ struct MeshStorage
         return scratchSizeInBytes;
     }
 
+    uint CreateMeshOverride(Mesh& source, float aabbMinY, float aabbExtentY, CommandBuffer& commandBuffer)
+    {
+        ZoneScoped;
+        lock.lock();
+
+        uint overrideIndex;
+        auto& freeList = overrideFreeListBySource[source.storageIndex];
+        bool recycled = !freeList.empty();
+        uint vertexOffset;
+        if (recycled)
+        {
+            overrideIndex = freeList.back();
+            freeList.pop_back();
+            vertexOffset = allMeshes[overrideIndex].vertexOffset; // already sized for this source's vertexCount
+        }
+        else
+        {
+            overrideIndex = nextMeshOffset;
+            nextMeshOffset += 1;
+            EnsureBufferCapacity(meshes, meshesAllocatedCount, nextMeshOffset, sizeof(HLSL::Mesh), "meshes", commandBuffer);
+
+            vertexOffset = nextVertexOffset;
+            nextVertexOffset += source.vertexCount;
+            EnsureBufferCapacity(vertices, verticesAllocatedCount, nextVertexOffset, sizeof(VertexPacked), "vertices", commandBuffer);
+        }
+
+        Mesh& ov = allMeshes[overrideIndex];
+        (HLSL::Mesh&)ov = (HLSL::Mesh&)source; // copy of original buffers indices/offsets
+        ov.vertexOffset = vertexOffset;
+        ov.storageIndex = overrideIndex;
+        ov.aabbMin.y = aabbMinY;
+        ov.aabbExtent.y = std::max(aabbExtentY, 1e-4f); // avoid a truly-zero extent (degenerate SNORM16 decode)
+        ov.aabbMin.w = 1.0f;
+
+        meshes.UploadElements(&(HLSL::Mesh&)ov, 1, overrideIndex, commandBuffer);
+
+        float hx = ov.aabbExtent.x * 0.5f, hy = ov.aabbExtent.y * 0.5f, hz = ov.aabbExtent.z * 0.5f;
+        BLASTransform xf = {};
+        xf.m[0] = hx;  xf.m[3]  = ov.aabbMin.x + hx;
+        xf.m[5] = hy;  xf.m[7]  = ov.aabbMin.y + hy;
+        xf.m[10] = hz; xf.m[11] = ov.aabbMin.z + hz;
+        if (overrideIndex >= meshTransforms.Size())
+            meshTransforms.Resize(overrideIndex + 64);
+        meshTransforms[overrideIndex] = xf;
+        meshTransforms.Upload();
+
+        if (!recycled)
+        {
+            vertices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            indices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            LoadBLAS(ov, commandBuffer);
+            vertices.Transition(commandBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+            indices.Transition(commandBuffer, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+        }
+
+        lock.unlock();
+        return overrideIndex;
+    }
+
+    // Returns an override slot to its source's free list for reuse by a future
+    // CreateMeshOverride of the SAME source mesh (matching vertexCount). Does not release any GPU
+    // resource -- the vertex range, mesh-buffer slot, and BLAS/BLASLow buffers stay allocated so
+    // a future reuse needs no GPU allocation at all, only a metadata rewrite + re-bake.
+    void FreeMeshOverride(uint overrideMeshIndex, uint sourceMeshIndex)
+    {
+        ZoneScoped;
+        lock.lock();
+        overrideFreeListBySource[sourceMeshIndex].push_back(overrideMeshIndex);
+        lock.unlock();
+    }
+
     // TODO : a real release in meshStorage
 };
 MeshStorage* MeshStorage::instance;
+
+struct TextureStorage
+{
+    static TextureStorage* instance;
+    std::unordered_map<uint, Resource> textures;
+    uint nextIndex = 0;
+
+    void On() { instance = this; }
+    void Off()
+    {
+        for (auto& kv : textures)
+            kv.second.Release();
+        textures.clear();
+        instance = nullptr;
+    }
+
+    void Release(uint index)
+    {
+        auto it = textures.find(index);
+        if (it == textures.end())
+            return;
+        it->second.Release();
+        textures.erase(it);
+    }
+};
+TextureStorage* TextureStorage::instance;
+
+struct ShaderStorage
+{
+    static ShaderStorage* instance;
+    std::unordered_map<uint, Shader> shaders;
+    uint nextIndex = 0;
+
+    void On() { instance = this; }
+    void Off()
+    {
+        for (auto& kv : shaders)
+            kv.second.Release();
+        shaders.clear();
+        instance = nullptr;
+    }
+};
+ShaderStorage* ShaderStorage::instance;

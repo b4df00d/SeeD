@@ -96,14 +96,7 @@ namespace Systems
             ZoneScoped;
             for (auto& kv : instancesPerTerrain)
                 for (auto& nodeKv : kv.second)
-                {
-                    World::Entity e = nodeKv.second.entity;
-                    if (e.IsValid())
-                    {
-                        e.ReleaseImmediately();
-                        churn.released++;
-                    }
-                }
+                    ReleaseNodeEntity(nodeKv.second.entity);
             instancesPerTerrain.clear();
             heightPyramids.clear();
         }
@@ -219,6 +212,37 @@ namespace Systems
             return culled;
         }
 
+        // Max raw [0,1] height delta the erosion filter can add (terrainErosion.hlsl clamps
+        // gullies to +/-1 before scaling by strength*scale*gain^octave), summed geometrically
+        // across octaves. Shared by ComputeNodeBoundingSphere (culling pad) and
+        // ComputeOverrideHeightRange (override mesh AABB) so the two never drift apart.
+        static float ComputeErosionRawPad(Components::Terrain& terrain)
+        {
+            if (terrain.erosionEnabled == 0)
+                return 0.0f;
+            float gain = terrain.erosionGain;
+            float octaveSum = std::abs(gain - 1.0f) < 1e-4f
+                ? (float)terrain.erosionOctaves
+                : (1.0f - std::pow(gain, (float)terrain.erosionOctaves)) / (1.0f - gain);
+            return terrain.erosionStrength * terrain.erosionScale * octaveSum * std::max(1.0f, terrain.erosionGullyWeight);
+        }
+
+        // OBJECT-SPACE (no terrainY) Y range a node's override mesh will ever displace into --
+        // the encode domain for its SNORM16 position quantization (MeshStorage::CreateMeshOverride).
+        // Conservative/per-terrain, not per-node-footprint (unlike the culling pyramid query):
+        // 16-bit precision over the whole padded range is already sub-mm, so there is no need for
+        // the tighter per-node bound culling uses.
+        static void ComputeOverrideHeightRange(Components::Terrain& terrain, float& outMinY, float& outExtentY)
+        {
+            float maxDelta = ComputeErosionRawPad(terrain);
+            float minRaw = std::max(0.0f, 0.0f - maxDelta);
+            float maxRaw = std::min(1.0f, 1.0f + maxDelta);
+            float y0 = minRaw * terrain.heightScale + terrain.heightOffset;
+            float y1 = maxRaw * terrain.heightScale + terrain.heightOffset;
+            outMinY = std::min(y0, y1);
+            outExtentY = std::abs(y1 - y0);
+        }
+
         float4 ComputeNodeBoundingSphere(Components::Terrain& terrain, float terrainY, const TerrainHeightPyramid& pyramid, const Node& node)
         {
             float worldExtent = std::max(terrain.worldExtent, 1e-5f);
@@ -230,11 +254,7 @@ namespace Systems
 
             if (terrain.erosionEnabled != 0)
             {
-                float gain = terrain.erosionGain;
-                float octaveSum = std::abs(gain - 1.0f) < 1e-4f
-                    ? (float)terrain.erosionOctaves
-                    : (1.0f - std::pow(gain, (float)terrain.erosionOctaves)) / (1.0f - gain);
-                float maxDelta = terrain.erosionStrength * terrain.erosionScale * octaveSum * std::max(1.0f, terrain.erosionGullyWeight);
+                float maxDelta = ComputeErosionRawPad(terrain);
                 minRaw = std::max(0.0f, minRaw - maxDelta);
                 maxRaw = std::min(1.0f, maxRaw + maxDelta);
             }
@@ -250,11 +270,10 @@ namespace Systems
             return float4(sphereCenter, radius);
         }
 
+        // Frustum visibility is checked separately by the caller (also needed there for the BVH
+        // force decision) -- this just computes the estimated on-screen size.
         float CullNodeAndGetNDCSize(const HLSL::Camera& camera, float invTanHalfFovY, const Node& node, float4 boundingSphere)
         {
-            if (FrustumCulled(camera, boundingSphere))
-                return -1.0f;
-
             float dist = std::max((float)length(boundingSphere.xyz - camera.worldPos.xyz), 0.001f);
             return (node.size / dist) * 0.5f * invTanHalfFovY;
         }
@@ -271,11 +290,53 @@ namespace Systems
             }
         }
 
-        EntityBase MakeNodeInstance(Components::Terrain& terrain, float3 position, float scaleXZ, float4 boundingSphere)
+        // Frees an entity's override mesh slot (if any) before releasing it -- the ONE place that
+        // must run at every node-instance destruction site (leftover sweep, mesh/material-swap
+        // retire, removed-terrain teardown, ClearAll), so it's centralized here instead of
+        // duplicated at each call site.
+        void ReleaseNodeEntity(World::Entity ent)
+        {
+            if (!ent.IsValid())
+                return;
+            if (ent.Has<Components::MeshOverride>())
+            {
+                auto& ov = ent.Get<Components::MeshOverride>();
+                if (ov.overrideMeshIndex != ~0u && MeshStorage::instance != nullptr)
+                    MeshStorage::instance->FreeMeshOverride(ov.overrideMeshIndex, ov.sourceMeshIndex);
+            }
+            ent.ReleaseImmediately();
+            churn.released++;
+        }
+
+        // Attempts to (re)populate a node's MeshOverride from the terrain's current gridMesh.
+        // Called at node creation AND, if that attempt found the source mesh not resolvable yet,
+        // retried every frame the node is revisited (EmitNodeInstance) until it succeeds -- an
+        // async mesh load taking a few frames is the COMMON case right after a scene loads a
+        // terrain from disk (AssetLibrary::Get with the default immediate=false just registers a
+        // loading request and returns nullptr; only the synchronous "Build Grid Mesh" editor
+        // button path resolves on the first try). Leaves the ~0u sentinel in place (no-op) when
+        // it still isn't ready -- self-healing, no special one-time resync pass needed, and cheap
+        // to retry (a failed attempt costs one Get<Mesh> call).
+        void TryAttachOverride(World::Entity terrainEntity, Components::Terrain& terrain, Components::MeshOverride& ov)
+        {
+            Components::Mesh& gridMeshCmp = terrain.gridMesh.Get();
+            Mesh* sourceMesh = AssetLibrary::instance->Get<Mesh>(gridMeshCmp.id);
+            if (sourceMesh == nullptr)
+                return;
+
+            float aabbMinY, aabbExtentY;
+            ComputeOverrideHeightRange(terrain, aabbMinY, aabbExtentY);
+            ov.overrideMeshIndex = MeshStorage::instance->CreateMeshOverride(*sourceMesh, aabbMinY, aabbExtentY, AssetLibrary::instance->commandBuffer.Get());
+            ov.sourceMeshIndex = sourceMesh->storageIndex;
+            ov.terrain.Set(terrainEntity);
+            ov.dirty = 1; // always bake at least once before this node is ever rendered
+        }
+
+        EntityBase MakeNodeInstance(World::Entity terrainEntity, Components::Terrain& terrain, float3 position, float scaleXZ, float4 boundingSphere)
         {
             ZoneScoped;
             World::Entity ent;
-            ent.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Instance::mask);
+            ent.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Instance::mask | Components::MeshOverride::mask);
             auto& tr = ent.Get<Components::Transform>();
             tr.position = position;
             tr.rotation = quaternion::identity();
@@ -286,10 +347,26 @@ namespace Systems
             inst.meshRT = Components::Handle<Components::Mesh>{ entityInvalid };
             inst.boundingSphereOverride = boundingSphere; // world-space, real per-node height range
             ent.Get<Components::State>().flags |= Components::State::Flags::transient;
+
+            // Terrain RT/raster unification: give this node its own override mesh (own vertex
+            // range + AABB + BLAS, sharing the source grid's meshlet/index/LOD data) so it gets
+            // displaced ONCE on the GPU (TerrainErosion::Render's bake dispatch) instead of the
+            // gbuffer path re-sampling the heightmap every frame, and enters the TLAS as real
+            // geometry instead of a flat plane. Starts at the ~0u sentinel (no MeshOverride
+            // content -> UpdateInstances/terrainmesh.hlsl both no-op) and falls back to the
+            // ORIGINAL live-displacement path until TryAttachOverride succeeds -- may take a few
+            // frames right after scene load (see its comment).
+            auto& ov = ent.Get<Components::MeshOverride>();
+            ov.overrideMeshIndex = ~0u;
+            ov.sourceMeshIndex = ~0u;
+            ov.terrain.Set(entityInvalid);
+            ov.dirty = 0;
+            TryAttachOverride(terrainEntity, terrain, ov);
+
             return ent;
         }
 
-        void EmitNodeInstance(Components::Terrain& terrain, float terrainY, const Node& node, float4 boundingSphere, std::unordered_map<uint64_t, PooledNodeInstance>& pool)
+        void EmitNodeInstance(World::Entity terrainEntity, Components::Terrain& terrain, float terrainY, const Node& node, float4 boundingSphere, std::unordered_map<uint64_t, PooledNodeInstance>& pool)
         {
             if (!terrain.gridMesh.IsValid() || !terrain.material.IsValid())
                 return;
@@ -328,22 +405,44 @@ namespace Systems
                         }
                         else
                             churn.reusedUnchanged++;
+
+                        // Retry attaching an override every frame it's still missing (source mesh
+                        // wasn't resolvable at creation time -- see TryAttachOverride), or re-dirty
+                        // an already-attached one: footprint changed -> the baked geometry (sampled
+                        // at the OLD position/scale) is stale, needs a re-bake at the new footprint.
+                        if (ent.Has<Components::MeshOverride>())
+                        {
+                            auto& ov = ent.Get<Components::MeshOverride>();
+                            if (ov.overrideMeshIndex == ~0u)
+                            {
+                                TryAttachOverride(terrainEntity, terrain, ov);
+                                // A retry that just succeeded needs UpdateInstances (Renderer.h)
+                                // to re-upload this instance -- it currently points at the
+                                // fallback source mesh, and won't be revisited otherwise (its
+                                // "loaded && !dirty" skip only reacts to Components::State::dirty,
+                                // separate from MeshOverride::dirty above).
+                                if (ov.overrideMeshIndex != ~0u)
+                                    ent.Get<Components::State>().flags |= Components::State::Flags::dirty;
+                            }
+                            else if (changed)
+                                ov.dirty = 1;
+                        }
+
                         it->second.lastTouchedFrame = frameCounter;
                         return;
                     }
-                    ent.ReleaseImmediately(); // mesh/material swapped: retire, remake fresh below
-                    churn.released++;
+                    ReleaseNodeEntity(ent); // mesh/material swapped: retire, remake fresh below
                 }
-                it->second.entity = MakeNodeInstance(terrain, position, scaleXZ, boundingSphere);
+                it->second.entity = MakeNodeInstance(terrainEntity, terrain, position, scaleXZ, boundingSphere);
                 it->second.lastTouchedFrame = frameCounter;
                 churn.created++;
                 return;
             }
-            pool.emplace(key, PooledNodeInstance{ MakeNodeInstance(terrain, position, scaleXZ, boundingSphere), frameCounter });
+            pool.emplace(key, PooledNodeInstance{ MakeNodeInstance(terrainEntity, terrain, position, scaleXZ, boundingSphere), frameCounter });
             churn.created++;
         }
 
-        void CullQuadtree(Components::Terrain& terrain, float terrainY, const TerrainHeightPyramid& pyramid,
+        void CullQuadtree(World::Entity terrainEntity, Components::Terrain& terrain, float terrainY, const TerrainHeightPyramid& pyramid,
             const HLSL::Camera& camera, float invTanHalfFovY,
             std::vector<Node>& nodesToSubdivide, std::vector<Node>& newNodesToSubdivide,
             std::unordered_map<uint64_t, PooledNodeInstance>& pool)
@@ -352,14 +451,36 @@ namespace Systems
             for (auto& node : nodesToSubdivide)
             {
                 float4 boundingSphere = ComputeNodeBoundingSphere(terrain, terrainY, pyramid, node);
-                float size = CullNodeAndGetNDCSize(camera, invTanHalfFovY, node, boundingSphere);
-                if (size < 0.0f)
-                    continue; // frustum-culled: nothing under this node can be visible either
+                bool frustumCulled = FrustumCulled(camera, boundingSphere);
 
-                if (size > terrain.targetScreenSize && node.depth < terrain.quadtreeDepth)
+                // Omnidirectional (NOT frustum-gated) forced depth around the camera: keeps
+                // terrain resident in the TLAS for RT shadow rays, whose casters aren't
+                // necessarily camera-frustum-visible -- culling.hlsl's RT instance culling is
+                // already distance-only/omnidirectional, it just never sees instances this CPU
+                // walk dropped in the first place. Full BVHMaxDepth is forced within
+                // BVHMinRadius, linearly relaxed to 0 by BVHMaxRadius; BVHMaxRadius <=
+                // BVHMinRadius (the default) disables this entirely.
+                bool bvhActive = terrain.BVHMaxRadius > terrain.BVHMinRadius;
+                float distToCam = (float)length(boundingSphere.xyz - camera.worldPos.xyz);
+                bool bvhRelevant = bvhActive && distToCam < terrain.BVHMaxRadius;
+                uint forcedDepth = 0;
+                if (bvhActive)
+                {
+                    float t = std::clamp((distToCam - terrain.BVHMinRadius) / (terrain.BVHMaxRadius - terrain.BVHMinRadius), 0.0f, 1.0f);
+                    forcedDepth = (uint)std::round((1.0f - t) * terrain.BVHMaxDepth);
+                }
+
+                if (frustumCulled && !bvhRelevant)
+                    continue; // neither raster-visible nor BVH/shadow-relevant
+
+                float size = frustumCulled ? -1.0f : CullNodeAndGetNDCSize(camera, invTanHalfFovY, node, boundingSphere);
+                bool subdivideForLOD = !frustumCulled && size > terrain.targetScreenSize && node.depth < terrain.quadtreeDepth;
+                bool subdivideForBVH = bvhRelevant && node.depth < forcedDepth;
+
+                if (subdivideForLOD || subdivideForBVH)
                     Subdivide(node, newNodesToSubdivide);
                 else
-                    EmitNodeInstance(terrain, terrainY, node, boundingSphere, pool);
+                    EmitNodeInstance(terrainEntity, terrain, terrainY, node, boundingSphere, pool);
             }
         }
 
@@ -400,12 +521,19 @@ namespace Systems
                     mat.parameters[Components::TerrainHeightScaleParam] = terrain.heightScale;
                     mat.parameters[Components::TerrainHeightOffsetParam] = terrain.heightOffset;
                     mat.parameters[Components::TerrainWorldSizeParam] = terrain.worldExtent;
+                    mat.parameters[Components::TerrainHeightmapBlurRadiusParam] = (float)terrain.heightmapBlurRadius;
                     // params TerrainErodedHeightmapParam (7) / TerrainErosionDiffParam (9) are
                     // owned and written by the TerrainErosion pass (Renderer.h), not here.
                 }
 
+                // Procedural terrains have no imported texture asset at all -- terrain.heightmap
+                // may be a never-explicitly-assigned Handle, and raw-malloc'd ECS component
+                // storage has no zero-init guarantee, so IsValid() (a sentinel-id check, not an
+                // "was this ever set" check) can't be trusted to read false here. Skip straight to
+                // the conservative fallback pyramid (full [0,1] raw-height range) instead of
+                // risking BuildTerrainHeightPyramid treating garbage bytes as a real entity.
                 auto& heightData = heightPyramids[e.id];
-                if (!terrain.heightmap.IsValid())
+                if (terrain.useProceduralHeightmap || !terrain.heightmap.IsValid())
                 {
                     if (heightData.builtForHeightmap.IsValid())
                         heightData = {};
@@ -427,7 +555,7 @@ namespace Systems
                 while (!nodesToSubdivide.empty())
                 {
                     newNodesToSubdivide.clear();
-                    CullQuadtree(terrain, origin.y, heightData.pyramid, camera, invTanHalfFovY, nodesToSubdivide, newNodesToSubdivide, pool);
+                    CullQuadtree(e, terrain, origin.y, heightData.pyramid, camera, invTanHalfFovY, nodesToSubdivide, newNodesToSubdivide, pool);
                     std::swap(nodesToSubdivide, newNodesToSubdivide);
                 }
 
@@ -437,12 +565,7 @@ namespace Systems
                     {
                         if (it->second.lastTouchedFrame != frameCounter)
                         {
-                            World::Entity c = it->second.entity;
-                            if (c.IsValid())
-                            {
-                                c.ReleaseImmediately();
-                                churn.released++;
-                            }
+                            ReleaseNodeEntity(it->second.entity);
                             it = pool.erase(it);
                         }
                         else
@@ -456,7 +579,7 @@ namespace Systems
             {
                 if (!stillPresent(it->first))
                 {
-                    for (auto& nodeKv : it->second) { World::Entity c = nodeKv.second.entity; if (c.IsValid()) { c.ReleaseImmediately(); churn.released++; } }
+                    for (auto& nodeKv : it->second) ReleaseNodeEntity(nodeKv.second.entity);
                     it = instancesPerTerrain.erase(it);
                 }
                 else ++it;

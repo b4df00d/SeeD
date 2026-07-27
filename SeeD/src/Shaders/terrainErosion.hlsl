@@ -294,14 +294,25 @@ void TerrainErosionMain(uint3 dtid : SV_DispatchThreadID)
     float srcW, srcH;
     src.GetDimensions(srcW, srcH);
     float2 texel = float2(1.0 / max(srcW, 1.0), 1.0 / max(srcH, 1.0));
-    float hX1 = src.SampleLevel(samplerLinearClamp, p + float2(texel.x, 0), 0).x;
-    float hX0 = src.SampleLevel(samplerLinearClamp, p - float2(texel.x, 0), 0).x;
-    float hY1 = src.SampleLevel(samplerLinearClamp, p + float2(0, texel.y), 0).x;
-    float hY0 = src.SampleLevel(samplerLinearClamp, p - float2(0, texel.y), 0).x;
+    // The demo's analytic slopes are exact and continuous; sampling a real (quantized, e.g.
+    // R16_UNORM) texture instead means a 1-texel finite difference measures the input's own
+    // texel-to-texel quantization steps, not real terrain slope -- individually imperceptible in
+    // the height texture itself (well under 1 LSB most places), but gullySlope's normalize (its
+    // DIRECTION, not magnitude, drives PhacelleNoise's stripe pattern below) is unstable at small
+    // magnitudes: near-flat regions turn that sub-LSB jitter into a wildly varying direction
+    // texel-to-texel, which is fine, pixel-scale noise ONLY visible after this gradient step (not
+    // in the input). Widening the finite-difference baseline to several texels averages the
+    // quantization steps out while still resolving real slope, since erosion features are tuned to
+    // be far larger than a few texels anyway (erosion.scale/cellScale).
+    float2 gradientStep = texel * 16.0;
+    float hX1 = src.SampleLevel(samplerLinearClamp, p + float2(gradientStep.x, 0), 0).x;
+    float hX0 = src.SampleLevel(samplerLinearClamp, p - float2(gradientStep.x, 0), 0).x;
+    float hY1 = src.SampleLevel(samplerLinearClamp, p + float2(0, gradientStep.y), 0).x;
+    float hY0 = src.SampleLevel(samplerLinearClamp, p - float2(0, gradientStep.y), 0).x;
     float3 n = float3(
         (hX1 + hX0 + hY1 + hY0) / 4.0,
-        (hX1 - hX0) / (2.0 * texel.x),
-        (hY1 - hY0) / (2.0 * texel.y));
+        (hX1 - hX0) / (2.0 * gradientStep.x),
+        (hY1 - hY0) / (2.0 * gradientStep.y));
 
     // Define the erosion fade target based on the altitude of the pre-eroded terrain.
     // The fade target should strive to be -1 at valleys and 1 at peaks, but overshooting is ok.
@@ -336,4 +347,69 @@ void TerrainErosionMain(uint3 dtid : SV_DispatchThreadID)
 
     // ridgeMap (-1 creases .. 1 ridges, useful for drainage/tree placement) is computed but not
     // stored yet -- future third output map.
+}
+
+
+// -----------------------------------------------------------------------------
+// PROCEDURAL BASE HEIGHTMAP (perlin FBM, in place of an imported heightmap texture)
+// -----------------------------------------------------------------------------
+
+// Shares CustomErosion/HLSL::TerrainErosionParameters with TerrainErosionMain above (one CBV type
+// per file/register) -- octaves/scale/lacunarity/gain/seed carry the same meaning as the erosion
+// params they're named after; inputHeightmapIndex/strength/gullyWeight/detail/cellScale/
+// normalization/ridgeRounding/creaseRounding/outputDiffIndex are unused by this entry.
+// One FBM evaluation at a given sub-texel-jittered UV (see the 2x2 supersample below).
+float TerrainNoiseFBM(float2 p, float3 seedOffset)
+{
+    // FBM: octaves at increasing frequency (lacunarity) and decreasing amplitude (gain), summed
+    // and re-normalized by the total amplitude -> stays in ~[-1,1] regardless of octave count.
+    // Stops accumulating octaves once their frequency would alias at this output resolution (a
+    // full noise cycle needs >= ~2 texels, Nyquist) -- a high octave count sampled at discrete
+    // texel centers past that point doesn't add detail, it aliases into fine per-texel noise
+    // (this was the actual source of the pixel-scale noise the erosion output showed, amplified
+    // further by erosion's own 1-texel finite-difference gradient).
+    float freq = 1.0 / max(erosion.scale, 1e-5);
+    float nyquistFreq = erosion.outputResolution * 0.5;
+    float amp = 1.0;
+    float sum = 0.0;
+    float ampSum = 0.0;
+    for (int i = 0; i < (int)erosion.octaves && freq <= nyquistFreq; i++)
+    {
+        sum += PerlinNoise3(float3(p * freq, 0.0) + seedOffset) * amp;
+        ampSum += amp;
+        freq *= erosion.lacunarity;
+        amp *= erosion.gain;
+    }
+    return ampSum > 1e-8 ? sum / ampSum : 0.0;
+}
+
+#pragma compute Noise TerrainNoiseMain
+
+[RootSignature(SeeDRootSignature)]
+[numthreads(8, 8, 1)]
+void TerrainNoiseMain(uint3 dtid : SV_DispatchThreadID)
+{
+    if (dtid.x >= erosion.outputResolution || dtid.y >= erosion.outputResolution)
+        return;
+
+    // Arbitrary decorrelation offset so different seeds sample unrelated regions of the noise
+    // field instead of the same lattice shifted by an integer (which would look identical).
+    float3 seedOffset = float3(erosion.seed * 17.13, erosion.seed * 91.7, erosion.seed * 3.71);
+
+    // 2x2 supersample (quarter-texel offsets), averaged: extra safety margin against any
+    // remaining near-Nyquist content on top of the octave clamp above.
+    float2 texel = 1.0 / erosion.outputResolution;
+    const float2 subOffsets[4] = { float2(-0.25, -0.25), float2(0.25, -0.25), float2(-0.25, 0.25), float2(0.25, 0.25) };
+    float n = 0.0;
+    for (int s = 0; s < 4; s++)
+    {
+        float2 p = (float2(dtid.xy) + 0.5 + subOffsets[s]) / erosion.outputResolution;
+        n += TerrainNoiseFBM(p, seedOffset);
+    }
+    n *= 0.25;
+
+    // Same [0,1] raw-height pipeline contract as the eroded map -- consumers (bake/live displacement,
+    // and optionally TerrainErosionMain itself if erosion is layered on top) don't distinguish.
+    RWTexture2D<float> dst = ResourceDescriptorHeap[erosion.outputHeightmapIndex];
+    dst[dtid.xy] = saturate(n * 0.5 + 0.5);
 }

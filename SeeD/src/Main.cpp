@@ -89,7 +89,7 @@
 // [ ] 13. Particule system that will be able to feed some atmospheric scattering
 //         data in the froxels (via simple spheres at first)
 // 
-// [ ] 14. texture importer does not work correctly when terxture is not 32bits and pow2
+// [ ] 14. texture importer does not work correctly when texture is not 32bits and pow2
 // 
 // [ ] 15. deal with this comment in renderer.h :
 //         // Path registration only (no entity, no bucket) for the other built-in mesh-shader variants.....
@@ -97,6 +97,17 @@
 // [ ] 16. All task scheduling allocates a lot. 
 //         See to recreate the scheduling only when not the same as the previous frame.
 //
+// [ ] 17. rework MeshData to store compressed vertices to avoid Pack vertices each loading.
+// 
+// [ ] 18. add default values ins component metadata, and use them when the component is created
+//         and to reset the component to default values (in global or one component at a time)
+// 
+// [ ] 19. rework omm resources (in a new struct with 2 entries for high and low ?)
+//         maybe even drop the low res omm. Put all in 1 function (formating / cleaning code)
+// 
+//  [ ] 20. avoid multiple upload() per frame for StructuredUploadBuffer. They can flag as dirty once
+//          and only upload once per frame. (see StructuredUploadBuffer::Upload() )
+// 
 // ============================================================================
 
 #define WIN32_LEAN_AND_MEAN
@@ -299,6 +310,18 @@ public:
             ui.FrameStart();
             ios.ProcessMessages();
 
+            // Open this frame's AssetLibrary command buffer BEFORE prefab/terrain streaming run:
+            // both can record GPU commands directly into it (terrainStreaming -> MeshStorage::
+            // CreateMeshOverride, e.g. mesh/transform uploads + the initial BLAS build), and they
+            // run here, single-threaded, well before ScheduleLoading's task (which used to be the
+            // sole Open() call) even gets scheduled below. Recording into a still-closed command
+            // list here silently discarded everything once ScheduleLoading's Open()->Reset() ran
+            // later this same frame -- e.g. every terrain override's GPU-side mesh entry (LODs,
+            // meshletCount, vertexOffset) stayed zeroed, which culling.hlsl reads as "0 meshlets"
+            // and drops the instance entirely (see [[gpuculling-latent-empty-lod-bug]]). Moving
+            // Open() here (and removing the now-redundant one in ScheduleLoading) fixes it.
+            AssetLibrary::instance->Open();
+
             // Prefab streaming + deferred cleanup run single-threaded at frame start, before the
             // ECS systems and the editor read the world. world.structureChanged is reset here
             // (before systems) and set by the streaming system on any load/unload; the hierarchy
@@ -408,7 +431,8 @@ public:
     {
         ZoneScoped;
 
-        AssetLibrary::instance->Open();
+        // AssetLibrary::instance->Open() now happens earlier in Loop(), before prefab/terrain
+        // streaming, which also record into this same command buffer -- see the comment there.
         tf::Task loadingTask = subflow.emplace([]() {AssetLibrary::instance->LoadAssets(); }).name("Loading");
 
         return loadingTask;

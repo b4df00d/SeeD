@@ -1749,6 +1749,8 @@ public:
 class TerrainErosion : public Pass
 {
     Components::Handle<Components::Shader> erosionShader;
+    Components::Handle<Components::Shader> bakeShader;
+    Components::Handle<Components::Shader> noiseShader;
 public:
     static constexpr uint ErodedResolution = 8192; // 8k R16_UNORM + R8_UNORM = 192 MiB of VRAM PER TERRAIN
 
@@ -1757,14 +1759,40 @@ public:
         Resource height; // R16_UNORM eroded heightmap (mesh displacement)
         Resource diff;   // R8_UNORM difference vs the original map, 0.5 = untouched (albedo debug/blending)
         assetID bakedInput = assetID::Invalid; // input heightmap of the last completed bake, for the bake-once (erosionEnabled == 1) skip
+        uint bakedProceduralGeneration = 0;    // same role as bakedInput when the base is procedural (no assetID to compare)
     };
     std::unordered_map<uint, ErodedMaps> erodedMaps;
+    // Baking is dirty-triggered (footprint change, first attach, erosionEnabled==2), so editing
+    // heightmapBlurRadius alone wouldn't re-bake already-baked nodes -- detect the change here and
+    // force one full re-bake of every node of that terrain the frame it changes (see forceRebakeAll
+    // below), so tuning it in the editor actually updates without needing another trigger.
+    std::unordered_map<uint, uint> lastBlurRadius;
+
+    // Procedural base heightmap (terrainErosion.hlsl's TerrainNoiseMain, an FBM sum of
+    // PerlinNoise3 octaves), used in place of an imported heightmap texture when
+    // Components::Terrain::useProceduralHeightmap is set. Regenerated only when its params
+    // change (NoiseSnapshot), not every frame -- proceduralGeneration is bumped on each
+    // regeneration so the erosion bake-once skip (below) knows to re-run when the base changes.
+    struct NoiseSnapshot
+    {
+        float scale = 0, lacunarity = 0, gain = 0;
+        uint octaves = 0, seed = 0;
+        bool operator==(const NoiseSnapshot& o) const
+        {
+            return scale == o.scale && lacunarity == o.lacunarity && gain == o.gain && octaves == o.octaves && seed == o.seed;
+        }
+    };
+    std::unordered_map<uint, Resource> proceduralHeightmaps;
+    std::unordered_map<uint, NoiseSnapshot> lastNoiseParams;
+    std::unordered_map<uint, uint> proceduralGeneration;
 
     virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         erosionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\terrainErosion.hlsl|Erosion");
+        bakeShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\terrainMeshBake.hlsl|Bake");
+        noiseShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\terrainErosion.hlsl|Noise");
     }
     void Off() override
     {
@@ -1774,6 +1802,9 @@ public:
             erodedMap.second.diff.Release();
         }
         erodedMaps.clear();
+        for (auto& map : proceduralHeightmaps)
+            map.second.Release();
+        proceduralHeightmaps.clear();
         Pass::Off();
     }
     void Setup(View* view) override
@@ -1785,10 +1816,27 @@ public:
         ZoneScoped;
         Open();
 
-        std::vector<uint> aliveTerrains; // terrains that keep their eroded map this frame
+        std::vector<uint> aliveTerrains;    // terrains that keep their eroded map this frame
+        std::vector<uint> aliveProcedural;  // terrains that keep their procedural base map this frame
         World& world = *World::instance;
         uint queryIndex = world.Query(Components::Terrain::mask, 0, true);
         auto& queryResult = world.frameQueries[queryIndex];
+
+        // Pushed once, reused by both the erosion dispatches below and the bake dispatches
+        // further down (previously computed per-terrain, inside the eroding branch only).
+        D3D12_GPU_VIRTUAL_ADDRESS commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
+        D3D12_GPU_VIRTUAL_ADDRESS viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+
+        // Per-terrain heightmap to sample for baking (eroded if available, else raw -- same
+        // fallback terrainmesh.hlsl's live path applies), collected while erosion runs and
+        // consumed by the node-vertex-bake loop below.
+        struct TerrainBakeContext
+        {
+            uint heightmapSRV = HLSL::invalidUINT;
+            uint erosionEnabled = 0;
+            bool forceRebakeAll = false;
+        };
+        std::unordered_map<uint, TerrainBakeContext> bakeContexts;
 
         for (auto& eb : queryResult)
         {
@@ -1797,56 +1845,115 @@ public:
             if (!terrainCmp.material.IsValid())
                 continue; // nothing can consume the maps -> also skip the dispatch, the scan below frees them
 
+            // Resolve the BASE heightmap SRV: either the imported texture, or a procedurally
+            // generated perlin-noise map (terrainErosion.hlsl's TerrainNoiseMain), regenerated only
+            // when its params change so steady state costs nothing.
+            uint baseHeightmapSRV = HLSL::invalidUINT;
+            if (terrainCmp.useProceduralHeightmap)
+            {
+                aliveProcedural.push_back(e.id);
+                NoiseSnapshot snap;
+                snap.scale = terrainCmp.noiseScale;
+                snap.octaves = terrainCmp.noiseOctaves;
+                snap.lacunarity = terrainCmp.noiseLacunarity;
+                snap.gain = terrainCmp.noiseGain;
+                snap.seed = terrainCmp.noiseSeed;
+
+                Resource& map = proceduralHeightmaps[e.id];
+                auto snapIt = lastNoiseParams.find(e.id);
+                bool needsGen = map.GetResource() == nullptr || snapIt == lastNoiseParams.end() || !(snapIt->second == snap);
+                if (needsGen)
+                {
+                    if (map.GetResource() == nullptr)
+                        map.CreateTexture(uint2(ErodedResolution, ErodedResolution), DXGI_FORMAT_R16_UNORM, false, "terrainNoise_" + std::to_string(e.id));
+
+                    Shader* noise = AssetLibrary::instance->Get<Shader>(noiseShader.Get().id, true);
+                    HLSL::TerrainErosionParameters params = {};
+                    params.outputResolution = ErodedResolution;
+                    params.octaves = terrainCmp.noiseOctaves;
+                    params.scale = terrainCmp.noiseScale;
+                    params.lacunarity = terrainCmp.noiseLacunarity;
+                    params.gain = terrainCmp.noiseGain;
+                    params.seed = terrainCmp.noiseSeed;
+                    params.outputHeightmapIndex = map.uav.offset;
+
+                    map.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    commandBuffer->SetCompute(*noise);
+                    commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+                    commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+                    commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&params));
+                    commandBuffer->cmd->Dispatch(noise->DispatchX(ErodedResolution), noise->DispatchY(ErodedResolution), 1);
+                    map.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+
+                    lastNoiseParams[e.id] = snap;
+                    proceduralGeneration[e.id]++;
+                }
+                if (map.GetResource() != nullptr)
+                    baseHeightmapSRV = map.srv.offset;
+            }
+            else if (terrainCmp.heightmap.IsValid())
+            {
+                Resource* raw = AssetLibrary::instance->Get<Resource>(terrainCmp.heightmap.Get().id);
+                if (raw != nullptr)
+                    baseHeightmapSRV = raw->srv.offset;
+            }
+
             // erosionEnabled: 0 = off, 1 = bake once, 2 = bake continuously (see World.h)
-            bool eroding = terrainCmp.erosionEnabled != 0 && terrainCmp.heightmap.IsValid();
+            bool eroding = terrainCmp.erosionEnabled != 0 && baseHeightmapSRV != HLSL::invalidUINT;
             if (eroding)
             {
                 aliveTerrains.push_back(e.id);
-                Resource* input = AssetLibrary::instance->Get<Resource>(terrainCmp.heightmap.Get().id);
-                if (input != nullptr)
+                ErodedMaps& maps = erodedMaps[e.id];
+
+                // "Input changed" for the bake-once skip: an assetID swap for an imported
+                // heightmap, or a fresh generation for a procedural one (no assetID to compare).
+                bool inputIdentityChanged = terrainCmp.useProceduralHeightmap
+                    ? (maps.bakedProceduralGeneration != proceduralGeneration[e.id])
+                    : (maps.bakedInput != terrainCmp.heightmap.Get().id);
+
+                if (!(terrainCmp.erosionEnabled == 1 && !inputIdentityChanged))
                 {
-                    ErodedMaps& maps = erodedMaps[e.id];
-                    if (!(terrainCmp.erosionEnabled == 1 && maps.bakedInput == terrainCmp.heightmap.Get().id))
-                    {
-                        Shader* erosion = AssetLibrary::instance->Get<Shader>(erosionShader.Get().id, true);
-                        D3D12_GPU_VIRTUAL_ADDRESS commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
-                        D3D12_GPU_VIRTUAL_ADDRESS viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+                    Shader* erosion = AssetLibrary::instance->Get<Shader>(erosionShader.Get().id, true);
 
-                        if (maps.height.GetResource() == nullptr)
-                            maps.height.CreateTexture(uint2(ErodedResolution, ErodedResolution), DXGI_FORMAT_R16_UNORM, false, "terrainEroded_" + std::to_string(e.id));
-                        if (maps.diff.GetResource() == nullptr)
-                            maps.diff.CreateTexture(uint2(ErodedResolution, ErodedResolution), DXGI_FORMAT_R8_UNORM, false, "terrainErosionDiff_" + std::to_string(e.id));
-                            
-                        HLSL::TerrainErosionParameters params;
-                        params.inputHeightmapIndex = input->srv.offset;
-                        params.outputResolution = ErodedResolution;
-                        params.octaves = terrainCmp.erosionOctaves;
-                        params.scale = terrainCmp.erosionScale;
-                        params.strength = terrainCmp.erosionStrength;
-                        params.gullyWeight = terrainCmp.erosionGullyWeight;
-                        params.detail = terrainCmp.erosionDetail;
-                        params.lacunarity = terrainCmp.erosionLacunarity;
-                        params.gain = terrainCmp.erosionGain;
-                        params.cellScale = terrainCmp.erosionCellScale;
-                        params.normalization = terrainCmp.erosionNormalization;
-                        params.ridgeRounding = terrainCmp.erosionRidgeRounding;
-                        params.creaseRounding = terrainCmp.erosionCreaseRounding;
-                        params.outputHeightmapIndex = maps.height.uav.offset;
-                        params.outputDiffIndex = maps.diff.uav.offset;
-                        params.pad0 = 0;
+                    if (maps.height.GetResource() == nullptr)
+                        maps.height.CreateTexture(uint2(ErodedResolution, ErodedResolution), DXGI_FORMAT_R16_UNORM, false, "terrainEroded_" + std::to_string(e.id));
+                    if (maps.diff.GetResource() == nullptr)
+                        maps.diff.CreateTexture(uint2(ErodedResolution, ErodedResolution), DXGI_FORMAT_R8_UNORM, false, "terrainErosionDiff_" + std::to_string(e.id));
 
-                        maps.height.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                        maps.diff.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                        commandBuffer->SetCompute(*erosion);
-                        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-                        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-                        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&params));
-                        commandBuffer->cmd->Dispatch(erosion->DispatchX(ErodedResolution), erosion->DispatchY(ErodedResolution), 1);
-                        maps.height.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-                        maps.diff.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+                    HLSL::TerrainErosionParameters params = {};
+                    params.inputHeightmapIndex = baseHeightmapSRV;
+                    params.outputResolution = ErodedResolution;
+                    params.octaves = terrainCmp.erosionOctaves;
+                    params.scale = terrainCmp.erosionScale;
+                    params.strength = terrainCmp.erosionStrength;
+                    params.gullyWeight = terrainCmp.erosionGullyWeight;
+                    params.detail = terrainCmp.erosionDetail;
+                    params.lacunarity = terrainCmp.erosionLacunarity;
+                    params.gain = terrainCmp.erosionGain;
+                    params.cellScale = terrainCmp.erosionCellScale;
+                    params.normalization = terrainCmp.erosionNormalization;
+                    params.ridgeRounding = terrainCmp.erosionRidgeRounding;
+                    params.creaseRounding = terrainCmp.erosionCreaseRounding;
+                    params.outputHeightmapIndex = maps.height.uav.offset;
+                    params.outputDiffIndex = maps.diff.uav.offset;
+                    params.seed = 0;
 
+                    maps.height.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    maps.diff.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    commandBuffer->SetCompute(*erosion);
+                    commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+                    commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+                    commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&params));
+                    commandBuffer->cmd->Dispatch(erosion->DispatchX(ErodedResolution), erosion->DispatchY(ErodedResolution), 1);
+                    maps.height.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+                    maps.diff.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+
+                    // Handle<T>::Get() auto-vivifies (creates a real entity and rewrites the
+                    // handle in place) when called on an invalid handle -- never call it on
+                    // terrainCmp.heightmap in procedural mode, where it's deliberately left unset.
+                    if (!terrainCmp.useProceduralHeightmap)
                         maps.bakedInput = terrainCmp.heightmap.Get().id;
-                    }
+                    maps.bakedProceduralGeneration = proceduralGeneration[e.id];
                 }
             }
 
@@ -1860,9 +1967,27 @@ public:
                 if (mapsIt->second.diff.GetResource() != nullptr)
                     diffParam = (float)mapsIt->second.diff.srv.offset;
             }
+            else if (terrainCmp.useProceduralHeightmap && baseHeightmapSRV != HLSL::invalidUINT)
+            {
+                // No erosion ran, but the procedural output is still a pass-created resource with
+                // no assetID/Handle<Texture> -- ride the same detour slot a pass-eroded map uses so
+                // terrainmesh.hlsl's live fallback (which otherwise reads terrain.heightmap's
+                // texture slot, invalid here) still finds it.
+                erodedParam = (float)baseHeightmapSRV;
+            }
             auto& mat = terrainCmp.material.Get();
             mat.parameters[Components::TerrainErodedHeightmapParam] = erodedParam;
             mat.parameters[Components::TerrainErosionDiffParam] = diffParam;
+
+            TerrainBakeContext ctx;
+            ctx.erosionEnabled = terrainCmp.erosionEnabled;
+            {
+                auto blurIt = lastBlurRadius.find(e.id);
+                ctx.forceRebakeAll = blurIt == lastBlurRadius.end() || blurIt->second != terrainCmp.heightmapBlurRadius;
+                lastBlurRadius[e.id] = terrainCmp.heightmapBlurRadius;
+            }
+            ctx.heightmapSRV = erodedParam >= 0.0f ? (uint)erodedParam : baseHeightmapSRV;
+            bakeContexts[e.id] = ctx;
         }
 
         for (auto it = erodedMaps.begin(); it != erodedMaps.end();)
@@ -1875,6 +2000,106 @@ public:
             }
             else
                 ++it;
+        }
+        for (auto it = proceduralHeightmaps.begin(); it != proceduralHeightmaps.end();)
+        {
+            if (std::find(aliveProcedural.begin(), aliveProcedural.end(), it->first) == aliveProcedural.end())
+            {
+                it->second.Release(true);
+                it = proceduralHeightmaps.erase(it);
+            }
+            else
+                ++it;
+        }
+
+        // Terrain node vertex bake (MeshStorage::CreateMeshOverride / terrainMeshBake.hlsl): one
+        // dispatch per node whose MeshOverride.dirty is set, or every node of a continuously-
+        // eroding (mode 2) terrain. Runs after the erosion loop above so every terrain's
+        // bakeContexts entry already reflects this frame's eroded map (or the raw fallback).
+        std::vector<Mesh*> justBaked;
+        {
+            Shader* bake = nullptr; // fetched lazily: nothing to bake -> shader never loads/compiles
+            uint overrideQueryIndex = world.Query(Components::MeshOverride::mask, 0, true);
+            auto& overrideQueryResult = world.frameQueries[overrideQueryIndex];
+            for (auto& oeb : overrideQueryResult)
+            {
+                World::Entity ent = oeb;
+                auto& overrideCmp = ent.Get<Components::MeshOverride>();
+                if (overrideCmp.overrideMeshIndex == ~0u || !overrideCmp.terrain.IsValid())
+                    continue;
+
+                auto ctxIt = bakeContexts.find(overrideCmp.terrain.id);
+                if (ctxIt == bakeContexts.end() || ctxIt->second.heightmapSRV == HLSL::invalidUINT)
+                    continue;
+
+                bool needsBake = overrideCmp.dirty != 0 || ctxIt->second.erosionEnabled == 2 || ctxIt->second.forceRebakeAll;
+                if (!needsBake)
+                    continue;
+
+                auto& instCmp = ent.Get<Components::Instance>();
+                Components::Mesh& sourceMeshCmp = instCmp.mesh.Get();
+                Mesh* sourceMesh = AssetLibrary::instance->Get<Mesh>(sourceMeshCmp.id);
+                if (sourceMesh == nullptr)
+                    continue;
+                auto overrideIt = MeshStorage::instance->allMeshes.find(overrideCmp.overrideMeshIndex);
+                if (overrideIt == MeshStorage::instance->allMeshes.end())
+                    continue;
+                Mesh& overrideMesh = overrideIt->second;
+
+                Components::Terrain& terrainCmp = overrideCmp.terrain.Get();
+                auto& tr = ent.Get<Components::Transform>();
+
+                if (bake == nullptr)
+                    bake = AssetLibrary::instance->Get<Shader>(bakeShader.Get().id, true);
+
+                HLSL::TerrainBakeParameters params;
+                params.verticesUAVIndex = MeshStorage::instance->vertices.uav.offset;
+                params.heightmapIndex = ctxIt->second.heightmapSRV;
+                params.sourceVertexOffset = sourceMesh->vertexOffset;
+                params.outputVertexOffset = overrideMesh.vertexOffset;
+                params.vertexCount = sourceMesh->vertexCount;
+                params.worldExtent = terrainCmp.worldExtent;
+                params.heightScale = terrainCmp.heightScale;
+                params.heightOffset = terrainCmp.heightOffset;
+                params.sourceAabbMin = sourceMesh->aabbMin;
+                params.sourceAabbExtent = sourceMesh->aabbExtent;
+                params.outputAabbMin = overrideMesh.aabbMin;
+                params.outputAabbExtent = overrideMesh.aabbExtent;
+                params.nodeWorldPosScaleXZ = float4(tr.position, tr.scale.x);
+                params.heightmapBlurRadius = terrainCmp.heightmapBlurRadius;
+
+                MeshStorage::instance->vertices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                commandBuffer->SetCompute(*bake);
+                commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+                commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+                commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&params));
+                commandBuffer->cmd->Dispatch(bake->DispatchX(sourceMesh->vertexCount), 1, 1);
+                MeshStorage::instance->vertices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+
+                overrideCmp.dirty = 0;
+                justBaked.push_back(&overrideMesh);
+            }
+        }
+
+        // Same-frame BLAS rebuild for everything just baked, IN PLACE (stable VA -- see
+        // BuildBLAS's allowInPlaceRebuild): graphics-queue submission order alone (this pass ->
+        // culling -> AccelerationStructure's TLAS build, compute queue, fenced behind culling)
+        // guarantees the TLAS built this frame already reflects the fresh geometry. Shares
+        // MeshStorage's scratchBLAS with that TLAS build (also starting at offset 0) -- safe for
+        // the same reason, the fences serialize them.
+        if (!justBaked.empty())
+        {
+            MeshStorage::instance->vertices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            MeshStorage::instance->indices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            UINT64 scratchOffset = 0;
+            for (Mesh* m : justBaked)
+            {
+                scratchOffset += MeshStorage::instance->BuildBLAS(*m, 0, m->BLAS, scratchOffset, commandBuffer.Get(), nullptr, nullptr, DXGI_FORMAT_R32_UINT, true);
+                if (m->lodCount > 1) // terrain grids are single-LOD today, but stay correct if that changes
+                    scratchOffset += MeshStorage::instance->BuildBLAS(*m, m->lodCount - 1, m->BLASLow, scratchOffset, commandBuffer.Get(), nullptr, nullptr, DXGI_FORMAT_R32_UINT, true);
+            }
+            MeshStorage::instance->vertices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+            MeshStorage::instance->indices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
         }
 
         Close();
@@ -2921,6 +3146,21 @@ public:
                     if (!mesh)
                         continue;
 
+                    // Terrain node displacement baking (MeshStorage::CreateMeshOverride): an
+                    // instance with a MeshOverride component is redirected to a MeshStorage-owned
+                    // override Mesh (its own vertex range + AABB + BLAS, sharing the source's
+                    // meshlet/index/LOD data) instead of the component's own mesh -- meshIndex
+                    // (gbuffer/RT vertex fetch) and the BLAS VAs below must always point at the
+                    // SAME mesh, or raster and RT would disagree.
+                    Mesh* effectiveMesh = mesh;
+                    if (ent.Has<Components::MeshOverride>())
+                    {
+                        auto& overrideCmp = ent.Get<Components::MeshOverride>();
+                        auto overrideIt = MeshStorage::instance->allMeshes.find(overrideCmp.overrideMeshIndex);
+                        if (overrideIt != MeshStorage::instance->allMeshes.end())
+                            effectiveMesh = &overrideIt->second;
+                    }
+
                     Shader* shader = AssetLibrary::instance->Get<Shader>(shaderCmp.id);
                     if (!shader)
                         continue;
@@ -2944,7 +3184,7 @@ public:
                     previousWorldMatrix = matrixCmp.matrix;
 
                     HLSL::Instance instance;
-                    instance.meshIndex = mesh->storageIndex;
+                    instance.meshIndex = effectiveMesh->storageIndex;
                     instance.materialIndex = materialIndex;
                     instance.current = instance.pack(matrixCmp.matrix);
                     instance.previous = instance.pack(previousWorldMatrix);
@@ -2953,15 +3193,17 @@ public:
                     instance.boundingSphereOverride = instanceCmp.boundingSphereOverride;
                     // the mesh's OMM was baked against one albedo: if the instance uses a
                     // different texture the baked opacity states are wrong, fall back to pure any-hit
-                    if (mesh->ommTextureHash != 0
-                        && (!materialCmp.textures[0].IsValid() || materialCmp.textures[0].Get().id.hash != mesh->ommTextureHash))
+                    // (an override mesh never carries OMM -- ommTextureHash stays 0 -- so this is
+                    // naturally a no-op for overridden instances)
+                    if (effectiveMesh->ommTextureHash != 0
+                        && (!materialCmp.textures[0].IsValid() || materialCmp.textures[0].Get().id.hash != effectiveMesh->ommTextureHash))
                         instance.rtFlags |= HLSL::RTInstanceFlagDisableOMMs;
-                    instance.rayTracingBLAS = mesh->BLAS.GetResource()->GetGPUVirtualAddress();
+                    instance.rayTracingBLAS = effectiveMesh->BLAS.GetResource()->GetGPUVirtualAddress();
                     // single-LOD meshes have no low BLAS: alias the high one so culling.hlsl can select blindly
-                    instance.rayTracingBLASLow = mesh->BLASLow.GetResource() ? mesh->BLASLow.GetResource()->GetGPUVirtualAddress() : instance.rayTracingBLAS;
+                    instance.rayTracingBLASLow = effectiveMesh->BLASLow.GetResource() ? effectiveMesh->BLASLow.GetResource()->GetGPUVirtualAddress() : instance.rayTracingBLAS;
 
                     viewWorld.instances.AddOrUpdate(ent, instance);
-                    localMeshletCount += mesh->LODs[0].meshletCount;
+                    localMeshletCount += effectiveMesh->LODs[0].meshletCount;
 
                     if (firstLoad)
                     {
@@ -2971,7 +3213,7 @@ public:
                         // wired in MainView::On()). Not hit again on later dirty-refresh frames, so
                         // in-place mesh/material mutation of an already-loaded instance is a known,
                         // documented limitation (doesn't happen anywhere in the codebase today).
-                        AddInstanceShaderContribution(ent, shaderCmp.id, mesh->LODs[0].meshletCount);
+                        AddInstanceShaderContribution(ent, shaderCmp.id, effectiveMesh->LODs[0].meshletCount);
                     }
 
                     // dirty is consumed exactly here (this is its only reader): clear it so an
@@ -3389,7 +3631,6 @@ public:
                 this->viewWorld.cameras.Get().Upload();
                 this->viewWorld.lights.Get().Upload();
                 this->viewContext.instancesCulledArgs.Resize(this->viewWorld.instances.Size());
-                this->viewContext.meshletsToCull.Resize(this->viewWorld.meshletsCount);
 
                 // Exclusive prefix-sum this MainView's persistent, incrementally-maintained
                 // per-shader-bucket meshlet counts (see UpdateInstances / AddInstanceShaderContribution
@@ -3417,6 +3658,15 @@ public:
                 this->viewContext.meshletsCulledArgs.Resize(totalMeshlets);
                 this->viewContext.meshletsCulledArgsSorted.Resize(totalMeshlets);
                 this->viewContext.meshletBuckets.Resize(totalMeshlets);
+                // CullingInstances (culling.hlsl) writes one meshletsToCull entry per meshlet of
+                // EVERY instance that survives frustum/occlusion/distance culling this frame -- that
+                // can be any currently-loaded instance, not just ones touched this frame, so this
+                // must share totalMeshlets' persistent accounting (see the comment above), not
+                // viewWorld.meshletsCount. Sizing it off the per-frame-touched count undersized the
+                // buffer once enough settled (loaded, non-dirty) instances existed simultaneously --
+                // e.g. terrain nodes, which stop re-touching every frame once baked -- causing
+                // out-of-bounds atomic-counter writes that flickered.
+                this->viewContext.meshletsToCull.Resize(totalMeshlets);
                 this->viewContext.meshletsCounter.Resize(bucketCount);
                 this->raytracingContext.instancesRayTracing.Resize(this->viewWorld.instances.Size());
 
@@ -3496,6 +3746,8 @@ public:
     static Renderer* instance;
     ConstantBuffer constantBuffer;
     MeshStorage meshStorage;
+    TextureStorage textureStorage;
+    ShaderStorage shaderStorage;
     MainView mainView;
     EditorView editorView;
     SubmissionList submissions;
@@ -3517,6 +3769,8 @@ public:
 
         constantBuffer.On();
         meshStorage.On();
+        textureStorage.On();
+        shaderStorage.On();
         BuildSubmissions(); // before the views' On(), so passes register after AssetLibrary (slot 0)
         mainView.On(_displayResolution, float2(_displayResolution) * 1.f);
         editorView.On(_displayResolution, _displayResolution);
@@ -3530,6 +3784,8 @@ public:
         editorView.Off();
         mainView.Off();
         meshStorage.Off();
+        textureStorage.Off();
+        shaderStorage.Off();
         constantBuffer.Off();
         instance = nullptr;
     }

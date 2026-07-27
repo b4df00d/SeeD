@@ -201,5 +201,8 @@
     <FxCompile Include="src\Shaders\terrainErosion.hlsl">
       <Filter>Source Files\Shaders</Filter>
     </FxCompile>
+    <FxCompile Include="src\Shaders\terrainMeshBake.hlsl">
+      <Filter>Source Files\Shaders</Filter>
+    </FxCompile>
   </ItemGroup>
 </Project>

@@ -104,8 +104,15 @@ knownComponents.push_back(
 			{ "heightmap", PropertyTypes::_Handle, Components::Texture::mask, 1, offsetof(Components::Terrain, heightmap) },
 			{ "gridMesh", PropertyTypes::_Handle, Components::Mesh::mask, 1, offsetof(Components::Terrain, gridMesh) },
 			{ "material", PropertyTypes::_Handle, Components::Material::mask, 1, offsetof(Components::Terrain, material) },
+			{ "useProceduralHeightmap", PropertyTypes::_uint, NULL, 1, offsetof(Components::Terrain, useProceduralHeightmap) },
+			{ "noiseScale", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, noiseScale) },
+			{ "noiseOctaves", PropertyTypes::_uint, NULL, 1, offsetof(Components::Terrain, noiseOctaves) },
+			{ "noiseLacunarity", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, noiseLacunarity) },
+			{ "noiseGain", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, noiseGain) },
+			{ "noiseSeed", PropertyTypes::_uint, NULL, 1, offsetof(Components::Terrain, noiseSeed) },
 			{ "heightScale", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, heightScale) },
 			{ "heightOffset", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, heightOffset) },
+			{ "heightmapBlurRadius", PropertyTypes::_uint, NULL, 1, offsetof(Components::Terrain, heightmapBlurRadius) },
 			{ "worldExtent", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, worldExtent) },
 			{ "quadtreeDepth", PropertyTypes::_uint, NULL, 1, offsetof(Components::Terrain, quadtreeDepth) },
 			{ "targetScreenSize", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, targetScreenSize) },
@@ -123,6 +130,18 @@ knownComponents.push_back(
 			{ "erosionNormalization", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionNormalization) },
 			{ "erosionRidgeRounding", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionRidgeRounding) },
 			{ "erosionCreaseRounding", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, erosionCreaseRounding) },
+			{ "BVHMaxDepth", PropertyTypes::_uint, NULL, 1, offsetof(Components::Terrain, BVHMaxDepth) },
+			{ "BVHMinRadius", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, BVHMinRadius) },
+			{ "BVHMaxRadius", PropertyTypes::_float, NULL, 1, offsetof(Components::Terrain, BVHMaxRadius) },
+		}
+ 	});
+knownComponents.push_back(
+ 	{ "MeshOverride", Components::MeshOverride::mask, nullptr,
+ 		{
+			{ "overrideMeshIndex", PropertyTypes::_uint, NULL, 1, offsetof(Components::MeshOverride, overrideMeshIndex) },
+			{ "sourceMeshIndex", PropertyTypes::_uint, NULL, 1, offsetof(Components::MeshOverride, sourceMeshIndex) },
+			{ "terrain", PropertyTypes::_Handle, Components::Terrain::mask, 1, offsetof(Components::MeshOverride, terrain) },
+			{ "dirty", PropertyTypes::_uint, NULL, 1, offsetof(Components::MeshOverride, dirty) },
 		}
  	});
 knownComponents.push_back(

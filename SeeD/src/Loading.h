@@ -15,7 +15,8 @@ public:
         String path;
         String originalFilePath;
         AssetLibrary::AssetType type;
-        void* data = nullptr;
+        void* data = nullptr; // points directly into MeshStorage::allMeshes / TextureStorage::textures / ShaderStorage::shaders
+        uint storageIndex = ~0u; // this asset's key in the storage above -- needed to erase it (see TextureStorage::Release)
         uint lastGetFrameCount = 0;
     };
     static AssetLibrary* instance;
@@ -66,35 +67,9 @@ public:
             commandBuffer.Get(i).Off();
         }
 
-        for (auto& item : map)
-        {
-            if (item.second.data != nullptr)
-            {
-                if (item.second.type == AssetLibrary::AssetType::mesh)
-                {
-                    // TODO : a real release in meshStorage
-                    Mesh* mesh = (Mesh*)item.second.data;
-                    mesh->BLAS.Release();
-                    mesh->BLASLow.Release();
-                    mesh->ommArray.Release();
-                    mesh->ommArrayLow.Release();
-                    mesh->ommIndices.Release();
-                    mesh->ommIndicesLow.Release();
-                    mesh->ommInputs.Release();
-                    mesh->ommInputsLow.Release();
-                }
-                else if (item.second.type == AssetLibrary::AssetType::shader)
-                {
-                    ((Shader*)item.second.data)->Release();
-                }
-                else if (item.second.type == AssetLibrary::AssetType::texture)
-                {
-                    ((Resource*)item.second.data)->Release();
-                }
-                item.second.data = nullptr;
-            }
-        }
-
+        map.clear();
+        assetsAlive.clear();
+        loadingRequest.clear();
         instance = nullptr;
     }
 
@@ -170,9 +145,9 @@ public:
                 {
                     if (item.type == AssetLibrary::AssetType::texture)
                     {
-                        ((Resource*)item.data)->Release();
-                        delete (Resource*)item.data;
+                        TextureStorage::instance->Release(item.storageIndex);
                         item.data = nullptr;
+                        item.storageIndex = ~0u;
                         assetsAlive[i] = assetsAlive.back();
                         assetsAlive.pop_back();
                         i--;
@@ -3207,9 +3182,12 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             {
                 OMMData ommData;
                 bool hasOMM = MeshLoader::instance->ReadOMM(map[id].path, ommData);
-                Mesh mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get(), hasOMM ? &ommData : nullptr);
+                // Load() inserts directly into MeshStorage::allMeshes and returns a reference into
+                // it -- map-owned, not new'd, so we just point this asset's data at it.
+                Mesh& mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get(), hasOMM ? &ommData : nullptr);
                 lock.lock();
-                map[id].data = new Mesh(mesh);
+                map[id].data = &mesh;
+                map[id].storageIndex = mesh.storageIndex;
                 map[id].lastGetFrameCount = 0;
                 assetsAlive.push_back(id);
                 meshLoaded++;
@@ -3231,7 +3209,13 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
                 lock.lock();
                 if (map[id].data == nullptr)
                 {
-                    map[id].data = new Shader();
+                    // First load: claim a fresh slot in ShaderStorage. A hot-reload later just
+                    // overwrites *map[id].data in place below -- the pointer stays valid and
+                    // pointed at this SAME slot for the shader's entire lifetime (unordered_map
+                    // element addresses are stable across further insertions).
+                    uint index = ShaderStorage::instance->nextIndex++;
+                    map[id].data = &ShaderStorage::instance->shaders[index];
+                    map[id].storageIndex = index;
                     assetsAlive.push_back(id);
                 }
                 *(Shader*)map[id].data = shader;
@@ -3259,7 +3243,11 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             if (texture.allocation != nullptr)
             {
                 lock.lock();
-                map[id].data = new Resource(texture);
+                uint index = TextureStorage::instance->nextIndex++;
+                Resource& slot = TextureStorage::instance->textures[index];
+                slot = texture;
+                map[id].data = &slot;
+                map[id].storageIndex = index;
                 map[id].lastGetFrameCount = 0;
                 assetsAlive.push_back(id);
                 textureLoaded++;

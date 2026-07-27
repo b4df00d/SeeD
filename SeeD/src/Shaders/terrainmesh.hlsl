@@ -47,57 +47,72 @@ void MeshMainTerrain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_
         float3 objectPos = DecodeVertexPositionOS(v);
         float3 tangentOS = DecodeVertexTangentOS(v);
         float handedness = DecodeVertexHandedness(v);
-        float3 normalOS = float3(0, 1, 0); // flat-grid authored normal, overwritten by the gradient below
+        float3 normalOS;
 
-        StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-        HLSL::Instance instance = instances[instanceIndexIndirect];
-        StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
-        HLSL::Material material = materials[instance.materialIndex];
-
-        uint heightmapIndex = material.textures[HLSL::TerrainHeightmapTextureSlot];
-        float heightScale = material.parameters[HLSL::TerrainHeightScaleParam];
-        float heightOffset = material.parameters[HLSL::TerrainHeightOffsetParam];
-        float terrainWorldSize = material.parameters[HLSL::TerrainWorldSizeParam];
-        float erodedIndexParam = material.parameters[HLSL::TerrainErodedHeightmapParam];// eroded heightmap index is a float param because a pass-created resource has no Handle<Texture>
-        if (erodedIndexParam >= 0.0f)
-            heightmapIndex = (uint)erodedIndexParam;
-
-        if (heightmapIndex != HLSL::invalidUINT)
+        if (mesh.aabbMin.w > 0.5f)
         {
-            // Read as float4 (like the other bindless material textures, e.g. GetSurfaceData's
-            // roughness/metalness fetches in common.hlsl) rather than a single-channel view, to
-            // avoid depending on the imported heightmap's exact DXGI format; only .x is used.
-            Texture2D<float4> heightmapTex = ResourceDescriptorHeap[heightmapIndex];
+            // Already baked (MeshStorage::CreateMeshOverride / terrainMeshBake.hlsl): objectPos
+            // decoded above is ALREADY the final displaced position (against this override's own
+            // AABB), v.uv is already the world-space UV the bake wrote, and tangentOS is already
+            // orthogonalized against the baked normal -- applying live heightmap displacement
+            // here would double it.
+            normalOS = DecodeVertexNormalOS(v);
+        }
+        else
+        {
+            normalOS = float3(0, 1, 0); // flat-grid authored normal, overwritten by the gradient below
 
-            // World-space UV instead of the mesh-local v.uv (0..1 across just THIS node's own
-            // patch): every quadtree node, regardless of its own footprint/scale, must sample the
-            // same heightmap texel for the same world XZ position, or neighboring nodes at
-            // different LODs would sample different (stretched) parts of the heightmap and the
-            // displacement wouldn't line up across node boundaries.
-            float3 worldPosXZ = mul(worldMatrix, float4(objectPos, 1)).xyz;
-            float2 uv = worldPosXZ.xz / max(terrainWorldSize, 1e-5f) + 0.5f;
-            v.uv = uv;
+            StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+            HLSL::Instance instance = instances[instanceIndexIndirect];
+            StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
+            HLSL::Material material = materials[instance.materialIndex];
 
-            float texW, texH;
-            heightmapTex.GetDimensions(texW, texH);
-            float2 texel = float2(1.0f / max(texW, 1.0f), 1.0f / max(texH, 1.0f));
+            uint heightmapIndex = material.textures[HLSL::TerrainHeightmapTextureSlot];
+            float heightScale = material.parameters[HLSL::TerrainHeightScaleParam];
+            float heightOffset = material.parameters[HLSL::TerrainHeightOffsetParam];
+            float terrainWorldSize = material.parameters[HLSL::TerrainWorldSizeParam];
+            uint heightmapBlurRadius = (uint)material.parameters[HLSL::TerrainHeightmapBlurRadiusParam];
+            float erodedIndexParam = material.parameters[HLSL::TerrainErodedHeightmapParam];// eroded heightmap index is a float param because a pass-created resource has no Handle<Texture>
+            if (erodedIndexParam >= 0.0f)
+                heightmapIndex = (uint)erodedIndexParam;
 
-            float hC  = heightmapTex.SampleLevel(samplerLinearClamp, uv, 0).x;
-            float hX1 = heightmapTex.SampleLevel(samplerLinearClamp, uv + float2(texel.x, 0), 0).x;
-            float hX0 = heightmapTex.SampleLevel(samplerLinearClamp, uv - float2(texel.x, 0), 0).x;
-            float hZ1 = heightmapTex.SampleLevel(samplerLinearClamp, uv + float2(0, texel.y), 0).x;
-            float hZ0 = heightmapTex.SampleLevel(samplerLinearClamp, uv - float2(0, texel.y), 0).x;
+            if (heightmapIndex != HLSL::invalidUINT)
+            {
+                // Read as float4 (like the other bindless material textures, e.g. GetSurfaceData's
+                // roughness/metalness fetches in common.hlsl) rather than a single-channel view, to
+                // avoid depending on the imported heightmap's exact DXGI format; only .x is used.
+                Texture2D<float4> heightmapTex = ResourceDescriptorHeap[heightmapIndex];
 
-            objectPos.y += hC * heightScale + heightOffset;
+                // World-space UV instead of the mesh-local v.uv (0..1 across just THIS node's own
+                // patch): every quadtree node, regardless of its own footprint/scale, must sample the
+                // same heightmap texel for the same world XZ position, or neighboring nodes at
+                // different LODs would sample different (stretched) parts of the heightmap and the
+                // displacement wouldn't line up across node boundaries.
+                float3 worldPosXZ = mul(worldMatrix, float4(objectPos, 1)).xyz;
+                float2 uv = worldPosXZ.xz / max(terrainWorldSize, 1e-5f) + 0.5f;
+                v.uv = uv;
 
-            float2 worldTexel = max(terrainWorldSize * texel, float2(1e-5f, 1e-5f));
-            float scaleXZ = max(length(float3(worldMatrix[0].x, worldMatrix[1].x, worldMatrix[2].x)), 1e-5f);
+                float texW, texH;
+                heightmapTex.GetDimensions(texW, texH);
+                float2 texel = float2(1.0f / max(texW, 1.0f), 1.0f / max(texH, 1.0f));
 
-            float dHdx = ((hX1 - hX0) * heightScale) / (2.0f * worldTexel.x);
-            float dHdz = ((hZ1 - hZ0) * heightScale) / (2.0f * worldTexel.y);
-            float3 normalObj = normalize(float3(-dHdx * scaleXZ, 1.0f, -dHdz * scaleXZ));
-            tangentOS = normalize(tangentOS - normalObj * dot(tangentOS, normalObj));
-            normalOS = float3(-dHdx / scaleXZ, 1.0f, -dHdz / scaleXZ);
+                float hC  = SampleHeightBlurred(heightmapTex, samplerLinearClamp, uv, texel, heightmapBlurRadius);
+                float hX1 = SampleHeightBlurred(heightmapTex, samplerLinearClamp, uv + float2(texel.x, 0), texel, heightmapBlurRadius);
+                float hX0 = SampleHeightBlurred(heightmapTex, samplerLinearClamp, uv - float2(texel.x, 0), texel, heightmapBlurRadius);
+                float hZ1 = SampleHeightBlurred(heightmapTex, samplerLinearClamp, uv + float2(0, texel.y), texel, heightmapBlurRadius);
+                float hZ0 = SampleHeightBlurred(heightmapTex, samplerLinearClamp, uv - float2(0, texel.y), texel, heightmapBlurRadius);
+
+                objectPos.y += hC * heightScale + heightOffset;
+
+                float2 worldTexel = max(terrainWorldSize * texel, float2(1e-5f, 1e-5f));
+                float scaleXZ = max(length(float3(worldMatrix[0].x, worldMatrix[1].x, worldMatrix[2].x)), 1e-5f);
+
+                float dHdx = ((hX1 - hX0) * heightScale) / (2.0f * worldTexel.x);
+                float dHdz = ((hZ1 - hZ0) * heightScale) / (2.0f * worldTexel.y);
+                float3 normalObj = normalize(float3(-dHdx * scaleXZ, 1.0f, -dHdz * scaleXZ));
+                tangentOS = normalize(tangentOS - normalObj * dot(tangentOS, normalObj));
+                normalOS = float3(-dHdx / scaleXZ, 1.0f, -dHdz / scaleXZ);
+            }
         }
 
         outVerts[groupThreadId.x] = BuildOutputVertex(objectPos, normalOS, tangentOS, handedness, v.uv);

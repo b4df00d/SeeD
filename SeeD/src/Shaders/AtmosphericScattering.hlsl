@@ -86,7 +86,10 @@ void RayGen()
         }
     }
     
-    float density = min(exp(-froxelWorldPos.y * asParameters.heightFalloff), 1) * asParameters.density * prevFroxelDist * smoothstep(asParameters.noiseThresholdLow, asParameters.noiseThresholdHigh, PerlinNoise3_Normalized(froxelWorldPos * asParameters.noiseFrequency + viewContext.frameTime * asParameters.animationSpeed));
+    float density = min(exp(-froxelWorldPos.y * asParameters.heightFalloff), 1) 
+    * asParameters.density 
+    * prevFroxelDist 
+    * smoothstep(asParameters.noiseThresholdLow, asParameters.noiseThresholdHigh, PerlinNoise3_Normalized(froxelWorldPos * asParameters.noiseFrequency + viewContext.frameTime * asParameters.animationSpeed * asParameters.noiseFrequency));
     
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
     froxelData[DispatchRaysIndex().xyz] = float4(sampleRadiance, density);

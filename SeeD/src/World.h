@@ -404,6 +404,7 @@ namespace Components
     static constexpr uint TerrainErodedHeightmapParam = 7; // srv heap index of the GPU-eroded heightmap AS FLOAT (exact, heap max 65535 < 2^24), -1 = none. See structs.hlsl for why an index and not a Handle<Texture>: the eroded map is a raw render Resource with no assetID. Written (with slot 9) by the TerrainErosion pass (Renderer.h) directly into the material component; TerrainStreaming owns slots 4/5/6/8.
     static constexpr uint TerrainWorldSizeParam = 8; // world-space XZ footprint the heightmap covers (UV = worldPos.xz / this + 0.5), so all quadtree nodes sample one consistent heightmap regardless of their own footprint
     static constexpr uint TerrainErosionDiffParam = 9; // srv heap index AS FLOAT (-1 = none, same detour as slot 7) of the R8 erosion difference map (0.5 = untouched), displayed on the terrain albedo
+    static constexpr uint TerrainHeightmapBlurRadiusParam = 10; // box-blur radius in heightmap texels AS FLOAT (0 = off), softens banding from low-precision imported heightmaps -- read by terrainmesh.hlsl's live path; the bake path (terrainMeshBake.hlsl) gets it directly via HLSL::TerrainBakeParameters instead
     // Milestone 1 (static grid + heightmap displacement, no erosion/brushes yet): one baked
     // heightmap texture drives mesh-shader displacement of a shared grid mesh, instanced across
     // a CPU-walked quadtree (built each frame in World::Update, see Systems below).
@@ -412,30 +413,51 @@ namespace Components
         Handle<Texture> heightmap;
         Handle<Mesh> gridMesh;
         Handle<Material> material;
-        float heightScale = 50.0f;
+        // Procedural base heightmap (terrainErosion.hlsl's TerrainNoiseMain, an FBM sum of
+        // PerlinNoise3 octaves -- common.hlsl) generated in place of loading `heightmap`, so a
+        // terrain needs no imported texture asset at all. Still flows through erosion normally
+        // (erosion can refine a procedural base exactly like an imported one) and through the same
+        // material-param detour a pass-created resource always uses (TerrainErodedHeightmapParam) --
+        // see TerrainErosion::Render (Renderer.h). Regenerated only when noise* params change.
+        uint  useProceduralHeightmap = 0;
+        float noiseScale = 0.15f;      // fraction of the terrain footprint per octave-0 feature (same convention as erosionScale)
+        uint  noiseOctaves = 5;
+        float noiseLacunarity = 2.0f;  // per-octave frequency multiplier
+        float noiseGain = 0.5f;        // per-octave amplitude multiplier
+        uint  noiseSeed = 0;           // varies the pattern; same seed + params -> identical terrain
+        float heightScale = 1000.0f;
         float heightOffset = 0.0f;
-        float worldExtent = 1024.0f;   // total terrain footprint (world units), centered on Transform
-        uint  quadtreeDepth = 4;       // leaf node size = worldExtent / 2^quadtreeDepth
-        float targetScreenSize = 0.15f; // fraction of viewport height (NDC-style, resolution-independent): a visible node subdivides while its estimated on-screen footprint exceeds this
+        uint  heightmapBlurRadius = 0; // box-blur radius in heightmap texels (0 = off): softens banding from low-precision (e.g. 8-bit) imported heightmaps; applied wherever the heightmap is sampled for displacement (terrainMeshBake.hlsl, terrainmesh.hlsl's live fallback)
+        float worldExtent = 16384.0f;   // total terrain footprint (world units), centered on Transform
+        uint  quadtreeDepth = 10;       // leaf node size = worldExtent / 2^quadtreeDepth
+        float targetScreenSize = 0.16f; // fraction of viewport height (NDC-style, resolution-independent): a visible node subdivides while its estimated on-screen footprint exceeds this
         // grid mesh build params (used by the "Build Grid Mesh" button)
-        float gridSpacing = 0.1f;      // meters/vertex at the most detailed quadtree level
-        float gridSize = 64.0f;        // meters, most detailed quadtree level patch size
+        float gridSpacing = 0.4f;      // meters/vertex at the most detailed quadtree level
+        float gridSize = 8.0f;        // meters, most detailed quadtree level patch size
         // GPU erosion (runevision "Advanced Terrain Erosion Filter", ported 1:1 from the shadertoy
         // reference into terrainErosion.hlsl -- TerrainErosion pass in Renderer.h). Names and
         // defaults match the shadertoy's EROSION_* constants; params mirror
         // HLSL::TerrainErosionParameters.
         uint  erosionEnabled = 1;      // 0 = off (maps freed), 1 = bake once (freezes after the first bake; a heightmap swap re-bakes, param edits don't), 2 = bake continuously (every frame, for live iteration)
-        uint  erosionOctaves = 5;
-        float erosionScale = 0.15f;    // horizontal+vertical erosion scale, fraction of the terrain footprint
-        float erosionStrength = 0.22f; // culling pad = strength * scale * sum(gain^o) * max(1, gullyWeight) (ComputeNodeBoundingSphere)
-        float erosionGullyWeight = 0.5f;
+        uint  erosionOctaves = 2;
+        float erosionScale = 0.05f;    // horizontal+vertical erosion scale, fraction of the terrain footprint
+        float erosionStrength = 0.1f; // culling pad = strength * scale * sum(gain^o) * max(1, gullyWeight) (ComputeNodeBoundingSphere)
+        float erosionGullyWeight = 10.0f;
         float erosionDetail = 1.5f;    // lower restricts high-frequency gullies to steeper slopes
-        float erosionLacunarity = 2.0f;
+        float erosionLacunarity = 1.831f;
         float erosionGain = 0.5f;      // per-octave strength multiplier
-        float erosionCellScale = 0.7f; // phacelle cell size relative to erosion scale, keep close to 1
+        float erosionCellScale = 0.2f; // phacelle cell size relative to erosion scale, keep close to 1
         float erosionNormalization = 0.5f; // phacelle magnitude normalization degree, 0..1
-        float erosionRidgeRounding = 0.1f;
-        float erosionCreaseRounding = 0.0f;
+        float erosionRidgeRounding = 100.f;
+        float erosionCreaseRounding = 200.0f;
+        // Omnidirectional (not frustum-gated) forced quadtree depth around the camera, independent
+        // of quadtreeDepth/targetScreenSize -- keeps terrain resident in the TLAS for RT shadow rays
+        // whose casters aren't necessarily camera-frustum-visible (Systems::TerrainStreaming::
+        // CullQuadtree). Full BVHMaxDepth is forced within BVHMinRadius of the camera, linearly
+        // relaxed to 0 by BVHMaxRadius; BVHMaxRadius <= BVHMinRadius disables the force entirely.
+        uint  BVHMaxDepth = 5;
+        float BVHMinRadius = 512.0f;
+        float BVHMaxRadius = 8192.0f;
     };
     inline Handle<Mesh> (*buildTerrainGridMesh)(float spacing, float size) = nullptr;
     static void TerrainPropertyDraw(char* p)
@@ -448,6 +470,22 @@ namespace Components
         if (buildTerrainGridMesh != nullptr && ImGui::Button("Build Grid Mesh"))
             t->gridMesh = buildTerrainGridMesh(t->gridSpacing, t->gridSize);
     }
+
+    // Runtime-only mesh override (terrain node displacement baking -- later shared by skinning,
+    // roadmap item 6): redirects UpdateInstances (Renderer.h) to a MeshStorage-owned override
+    // Mesh (its own vertex range + AABB + BLAS, sharing the source mesh's meshlet/index/LOD data
+    // via MeshStorage::CreateMeshOverride) instead of the owning Instance component's own `mesh`
+    // handle. Never serialized in practice (only ever attached to transient entities). IMPORTANT:
+    // World::Pool allocates component storage with raw malloc -- there is NO implicit zero-init
+    // for a new component slot (see Instance::boundingSphereOverride above), so every site that
+    // creates a MeshOverride component MUST explicitly set every field.
+    struct MeshOverride : ComponentBase<MeshOverride>
+    {
+        uint overrideMeshIndex;  // MeshStorage meshIndex namespace (shared with normal Mesh::storageIndex)
+        uint sourceMeshIndex;    // the override's source mesh's storageIndex -- needed to free it back into MeshStorage's per-source recycling list
+        Handle<Terrain> terrain; // owning Terrain entity -- TerrainErosion::Render (Renderer.h) looks up per-terrain bake state (heightmap SRV, worldExtent, heightScale/heightOffset) through this
+        uint dirty;              // needs a vertex re-bake (TerrainErosion::Render); the owning system sets/clears this
+    };
 }
 
 // Autogenerated InitKnownComponents() — must come after the component structs (uses offsetof).
@@ -779,12 +817,7 @@ public:
             for (uint i = 0; i < poolFrom.data.size(); i++)
             {
                 if (poolFrom.data[i] != nullptr && poolTo.data[i] != nullptr)
-                {
-                    if(Components::transient[i] == false)
-                        memcpy(to.Get(i), from.Get(i), Components::strides[i]);
-                    else
-                        memset(to.Get(i), 0, Components::strides[i]);
-                }
+                    memcpy(to.Get(i), from.Get(i), Components::strides[i]);
             }
         }
 

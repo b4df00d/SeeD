@@ -225,6 +225,11 @@ namespace HLSL
 
     struct Mesh
     {
+        // .w > 0.5 on EITHER field marks this as a terrain override mesh whose vertex range holds
+        // already-baked (displaced) geometry (MeshStorage::CreateMeshOverride /
+        // terrainMeshBake.hlsl) -- terrainmesh.hlsl's MeshMainTerrain checks aabbMin.w and skips
+        // its live heightmap-sampling displacement for these, or the baked + live displacement
+        // would stack. Regular (non-terrain) meshes always have aabbMin.w == 0.
         float4 aabbMin;    // .xyz : mesh-AABB min  (anchor for SNORM16 position decode)
         float4 aabbExtent; // .xyz : mesh-AABB size (max - min)
         uint lodCount;
@@ -268,6 +273,7 @@ namespace HLSL
     static const uint TerrainErodedHeightmapParam = 7; // srv heap index of the GPU-eroded heightmap stored AS FLOAT (exact below 2^24, heap max is 65535), -1 = none -> fall back to the raw heightmap in slot 4. A raw pass-created Resource has no assetID/Handle<Texture>, so it can't ride a texture slot (UpdateMaterials resolves those through AssetLibrary); parameters are copied verbatim, hence this detour. Written (with slot 9) by the TerrainErosion pass (Renderer.h), read by terrainmesh.hlsl.
     static const uint TerrainWorldSizeParam = 8; // world-space XZ footprint the heightmap covers (UV = worldPos.xz / this + 0.5), so all quadtree nodes sample one consistent heightmap regardless of their own footprint
     static const uint TerrainErosionDiffParam = 9; // srv heap index (AS FLOAT, -1 = none, same detour as slot 7) of the R8 erosion difference map: 0.5 = eroded == original, < 0.5 carved, > 0.5 deposited (normalized by erosionStrength). Displayed on the terrain albedo (terrainmesh.hlsl)
+    static const uint TerrainHeightmapBlurRadiusParam = 10; // box-blur radius in heightmap texels, AS FLOAT (0 = off) -- see common.hlsl's SampleHeightBlurred
 
     struct TerrainErosionParameters
     {
@@ -289,9 +295,44 @@ namespace HLSL
         float ridgeRounding;         // EROSION_ROUNDING.x
         float creaseRounding;        // EROSION_ROUNDING.y
         uint  outputDiffIndex;       // bindless UAV of the R8 difference map (see TerrainErosionDiffParam)
-        uint  pad0;
+        // Shared with the Noise entry (TerrainNoiseMain, same file/CBV): decorrelates the procedural
+        // heightmap pattern (same params + seed -> identical terrain). Unused (0) by Erosion.
+        uint  seed;
     };
-    
+
+    // Terrain node vertex-bake (MeshStorage::CreateMeshOverride / terrainMeshBake.hlsl): displaces
+    // one node's copy of the shared grid mesh once on the GPU, so raster (terrainmesh.hlsl) and RT
+    // (via the override's own BLAS) both see the same baked geometry instead of the gbuffer path
+    // re-sampling the heightmap every frame. One dispatch per dirty node, one thread per vertex.
+    struct TerrainBakeParameters
+    {
+        uint verticesUAVIndex;      // bindless UAV of MeshStorage::vertices (same resource read + written)
+        uint heightmapIndex;        // eroded (if available) or raw heightmap SRV to sample
+        uint sourceVertexOffset;    // source mesh's base into the shared vertices pool
+        uint outputVertexOffset;    // override mesh's own base into the shared vertices pool
+
+        uint vertexCount;           // shared by source and override (identical grid topology)
+        float worldExtent;          // terrain's XZ footprint (UV = worldXZ / worldExtent + 0.5)
+        float heightScale;
+        float heightOffset;
+
+        float4 sourceAabbMin;       // decode domain for the source's SNORM16 positions (.w unused)
+        float4 sourceAabbExtent;
+        float4 outputAabbMin;       // encode domain for the override's SNORM16 positions (.w unused)
+        float4 outputAabbExtent;
+
+        // .xyz = node instance's Transform.position (terrain nodes: no rotation), .w = Transform.scale.x
+        // (== .z, uniform XZ, Y always 1). Packed into one float4 (not a trailing float3+float) because
+        // hlslpp's C++ float3 is backed by a full 16-byte __m128 (its .w lane is padding/garbage), while
+        // HLSL's cbuffer packs a float3 as 12 bytes and slots a following scalar into the same 16-byte
+        // row -- a trailing "float3;float;" pair reads back at the WRONG offset on the HLSL side (this
+        // bit us once already: nodeScaleXZ silently read ~0, collapsing every node's XZ displacement).
+        float4 nodeWorldPosScaleXZ;
+
+        uint heightmapBlurRadius;  // box-blur radius in heightmap texels (0 = off, a single point sample)
+    };
+
+
     // Packed into D3D12_RAYTRACING_INSTANCE_DESC.InstanceID (24 bits) by culling.hlsl when the
     // instance points at the low-detail BLAS, so hit shaders fetch triangles from the matching LOD.
     static const uint RTInstanceLowLodBit = 1u << 23;

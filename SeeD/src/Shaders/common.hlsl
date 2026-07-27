@@ -90,6 +90,26 @@ float dot2(float3 p)
     return dot(p, p);
 }
 
+// Box-blur average of a single-channel texture around uv, radius texels out in each direction
+// (radius=0 degenerates to exactly one SampleLevel, so this is a drop-in replacement with no
+// behavior change at the default). Used by terrain height sampling (terrainMeshBake.hlsl,
+// terrainmesh.hlsl) to soften banding from low-precision (e.g. 8-bit) imported heightmaps --
+// shared here since both files sample through it identically and both already include this file.
+float SampleHeightBlurred(Texture2D<float4> tex, SamplerState samp, float2 uv, float2 texel, uint radius)
+{
+    float sum = 0.0;
+    float count = 0.0;
+    for (int y = -(int)radius; y <= (int)radius; y++)
+    {
+        for (int x = -(int)radius; x <= (int)radius; x++)
+        {
+            sum += tex.SampleLevel(samp, uv + float2(x, y) * texel, 0).x;
+            count += 1.0;
+        }
+    }
+    return sum / count;
+}
+
 float3 WorldNormal(float3 nrm, float3x3 tbn, float scale)
 {
 	//nrm = float3(0.5, 0.5, 1);
