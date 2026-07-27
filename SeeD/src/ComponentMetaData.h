@@ -140,8 +140,13 @@ knownComponents.push_back(
  		{
 			{ "overrideMeshIndex", PropertyTypes::_uint, NULL, 1, offsetof(Components::MeshOverride, overrideMeshIndex) },
 			{ "sourceMeshIndex", PropertyTypes::_uint, NULL, 1, offsetof(Components::MeshOverride, sourceMeshIndex) },
-			{ "terrain", PropertyTypes::_Handle, Components::Terrain::mask, 1, offsetof(Components::MeshOverride, terrain) },
 			{ "dirty", PropertyTypes::_uint, NULL, 1, offsetof(Components::MeshOverride, dirty) },
+		}
+ 	});
+knownComponents.push_back(
+ 	{ "TerrainBaking", Components::TerrainBaking::mask, nullptr,
+ 		{
+			{ "terrain", PropertyTypes::_Handle, Components::Terrain::mask, 1, offsetof(Components::TerrainBaking, terrain) },
 		}
  	});
 knownComponents.push_back(

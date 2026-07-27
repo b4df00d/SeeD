@@ -105,8 +105,10 @@
 // [ ] 19. rework omm resources (in a new struct with 2 entries for high and low ?)
 //         maybe even drop the low res omm. Put all in 1 function (formating / cleaning code)
 // 
-//  [ ] 20. avoid multiple upload() per frame for StructuredUploadBuffer. They can flag as dirty once
-//          and only upload once per frame. (see StructuredUploadBuffer::Upload() )
+// [ ] 20. avoid multiple upload() per frame for StructuredUploadBuffer. They can flag as dirty once
+//         and only upload once per frame. (see StructuredUploadBuffer::Upload() )
+// 
+// [ ] 21. add gpu profile for tracy
 // 
 // ============================================================================
 
@@ -305,32 +307,12 @@ public:
         {
             ZoneScoped;
 
+            world.structureChanged = false;
+
             Time::instance->Update();
             gpu.FrameStart();
             ui.FrameStart();
             ios.ProcessMessages();
-
-            // Open this frame's AssetLibrary command buffer BEFORE prefab/terrain streaming run:
-            // both can record GPU commands directly into it (terrainStreaming -> MeshStorage::
-            // CreateMeshOverride, e.g. mesh/transform uploads + the initial BLAS build), and they
-            // run here, single-threaded, well before ScheduleLoading's task (which used to be the
-            // sole Open() call) even gets scheduled below. Recording into a still-closed command
-            // list here silently discarded everything once ScheduleLoading's Open()->Reset() ran
-            // later this same frame -- e.g. every terrain override's GPU-side mesh entry (LODs,
-            // meshletCount, vertexOffset) stayed zeroed, which culling.hlsl reads as "0 meshlets"
-            // and drops the instance entirely (see [[gpuculling-latent-empty-lod-bug]]). Moving
-            // Open() here (and removing the now-redundant one in ScheduleLoading) fixes it.
-            AssetLibrary::instance->Open();
-
-            // Prefab streaming + deferred cleanup run single-threaded at frame start, before the
-            // ECS systems and the editor read the world. world.structureChanged is reset here
-            // (before systems) and set by the streaming system on any load/unload; the hierarchy
-            // window reads it to refresh. Running before DeferredRelease + RUN guarantees an
-            // unload's entities are fully removed before the hierarchy rebuilds.
-            world.structureChanged = false;
-            prefabStreaming.Update(&world);
-            terrainStreaming.Update(&world);
-            world.DeferredRelease(); // thread this ?
 
             TASK(UpdateWindow);
             TASKWITHSUBFLOW(ScheduleInputs);
@@ -341,6 +323,7 @@ public:
 
             UpdateWindow.precede(ScheduleInputs);
             ScheduleInputs.precede(ScheduleWorld);
+            ScheduleWorld.succeed(ScheduleLoading);
             ScheduleWorld.precede(ScheduleEditor);
             ScheduleRenderer.succeed(ScheduleEditor, ScheduleLoading);
 
@@ -431,16 +414,25 @@ public:
     {
         ZoneScoped;
 
-        // AssetLibrary::instance->Open() now happens earlier in Loop(), before prefab/terrain
-        // streaming, which also record into this same command buffer -- see the comment there.
-        tf::Task loadingTask = subflow.emplace([]() {AssetLibrary::instance->LoadAssets(); }).name("Loading");
+        // Open() must run before ScheduleWorld's prefab/terrain streaming (see ScheduleWorld.
+        // succeed(ScheduleLoading) in Loop()) -- both can record GPU commands directly into this
+        // command buffer, which isn't valid to record into until Open() has run this frame.
+        tf::Task loadingTask = subflow.emplace([]() {AssetLibrary::instance->Open(); AssetLibrary::instance->LoadAssets(); }).name("Loading");
 
         return loadingTask;
     }
 
     void ScheduleWorld(tf::Subflow& subflow)
     {
-        world.Schedule(subflow);
+        ZoneScoped;
+
+        tf::Task prefabTask = subflow.emplace([this]() { prefabStreaming.Update(&world); }).name("PrefabStreaming");
+        tf::Task terrainTask = subflow.emplace([this]() { terrainStreaming.Update(&world); }).name("TerrainStreaming");
+        tf::Task deferredReleaseTask = subflow.emplace([this]() { world.DeferredRelease(); }).name("DeferredRelease"); // thread this ?
+        prefabTask.precede(terrainTask);
+        terrainTask.precede(deferredReleaseTask);
+
+        world.Schedule(subflow, deferredReleaseTask);
     }
 
     void ScheduleEditor(tf::Subflow& subflow)

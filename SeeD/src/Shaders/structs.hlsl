@@ -263,18 +263,6 @@ namespace HLSL
         uint shaderIndex; // stable per-shader-bucket index (Renderer.h MainView shader-bucket registry); routes this material's meshlets to the matching draw bucket in culling.hlsl instead of the old cutout/terrain bool flags
     };
     
-    // Milestone 1 terrain (see World.h Components::Terrain*Slot/Param, must match): the heightmap
-    // heap index + height decode params ride on the material's otherwise-unused texture/parameter
-    // slots instead of adding new per-instance/per-mesh fields. Shading-bucket routing is via
-    // Material::shader/shaderIndex now, not a parameter flag.
-    static const uint TerrainHeightmapTextureSlot = 4;
-    static const uint TerrainHeightScaleParam = 5;
-    static const uint TerrainHeightOffsetParam = 6;
-    static const uint TerrainErodedHeightmapParam = 7; // srv heap index of the GPU-eroded heightmap stored AS FLOAT (exact below 2^24, heap max is 65535), -1 = none -> fall back to the raw heightmap in slot 4. A raw pass-created Resource has no assetID/Handle<Texture>, so it can't ride a texture slot (UpdateMaterials resolves those through AssetLibrary); parameters are copied verbatim, hence this detour. Written (with slot 9) by the TerrainErosion pass (Renderer.h), read by terrainmesh.hlsl.
-    static const uint TerrainWorldSizeParam = 8; // world-space XZ footprint the heightmap covers (UV = worldPos.xz / this + 0.5), so all quadtree nodes sample one consistent heightmap regardless of their own footprint
-    static const uint TerrainErosionDiffParam = 9; // srv heap index (AS FLOAT, -1 = none, same detour as slot 7) of the R8 erosion difference map: 0.5 = eroded == original, < 0.5 carved, > 0.5 deposited (normalized by erosionStrength). Displayed on the terrain albedo (terrainmesh.hlsl)
-    static const uint TerrainHeightmapBlurRadiusParam = 10; // box-blur radius in heightmap texels, AS FLOAT (0 = off) -- see common.hlsl's SampleHeightBlurred
-
     struct TerrainErosionParameters
     {
         uint inputHeightmapIndex;    // bindless SRV of the raw imported heightmap

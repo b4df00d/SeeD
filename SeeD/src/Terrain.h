@@ -317,18 +317,28 @@ namespace Systems
         // button path resolves on the first try). Leaves the ~0u sentinel in place (no-op) when
         // it still isn't ready -- self-healing, no special one-time resync pass needed, and cheap
         // to retry (a failed attempt costs one Get<Mesh> call).
-        void TryAttachOverride(World::Entity terrainEntity, Components::Terrain& terrain, Components::MeshOverride& ov)
+        // scaleXZ: the node's world-footprint-to-gridSize ratio. Node instances carry an identity
+        // Transform.scale (baked meshes need no render-time scale), so this is the ONLY place that
+        // ratio gets applied -- baked into the override's own AABB (X/Z scaled by it, matching what
+        // the bake shader also bakes into the vertex positions themselves -- see
+        // terrainMeshBake.hlsl) so the override's encode domain matches its actual baked content.
+        void TryAttachOverride(World::Entity terrainEntity, Components::Terrain& terrain, Components::MeshOverride& ov, Components::TerrainBaking& baking, float scaleXZ)
         {
             Components::Mesh& gridMeshCmp = terrain.gridMesh.Get();
             Mesh* sourceMesh = AssetLibrary::instance->Get<Mesh>(gridMeshCmp.id);
             if (sourceMesh == nullptr)
                 return;
 
+            // X/Z are the source's own footprint scaled up to this node's real world size; only Y
+            // is degenerate on the source (flat, no room to encode displacement into) and needs a
+            // real range -- CreateMeshOverride itself has no terrain-specific knowledge of either.
             float aabbMinY, aabbExtentY;
             ComputeOverrideHeightRange(terrain, aabbMinY, aabbExtentY);
-            ov.overrideMeshIndex = MeshStorage::instance->CreateMeshOverride(*sourceMesh, aabbMinY, aabbExtentY, AssetLibrary::instance->commandBuffer.Get());
+            float3 overrideAabbMin((float)sourceMesh->aabbMin.x * scaleXZ, aabbMinY, (float)sourceMesh->aabbMin.z * scaleXZ);
+            float3 overrideAabbExtent((float)sourceMesh->aabbExtent.x * scaleXZ, aabbExtentY, (float)sourceMesh->aabbExtent.z * scaleXZ);
+            ov.overrideMeshIndex = MeshStorage::instance->CreateMeshOverride(*sourceMesh, overrideAabbMin, overrideAabbExtent, AssetLibrary::instance->commandBuffer.Get());
             ov.sourceMeshIndex = sourceMesh->storageIndex;
-            ov.terrain.Set(terrainEntity);
+            baking.terrain.Set(terrainEntity);
             ov.dirty = 1; // always bake at least once before this node is ever rendered
         }
 
@@ -336,11 +346,14 @@ namespace Systems
         {
             ZoneScoped;
             World::Entity ent;
-            ent.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Instance::mask | Components::MeshOverride::mask);
+            ent.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Instance::mask | Components::MeshOverride::mask | Components::TerrainBaking::mask);
             auto& tr = ent.Get<Components::Transform>();
             tr.position = position;
             tr.rotation = quaternion::identity();
-            tr.scale = float3(scaleXZ, 1.0f, scaleXZ);
+            // Always identity: the node's world footprint (scaleXZ) is baked directly into the
+            // override mesh's vertex positions and AABB instead (see TryAttachOverride /
+            // terrainMeshBake.hlsl), not applied via this transform.
+            tr.scale = float3(1.0f, 1.0f, 1.0f);
             auto& inst = ent.Get<Components::Instance>();
             inst.mesh = terrain.gridMesh;
             inst.material = terrain.material;
@@ -352,16 +365,17 @@ namespace Systems
             // range + AABB + BLAS, sharing the source grid's meshlet/index/LOD data) so it gets
             // displaced ONCE on the GPU (TerrainErosion::Render's bake dispatch) instead of the
             // gbuffer path re-sampling the heightmap every frame, and enters the TLAS as real
-            // geometry instead of a flat plane. Starts at the ~0u sentinel (no MeshOverride
-            // content -> UpdateInstances/terrainmesh.hlsl both no-op) and falls back to the
-            // ORIGINAL live-displacement path until TryAttachOverride succeeds -- may take a few
-            // frames right after scene load (see its comment).
+            // geometry instead of a flat plane. Starts at the ~0u sentinel (no MeshOverride content
+            // -> UpdateInstances/terrainmesh.hlsl both no-op, renders as an undisplaced flat patch)
+            // until TryAttachOverride succeeds -- may take a few frames right after scene load (see
+            // its comment).
             auto& ov = ent.Get<Components::MeshOverride>();
             ov.overrideMeshIndex = ~0u;
             ov.sourceMeshIndex = ~0u;
-            ov.terrain.Set(entityInvalid);
             ov.dirty = 0;
-            TryAttachOverride(terrainEntity, terrain, ov);
+            auto& baking = ent.Get<Components::TerrainBaking>();
+            baking.terrain.Set(entityInvalid);
+            TryAttachOverride(terrainEntity, terrain, ov, baking, scaleXZ);
 
             return ent;
         }
@@ -386,11 +400,14 @@ namespace Systems
                     if (inst.mesh == terrain.gridMesh && inst.material == terrain.material)
                     {
                         auto& tr = ent.Get<Components::Transform>();
+                        // tr.scale is always identity now (see MakeNodeInstance) -- a footprint
+                        // (size) change is caught via boundingSphereOverride instead, which node.size
+                        // directly determines (ComputeNodeBoundingSphere), so it's already a
+                        // reliable proxy without needing scaleXZ compared here too.
                         bool changed =
                             (float)tr.position.x != (float)position.x ||
                             (float)tr.position.y != (float)position.y ||
                             (float)tr.position.z != (float)position.z ||
-                            (float)tr.scale.x != scaleXZ ||
                             (float)inst.boundingSphereOverride.x != (float)boundingSphere.x ||
                             (float)inst.boundingSphereOverride.y != (float)boundingSphere.y ||
                             (float)inst.boundingSphereOverride.z != (float)boundingSphere.z ||
@@ -398,25 +415,40 @@ namespace Systems
                         if (changed)
                         {
                             tr.position = position;
-                            tr.scale = float3(scaleXZ, 1.0f, scaleXZ);
                             inst.boundingSphereOverride = boundingSphere;
                             ent.Get<Components::State>().flags |= Components::State::Flags::dirty;
                             churn.reusedRewritten++;
+
+                            // scaleXZ is baked into the override's own AABB/vertex positions (see
+                            // TryAttachOverride), not applied via tr.scale -- a footprint change can
+                            // mean that baked scale is stale too, not just the vertex content a mere
+                            // re-bake (dirty=1) would refresh, so free the current slot and fall
+                            // through to the retry path below, which reattaches fresh at the new
+                            // scaleXZ (recycled from the same source's free list, not a real
+                            // reallocation -- see MeshStorage::FreeMeshOverride).
+                            if (ent.Has<Components::MeshOverride>())
+                            {
+                                auto& ov = ent.Get<Components::MeshOverride>();
+                                if (ov.overrideMeshIndex != ~0u)
+                                {
+                                    MeshStorage::instance->FreeMeshOverride(ov.overrideMeshIndex, ov.sourceMeshIndex);
+                                    ov.overrideMeshIndex = ~0u;
+                                }
+                            }
                         }
                         else
                             churn.reusedUnchanged++;
 
-                        // Retry attaching an override every frame it's still missing (source mesh
-                        // wasn't resolvable at creation time -- see TryAttachOverride), or re-dirty
-                        // an already-attached one: footprint changed -> the baked geometry (sampled
-                        // at the OLD position/scale) is stale, needs a re-bake at the new footprint.
+                        // Retry attaching an override every frame it's still missing -- either the
+                        // source mesh wasn't resolvable at creation time (see TryAttachOverride), or
+                        // a footprint change just freed it above.
                         if (ent.Has<Components::MeshOverride>())
                         {
                             auto& ov = ent.Get<Components::MeshOverride>();
                             if (ov.overrideMeshIndex == ~0u)
                             {
-                                TryAttachOverride(terrainEntity, terrain, ov);
-                                // A retry that just succeeded needs UpdateInstances (Renderer.h)
+                                TryAttachOverride(terrainEntity, terrain, ov, ent.Get<Components::TerrainBaking>(), scaleXZ);
+                                // A (re)attach that just succeeded needs UpdateInstances (Renderer.h)
                                 // to re-upload this instance -- it currently points at the
                                 // fallback source mesh, and won't be revisited otherwise (its
                                 // "loaded && !dirty" skip only reacts to Components::State::dirty,
@@ -424,8 +456,6 @@ namespace Systems
                                 if (ov.overrideMeshIndex != ~0u)
                                     ent.Get<Components::State>().flags |= Components::State::Flags::dirty;
                             }
-                            else if (changed)
-                                ov.dirty = 1;
                         }
 
                         it->second.lastTouchedFrame = frameCounter;
@@ -513,18 +543,9 @@ namespace Systems
 
                 auto& terrain = e.Get<Components::Terrain>();
 
-
-                if (terrain.material.IsValid())
-                {
-                    auto& mat = terrain.material.Get();
-                    mat.textures[Components::TerrainHeightmapTextureSlot] = terrain.heightmap;
-                    mat.parameters[Components::TerrainHeightScaleParam] = terrain.heightScale;
-                    mat.parameters[Components::TerrainHeightOffsetParam] = terrain.heightOffset;
-                    mat.parameters[Components::TerrainWorldSizeParam] = terrain.worldExtent;
-                    mat.parameters[Components::TerrainHeightmapBlurRadiusParam] = (float)terrain.heightmapBlurRadius;
-                    // params TerrainErodedHeightmapParam (7) / TerrainErosionDiffParam (9) are
-                    // owned and written by the TerrainErosion pass (Renderer.h), not here.
-                }
+                // Terrain's material is now shaded like a standard mesh (PixelgBufferTerrain,
+                // terrainmesh.hlsl) -- displacement params go straight from this Components::Terrain
+                // into HLSL::TerrainBakeParameters (Renderer.h), not through the material at all.
 
                 // Procedural terrains have no imported texture asset at all -- terrain.heightmap
                 // may be a never-explicitly-assigned Handle, and raw-malloc'd ECS component

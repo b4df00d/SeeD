@@ -3182,9 +3182,9 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             {
                 OMMData ommData;
                 bool hasOMM = MeshLoader::instance->ReadOMM(map[id].path, ommData);
-                // Load() inserts directly into MeshStorage::allMeshes and returns a reference into
-                // it -- map-owned, not new'd, so we just point this asset's data at it.
-                Mesh& mesh = MeshStorage::instance->Load(meshData, commandBuffer.Get(), hasOMM ? &ommData : nullptr);
+                // GetOrCreate() inserts directly into MeshStorage::allMeshes and returns a
+                // reference into it -- map-owned, not new'd, so we just point this asset's data at it.
+                Mesh& mesh = MeshStorage::instance->GetOrCreate(meshData, commandBuffer.Get(), hasOMM ? &ommData : nullptr);
                 lock.lock();
                 map[id].data = &mesh;
                 map[id].storageIndex = mesh.storageIndex;
@@ -3207,14 +3207,12 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             if (compiled)
             {
                 lock.lock();
-                if (map[id].data == nullptr)
+                bool firstLoad = map[id].data == nullptr;
+                uint index;
+                Shader& slot = ShaderStorage::instance->GetOrCreate(firstLoad ? ~0u : map[id].storageIndex, index);
+                if (firstLoad)
                 {
-                    // First load: claim a fresh slot in ShaderStorage. A hot-reload later just
-                    // overwrites *map[id].data in place below -- the pointer stays valid and
-                    // pointed at this SAME slot for the shader's entire lifetime (unordered_map
-                    // element addresses are stable across further insertions).
-                    uint index = ShaderStorage::instance->nextIndex++;
-                    map[id].data = &ShaderStorage::instance->shaders[index];
+                    map[id].data = &slot;
                     map[id].storageIndex = index;
                     assetsAlive.push_back(id);
                 }
@@ -3243,9 +3241,8 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             if (texture.allocation != nullptr)
             {
                 lock.lock();
-                uint index = TextureStorage::instance->nextIndex++;
-                Resource& slot = TextureStorage::instance->textures[index];
-                slot = texture;
+                uint index;
+                Resource& slot = TextureStorage::instance->GetOrCreate(texture, index);
                 map[id].data = &slot;
                 map[id].storageIndex = index;
                 map[id].lastGetFrameCount = 0;

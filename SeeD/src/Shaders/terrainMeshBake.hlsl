@@ -82,17 +82,23 @@ void TerrainMeshBakeMain(uint3 dtid : SV_DispatchThreadID)
 
     objectPos.y += hC * bake.heightScale + bake.heightOffset;
 
-    // Same gradient/inverse-transpose-folding math as terrainmesh.hlsl's MeshMainTerrain (see its
-    // comments): node instances carry a non-uniform (s,1,s) scale, so the world-space slope must
-    // be pre-divided by s for the pre-compensated normal to reconstruct correctly after that
-    // transform, and the tangent orthogonalized against the TRUE object-space normal (slope*s).
+    // Node instances now carry an identity Transform.scale -- the node's world footprint is baked
+    // directly into the vertex positions here instead (and into the override's own AABB, set to
+    // match at CreateMeshOverride time -- see Terrain.h TryAttachOverride), so no scale is ever
+    // applied again downstream. That also means the world-space gradient below (already
+    // world-units-per-world-unit, via worldTexel) IS the correct object-space gradient in this new
+    // scaled-object-space directly -- no inverse-transpose folding needed anymore.
     float2 worldTexel = max(bake.worldExtent * texel, float2(1e-5, 1e-5));
     float dHdx = ((hX1 - hX0) * bake.heightScale) / (2.0 * worldTexel.x);
     float dHdz = ((hZ1 - hZ0) * bake.heightScale) / (2.0 * worldTexel.y);
-    float nodeScaleXZ = bake.nodeWorldPosScaleXZ.w;
-    float3 normalObj = normalize(float3(-dHdx * nodeScaleXZ, 1.0, -dHdz * nodeScaleXZ));
-    tangentOS = normalize(tangentOS - normalObj * dot(tangentOS, normalObj));
-    float3 normalOS = normalize(float3(-dHdx / nodeScaleXZ, 1.0, -dHdz / nodeScaleXZ));
+    float3 normalOS = normalize(float3(-dHdx, 1.0, -dHdz));
+    tangentOS = normalize(tangentOS - normalOS * dot(tangentOS, normalOS));
+
+    // Bake the node's XZ scale into the position itself (Y is already in world units via
+    // heightScale) -- must happen after the UV/gradient work above, which needs the ORIGINAL
+    // (unscaled, source-grid-local) objectPos.x/z.
+    objectPos.x *= bake.nodeWorldPosScaleXZ.w;
+    objectPos.z *= bake.nodeWorldPosScaleXZ.w;
 
     // Re-encode SNORM16 against the OVERRIDE's own AABB (its Y range is real, unlike the flat
     // source's degenerate one -- see MeshStorage::CreateMeshOverride).

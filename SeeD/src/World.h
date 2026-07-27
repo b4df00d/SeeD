@@ -393,21 +393,6 @@ namespace Components
         }
     }
 
-    // Milestone 1 terrain (see Components::Terrain below): the heightmap + decode params ride on
-    // the material's otherwise-unused texture/parameter slots instead of adding new
-    // per-instance/per-mesh fields. Mirrored as raw indices in structs.hlsl (culling.hlsl /
-    // terrainmesh.hlsl read them the same way) -- keep both sides in sync. Shading-bucket routing
-    // is via Material::shader/shaderIndex (generic multi-shader GBuffer draw), not a parameter flag.
-    static constexpr uint TerrainHeightmapTextureSlot = 4;
-    static constexpr uint TerrainHeightScaleParam = 5;
-    static constexpr uint TerrainHeightOffsetParam = 6;
-    static constexpr uint TerrainErodedHeightmapParam = 7; // srv heap index of the GPU-eroded heightmap AS FLOAT (exact, heap max 65535 < 2^24), -1 = none. See structs.hlsl for why an index and not a Handle<Texture>: the eroded map is a raw render Resource with no assetID. Written (with slot 9) by the TerrainErosion pass (Renderer.h) directly into the material component; TerrainStreaming owns slots 4/5/6/8.
-    static constexpr uint TerrainWorldSizeParam = 8; // world-space XZ footprint the heightmap covers (UV = worldPos.xz / this + 0.5), so all quadtree nodes sample one consistent heightmap regardless of their own footprint
-    static constexpr uint TerrainErosionDiffParam = 9; // srv heap index AS FLOAT (-1 = none, same detour as slot 7) of the R8 erosion difference map (0.5 = untouched), displayed on the terrain albedo
-    static constexpr uint TerrainHeightmapBlurRadiusParam = 10; // box-blur radius in heightmap texels AS FLOAT (0 = off), softens banding from low-precision imported heightmaps -- read by terrainmesh.hlsl's live path; the bake path (terrainMeshBake.hlsl) gets it directly via HLSL::TerrainBakeParameters instead
-    // Milestone 1 (static grid + heightmap displacement, no erosion/brushes yet): one baked
-    // heightmap texture drives mesh-shader displacement of a shared grid mesh, instanced across
-    // a CPU-walked quadtree (built each frame in World::Update, see Systems below).
     struct Terrain : ComponentBase<Terrain>
     {
         Handle<Texture> heightmap;
@@ -471,20 +456,31 @@ namespace Components
             t->gridMesh = buildTerrainGridMesh(t->gridSpacing, t->gridSize);
     }
 
-    // Runtime-only mesh override (terrain node displacement baking -- later shared by skinning,
-    // roadmap item 6): redirects UpdateInstances (Renderer.h) to a MeshStorage-owned override
-    // Mesh (its own vertex range + AABB + BLAS, sharing the source mesh's meshlet/index/LOD data
-    // via MeshStorage::CreateMeshOverride) instead of the owning Instance component's own `mesh`
-    // handle. Never serialized in practice (only ever attached to transient entities). IMPORTANT:
-    // World::Pool allocates component storage with raw malloc -- there is NO implicit zero-init
-    // for a new component slot (see Instance::boundingSphereOverride above), so every site that
-    // creates a MeshOverride component MUST explicitly set every field.
+    // Runtime-only mesh override (currently terrain node displacement baking, later shared by
+    // skinning, roadmap item 6): redirects UpdateInstances (Renderer.h) to a MeshStorage-owned
+    // override Mesh (its own vertex range + AABB + BLAS, sharing the source mesh's meshlet/index/LOD
+    // data via MeshStorage::CreateMeshOverride) instead of the owning Instance component's own
+    // `mesh` handle. Deliberately agnostic of WHAT drives the bake -- that link lives in a separate
+    // component alongside this one (TerrainBaking below; a future SkinBaking with a skeleton Handle
+    // will reuse this same mechanism for skinned meshes) so this stays reusable as-is. Never
+    // serialized in practice (only ever attached to transient entities). IMPORTANT: World::Pool
+    // allocates component storage with raw malloc -- there is NO implicit zero-init for a new
+    // component slot (see Instance::boundingSphereOverride above), so every site that creates a
+    // MeshOverride component MUST explicitly set every field.
     struct MeshOverride : ComponentBase<MeshOverride>
     {
-        uint overrideMeshIndex;  // MeshStorage meshIndex namespace (shared with normal Mesh::storageIndex)
-        uint sourceMeshIndex;    // the override's source mesh's storageIndex -- needed to free it back into MeshStorage's per-source recycling list
-        Handle<Terrain> terrain; // owning Terrain entity -- TerrainErosion::Render (Renderer.h) looks up per-terrain bake state (heightmap SRV, worldExtent, heightScale/heightOffset) through this
-        uint dirty;              // needs a vertex re-bake (TerrainErosion::Render); the owning system sets/clears this
+        uint overrideMeshIndex; // MeshStorage meshIndex namespace (shared with normal Mesh::storageIndex)
+        uint sourceMeshIndex;   // the override's source mesh's storageIndex -- needed to free it back into MeshStorage's per-source recycling list
+        uint dirty;             // needs a vertex re-bake; the owning baking system sets/clears this
+    };
+
+    // Links a MeshOverride-bearing entity back to the Terrain driving its bake -- TerrainErosion::
+    // Render (Renderer.h) looks up per-terrain bake state (heightmap SRV, worldExtent, heightScale/
+    // heightOffset) through this. Attached alongside MeshOverride on every terrain node instance
+    // (Systems::TerrainStreaming, Terrain.h). Same raw-malloc-no-zero-init caveat as MeshOverride.
+    struct TerrainBaking : ComponentBase<TerrainBaking>
+    {
+        Handle<Terrain> terrain;
     };
 }
 
@@ -1372,7 +1368,9 @@ public:
         }
     }
 
-    void Schedule(tf::Subflow& subflow)
+    // predecessor: if non-empty, every system task succeeds it (e.g. prefab/terrain streaming +
+    // DeferredRelease must land before the ECS systems read the world this frame).
+    void Schedule(tf::Subflow& subflow, tf::Task predecessor = tf::Task())
     {
         ZoneScoped;
         frameQueriesIndex = 0;
@@ -1382,6 +1380,8 @@ public:
             auto sys = systems[i];
             //SUBTASKWORLD(sys);
             tf::Task t = subflow.emplace([this, i]() {this->systems[i]->Update(this); }).name("#system");
+            if (!predecessor.empty())
+                t.succeed(predecessor);
         }
     }
 

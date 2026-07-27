@@ -3116,7 +3116,7 @@ struct MeshStorage
         }
     }
 
-    Mesh& Load(MeshData& meshData, CommandBuffer& commandBuffer, const OMMData* omm = nullptr)
+    Mesh& GetOrCreate(MeshData& meshData, CommandBuffer& commandBuffer, const OMMData* omm = nullptr)
     {
         ZoneScoped;
 
@@ -3445,7 +3445,12 @@ struct MeshStorage
         return scratchSizeInBytes;
     }
 
-    uint CreateMeshOverride(Mesh& source, float aabbMinY, float aabbExtentY, CommandBuffer& commandBuffer)
+    // aabbMin/aabbExtent are the override's own encode domain for its SNORM16 positions -- callers
+    // needing only some axes overridden (e.g. terrain: X/Z copied from source, only Y is real) pass
+    // the source's own values through for the rest. Generic across future override drivers (terrain
+    // displacement today, skinning later -- a skinned pose's AABB can differ from the rest pose's on
+    // any axis, not just Y).
+    uint CreateMeshOverride(Mesh& source, float3 aabbMin, float3 aabbExtent, CommandBuffer& commandBuffer)
     {
         ZoneScoped;
         lock.lock();
@@ -3475,8 +3480,13 @@ struct MeshStorage
         (HLSL::Mesh&)ov = (HLSL::Mesh&)source; // copy of original buffers indices/offsets
         ov.vertexOffset = vertexOffset;
         ov.storageIndex = overrideIndex;
-        ov.aabbMin.y = aabbMinY;
-        ov.aabbExtent.y = std::max(aabbExtentY, 1e-4f); // avoid a truly-zero extent (degenerate SNORM16 decode)
+        ov.aabbMin.x = aabbMin.x;
+        ov.aabbMin.y = aabbMin.y;
+        ov.aabbMin.z = aabbMin.z;
+        // avoid a truly-zero extent on any axis (degenerate SNORM16 decode)
+        ov.aabbExtent.x = std::max((float)aabbExtent.x, 1e-4f);
+        ov.aabbExtent.y = std::max((float)aabbExtent.y, 1e-4f);
+        ov.aabbExtent.z = std::max((float)aabbExtent.z, 1e-4f);
         ov.aabbMin.w = 1.0f;
 
         meshes.UploadElements(&(HLSL::Mesh&)ov, 1, overrideIndex, commandBuffer);
@@ -3543,6 +3553,15 @@ struct TextureStorage
         it->second.Release();
         textures.erase(it);
     }
+
+    // Textures never reload in place (unlike shaders) -- always claims a fresh slot.
+    Resource& GetOrCreate(Resource& texture, uint& outIndex)
+    {
+        outIndex = nextIndex++;
+        Resource& slot = textures[outIndex];
+        slot = texture;
+        return slot;
+    }
 };
 TextureStorage* TextureStorage::instance;
 
@@ -3559,6 +3578,15 @@ struct ShaderStorage
             kv.second.Release();
         shaders.clear();
         instance = nullptr;
+    }
+
+    // existingIndex == ~0u -> claim a fresh slot (first load); otherwise reuse that slot in place
+    // (hot-reload) -- unordered_map element addresses are stable across insertion, so the returned
+    // reference stays valid and pointed at the same slot for the shader's entire lifetime.
+    Shader& GetOrCreate(uint existingIndex, uint& outIndex)
+    {
+        outIndex = existingIndex == ~0u ? nextIndex++ : existingIndex;
+        return shaders[outIndex];
     }
 };
 ShaderStorage* ShaderStorage::instance;

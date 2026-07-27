@@ -1957,27 +1957,19 @@ public:
                 }
             }
 
+            // Resolves to the eroded map's SRV if erosion ran, else the procedural/imported base --
+            // ctx.heightmapSRV below is what the bake dispatch actually samples.
             float erodedParam = -1.0f;
-            float diffParam = -1.0f;
             auto mapsIt = erodedMaps.find(e.id);
             if (eroding && mapsIt != erodedMaps.end())
             {
                 if (mapsIt->second.height.GetResource() != nullptr)
                     erodedParam = (float)mapsIt->second.height.srv.offset;
-                if (mapsIt->second.diff.GetResource() != nullptr)
-                    diffParam = (float)mapsIt->second.diff.srv.offset;
             }
             else if (terrainCmp.useProceduralHeightmap && baseHeightmapSRV != HLSL::invalidUINT)
             {
-                // No erosion ran, but the procedural output is still a pass-created resource with
-                // no assetID/Handle<Texture> -- ride the same detour slot a pass-eroded map uses so
-                // terrainmesh.hlsl's live fallback (which otherwise reads terrain.heightmap's
-                // texture slot, invalid here) still finds it.
                 erodedParam = (float)baseHeightmapSRV;
             }
-            auto& mat = terrainCmp.material.Get();
-            mat.parameters[Components::TerrainErodedHeightmapParam] = erodedParam;
-            mat.parameters[Components::TerrainErosionDiffParam] = diffParam;
 
             TerrainBakeContext ctx;
             ctx.erosionEnabled = terrainCmp.erosionEnabled;
@@ -2019,16 +2011,17 @@ public:
         std::vector<Mesh*> justBaked;
         {
             Shader* bake = nullptr; // fetched lazily: nothing to bake -> shader never loads/compiles
-            uint overrideQueryIndex = world.Query(Components::MeshOverride::mask, 0, true);
+            uint overrideQueryIndex = world.Query(Components::MeshOverride::mask | Components::TerrainBaking::mask, 0, true);
             auto& overrideQueryResult = world.frameQueries[overrideQueryIndex];
             for (auto& oeb : overrideQueryResult)
             {
                 World::Entity ent = oeb;
                 auto& overrideCmp = ent.Get<Components::MeshOverride>();
-                if (overrideCmp.overrideMeshIndex == ~0u || !overrideCmp.terrain.IsValid())
+                auto& bakingCmp = ent.Get<Components::TerrainBaking>();
+                if (overrideCmp.overrideMeshIndex == ~0u || !bakingCmp.terrain.IsValid())
                     continue;
 
-                auto ctxIt = bakeContexts.find(overrideCmp.terrain.id);
+                auto ctxIt = bakeContexts.find(bakingCmp.terrain.id);
                 if (ctxIt == bakeContexts.end() || ctxIt->second.heightmapSRV == HLSL::invalidUINT)
                     continue;
 
@@ -2046,7 +2039,7 @@ public:
                     continue;
                 Mesh& overrideMesh = overrideIt->second;
 
-                Components::Terrain& terrainCmp = overrideCmp.terrain.Get();
+                Components::Terrain& terrainCmp = bakingCmp.terrain.Get();
                 auto& tr = ent.Get<Components::Transform>();
 
                 if (bake == nullptr)
@@ -2065,7 +2058,14 @@ public:
                 params.sourceAabbExtent = sourceMesh->aabbExtent;
                 params.outputAabbMin = overrideMesh.aabbMin;
                 params.outputAabbExtent = overrideMesh.aabbExtent;
-                params.nodeWorldPosScaleXZ = float4(tr.position, tr.scale.x);
+                // Node instances carry an identity Transform.scale now (the node's world footprint
+                // is baked into the vertex positions/AABB instead -- see Terrain.h
+                // TryAttachOverride), so the scale the bake shader needs for the heightmap UV
+                // lookup and to bake into the output position is recovered from the override's own
+                // AABB (set to source-AABB * scaleXZ at attach time) rather than tr.scale.
+                float sourceExtentX = (float)sourceMesh->aabbExtent.x;
+                float nodeScaleXZ = sourceExtentX > 1e-8f ? (float)overrideMesh.aabbExtent.x / sourceExtentX : 1.0f;
+                params.nodeWorldPosScaleXZ = float4(tr.position, nodeScaleXZ);
                 params.heightmapBlurRadius = terrainCmp.heightmapBlurRadius;
 
                 MeshStorage::instance->vertices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
