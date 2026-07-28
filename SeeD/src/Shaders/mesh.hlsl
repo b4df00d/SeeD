@@ -105,22 +105,22 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts, uint primitiveID : SV_PrimitiveID)
 
     o.albedo = s.albedo;
 
-    if (editorContext.clusters)
+    if (editorContext.debugFlags & HLSL::EditorDebugClusters)
     {
         o.albedo = 1;
         o.albedo.xyz = RandUINT(meshletIndexIndirect); // per-meshlet debug color (computed here, not interpolated)
     }
-    if (editorContext.triangles)
+    if (editorContext.debugFlags & HLSL::EditorDebugTriangles)
     {
         o.albedo = 1;
         o.albedo.xyz = RandUINT(meshletIndexIndirect * HLSL::max_triangles + primitiveID); // unique seed per triangle
     }
-    
+
 #ifdef CUTOUT
     if((o.albedo.a+0.01) < material.parameters[4]) discard;
 #endif
 
-    if (editorContext.overdraw) // count shaded fragments per pixel for the overdraw heatmap
+    if (editorContext.debugFlags & HLSL::EditorDebugOverdraw) // count shaded fragments per pixel for the overdraw heatmap
     {
         RWTexture2D<uint> overdraw = ResourceDescriptorHeap[viewContext.overdrawIndex];
         uint previous;

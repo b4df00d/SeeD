@@ -2206,6 +2206,11 @@ public :
         pIncludeHandler->LoadSource(wfile.c_str(), &pincludes);
 
         std::vector<LPCWSTR> vArgs;
+        // Positional filename arg: without this, DXC has no real source name to embed in debug
+        // info / PDB, so every compiled shader's errors (GBV, debug-layer, breadcrumbs) report a
+        // generic placeholder filename instead of the actual .hlsl file -- makes every line number
+        // in a GPU-based-validation message ambiguous about which file/include it's really in.
+        vArgs.push_back(wfile.c_str());
         vArgs.push_back(L"-I");
         vArgs.push_back(includePath.c_str());
         vArgs.push_back(L"-E");

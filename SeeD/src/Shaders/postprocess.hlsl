@@ -98,10 +98,12 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
         inputPixel = dtid.xy * viewContext.displayResolution.zw * viewContext.renderResolution.xy;
     
     RWTexture2D<float4> postProcessed = ResourceDescriptorHeap[ppParameters.postProcessedIndex];
-    Texture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
+    // lightedIndex is a UAV slot either way (lighted.uav.offset or, for DLSS/DLSS-RR, upscaled.uav.offset
+    // -- Renderer.h PostProcess::Render -- both live permanently in UNORDERED_ACCESS), read-only here.
+    RWTexture2D<float4> lighted = ResourceDescriptorHeap[ppParameters.lightedIndex];
     float4 HDR = float4(lighted[inputPixel.xy].xyz * HLSL::brightnessClippingAdjust, 1);
     
-    if (editorContext.GIBounces || editorContext.GINormals || editorContext.albedo || editorContext.normals || editorContext.clusters || editorContext.triangles)
+    if (editorContext.debugFlags & (HLSL::EditorDebugGIBounces | HLSL::EditorDebugGINormals | HLSL::EditorDebugAlbedo | HLSL::EditorDebugNormals | HLSL::EditorDebugClusters | HLSL::EditorDebugTriangles))
     {
         postProcessed[dtid.xy] = HDR;
         return;

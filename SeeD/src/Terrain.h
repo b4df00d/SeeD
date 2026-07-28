@@ -415,6 +415,7 @@ namespace Systems
                         if (changed)
                         {
                             tr.position = position;
+                            tr.version++;
                             inst.boundingSphereOverride = boundingSphere;
                             ent.Get<Components::State>().flags |= Components::State::Flags::dirty;
                             churn.reusedRewritten++;

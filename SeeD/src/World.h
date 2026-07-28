@@ -203,11 +203,20 @@ namespace Components
         float3 position;
         quaternion rotation;
         float3 scale;
+        // Bumped by every site that edits position/rotation/scale (Guizmo::SetWorldPositionRotationScale,
+        // TerrainStreaming node repositioning), never reset. Lets descendants notice an ancestor moved
+        // (ComputeTransformVersion) without a children list -- raw-malloc pool storage means this starts
+        // as garbage on a fresh slot (see Instance::boundingSphereOverride comment above), but that's
+        // fine: consumers only ever compare it for *change*, never against a known baseline.
+        uint version;
     };
 
     struct WorldMatrix : ComponentBase<WorldMatrix>
     {
         float4x4 matrix;
+        // ComputeTransformVersion(entity) result as of the last time matrix was rebuilt; a mismatch
+        // means this entity or an ancestor moved since, and MainView::UpdateInstances should recompute.
+        uint versionCache;
     };
 
     struct Instance : ComponentBase<Instance>
@@ -1566,6 +1575,25 @@ float4x4 ComputeWorldMatrix(World::Entity ent)
     }
 
     return matrix;
+}
+
+// Sum of Transform::version across ent and every ancestor. Both terms only ever increase, so the
+// sum only ever increases too -- a cheap (O(hierarchy depth), no children list, no world scan)
+// stand-in for "did this entity's world matrix become stale", read fresh each check rather than
+// propagated/cached down the hierarchy, so it can't go wrong from processing entities out of order.
+uint ComputeTransformVersion(World::Entity ent)
+{
+    uint version = ent.Has<Components::Transform>() ? ent.Get<Components::Transform>().version : 0;
+
+    if (ent.Has<Components::Parent>())
+    {
+        auto& parentCmp = ent.Get<Components::Parent>();
+        auto parentEnt = World::Entity(parentCmp.entity.Get());
+        if (parentEnt != entityInvalid)
+            version += ComputeTransformVersion(parentEnt);
+    }
+
+    return version;
 }
 
 uint Rand(uint max)

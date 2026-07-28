@@ -2051,6 +2051,7 @@ public:
         t.position = position;
         t.rotation = rotation;
         t.scale = scale;
+        t.version++;
 
         auto& state = ent.Get<Components::State>();
         state.flags |= Components::State::Flags::dirty;

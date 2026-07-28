@@ -540,7 +540,7 @@ void PathTraceRays()
             // the reservoir AFTER spatial reuse in lighting.hlsl, which does lighted += indirect.
             UpdateSampleData(accumulatedSampleData, directLight, isDiffusePath, hitDistance);
             
-            if (editorContext.GIBounces)// Bounce Heatmap
+            if (editorContext.debugFlags & HLSL::EditorDebugGIBounces)// Bounce Heatmap
                 debugColor = BounceHeatmap(bounce);
         }
     }
@@ -554,9 +554,9 @@ void PathTraceRays()
     
     
     
-    if (editorContext.GIBounces)// Bounce Heatmap
+    if (editorContext.debugFlags & HLSL::EditorDebugGIBounces)// Bounce Heatmap
         color = float4(debugColor, 1);
-    if (editorContext.GIAlbedo || editorContext.GINormals)
+    if (editorContext.debugFlags & (HLSL::EditorDebugGIAlbedo | HLSL::EditorDebugGINormals))
     {
         RayDesc ray;
         ray.Origin = cd.camera.worldPos.xyz;
@@ -590,9 +590,9 @@ void PathTraceRays()
         float3 sampleDir;
         evalIndirectCombinedBRDF(rand2, s.normal, s.objectNormal, -cd.viewDir, s, DIFFUSE_TYPE, 1, sampleDir, brdfWeight, brdfPdf);
         
-        if (editorContext.GIAlbedo)
+        if (editorContext.debugFlags & HLSL::EditorDebugGIAlbedo)
             color = float4(s.albedo.xyz, 1);
-        if (editorContext.GINormals)
+        if (editorContext.debugFlags & HLSL::EditorDebugGINormals)
             color = float4(sampleDir * 0.5 + 0.5, 1);
     }
 

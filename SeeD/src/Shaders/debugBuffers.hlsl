@@ -37,26 +37,26 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
     
     SurfaceData s = GetSurfaceData(cd.pixel.xy);
         
-    if (editorContext.albedo || editorContext.clusters || editorContext.triangles)
+    if ((editorContext.debugFlags & (HLSL::EditorDebugAlbedo | HLSL::EditorDebugClusters | HLSL::EditorDebugTriangles)) != 0)
     {
         // clusters/triangles wrote their debug colors into the albedo gbuffer: show it unlit
         lighted[dtid.xy] = s.albedo;
     }
-    else if (editorContext.normals)
+    else if (editorContext.debugFlags & HLSL::EditorDebugNormals)
     {
         lighted[dtid.xy].xyz = normalize(s.normal.xyz) * 0.5 + 0.5;
     }
-    else if (editorContext.overdraw)
+    else if (editorContext.debugFlags & HLSL::EditorDebugOverdraw)
     {
         RWTexture2D<uint> overdraw = ResourceDescriptorHeap[viewContext.overdrawIndex];
         uint count = overdraw[dtid.xy];
         float3 color = count == 0 ? float3(0, 0, 0) : OverdrawColor(count / OVERDRAW_MAX);
         lighted[dtid.xy] = float4(color, 1);
     }
-    else if (editorContext.lighting)
+    else if (editorContext.debugFlags & HLSL::EditorDebugLighting)
     {
     }
-    else if (editorContext.GIprobes)
+    else if (editorContext.debugFlags & HLSL::EditorDebugGIprobes)
     {
         HashGridParameters gridParameters;
         gridParameters.cameraPosition = cd.camera.worldPos.xyz;
@@ -113,7 +113,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         }
     }
    
-    if (editorContext.boundingVolumes) // daw boundingbox
+    if (editorContext.debugFlags & HLSL::EditorDebugBoundingVolumes) // daw boundingbox
     {
         int2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
         bool inRange = abs(length(debugPixel - int2(dtid.xy))) <= 0;
@@ -136,7 +136,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
             DrawSphere(center, radius);
         }
     }
-    if (editorContext.rays) // daw ray
+    if (editorContext.debugFlags & HLSL::EditorDebugRays) // daw ray
     {
         RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
         HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * viewContext.renderResolution.x]);

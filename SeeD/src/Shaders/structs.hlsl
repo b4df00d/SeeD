@@ -166,7 +166,8 @@ namespace HLSL
         uint shaderBucketCount; // number of shader buckets this frame (CullingReset zeroes exactly this many meshletsCounters entries)
         uint albedoIndex;
         uint metalnessIndex;
-        uint normalIndex; // gbuffer normal, a = roughness (DLSS-RR packed mode)
+        uint normalIndex; // gbuffer normal, a = roughness (DLSS-RR packed mode); SRV slot, every reader (GetGBufferCameraData) samples it read-only
+        uint normalUAVIndex; // same resource's UAV slot -- lighting.hlsl is the one writer (packs roughness into .a via RWTexture2D), needs a heap index of the matching descriptor type
         uint motionIndex;
         uint instanceIDIndex;
         uint overdrawIndex;
@@ -480,10 +481,12 @@ namespace HLSL
     {
 #ifdef __cplusplus
         uint resolution[3];
-        uint index;
+        uint index;    // UAV heap slot: every AtmosphericScattering.hlsl compute pass writes this froxel volume via RWTexture3D
+        uint srvIndex; // SRV heap slot: read-only Texture3D<>.Sample() access (Reprojection's history read, postprocessHalfRes's final composite read)
 #else
         uint3 resolution;
         uint index;
+        uint srvIndex;
 #endif
     };
     
@@ -598,20 +601,27 @@ namespace HLSL
     // ----------------- End RT stuff ------------------
     
     //----------------------- DEBUG -----------------------
+    // EditorContext is raw-memcpy'd from C++ straight into a GPU cbuffer
+    // (ConstantBuffer::PushConstantBuffer) and reinterpreted by DXC on the shader side -- nothing
+    // guarantees the two compilers pack a run of C-style `uint x : 1` bitfields into a cbuffer
+    // register the same way (unlike plain scalar fields, this was never actually verified for this
+    // struct). A single explicit uint + named bit masks sidesteps the packing question entirely.
+    static const uint EditorDebugRays            = 1u << 0;
+    static const uint EditorDebugBoundingVolumes = 1u << 1;
+    static const uint EditorDebugAlbedo          = 1u << 2;
+    static const uint EditorDebugNormals         = 1u << 3;
+    static const uint EditorDebugClusters        = 1u << 4;
+    static const uint EditorDebugTriangles       = 1u << 5;
+    static const uint EditorDebugLighting        = 1u << 6;
+    static const uint EditorDebugGIprobes        = 1u << 7;
+    static const uint EditorDebugGIBounces       = 1u << 8;
+    static const uint EditorDebugGIAlbedo        = 1u << 9;
+    static const uint EditorDebugGINormals       = 1u << 10;
+    static const uint EditorDebugOverdraw        = 1u << 11;
+
     struct EditorContext
     {
-        uint rays : 1;
-        uint boundingVolumes : 1;
-        uint albedo : 1;
-        uint normals : 1;
-        uint clusters : 1;
-        uint triangles : 1;
-        uint lighting : 1;
-        uint GIprobes : 1;
-        uint GIBounces : 1;
-        uint GIAlbedo : 1;
-        uint GINormals : 1;
-        uint overdraw : 1;
+        uint debugFlags;
         uint debugBufferHeapIndex;
         uint debugVerticesHeapIndex;
         uint debugVerticesCountHeapIndex;

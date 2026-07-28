@@ -30,7 +30,7 @@ void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchT
     
     StructuredBuffer<HLSL::Froxels> froxels = ResourceDescriptorHeap[pphrParameters.froxelsIndex];
     HLSL::Froxels currentFroxel = froxels[pphrParameters.atmosphericScatteringIndex];
-    Texture3D<float4> atmosphericScattering = ResourceDescriptorHeap[currentFroxel.index];
+    Texture3D<float4> atmosphericScattering = ResourceDescriptorHeap[currentFroxel.srvIndex];
     
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[viewContext.cameraIndex];

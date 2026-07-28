@@ -859,15 +859,30 @@ public:
 
             // GPU-Based Validation: catches out-of-bounds descriptor access, uninitialized
             // resources, etc. Much slower - enable when hunting a stubborn GPU-side bug.
-            //ID3D12Debug1* debugController1 = nullptr;
-            //if (SUCCEEDED(debugController->QueryInterface(IID_PPV_ARGS(&debugController1))))
-            //{
-            //    debugController1->SetEnableGPUBasedValidation(TRUE);
-            //    debugController1->Release();
-            //}
+            ID3D12Debug1* debugController1 = nullptr;
+            if (SUCCEEDED(debugController->QueryInterface(IID_PPV_ARGS(&debugController1))))
+            {
+                debugController1->SetEnableGPUBasedValidation(TRUE);
+                debugController1->Release();
+            }
 
             debugController->Release();
         }
+
+        // DRED: if GBV doesn't catch the corruption before a TDR actually happens, this gives a
+        // post-mortem on device removal -- which named command list's breadcrumb was last executing
+        // and, for a page fault, the faulting GPU VA plus nearby live/recently-freed allocations.
+        // See PrintDeviceRemovedReason below, which dumps both. Must be set before device creation.
+        {
+            ID3D12DeviceRemovedExtendedDataSettings* dredSettings = nullptr;
+            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings))))
+            {
+                dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dredSettings->Release();
+            }
+        }
+
         debugFlags = DXGI_CREATE_FACTORY_DEBUG;
 #endif
         CreateDXGIFactory2(debugFlags, IID_PPV_ARGS(&dxgiFactory));
@@ -911,6 +926,19 @@ public:
             infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
             infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
             //infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE); // noisy, enable when hunting
+
+            // Pre-existing GBV noise from the third-party FidelityFX SPD component (Third\FidelityFX-SDK-v1.1.3):
+            // its 'SPD_AtomicCounter' UAV is created with StructureByteStride 4 but some bindless shader
+            // permutation reflects a 24-byte struct for that slot. Fires every frame (HZB runs every frame),
+            // which would otherwise break the debugger before a GPU-based-validation session ever reaches
+            // whatever we're actually hunting. Muted here, not fixed, since it's SDK code -- if this specific
+            // message ID starts showing a DIFFERENT resource name, that's no longer this issue.
+            D3D12_MESSAGE_ID deniedIds[] = { D3D12_MESSAGE_ID_GPU_BASED_VALIDATION_STRUCTURED_BUFFER_STRIDE_MISMATCH };
+            D3D12_INFO_QUEUE_FILTER filter = {};
+            filter.DenyList.NumIDs = _countof(deniedIds);
+            filter.DenyList.pIDList = deniedIds;
+            infoQueue->AddStorageFilterEntries(&filter);
+
             infoQueue->Release();
         }
 #endif
@@ -1071,6 +1099,42 @@ public:
     {
         HRESULT reason = instance->device->GetDeviceRemovedReason();
         IOs::Log("Device removed! DXGI_ERROR code: 0x{} | 0x{}", (int)reason, (int)hr);
+
+#if defined(_DEBUG)
+        // DRED breadcrumbs/page-fault dump (see the SetAutoBreadcrumbsEnablement/SetPageFaultEnablement
+        // call in CreateDevice). Only meaningful once the device has actually been removed -- reading
+        // this on a live device returns stale/empty data.
+        ID3D12DeviceRemovedExtendedData1* dred = nullptr;
+        if (SUCCEEDED(instance->device->QueryInterface(IID_PPV_ARGS(&dred))))
+        {
+            D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs = {};
+            if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&breadcrumbs)))
+            {
+                for (const D3D12_AUTO_BREADCRUMB_NODE1* node = breadcrumbs.pHeadAutoBreadcrumbNode; node != nullptr; node = node->pNext)
+                {
+                    uint completed = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+                    IOs::Log("DRED command list '{}': {} ops queued, {} completed",
+                             node->pCommandListDebugNameA ? node->pCommandListDebugNameA : "?",
+                             node->BreadcrumbCount, completed);
+                    // op codes are D3D12_AUTO_BREADCRUMB_OP (d3d12.h) -- the op AFTER the last
+                    // completed one is the one that hung/faulted.
+                    for (uint i = 0; i < node->BreadcrumbCount; i++)
+                        IOs::Log("  [{}] op {}{}", i, (int)node->pCommandHistory[i], i == completed ? "  <-- suspect (first not completed)" : "");
+                }
+            }
+
+            D3D12_DRED_PAGE_FAULT_OUTPUT1 pageFault = {};
+            if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&pageFault)) && pageFault.PageFaultVA != 0)
+            {
+                IOs::Log("DRED page fault at GPU VA 0x{:x}", pageFault.PageFaultVA);
+                for (const D3D12_DRED_ALLOCATION_NODE1* node = pageFault.pHeadExistingAllocationNode; node != nullptr; node = node->pNext)
+                    IOs::Log("  nearby live allocation: '{}' (type {})", node->ObjectNameA ? node->ObjectNameA : "?", (int)node->AllocationType);
+                for (const D3D12_DRED_ALLOCATION_NODE1* node = pageFault.pHeadRecentFreedAllocationNode; node != nullptr; node = node->pNext)
+                    IOs::Log("  nearby recently-freed allocation: '{}' (type {})", node->ObjectNameA ? node->ObjectNameA : "?", (int)node->AllocationType);
+            }
+            dred->Release();
+        }
+#endif
     }
 };
 GPU* GPU::instance;
@@ -3302,6 +3366,19 @@ struct MeshStorage
         UINT64 scratchUsed = BuildBLAS(mesh, 0, mesh.BLAS, 0, commandBuffer, omm0 ? &mesh.ommArray : nullptr, omm0 ? &mesh.ommIndices : nullptr, omm0 ? omm0->indexFormat : DXGI_FORMAT_R32_UINT);
         if (mesh.lodCount > 1)
             BuildBLAS(mesh, mesh.lodCount - 1, mesh.BLASLow, scratchUsed, commandBuffer, ommLow ? &mesh.ommArrayLow : nullptr, ommLow ? &mesh.ommIndicesLow : nullptr, ommLow ? ommLow->indexFormat : DXGI_FORMAT_R32_UINT);
+
+        // Every LoadBLAS call restarts at scratchOffset 0 in the SAME shared scratchBLAS buffer (see
+        // comment above -- that reasoning only covers the disjoint high/low offsets within THIS call).
+        // Without this, back-to-back LoadBLAS calls for different meshes in the same frame (e.g. a
+        // burst of terrain nodes streaming in as the camera moves) race on scratchBLAS with no
+        // ordering between them: the driver is free to overlap the builds, corrupting whichever one
+        // loses the race and producing a malformed BLAS that hangs the RT cores on traversal.
+        D3D12_RESOURCE_BARRIER scratchBarrier;
+        scratchBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        scratchBarrier.UAV.pResource = scratchBLAS.GetResource();
+        scratchBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        commandBuffer.cmd->ResourceBarrier(1, &scratchBarrier);
+
         lock.unlock();
     }
 

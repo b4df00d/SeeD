@@ -253,7 +253,7 @@ void AtmosphericScatteringReprojection(uint3 gtid : SV_GroupThreadID, uint3 dtid
     float3 currentWorldPos = FroxelToWorld(dtid.xyz, currentFroxel.resolution.xyz, asParameters.specialNear, camera);
     float3 historyFroxelPos = WorldTohistoryFroxelUVW(currentWorldPos, historyFroxel.resolution.xyz, asParameters.specialNear, camera);
     
-    Texture3D<float4> historyFroxelData = ResourceDescriptorHeap[historyFroxel.index];
+    Texture3D<float4> historyFroxelData = ResourceDescriptorHeap[historyFroxel.srvIndex];
     float4 previousData = historyFroxelData.Sample(samplerLinearClamp, historyFroxelPos);
     
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];

@@ -491,7 +491,7 @@ public:
         commonResourcesIndices.lightCount = viewWorld.lights->Size();
         commonResourcesIndices.materialsHeapIndex = viewWorld.materials.GetResource().srv.offset;
         commonResourcesIndices.materialCount = viewWorld.materials.Size();
-        commonResourcesIndices.instancesHeapIndex = viewWorld.instances.GetResource().uav.offset;
+        commonResourcesIndices.instancesHeapIndex = viewWorld.instances.GetResource().srv.offset; // read-only StructuredBuffer<HLSL::Instance> everywhere it's bound, never RW
         commonResourcesIndices.instanceCount = viewWorld.instances.Size();
 
 
@@ -529,8 +529,9 @@ public:
         viewContextParams.albedoIndex = GetRegisteredResource("albedo").srv.offset;
         viewContextParams.metalnessIndex = GetRegisteredResource("metalness").srv.offset;
         viewContextParams.normalIndex = GetRegisteredResource("normal").srv.offset;
+        viewContextParams.normalUAVIndex = GetRegisteredResource("normal").uav.offset;
         viewContextParams.motionIndex = GetRegisteredResource("motion").srv.offset;
-        viewContextParams.instanceIDIndex = GetRegisteredResource("instanceID").uav.offset;
+        viewContextParams.instanceIDIndex = GetRegisteredResource("instanceID").srv.offset; // read-only Texture2D<uint> in debugBuffers.hlsl/selection.hlsl, never RW
         viewContextParams.overdrawIndex = GetRegisteredResource("overdraw").uav.offset;
         viewContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
         viewContextParams.reverseZ = true;
@@ -569,18 +570,19 @@ public:
     {
         HLSL::EditorContext editorContextParams;
 
-        editorContextParams.rays = options.debugMode == Options::DebugMode::ray;
-        editorContextParams.boundingVolumes = options.debugMode == Options::DebugMode::boundingSphere;
-        editorContextParams.albedo = options.debugDraw == Options::DebugDraw::albedo;
-        editorContextParams.normals = options.debugDraw == Options::DebugDraw::normals;
-        editorContextParams.clusters = options.debugDraw == Options::DebugDraw::clusters;
-        editorContextParams.triangles = options.debugDraw == Options::DebugDraw::triangles;
-        editorContextParams.lighting = options.debugDraw == Options::DebugDraw::lighting;
-        editorContextParams.GIprobes = options.debugDraw == Options::DebugDraw::GIprobes;
-        editorContextParams.GIBounces = options.debugDraw == Options::DebugDraw::GIBounces;
-        editorContextParams.GIAlbedo = options.debugDraw == Options::DebugDraw::GIAlbedo;
-        editorContextParams.GINormals = options.debugDraw == Options::DebugDraw::GINormals;
-        editorContextParams.overdraw = options.debugDraw == Options::DebugDraw::overdraw;
+        editorContextParams.debugFlags =
+            (options.debugMode == Options::DebugMode::ray ? HLSL::EditorDebugRays : 0)
+            | (options.debugMode == Options::DebugMode::boundingSphere ? HLSL::EditorDebugBoundingVolumes : 0)
+            | (options.debugDraw == Options::DebugDraw::albedo ? HLSL::EditorDebugAlbedo : 0)
+            | (options.debugDraw == Options::DebugDraw::normals ? HLSL::EditorDebugNormals : 0)
+            | (options.debugDraw == Options::DebugDraw::clusters ? HLSL::EditorDebugClusters : 0)
+            | (options.debugDraw == Options::DebugDraw::triangles ? HLSL::EditorDebugTriangles : 0)
+            | (options.debugDraw == Options::DebugDraw::lighting ? HLSL::EditorDebugLighting : 0)
+            | (options.debugDraw == Options::DebugDraw::GIprobes ? HLSL::EditorDebugGIprobes : 0)
+            | (options.debugDraw == Options::DebugDraw::GIBounces ? HLSL::EditorDebugGIBounces : 0)
+            | (options.debugDraw == Options::DebugDraw::GIAlbedo ? HLSL::EditorDebugGIAlbedo : 0)
+            | (options.debugDraw == Options::DebugDraw::GINormals ? HLSL::EditorDebugGINormals : 0)
+            | (options.debugDraw == Options::DebugDraw::overdraw ? HLSL::EditorDebugOverdraw : 0);
         editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
         editorContextParams.debugVerticesHeapIndex = editorContext.indirectDebugVertices.GetResource().uav.offset;
         editorContextParams.debugVerticesCountHeapIndex = editorContext.indirectDebugVerticesCount.GetResource().uav.offset;
@@ -1447,6 +1449,7 @@ class LightingProbes : public Pass
 {
     Components::Handle<Components::Shader> rayDispatchShader;
     Components::Handle<Components::Shader> resolveShader;
+    ViewResource depth;
 
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
@@ -1455,6 +1458,7 @@ public:
 
         rayDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracing2.hlsl|Update");
         resolveShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\SHARCResolve.hlsl|sharcResolve");
+        depth.Register("depth", view);
 
         ZoneScoped;
     }
@@ -1472,6 +1476,15 @@ public:
         auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
         auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
 
+        // GBuffers::Render leaves depth in COMMON; this dispatch reads it (GetGBufferCameraData) as a
+        // plain Texture2D SRV, which for a DEPTH_STENCIL-flagged resource is never implicitly promoted.
+        // Returned to COMMON right after so Lighting::Render (next consumer) finds it where it expects.
+        // NOTE: this pass runs on the COMPUTE queue -- DEPTH_READ/DEPTH_WRITE aren't legal resource
+        // states on a compute command list (only DIRECT lists touch the depth-stencil pipeline stage),
+        // so this is NON_PIXEL_SHADER_RESOURCE alone, unlike the DEPTH_READ-combined bracket used for
+        // this same resource in the graphics-queue passes (Lighting, PostProcessHalfRes, GPUDebug, DLSS).
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
         // Trace rays (+ temporal ReSTIR)
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
         commandBuffer->SetRaytracing(rayDispatch);
@@ -1487,6 +1500,7 @@ public:
 
         commandBuffer->cmd->DispatchRays(&drd);
 
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
 
         view->raytracingContext.SHARCAccumulation.Barrier(commandBuffer.Get());
 
@@ -1531,6 +1545,17 @@ public:
         normal.Register("normal", view);
         rayDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracing2.hlsl|Query");
         applyLightingShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\lighting.hlsl|Lighting");
+
+        // Both are written via RWTexture2D by this pass's raytracing dispatches every frame and
+        // otherwise only ever read as SRV (implicit-promotion-from-COMMON-eligible) -- unlike depth
+        // or the render-target-flagged gbuffers, nothing else in the frame needs them in any other
+        // state, so (like PostProcess's 'postProcessed') a single one-time transition here is enough;
+        // no per-frame bracket needed. CreateTexture leaves both in COMMON.
+        Open();
+        lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        specularHitDistance.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Close();
+        ExecuteNow();
     }
     void Off() override
     {
@@ -1553,9 +1578,16 @@ public:
         auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
         auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
 
+        // GBuffers::Render leaves depth in COMMON at its own end (LightingProbes, which runs right
+        // before this pass, brackets its own read back to COMMON too) -- both dispatches below read
+        // it (GetGBufferCameraData) as a plain Texture2D SRV, which for a DEPTH_STENCIL-flagged
+        // resource is never implicitly promoted. Transitioned to DEPTH_WRITE below for next frame's
+        // zPrepass once both dispatches are done with it.
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
         // Trace rays (+ temporal ReSTIR)
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
-        commandBuffer->SetRaytracing(rayDispatch); 
+        commandBuffer->SetRaytracing(rayDispatch);
         // global root sig for ray tracing is the same as compute shaders
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
@@ -1572,7 +1604,12 @@ public:
         Profiler::instance->EndProfile(commandBuffer.Get());
         Profiler::instance->StartProfile(commandBuffer.Get(), "lightingApply");
 
-        // Lighting (+ spacial ResTIR)
+        // Lighting (+ spacial ResTIR). Also packs roughness into normal.a for DLSS-RR
+        // (lighting.hlsl:284-285, RWTexture2D write) -- GBuffers::Render leaves normal in COMMON
+        // (its own SRV consumers rely on implicit promotion, fine), but a UAV write always needs an
+        // explicit transition regardless of creation flags.
+        normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
         Shader& applyLighting = *AssetLibrary::instance->Get<Shader>(applyLightingShader.Get().id, true);
         commandBuffer->SetRaytracing(applyLighting);
         commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
@@ -1585,8 +1622,9 @@ public:
         commandBuffer->cmd->DispatchRays(&drd);
 
         lighted.Get().Barrier(commandBuffer.Get());
+        normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
 
-        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
         Close();
     }
@@ -1631,6 +1669,7 @@ class GPUDebug : public Pass
 {
     ViewResource lighted;
     ViewResource depth;
+    ViewResource overdraw;
     Components::Handle<Components::Shader> indirectDebugShader;
     Components::Handle<Components::Shader> selectionShader;
     Components::Handle<Components::Shader> debugBuffersShader;
@@ -1642,6 +1681,7 @@ public:
         ZoneScoped;
         lighted.Register("lighted", view);
         depth.Register("depth", view);
+        overdraw.Register("overdraw", view);
         indirectDebugShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debug.hlsl|Debug");
         selectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\selection.hlsl|Selection");
         debugBuffersShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debugBuffers.hlsl|Lighting");
@@ -1684,6 +1724,14 @@ public:
         if (options.debugMode != Options::DebugMode::none
             || options.debugDraw != Options::DebugDraw::none)
         {
+            // debugBuffers.hlsl's Lighting entry unconditionally calls GetGBufferCameraData, which
+            // reads depth as SRV -- by this point in the frame Lighting::Render has already put it
+            // back in DEPTH_WRITE for next frame's zPrepass, so it needs its own bracket here too.
+            depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            bool overdrawDebug = options.debugDraw == Options::DebugDraw::overdraw;
+            if (overdrawDebug)
+                overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
             Shader& debugBuffers = *AssetLibrary::instance->Get<Shader>(debugBuffersShader.Get().id, true);
             commandBuffer->SetCompute(debugBuffers);
             commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
@@ -1691,6 +1739,10 @@ public:
             commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
             commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, rtParametersAddress);
             commandBuffer->cmd->Dispatch(debugBuffers.DispatchX(view->renderResolution.x), debugBuffers.DispatchY(view->renderResolution.y), 1);
+
+            if (overdrawDebug)
+                overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+            depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
             if (options.debugMode == Options::DebugMode::ray
                 || options.debugMode == Options::DebugMode::boundingSphere)
@@ -2153,10 +2205,12 @@ public:
         froxelsData[0].resolution[1] = (uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height;
         froxelsData[0].resolution[2] = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
         froxelsData[0].index = atmosphericScatteringFroxels.Get().uav.offset;
+        froxelsData[0].srvIndex = atmosphericScatteringFroxels.Get().srv.offset;
         froxelsData[1].resolution[0] = (uint)atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Width;
         froxelsData[1].resolution[1] = (uint)atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().Height;
         froxelsData[1].resolution[2] = atmosphericScatteringHistoryFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
         froxelsData[1].index = atmosphericScatteringHistoryFroxels.Get().uav.offset;
+        froxelsData[1].srvIndex = atmosphericScatteringHistoryFroxels.Get().srv.offset;
         froxelsBuffer.Get().UploadElements(froxelsData, ARRAYSIZE(froxelsData), 0, commandBuffer.Get());
         froxelsBuffer.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         Close();
@@ -2195,7 +2249,7 @@ public:
 
         uint inputIndex = (GPU::instance->frameIndex + 0) % 2;
         uint outputIndex = (GPU::instance->frameIndex + 1) % 2;
-        asparams.froxelsIndex = froxelsBuffer.Get().uav.offset;
+        asparams.froxelsIndex = froxelsBuffer.Get().srv.offset; // read-only StructuredBuffer<HLSL::Froxels> in every shader that binds this (AtmosphericScattering.hlsl, postprocessHalfRes.hlsl)
         asparams.currentFroxelIndex = 0;
         asparams.historyFroxelIndex = 1;
 
@@ -2206,6 +2260,16 @@ public:
         drd.Width = (uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width;
         drd.Height = (uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height;
         drd.Depth = atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize;
+
+        // Both froxel volumes are created (and left, at the end of this function / PostProcessHalfRes)
+        // in COMMON -- textures, unlike buffers, are never implicitly promoted into a UAV-writable
+        // state, so every compute pass touching them needs an explicit transition first. .Barrier()
+        // below is only a UAV hazard barrier (ordering read-after-write for a resource already in
+        // UAV state) -- it does not perform this transition.
+        atmosphericScatteringFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        // history: read-only (SRV) this frame in Reprojection below (last frame's blurred/accumulated
+        // result) before Blur/Accumulation overwrite it via UAV.
+        atmosphericScatteringHistoryFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         commandBuffer->cmd->DispatchRays(&drd);
 
@@ -2221,6 +2285,8 @@ public:
             atmosphericScatteringReprojection.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize));
 
         atmosphericScatteringFroxels.Get().Barrier(commandBuffer.Get());
+        // history goes from SRV (Reprojection's read, just above) to UAV (Blur's write, just below)
+        atmosphericScatteringHistoryFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
 
         // Blur atmospheric scattering froxels (XY box filter, ping-pong into history buffer)
@@ -2241,6 +2307,11 @@ public:
             atmosphericScatteringAccumulation.DispatchX((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width),
             atmosphericScatteringAccumulation.DispatchY((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height),
             1);
+
+        // Back to COMMON on both: current is read as SRV by PostProcessHalfRes next (its own
+        // transition brackets that), history goes back to SRV at the top of next frame's Reprojection.
+        atmosphericScatteringFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        atmosphericScatteringHistoryFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
 
         Close();
     }
@@ -2280,6 +2351,13 @@ public:
         atmosphericScatteringFroxelsBuffer.Register("froxelsBuffer", view);
         atmosphericScatteringFroxels.Register("atmosphericScatteringFroxels", view);
         postProcessHalfResShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\PostProcessHalfRes.hlsl|PostProcessHalfRes");
+
+        // Read+written via RWTexture2D every frame here and nowhere else needs it in any other
+        // state (DLSS-RR reads it raw downstream) -- one-time transition, no per-frame bracket needed.
+        Open();
+        transparencyLayer.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Close();
+        ExecuteNow();
     }
     void Off() override
     {
@@ -2300,7 +2378,7 @@ public:
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
         auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
 
-        pphrparams.froxelsIndex = atmosphericScatteringFroxelsBuffer.Get().uav.offset;
+        pphrparams.froxelsIndex = atmosphericScatteringFroxelsBuffer.Get().srv.offset; // read-only StructuredBuffer<HLSL::Froxels> in postprocessHalfRes.hlsl
         pphrparams.atmosphericScatteringIndex = 0;
         pphrparams.lightedIndex = lighted.Get().uav.offset;
         pphrparams.transparencyLayerIndex = transparencyLayer.Get().uav.offset;
@@ -2312,7 +2390,19 @@ public:
         commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&pphrparams));
         commandBuffer->cmd->SetComputeRootConstantBufferView(Custom2Register, ConstantBuffer::instance->PushConstantBuffer(&asparams));
+
+        // AtmosphericScattering::Render leaves this in COMMON (see its own end-of-frame transition);
+        // sampled here via Texture3D<>.Sample(), which needs an explicit SRV-compatible state.
+        atmosphericScatteringFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        // Lighting::Render leaves depth in DEPTH_WRITE at the end of its frame (its own end-of-frame
+        // transition) for next frame's zPrepass -- but common.hlsl's GetGBufferCameraData (called
+        // here via viewContext.depthIndex) reads it as a plain Texture2D SRV, which for a
+        // DEPTH_STENCIL-flagged resource needs the DEPTH_READ state combined with the shader-visible
+        // read state, not DEPTH_WRITE.
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         commandBuffer->cmd->Dispatch(postProcessHalfRes.DispatchX(view->renderResolution.x), postProcessHalfRes.DispatchY(view->renderResolution.y), 1);
+        depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        atmosphericScatteringFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
 
         Close();
     }
@@ -2392,7 +2482,13 @@ public:
         if (view->upscaling == HLSL::Upscaling::taa)
         {
             taaparams.lightedIndex = lighted.Get().uav.offset;
-            taaparams.historyIndex = history.Get().uav.offset;
+            taaparams.historyIndex = history.Get().srv.offset; // read-only Texture2D<>.SampleLevel() in TAA.hlsl, not RW
+
+            // history sits at rest in COMMON; TAA.hlsl samples it as SRV, which -- unlike the implicit
+            // promotion a read from COMMON would normally get -- we make explicit here so the COPY_DEST
+            // transition below has an unambiguous, verified "before" state instead of relying on
+            // mid-command-list implicit-promotion decay timing.
+            history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
             Shader& TAA = *AssetLibrary::instance->Get<Shader>(TAAShader.Get().id, true);
             commandBuffer->SetCompute(TAA);
@@ -2402,9 +2498,12 @@ public:
             commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(&taaparams));
             commandBuffer->cmd->Dispatch(TAA.DispatchX(view->renderResolution.x), TAA.DispatchY(view->renderResolution.y), 1);
 
-
-            history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+            history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+            // lighted lives permanently in UNORDERED_ACCESS (see Lighting::On) -- CopyResource's
+            // source needs COPY_SOURCE instead, restored right after for whatever reads it next.
+            lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
             commandBuffer->cmd->CopyResource(history.Get().GetResource(), lighted.Get().GetResource());
+            lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             history.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON); // transition to present in the editor cmb
         }
 
@@ -2479,6 +2578,14 @@ public:
         specularHitDistance.Register("specularHitDistance", view);
         upscaled.Register("upscaled", view);
         upscaled.Get().CreateRenderTarget(view->displayResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "upscaled"); // must be the same as Lighted input
+
+        // NGX Evaluate writes this as its output resource (raw pointer, DLSS/DLSS-RR convention:
+        // UNORDERED_ACCESS); PostProcess::Render reads it back via UAV too (ppparams.lightedIndex =
+        // upscaled.Get().uav.offset) -- nothing else needs it in any other state.
+        Open();
+        upscaled.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Close();
+        ExecuteNow();
     }
     virtual void Off() override
     {
@@ -2640,6 +2747,22 @@ public:
         {
             lighted.Get().Barrier(commandBuffer.Get());
 
+            // NGX Evaluate reads every input resource by raw ID3D12Resource*, no descriptor involved,
+            // but D3D12 barrier tracking still applies. Per NVIDIA's DLSS/DLSS-RR programming guide,
+            // color/vector inputs and the output are expected in UNORDERED_ACCESS; depth is the
+            // exception (depth-stencil-format resources can't even have a UAV -- CreateDepthTarget
+            // never creates one -- so it goes in via the same SRV-combo read state used elsewhere in
+            // this file). lighted/transparencyLayer/specularHitDistance/upscaled already live in
+            // UNORDERED_ACCESS at rest (see their one-time init transitions), so only the resources
+            // that sit in COMMON between GBuffers and here need a bracket.
+            depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            if (view->upscaling == HLSL::Upscaling::dlssd)
+            {
+                normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            }
 
             if (upscalingPreviousSetting != view->upscaling || featureDirty)
             {
@@ -2760,7 +2883,14 @@ public:
 
                 NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSSD_EXT(commandBuffer->cmd, dlss_feature, ngx_parameters, &dlss_eval_params);
                 seedAssert(NVSDK_NGX_SUCCEED(result));
+
+                normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+                albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+                specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
             }
+
+            motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+            depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         }
 
         Close();
@@ -3043,7 +3173,13 @@ public:
         updateRenderSettings.precede(atmospehricScatteringTask, postProcessHalfResTask, postProcessTask);
         // no need to put unnecessary dependencies on upload and setup (passes that do not use the view world data)
         // weeeelllll for all passes that use the camera need to wait for upload and setup to be sure the camera data is updated (just in case the buffers used are new because they are bigger)
-        uploadAndSetup.precede(skinningTask, terrainTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, atmospehricScatteringTask, postProcessHalfResTask, forwardTask, dlssTask, postProcessTask);
+        // gpuDebugInit/gpuDebug push commonResourcesIndices/viewContext/editorContext the same way every
+        // other pass here does, but were missing from this list -- with no edge to uploadAndSetup (the
+        // only place those CBs get (re)populated for the frame, see UploadAndSetup/SetupEditorParams),
+        // Taskflow was free to run them concurrently with (or before) uploadAndSetup's write, a genuine
+        // data race on view->editorContext.editorContext etc. GBV caught it as debug.hlsl reading a
+        // garbage descriptor heap index out of editorContext.debugVerticesCountHeapIndex.
+        uploadAndSetup.precede(skinningTask, terrainTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, atmospehricScatteringTask, postProcessHalfResTask, forwardTask, dlssTask, postProcessTask, gpuDebugInitTask, gpuDebugTask);
 
         presentTask.succeed(uploadAndSetup,
             structuredCommandBufferUpdateTask,
@@ -3124,7 +3260,18 @@ public:
                     Components::State& state = slot.Get<Components::State>();
                     bool loaded = state.flags & Components::State::Flags::loaded;
                     bool dirty = state.flags & Components::State::Flags::dirty;
-                    if (loaded && !dirty)
+
+                    // Catches the case dirty can't: this instance itself wasn't touched, but an
+                    // ancestor's Transform was (e.g. moving a parent in the editor) -- see
+                    // ComputeTransformVersion (World.h). Walking to the root here is O(depth) and
+                    // piggybacks on a query this loop already runs every frame, so it's cheap even
+                    // though it (unlike `dirty`) can't be short-circuited by the loaded check below.
+                    World::Entity ent = World::Entity(slot.Get<Components::Entity>());
+                    Components::WorldMatrix& matrixCmp = slot.Get<Components::WorldMatrix>();
+                    uint transformVersion = ComputeTransformVersion(ent);
+                    bool ancestryMoved = matrixCmp.versionCache != transformVersion;
+
+                    if (loaded && !dirty && !ancestryMoved)
                         continue;
 
                     Components::Instance& instanceCmp = slot.Get<Components::Instance>();
@@ -3138,7 +3285,6 @@ public:
                     if (!materialCmp.shader.IsValid())
                         continue;
 
-                    World::Entity ent = World::Entity(slot.Get<Components::Entity>());
                     Components::Mesh& meshCmp = instanceCmp.mesh.Get();
                     Components::Shader& shaderCmp = materialCmp.shader.Get();
 
@@ -3177,10 +3323,9 @@ public:
 
                     // everything should be loaded to be able to draw the instance
 
-                    Components::WorldMatrix& matrixCmp = slot.Get<Components::WorldMatrix>();
-
                     float4x4 previousWorldMatrix = matrixCmp.matrix;
                     matrixCmp.matrix = ComputeWorldMatrix(ent);
+                    matrixCmp.versionCache = transformVersion;
                     previousWorldMatrix = matrixCmp.matrix;
 
                     HLSL::Instance instance;
