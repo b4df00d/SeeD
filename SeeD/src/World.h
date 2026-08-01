@@ -10,6 +10,7 @@
 #include <vector>
 #include <cmath>
 #include <cfloat>
+#include <functional>
 
 #define SUBTASKWORLD(system) tf::Task system##Task = subflow.emplace([this, &system](){system->Update(this);}).name(#system)
 
@@ -70,7 +71,7 @@ namespace Components
     static std::array<uint, componentMaxCount> strides;
     static std::array<bool, componentMaxCount> transient;
 
-    using CallbackT = void(*)(EntityBase);
+    using CallbackT = std::function<void(EntityBase)>;
     static std::array<CallbackT, componentMaxCount> AddCallback;
     static std::array<CallbackT, componentMaxCount> RemoveCallback;
 
@@ -158,7 +159,14 @@ namespace Components
     struct Shader : ComponentBase<Shader>
     {
         assetID id;
+        #define ECS_SHADER_PATH 256
+        char path[ECS_SHADER_PATH] = {};
     };
+    static void ShaderPropertyDraw(char* p)
+    {
+        Shader* shader = (Shader*)p;
+        ImGui::InputText("path", shader->path, ECS_SHADER_PATH);
+    }
 
     struct Mesh : ComponentBase<Mesh>
     {
@@ -203,19 +211,12 @@ namespace Components
         float3 position;
         quaternion rotation;
         float3 scale;
-        // Bumped by every site that edits position/rotation/scale (Guizmo::SetWorldPositionRotationScale,
-        // TerrainStreaming node repositioning), never reset. Lets descendants notice an ancestor moved
-        // (ComputeTransformVersion) without a children list -- raw-malloc pool storage means this starts
-        // as garbage on a fresh slot (see Instance::boundingSphereOverride comment above), but that's
-        // fine: consumers only ever compare it for *change*, never against a known baseline.
         uint version;
     };
 
     struct WorldMatrix : ComponentBase<WorldMatrix>
     {
         float4x4 matrix;
-        // ComputeTransformVersion(entity) result as of the last time matrix was rebuilt; a mismatch
-        // means this entity or an ancestor moved since, and MainView::UpdateInstances should recompute.
         uint versionCache;
     };
 
@@ -224,29 +225,10 @@ namespace Components
         Handle<Mesh> mesh;
         Handle<Mesh> meshRT;
         Handle<Material> material;
-        // World-space bounding-sphere override for CPU-computed culling volumes the generic
-        // mesh-AABB-derived sphere can't express (currently: terrain quadtree nodes, see
-        // Systems::TerrainStreaming::CreateNodeInstance). w <= 0 means "no override, use
-        // mesh.GetBoundingSphere() transformed by worldMatrix" (culling.hlsl CullingInstances /
-        // CullingMeshlets, MainView::UpdateInstances). IMPORTANT: World::Pool allocates component
-        // storage with raw malloc (Pool::On) -- there is NO implicit zero-init for a new component
-        // slot, so every site that creates an Instance component MUST explicitly set this field.
         float4 boundingSphereOverride;
     };
-    // set by OMMBaker::On (Loading.h, included after World.h): the "bake OMM" button in
-    // InstancePropertyDraw routes through this pointer to avoid a World -> Loading dependency
-    inline void (*requestOMMBake)(Instance&) = nullptr;
-    static void InstancePropertyDraw(char* p)
-    {
-        DefaultPropertyDraw(Instance::mask, p);
-
-        Instance* instance = (Instance*)p;
-        ImGui::Spacing();
-        // bakes this mesh against the material's albedo alpha and (re)writes the {hash}.omm
-        // sidecar in the background; the BLAS reads it at load -> effective at the next run
-        if (requestOMMBake != nullptr && ImGui::Button("bake OMM"))
-            requestOMMBake(*instance);
-    }
+    // Defined in Loading.h, right after OMMBaker (whose RequestBake this calls) is declared.
+    static void InstancePropertyDraw(char* p);
 
     struct State : ComponentBase<State>
     {
@@ -255,10 +237,6 @@ namespace Components
             loaded = 1 << 0,
             dirty = 1 << 1,
             BLAS = 1 << 2,
-            // per-entity (not per-component-type like Components::transient above): entity is
-            // regenerated every frame by a system (e.g. TerrainStreaming's quadtree instances) and
-            // should be invisible to the hierarchy window and skipped by World::Save -- there's
-            // nothing meaningful to show/persist about it, it's rebuilt from its owning component.
             transient = 1 << 3
         };
         BitFlags<Flags> flags;
@@ -286,15 +264,6 @@ namespace Components
         float nearClip;
         float farClip;
     };
-    // set by MainView::UpdateCameras (Renderer.h): returns the same HLSL::Camera (world-space
-    // frustum planes, worldPos, fovY, ...) already computed once per frame for GPU culling, so
-    // TerrainStreaming's CPU-side frustum test agrees exactly with common.hlsl's FrustumCulling.
-    inline HLSL::Camera (*getMainCamera)() = nullptr;
-
-    // Streaming placeholder. An entity with Prefab + Transform additively loads `file`
-    // (a .seed produced by World::SavePrefab) when the camera comes within loadDistance,
-    // and unloads it when beyond. Handled by Systems::PrefabStreaming. The component is
-    // plain POD so it serializes like any other; runtime load state lives in the system.
     struct Prefab : ComponentBase<Prefab>
     {
         #define ECS_PREFAB_PATH 256
@@ -407,75 +376,44 @@ namespace Components
         Handle<Texture> heightmap;
         Handle<Mesh> gridMesh;
         Handle<Material> material;
-        // Procedural base heightmap (terrainErosion.hlsl's TerrainNoiseMain, an FBM sum of
-        // PerlinNoise3 octaves -- common.hlsl) generated in place of loading `heightmap`, so a
-        // terrain needs no imported texture asset at all. Still flows through erosion normally
-        // (erosion can refine a procedural base exactly like an imported one) and through the same
-        // material-param detour a pass-created resource always uses (TerrainErodedHeightmapParam) --
-        // see TerrainErosion::Render (Renderer.h). Regenerated only when noise* params change.
-        uint  useProceduralHeightmap = 0;
-        float noiseScale = 0.15f;      // fraction of the terrain footprint per octave-0 feature (same convention as erosionScale)
-        uint  noiseOctaves = 5;
-        float noiseLacunarity = 2.0f;  // per-octave frequency multiplier
-        float noiseGain = 0.5f;        // per-octave amplitude multiplier
-        uint  noiseSeed = 0;           // varies the pattern; same seed + params -> identical terrain
+        //-------------------------------------------------
+        uint  useProceduralHeightmap = 1;
+        float noiseScale = 1.0f;       // fraction of the terrain footprint per octave-0 feature (same convention as erosionScale)
+        uint  noiseOctaves = 2;
+        float noiseLacunarity = 2.412f;  // per-octave frequency multiplier
+        float noiseGain = 1.0f;        // per-octave amplitude multiplier
+        uint  noiseSeed = 1;           // varies the pattern; same seed + params -> identical terrain
+        //-------------------------------------------------
         float heightScale = 1000.0f;
         float heightOffset = 0.0f;
         uint  heightmapBlurRadius = 0; // box-blur radius in heightmap texels (0 = off): softens banding from low-precision (e.g. 8-bit) imported heightmaps; applied wherever the heightmap is sampled for displacement (terrainMeshBake.hlsl, terrainmesh.hlsl's live fallback)
-        float worldExtent = 16384.0f;   // total terrain footprint (world units), centered on Transform
+        float worldExtent = 8192.0f;   // total terrain footprint (world units), centered on Transform
         uint  quadtreeDepth = 10;       // leaf node size = worldExtent / 2^quadtreeDepth
-        float targetScreenSize = 0.16f; // fraction of viewport height (NDC-style, resolution-independent): a visible node subdivides while its estimated on-screen footprint exceeds this
-        // grid mesh build params (used by the "Build Grid Mesh" button)
-        float gridSpacing = 0.4f;      // meters/vertex at the most detailed quadtree level
-        float gridSize = 8.0f;        // meters, most detailed quadtree level patch size
-        // GPU erosion (runevision "Advanced Terrain Erosion Filter", ported 1:1 from the shadertoy
-        // reference into terrainErosion.hlsl -- TerrainErosion pass in Renderer.h). Names and
-        // defaults match the shadertoy's EROSION_* constants; params mirror
-        // HLSL::TerrainErosionParameters.
-        uint  erosionEnabled = 1;      // 0 = off (maps freed), 1 = bake once (freezes after the first bake; a heightmap swap re-bakes, param edits don't), 2 = bake continuously (every frame, for live iteration)
-        uint  erosionOctaves = 2;
-        float erosionScale = 0.05f;    // horizontal+vertical erosion scale, fraction of the terrain footprint
+        float targetScreenSize = 0.15f; // fraction of viewport height (NDC-style, resolution-independent): a visible node subdivides while its estimated on-screen footprint exceeds this
+        //-------------------------------------------------
+        float gridSpacing = 0.66f;     // meters/vertex at the most detailed quadtree level
+        float gridSize = 16.0f;       // meters, most detailed quadtree level patch size
+        //-------------------------------------------------
+        uint  erosionEnabled = 2;      // 0 = off (maps freed), 1 = bake once (freezes after the first bake; a heightmap swap re-bakes, param edits don't), 2 = bake continuously (every frame, for live iteration)
+        uint  erosionOctaves = 3;
+        float erosionScale = 0.16f;    // horizontal+vertical erosion scale, fraction of the terrain footprint
         float erosionStrength = 0.1f; // culling pad = strength * scale * sum(gain^o) * max(1, gullyWeight) (ComputeNodeBoundingSphere)
-        float erosionGullyWeight = 10.0f;
-        float erosionDetail = 1.5f;    // lower restricts high-frequency gullies to steeper slopes
-        float erosionLacunarity = 1.831f;
-        float erosionGain = 0.5f;      // per-octave strength multiplier
-        float erosionCellScale = 0.2f; // phacelle cell size relative to erosion scale, keep close to 1
-        float erosionNormalization = 0.5f; // phacelle magnitude normalization degree, 0..1
-        float erosionRidgeRounding = 100.f;
-        float erosionCreaseRounding = 200.0f;
-        // Omnidirectional (not frustum-gated) forced quadtree depth around the camera, independent
-        // of quadtreeDepth/targetScreenSize -- keeps terrain resident in the TLAS for RT shadow rays
-        // whose casters aren't necessarily camera-frustum-visible (Systems::TerrainStreaming::
-        // CullQuadtree). Full BVHMaxDepth is forced within BVHMinRadius of the camera, linearly
-        // relaxed to 0 by BVHMaxRadius; BVHMaxRadius <= BVHMinRadius disables the force entirely.
+        float erosionGullyWeight = 3.3f;
+        float erosionDetail = 1.0f;    // lower restricts high-frequency gullies to steeper slopes
+        float erosionLacunarity = 2.476f;
+        float erosionGain = 0.67f;     // per-octave strength multiplier
+        float erosionCellScale = 0.64f; // phacelle cell size relative to erosion scale, keep close to 1
+        float erosionNormalization = 0.83f; // phacelle magnitude normalization degree, 0..1
+        float erosionRidgeRounding = 0.13f;
+        float erosionCreaseRounding = 0.81f;
+        //-------------------------------------------------
         uint  BVHMaxDepth = 5;
         float BVHMinRadius = 512.0f;
-        float BVHMaxRadius = 8192.0f;
+        float BVHMaxRadius = 4096.0f;
     };
-    inline Handle<Mesh> (*buildTerrainGridMesh)(float spacing, float size) = nullptr;
-    static void TerrainPropertyDraw(char* p)
-    {
-        DefaultPropertyDraw(Terrain::mask, p);
+    // Defined in Loading.h, right after MeshLoader (whose BuildTerrainGridMesh this calls) is declared.
+    static void TerrainPropertyDraw(char* p);
 
-        Terrain* t = (Terrain*)p;
-        // built via a function pointer (set by Loading.h after MeshStorage is available) to
-        // avoid a World -> MeshStorage dependency, same pattern as requestOMMBake above.
-        if (buildTerrainGridMesh != nullptr && ImGui::Button("Build Grid Mesh"))
-            t->gridMesh = buildTerrainGridMesh(t->gridSpacing, t->gridSize);
-    }
-
-    // Runtime-only mesh override (currently terrain node displacement baking, later shared by
-    // skinning, roadmap item 6): redirects UpdateInstances (Renderer.h) to a MeshStorage-owned
-    // override Mesh (its own vertex range + AABB + BLAS, sharing the source mesh's meshlet/index/LOD
-    // data via MeshStorage::CreateMeshOverride) instead of the owning Instance component's own
-    // `mesh` handle. Deliberately agnostic of WHAT drives the bake -- that link lives in a separate
-    // component alongside this one (TerrainBaking below; a future SkinBaking with a skeleton Handle
-    // will reuse this same mechanism for skinned meshes) so this stays reusable as-is. Never
-    // serialized in practice (only ever attached to transient entities). IMPORTANT: World::Pool
-    // allocates component storage with raw malloc -- there is NO implicit zero-init for a new
-    // component slot (see Instance::boundingSphereOverride above), so every site that creates a
-    // MeshOverride component MUST explicitly set every field.
     struct MeshOverride : ComponentBase<MeshOverride>
     {
         uint overrideMeshIndex; // MeshStorage meshIndex namespace (shared with normal Mesh::storageIndex)
@@ -483,10 +421,6 @@ namespace Components
         uint dirty;             // needs a vertex re-bake; the owning baking system sets/clears this
     };
 
-    // Links a MeshOverride-bearing entity back to the Terrain driving its bake -- TerrainErosion::
-    // Render (Renderer.h) looks up per-terrain bake state (heightmap SRV, worldExtent, heightScale/
-    // heightOffset) through this. Attached alongside MeshOverride on every terrain node instance
-    // (Systems::TerrainStreaming, Terrain.h). Same raw-malloc-no-zero-init caveat as MeshOverride.
     struct TerrainBaking : ComponentBase<TerrainBaking>
     {
         Handle<Terrain> terrain;
@@ -681,13 +615,6 @@ public:
             }
         }
 
-        // Same as Release(), but reclaims the pool slot right now instead of queuing it for
-        // World::DeferredRelease() at the end of the frame -- i.e. it inlines exactly what
-        // DeferredRelease() does for a single entity (see World.h, the swap-the-last-slot-in
-        // compaction). Needed by systems that Release() and immediately Make() again within the
-        // same Update() call (e.g. Systems::TerrainStreaming rebuilding every frame): without this,
-        // freed ids/slots aren't available again until next frame's DeferredRelease() runs, so
-        // same-frame Make() calls would just keep growing the pool instead of reusing slots.
         void ReleaseImmediately()
         {
             seedAssert(IsValid());
@@ -865,8 +792,6 @@ public:
     std::vector<Systems::SystemBase*> systems;
 
     bool playing;
-    // Set by structural changes (currently prefab streaming load/unload), read by the editor
-    // hierarchy window to refresh. Reset to false at frame start, before systems run.
     bool structureChanged = false;
 
     void On()
@@ -883,8 +808,6 @@ public:
         instance = nullptr;
     }
 
-    // Hard reset: free all pools and entity bookkeeping immediately.
-    // Use before Load() when a full replace (rather than additive merge) is wanted.
     void ClearImmediate()
     {
         for (auto& pool : components)
@@ -898,15 +821,6 @@ public:
         for (auto& fq : frameQueries) fq.clear();
     }
 
-    // Load is ALWAYS additive: it creates fresh entities for everything in the file and
-    // remaps handles, so the same file can be loaded as a prefab into a populated world,
-    // and multiple files compose. For a full replace, call ClearImmediate() first.
-    // Format is self-describing (schema by component name), so adding/removing components
-    // or fields stays loadable; a v4 file also carries a schema GUID and when it matches this
-    // build Load takes a fastpath that skips all schema/migration work. Every entity in the file
-    // is created fresh (no asset dedup) --
-    // a duplicate Shader/Mesh/Texture entity is harmless because the AssetLibrary keys the
-    // actual GPU asset by assetID and loads it once regardless of how many entities reference it.
     struct LoadResult
     {
         std::vector<EntityBase> created;  // every entity freshly created by this load
@@ -1169,11 +1083,6 @@ public:
         return result;
     }
 
-    // Near-raw bulk save of an ARBITRARY set of entities. Self-describing: writes a schema
-    // table (all components + fields by name), then groups the requested entities by their
-    // source pool and writes only those entities' component rows. Transient components are
-    // skipped. No handle rewriting here; all remapping happens additively on Load -- a handle
-    // pointing outside the saved set simply resolves to invalid on load.
     void SaveEntities(String name, const std::vector<EntityBase>& entities, EntityBase root = entityInvalid)
     {
         ZoneScoped;
@@ -1281,11 +1190,6 @@ public:
         SaveEntities(name, all);
     }
 
-    // Transitive dependency closure of one entity: every Handle field (mesh / material /
-    // shader / textures ...) followed forward, plus children found by reverse Parent scan.
-    // The Parent link is never followed UPWARD, so the root's own parent (and the rest of the
-    // scene) stays out. Asset entities are pulled in by their assetID handle but carry only
-    // that id (the heavy blob lives in AssetLibrary), so the result is small and shareable.
     std::vector<EntityBase> CollectClosure(Entity root)
     {
         InitKnownComponents();
@@ -1346,9 +1250,6 @@ public:
     {
         SaveEntities(name, CollectClosure(root), root);
     }
-
-    //TODO : add a validation and conversion function to convert old version of the world to the new one (for example if a component is removed or added)
-    //and add a UI function to start the conversion
 
     void Clear()
     {
@@ -1577,10 +1478,6 @@ float4x4 ComputeWorldMatrix(World::Entity ent)
     return matrix;
 }
 
-// Sum of Transform::version across ent and every ancestor. Both terms only ever increase, so the
-// sum only ever increases too -- a cheap (O(hierarchy depth), no children list, no world scan)
-// stand-in for "did this entity's world matrix become stale", read fresh each check rather than
-// propagated/cached down the hierarchy, so it can't go wrong from processing entities out of order.
 uint ComputeTransformVersion(World::Entity ent)
 {
     uint version = ent.Has<Components::Transform>() ? ent.Get<Components::Transform>().version : 0;
@@ -1707,11 +1604,6 @@ namespace Systems
         }
     };
 
-    // Distance-based prefab streaming. NOT registered in World::systems (those run in parallel):
-    // it mutates world structure via Load / Release, so it must run single-threaded -- call
-    // Update() once per frame from the main loop, after DeferredRelease(). Only runs while
-    // playing, so placeholders stay empty in edit mode and authored saves don't capture
-    // streamed-in entities.
     struct PrefabStreaming : SystemBase
     {
         struct Instance { std::vector<EntityBase> created; bool loaded = false; };
@@ -1738,10 +1630,6 @@ namespace Systems
 
         void Unload(Instance& inst)
         {
-            // Release everything this instance loaded, asset entities included: Load no longer
-            // dedups, so each instance owns its own Shader/Mesh/Texture entities and nothing else
-            // points at them. Releasing them does not unload the underlying GPU asset -- the
-            // AssetLibrary keeps that alive by assetID for as long as any entity references it.
             for (auto& eb : inst.created)
             {
                 World::Entity e = eb;
@@ -1759,8 +1647,6 @@ namespace Systems
                 if (kv.second.loaded) Unload(kv.second);
         }
 
-        // Re-parent child under parent (its transform becomes relative to parent). Adds a Parent
-        // component if missing. No-op for entities without a Transform (nothing to position).
         static void ParentUnder(World::Entity child, World::Entity parent)
         {
             if (!child.IsValid() || !child.Has<Components::Transform>()) return;
@@ -1774,7 +1660,6 @@ namespace Systems
             if (!world->playing) { UnloadAll(); return; }
             if (!FindCamera(world)) return;
 
-            // snapshot placeholders first: Load() mutates pools, so we must not iterate them live
             uint prefabBucket = Components::MaskToBucket(Components::Prefab::mask);
             uint trBucket = Components::MaskToBucket(Components::Transform::mask);
 
@@ -1792,10 +1677,6 @@ namespace Systems
                 {
                     World::LoadResult r = world->Load(String(pf.file));
                     inst.created = std::move(r.created);
-                    // Parent the prefab under the placeholder so it inherits the placeholder's
-                    // transform (its world position). Prefer the explicit root recorded by
-                    // SavePrefab; only that one entity needs re-parenting -- its children keep
-                    // their (remapped) in-prefab parents and ride along.
                     World::Entity root = r.root;
                     if (root.IsValid())
                     {
@@ -1803,8 +1684,6 @@ namespace Systems
                     }
                     else
                     {
-                        // fallback for whole-world / legacy files with no recorded root: parent
-                        // every created entity whose parent isn't itself part of this load.
                         std::unordered_set<uint> createdIds;
                         for (auto& ceb : inst.created) createdIds.insert(ceb.id);
                         for (auto& ceb : inst.created)

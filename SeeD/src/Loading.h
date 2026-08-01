@@ -40,9 +40,6 @@ public:
     PerFrame<CommandBuffer> commandBuffer;
     const char* name = "AssetLibraryUpload";
 
-    // Slot in SubmissionList (registered first, in Renderer::On / the view rebuild). See TODO #9.
-    int submitIndex = -1;
-
     void On()
     {
         ZoneScoped;
@@ -803,15 +800,11 @@ public:
 	{
 		ZoneScoped;
         instance = this;
-        // "Build Grid Mesh" button on the Terrain component (World.h TerrainPropertyDraw) routes
-        // through this pointer to avoid a World -> MeshLoader dependency, same pattern as requestOMMBake.
-        Components::buildTerrainGridMesh = [](float spacing, float size) { return MeshLoader::instance->BuildTerrainGridMesh(spacing, size); };
 	}
 
 	void Off()
 	{
 		ZoneScoped;
-        Components::buildTerrainGridMesh = nullptr;
         instance = nullptr;
 	}
 
@@ -1027,8 +1020,8 @@ public:
     // (Process -> Write -> AssetLibrary) so it gets meshlet-ized identically (8-bit meshlet indices,
     // SNORM16 quantized positions -- no new mesh format code). Grid is centered on the origin so the
     // quadtree (World.h Systems::TerrainStreaming) can position/scale instances of it directly.
-    // Called from the "Build Grid Mesh" editor button (Components::buildTerrainGridMesh, wired
-    // in On() below) and re-running it replaces the terrain's Handle<Mesh>.
+    // Called from the "Build Grid Mesh" editor button (Components::TerrainPropertyDraw, defined
+    // below) and re-running it replaces the terrain's Handle<Mesh>.
     Components::Handle<Components::Mesh> BuildTerrainGridMesh(float spacing, float size)
     {
         ZoneScoped;
@@ -1108,6 +1101,20 @@ public:
     }
 };
 MeshLoader* MeshLoader::instance = nullptr;
+
+namespace Components
+{
+    // Declared in World.h; defined here so the "Build Grid Mesh" button can call MeshLoader
+    // directly instead of going through a function pointer set up during MeshLoader::On().
+    static void TerrainPropertyDraw(char* p)
+    {
+        DefaultPropertyDraw(Terrain::mask, p);
+
+        Terrain* t = (Terrain*)p;
+        if (MeshLoader::instance != nullptr && ImGui::Button("Build Grid Mesh"))
+            t->gridMesh = MeshLoader::instance->BuildTerrainGridMesh(t->gridSpacing, t->gridSize);
+    }
+}
 
 #include "../../Third/assimp-master/include/assimp/Importer.hpp"
 #include "../../Third/assimp-master/include/assimp/Exporter.hpp"
@@ -1699,11 +1706,15 @@ public:
         // buckets by Material::shader rather than by parameters[4] at cull time.
         World::Entity shader;
         shader.Make(Components::Shader::mask);
-        shader.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl|DefaultG", "src\\Shaders\\mesh.hlsl|DefaultG");
+        auto& shaderCmp = shader.Get<Components::Shader>();
+        shaderCmp.id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl|DefaultG", "src\\Shaders\\mesh.hlsl|DefaultG");
+        strcpy_s(shaderCmp.path, ECS_SHADER_PATH, "src\\Shaders\\mesh.hlsl|DefaultG");
 
         World::Entity shaderCutout;
         shaderCutout.Make(Components::Shader::mask);
-        shaderCutout.Get<Components::Shader>().id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl|DefaultGCutout", "src\\Shaders\\mesh.hlsl|DefaultGCutout");
+        auto& shaderCutoutCmp = shaderCutout.Get<Components::Shader>();
+        shaderCutoutCmp.id = AssetLibrary::instance->Add("src\\Shaders\\mesh.hlsl|DefaultGCutout", "src\\Shaders\\mesh.hlsl|DefaultGCutout");
+        strcpy_s(shaderCutoutCmp.path, ECS_SHADER_PATH, "src\\Shaders\\mesh.hlsl|DefaultGCutout");
 
         IOs::Log("  materials : {}", _scene->mNumMaterials);
         for (unsigned int i = 0; i < _scene->mNumMaterials; i++)
@@ -1865,12 +1876,10 @@ public:
         // populate AssetLibrary's lazy import-file map now, on the main thread: afterwards
         // FindInImportPath is read-only and safe to call from the worker
         AssetLibrary::instance->FindInImportPath("");
-        Components::requestOMMBake = [](Components::Instance& instanceCmp) { OMMBaker::instance->RequestBake(instanceCmp); };
     }
 
     void Off()
     {
-        Components::requestOMMBake = nullptr;
         stop = true;
         if (worker.joinable())
             worker.join();
@@ -1960,6 +1969,21 @@ private:
     std::deque<Request> queue;
 };
 OMMBaker* OMMBaker::instance = nullptr;
+
+namespace Components
+{
+    // Declared in World.h; defined here so the "bake OMM" button can call OMMBaker directly
+    // instead of going through a function pointer set up during OMMBaker::On().
+    static void InstancePropertyDraw(char* p)
+    {
+        DefaultPropertyDraw(Instance::mask, p);
+
+        Instance* instance = (Instance*)p;
+        ImGui::Spacing();
+        if (OMMBaker::instance != nullptr && ImGui::Button("bake OMM"))
+            OMMBaker::instance->RequestBake(*instance);
+    }
+}
 
 #pragma comment(lib, "dxcompiler.lib")
 #include "../../Third/DirectXShaderCompiler-main/inc/dxcapi.h"

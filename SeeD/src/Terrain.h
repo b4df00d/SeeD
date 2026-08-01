@@ -526,12 +526,12 @@ namespace Systems
             auto& terrains = world->frameQueries[terrainQueryIndex];
             if (terrains.empty()) { ClearAll(); PublishChurn(); return; }
 
-            if (Components::getMainCamera == nullptr)
+            if (Renderer::instance == nullptr)
             {
                 PublishChurn();
                 return;
             }
-            HLSL::Camera camera = Components::getMainCamera();
+            HLSL::Camera camera = Renderer::instance->mainView.mainCamera;
             float invTanHalfFovY = 1.0f / tanf(camera.fovY * (3.14159265f / 180.0f) * 0.5f);
 
             presentTerrains.clear();

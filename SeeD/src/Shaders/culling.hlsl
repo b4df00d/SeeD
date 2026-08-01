@@ -260,14 +260,18 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
         mdc.ThreadGroupCountZ = 1;
 
         // Route this meshlet to its material's shader bucket -- a stable per-Shader-asset index
-        // assigned by the CPU-side registry (Renderer.h MainView::GetOrRegisterShaderBucket) and
-        // written into HLSL::Material.shaderIndex by UpdateMaterials. Bucket 0 is always the
-        // sort-eligible default opaque shader (reserved unconditionally in MainView::On()); every
-        // other bucket (cutout, terrain, or any future mesh-shader variant) draws unsorted from its
-        // own exact region of the single shared meshletsCulledArgs buffer.
+        // assigned by the CPU-side registry (Renderer.h ShaderBucketRegistry::GetOrRegister) and
+        // written into HLSL::Material.shaderIndex by UpdateMaterials. Only bucket 0 is ever
+        // sort-eligible below (whichever shader happens to claim it first); every other bucket draws
+        // unsorted from its own exact region of the single shared meshletsCulledArgs buffer.
         StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
         HLSL::Material meshletMaterial = materials[instance.materialIndex];
         uint shaderBucket = meshletMaterial.shaderIndex;
+        // ~0 means the material has no (resolvable) shader assigned -- same "not assigned"
+        // convention as HLSL::Material's texture slots. Don't draw it, same as a culled meshlet,
+        // rather than falling back to some default.
+        if (shaderBucket == ~0)
+            return;
 
         StructuredBuffer<uint> shaderBucketOffsets = ResourceDescriptorHeap[viewContext.shaderBucketOffsetsIndex];
         uint bucketBase = shaderBucketOffsets[shaderBucket];

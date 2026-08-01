@@ -195,14 +195,155 @@ public:
 };
 UI* UI::instance;
 
-// Snapshot of one shader bucket for the current frame, built by MainView::UploadAndSetup from the
-// persistent registry (MainView::shaderBucketMeshletCounts etc.) and consumed by GBuffers::Render
-// to issue one ExecuteIndirect per distinct Shader asset actually referenced by scene materials.
 struct ShaderBucketInfo
 {
     assetID shaderAssetId;
-    uint baseOffset;    // exclusive-prefix-sum base offset (in elements) into the shared meshletsCulledArgs buffer
-    uint meshletCount;  // exact candidate meshlet count for this bucket this frame (pre-GPU-culling upper bound, == this bucket's allocated region size)
+    uint baseOffset;
+    uint meshletCount;
+};
+
+// Debug-UI snapshot of one bucket's state; see ShaderBucketRegistry::GetDebugStats.
+struct ShaderBucketDebugEntry
+{
+    assetID shaderAssetId;
+    uint bucketIndex;
+    uint meshletCount;
+    uint instanceCount;
+};
+
+// Persistent (NOT rebuilt every frame) registry of the distinct Shader assets referenced by scene
+// materials, backing the generic multi-shader GBuffer draw-indirect: one ExecuteIndirect per shader
+// found (GBuffers::Render), routed GPU-side by a per-material shaderIndex (structs.hlsl
+// HLSL::Material.shaderIndex / culling.hlsl) instead of per-shader bool flags.
+//
+// Bucket *indices* are stable for the life of the view: assigned once per distinct Shader assetID
+// the first time a material references it (GetOrRegister), and never reassigned/reused -- because a
+// material's shaderIndex, once written to the GPU materials buffer, is only re-touched when that
+// material is dirty again (UpdateMaterials), so shifting index assignment across frames would leave
+// untouched materials silently pointing at the wrong bucket.
+//
+// Meshlet counts are maintained INCREMENTALLY (added on an instance's first load, subtracted on
+// release -- see AddInstanceContribution/ReleaseInstanceContribution), NOT recomputed from a
+// per-frame scan: UpdateInstances skips loaded-and-not-dirty instances for performance, so a naive
+// "sum what ran this frame" total would silently undercount once instances settle into the
+// non-dirty steady state.
+class ShaderBucketRegistry
+{
+    std::mutex lock;
+    std::unordered_map<assetID, uint> bucketIndex;         // assetID -> stable bucket index
+    std::vector<assetID> bucketShaderAssetId;               // index -> assetID
+    // std::deque, not std::vector: std::atomic is non-movable/non-copyable so a vector could never
+    // grow past its first allocation, and deque additionally guarantees push/emplace_back at the
+    // end never invalidates references to existing elements -- required here since callers look up
+    // a bucket's atomic once (under lock) and may keep using that reference afterward.
+    std::deque<std::atomic<uint32_t>> bucketMeshletCounts;  // index -> current live meshlet count
+    // instance -> (bucketIndex, meshletCount) it added on first load, so release can subtract
+    // exactly that back out.
+    std::unordered_map<World::Entity, std::pair<uint, uint>> instanceContribution;
+
+    // Caller must hold lock. Shared by GetOrRegister and AddInstanceContribution so lookup-or-register
+    // and any follow-up counter mutation happen under a single critical section.
+    uint GetOrRegister_NoLock(assetID shaderId)
+    {
+        auto it = bucketIndex.find(shaderId);
+        if (it != bucketIndex.end())
+            return it->second;
+        uint index = (uint)bucketShaderAssetId.size();
+        bucketIndex[shaderId] = index;
+        bucketShaderAssetId.push_back(shaderId);
+        bucketMeshletCounts.emplace_back(0u);
+        return index;
+    }
+
+public:
+    // Look up (or, if never seen before, register) the stable bucket index for a Shader asset.
+    // Thread-safe; called from UpdateMaterials for every material processed this frame.
+    uint GetOrRegister(assetID shaderId)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        return GetOrRegister_NoLock(shaderId);
+    }
+
+    // Registers (first-load only) this instance's meshlet-count contribution to its shader's
+    // bucket, and records exactly what was added so ReleaseInstanceContribution can undo it
+    // precisely. Everything happens under one lock so the bucket lookup/registration and the
+    // counter increment are atomic with respect to each other and to concurrent releases.
+    void AddInstanceContribution(World::Entity entity, assetID shaderId, uint meshletCount)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        uint bucket = GetOrRegister_NoLock(shaderId);
+        bucketMeshletCounts[bucket].fetch_add(meshletCount, std::memory_order_relaxed);
+        instanceContribution[entity] = { bucket, meshletCount };
+    }
+
+    // Undo exactly the meshlet-count contribution an instance added on its first load, so a
+    // released instance's shader bucket shrinks back down instead of leaking a stale over-large
+    // count into next frame's buffer sizing.
+    void ReleaseInstanceContribution(World::Entity entity)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        auto it = instanceContribution.find(entity);
+        if (it == instanceContribution.end())
+            return;
+        uint bucket = it->second.first;
+        uint meshletCount = it->second.second;
+        if (bucket < bucketMeshletCounts.size())
+            bucketMeshletCounts[bucket].fetch_sub(meshletCount, std::memory_order_relaxed);
+        instanceContribution.erase(it);
+    }
+
+    // Exclusive prefix-sum the persistent, incrementally-maintained per-bucket meshlet counts (see
+    // AddInstanceContribution/ReleaseInstanceContribution -- NOT a per-frame instance scan, which
+    // would silently undercount once instances settle into the loaded-and-not-dirty steady state)
+    // into per-bucket base offsets for the single shared meshletsCulledArgs buffer, and snapshot
+    // (shaderAssetId, baseOffset, meshletCount) per bucket for GBuffers::Render to iterate. O(bucket
+    // count), not O(instance count). Returns the total meshlet count across every bucket.
+    uint BuildFrameSnapshot(StructuredUploadBuffer<uint>& offsets, std::vector<ShaderBucketInfo>& buckets)
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        uint bucketCount = (uint)bucketMeshletCounts.size();
+        offsets.Clear();
+        buckets.clear();
+        uint totalMeshlets = 0;
+        for (uint b = 0; b < bucketCount; b++)
+        {
+            uint count = bucketMeshletCounts[b].load(std::memory_order_relaxed);
+            offsets.Add(totalMeshlets); // exclusive prefix sum
+            ShaderBucketInfo info;
+            info.shaderAssetId = bucketShaderAssetId[b];
+            info.baseOffset = totalMeshlets;
+            info.meshletCount = count;
+            buckets.push_back(info);
+            totalMeshlets += count;
+        }
+        offsets.Upload();
+        return totalMeshlets;
+    }
+
+    // Debug-UI-only snapshot of every bucket's live state, including per-bucket instance count
+    // (instanceContribution is only ever as large as the currently-loaded instance count, so
+    // this O(bucket count + instance count) walk is fine for an opt-in, not-every-frame window --
+    // unlike BuildFrameSnapshot, which runs unconditionally every frame and must stay O(bucket count)).
+    std::vector<ShaderBucketDebugEntry> GetDebugStats()
+    {
+        std::lock_guard<std::mutex> lk(lock);
+        uint bucketCount = (uint)bucketMeshletCounts.size();
+        std::vector<ShaderBucketDebugEntry> result(bucketCount);
+        for (uint b = 0; b < bucketCount; b++)
+        {
+            result[b].shaderAssetId = bucketShaderAssetId[b];
+            result[b].bucketIndex = b;
+            result[b].meshletCount = bucketMeshletCounts[b].load(std::memory_order_relaxed);
+            result[b].instanceCount = 0;
+        }
+        for (auto& kv : instanceContribution)
+        {
+            uint bucket = kv.second.first;
+            if (bucket < result.size())
+                result[bucket].instanceCount++;
+        }
+        return result;
+    }
 };
 
 // life time : frame
@@ -211,37 +352,24 @@ struct ViewWorld
     HLSL::CommonResourcesIndices commonResourcesIndices;
     PerFrame<StructuredUploadBuffer<HLSL::Camera>> cameras;
     PerFrame<StructuredUploadBuffer<HLSL::Light>> lights;
-    // CPU-computed exclusive-prefix-sum base offset per shader bucket, uploaded fresh each frame
-    // (MainView::UploadAndSetup). PerFrame like cameras/lights above: it's written directly by the
-    // CPU (Map/memcpy, not a GPU copy command), so it must be double-buffered the same way, or a
-    // CPU thread running a frame ahead could clobber data the GPU hasn't finished reading yet.
-    PerFrame<StructuredUploadBuffer<uint>> shaderBucketOffsets;
-    std::vector<ShaderBucketInfo> shaderBuckets; // this frame's snapshot, for GBuffers::Render to iterate
     DirtyTrackingStructuredBuffer<World::Entity, HLSL::Material> materials;
     DirtyTrackingStructuredBuffer<World::Entity, HLSL::Instance> instances;
+
+    ShaderBucketRegistry shaderBucketRegistry;
+    PerFrame<StructuredUploadBuffer<uint>> shaderBucketOffsets;
+    std::vector<ShaderBucketInfo> shaderBuckets; // this frame's snapshot, for GBuffers::Render to iterate
     std::vector<HLSL::Instance> instancesReadBackDebug;
 
     std::atomic<uint> meshletsCount;
 
-    // Static instance used by the callback function pointer (non-capturing lambda)
-    static ViewWorld* instance;
-
     void On()
     {
         ZoneScoped;
-        // store instance pointer so we can use a non-capturing lambda (convertible to function pointer)
-        instance = this;
 
-        // Assign a non-capturing lambda that uses the static instance pointer.
-        // Non-capturing lambdas can convert to function pointers of the appropriate type.
-        // MainView::On() (below) further extends this same callback slot to also give back this
-        // instance's shader-bucket meshlet-count contribution -- see MainView::instance there.
-        Components::RemoveCallback[Components::Instance::bucketIndex] = [](EntityBase entity)
+        Components::RemoveCallback[Components::Instance::bucketIndex] = [this](EntityBase entity)
         {
-            if (ViewWorld::instance)
-            {
-                ViewWorld::instance->instances.Remove(World::Entity(entity));
-            }
+            instances.Remove(World::Entity(entity));
+            shaderBucketRegistry.ReleaseInstanceContribution(World::Entity(entity));
         };
     }
 
@@ -257,9 +385,6 @@ struct ViewWorld
         instances.Release();
     }
 };
-
-// Define the static instance
-ViewWorld* ViewWorld::instance = nullptr;
 
 // life time : view (only updated on GPU)
 struct ViewContext
@@ -306,7 +431,7 @@ struct ViewContext
         meshletsCulledArgsSorted.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         sortHistogram.CreateBuffer(SORT_BUCKETS, D3D12_RESOURCE_STATE_COMMON);
         meshletBuckets.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
-        meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON); // resized to the current shader-bucket count each frame (UploadAndSetup)
+        meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
         jitterIndex = 0;
     }
 
@@ -327,7 +452,6 @@ struct ViewContext
 
 struct EditorContext
 {
-    // create a indirect buffer to store line to be drawn buy this debug shader 
     HLSL::EditorContext editorContext;
     StructuredBuffer<HLSL::IndirectCommand> indirectDebugBuffer;
     StructuredBuffer<HLSL::DebugVertex> indirectDebugVertices;
@@ -423,6 +547,8 @@ struct RayTracingContext
     }
 };
 
+struct SubmissionList;
+
 class View
 {
 public:
@@ -435,6 +561,7 @@ public:
     ViewContext viewContext;
     EditorContext editorContext;
     std::map<UINT64, Resource> resources;
+    SubmissionList* submissions = nullptr; // owned by Renderer, shared by every view so passes on the same queue stay strictly ordered
 
     virtual void On(uint2 _displayResolution, uint2 _renderResolution)
     {
@@ -459,8 +586,6 @@ public:
         }
     }
     virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
-    // Submission is no longer per-view: passes self-register into Renderer::submissions and are
-    // submitted in registration order by the cooperative drain (TODO #9). No View::Execute().
 
     Resource& GetRegisteredResource(String name)
     {
@@ -521,9 +646,6 @@ public:
         viewContextParams.meshletBucketsIndex = viewContext.meshletBuckets.GetResource().uav.offset;
         viewContextParams.frontToBackSort = options.frontToBackSort ? 1 : 0;
         viewContextParams.meshletsCounterIndex = viewContext.meshletsCounter.GetResource().uav.offset;
-        // viewWorld.shaderBucketOffsets/shaderBuckets are built earlier this frame in
-        // MainView::UploadAndSetup, before it calls this function -- read the already-uploaded
-        // snapshot here rather than reaching into MainView's persistent registry directly.
         viewContextParams.shaderBucketOffsetsIndex = viewWorld.shaderBucketOffsets.Get().gpuData.srv.offset;
         viewContextParams.shaderBucketCount = (uint)viewWorld.shaderBuckets.size();
         viewContextParams.albedoIndex = GetRegisteredResource("albedo").srv.offset;
@@ -635,15 +757,8 @@ public:
 };
 std::mutex ViewResource::lock;
 
-// Ordered, cooperative GPU-submission list (TODO #9). Passes record their command buffers in
-// parallel, but submission to the queues must happen in one fixed order (a topological order of
-// the fence dependencies). Each submittable registers once (in Pass::On / Renderer::On) and gets a
-// slot index. When a worker finishes recording a pass it calls MarkReadyAndDrain(index): under the
-// lock it flags that slot ready and submits every contiguous-ready slot from the cursor forward.
-// So whichever worker unblocks the cursor performs the submission inline -- no dedicated thread.
 struct SubmissionList
 {
-    static SubmissionList* instance;
     std::vector<std::function<void()>> execute; // submission action per slot, in order
     std::vector<bool> ready;                    // guarded by mutex
     size_t cursor = 0;
@@ -682,7 +797,6 @@ struct SubmissionList
             execute[cursor++]();
     }
 };
-SubmissionList* SubmissionList::instance = nullptr;
 
 class Pass
 {
@@ -712,8 +826,7 @@ public:
             commandBuffer.Get(i).On(queue, name);
         }
 
-        // Self-register into the submission list. View::On() call order == GPU submission order.
-        submitIndex = SubmissionList::instance->Register([this]{ this->Execute(); });
+        submitIndex = view->submissions->Register([this] { this->Execute(); });
     }
 
     virtual void Off()
@@ -766,8 +879,6 @@ public:
     {
         ZoneScoped;
         ZoneName(name.c_str(), name.size()); // show the pass name (e.g. "culling") instead of "Execute"
-        if (commandBuffer->open)
-            IOs::Log("{} OPEN !!", name.c_str());
 
         if (dependency != nullptr)
         {
@@ -782,8 +893,7 @@ public:
             uint lastFrameIndex = GPU::instance->frameIndex ? 0 : 1;
             commandBuffer->queue->Wait(endOfLastFrame->Get(lastFrameIndex).passEnd.fence, endOfLastFrame->Get(lastFrameIndex).passEnd.fenceValue);
         }
-        commandBuffer->queue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
-        commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
+        ExecuteNow();
     }
 
     void ExecuteNow()
@@ -793,9 +903,6 @@ public:
             IOs::Log("{} OPEN !!", name.c_str());
 
         commandBuffer->queue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandBuffer->cmd);
-        // Signal passEnd just like Execute() so this submission is tracked. Without it, the one-time
-        // init submission from On() (Open/Close/ExecuteNow) leaves fenceValue at 0, so the first
-        // Render()->Open() resets this allocator with nothing to wait on -> COMMAND_ALLOCATOR_SYNC.
         commandBuffer->queue->Signal(commandBuffer->passEnd.fence, ++commandBuffer->passEnd.fenceValue);
     }
 
@@ -1200,9 +1307,6 @@ public:
 
         if (options.frontToBackSort)
         {
-            // The histogram + per-meshlet buckets were filled inside CullingMeshlets above.
-            // Reorder the culled meshlet draw list front-to-back (prefix sum + scatter) so the
-            // gBuffer's early-Z rejects far fragments first, cutting overdraw.
             view->viewContext.meshletsCulledArgs.GetResource().Barrier(commandBuffer.Get());
             view->viewContext.meshletsCounter.GetResource().Barrier(commandBuffer.Get());
             view->viewContext.meshletBuckets.GetResource().Barrier(commandBuffer.Get());
@@ -1227,12 +1331,7 @@ public:
             view->viewContext.meshletsCulledArgsSorted.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         }
 
-        // meshletsCulledArgs always needs to end up indirect-readable now: non-zero shader buckets
-        // always draw straight from it (never sorted), and when frontToBackSort is off bucket 0
-        // (the default opaque shader) does too. When sort is on, bucket 0's own region within it is
-        // superseded by meshletsCulledArgsSorted above, but the other buckets still read this buffer.
         view->viewContext.meshletsCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-
         view->viewContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
         Close();
@@ -1284,11 +1383,7 @@ class GBuffers : public Pass
     ViewResource motion;
     ViewResource instanceID;
     ViewResource overdraw;
-    Components::Handle<Components::Shader> meshShader; // default opaque shader (DefaultG); also seeds shader bucket 0 (see MainView::On())
 public:
-    // Used once by MainView::On() right after gBuffers.On() to reserve shader bucket 0 for the
-    // default opaque shader -- the only bucket the front-to-back sort passes operate on.
-    assetID GetMeshShaderAssetId() { return meshShader.Get().id; }
 
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
@@ -1309,18 +1404,6 @@ public:
         instanceID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "instanceID");
         overdraw.Register("overdraw", view);
         overdraw.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "overdraw"); // per-pixel atomic counter for the overdraw heatmap
-        meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl|DefaultG");
-        // Path registration only (no entity, no bucket) for the other built-in mesh-shader variants.
-        // AssetLibrary::Get<Shader> can only ever resolve an assetID whose path was registered via
-        // Add/AddHardCoded at some point in this process's lifetime -- ProbeCache (its only other
-        // resolution path) looks for cached .mesh/.tex files on disk and never handles .hlsl assets.
-        // A material referencing DefaultGCutout/DefaultGTerrain loaded straight from a saved .seed
-        // scene (no Assimp import / UI "New Terrain" click this session) would otherwise leave that
-        // shader's assetID unresolvable and its bucket silently, permanently skipped in
-        // GBuffers::Render. This does not add a hardcoded draw or a bucket by itself -- a bucket
-        // still only appears once some material actually references the shader (UpdateMaterials).
-        AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl|DefaultGCutout");
-        AssetLibrary::instance->AddHardCoded("src\\Shaders\\terrainmesh.hlsl|DefaultGTerrain");
 
         Open();
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1375,8 +1458,6 @@ public:
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-        // Overdraw heatmap: clear the counter then make it a UAV the pixel shader atomically increments.
-        // Only paid for when the overdraw debug view is active.
         bool overdrawEnabled = options.debugDraw == Options::DebugDraw::overdraw;
         if (overdrawEnabled)
         {
@@ -1393,14 +1474,6 @@ public:
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
         auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
 
-        // One ExecuteIndirect per distinct Shader asset actually referenced by scene materials this
-        // frame (view->viewWorld.shaderBuckets, snapshotted from MainView's persistent shader-bucket
-        // registry in UploadAndSetup). Bucket 0 is always the sort-eligible default opaque shader
-        // (DefaultG, reserved for life in MainView::On()) and draws from meshletsCulledArgsSorted
-        // when front-to-back sort is on; every other bucket (cutout, terrain, or any future
-        // mesh-shader variant) always draws unsorted, straight from its own exact region of the
-        // shared meshletsCulledArgs buffer. Adding a new shader variant needs zero changes here --
-        // just register the asset and point materials at it.
         for (uint bucketIndex = 0; bucketIndex < view->viewWorld.shaderBuckets.size(); bucketIndex++)
         {
             ShaderBucketInfo& bucket = view->viewWorld.shaderBuckets[bucketIndex];
@@ -1455,12 +1528,12 @@ public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
 
         rayDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracing2.hlsl|Update");
         resolveShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\SHARCResolve.hlsl|sharcResolve");
         depth.Register("depth", view);
 
-        ZoneScoped;
     }
     void Setup(View* view) override
     {
@@ -1485,7 +1558,7 @@ public:
         // this same resource in the graphics-queue passes (Lighting, PostProcessHalfRes, GPUDebug, DLSS).
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-        // Trace rays (+ temporal ReSTIR)
+        // Trace rays with updatte defined (very low resolution, only for SHARC update)
         Shader& rayDispatch = *AssetLibrary::instance->Get<Shader>(rayDispatchShader.Get().id, true);
         commandBuffer->SetRaytracing(rayDispatch);
         // global root sig for ray tracing is the same as compute shaders
@@ -1546,11 +1619,6 @@ public:
         rayDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\raytracing2.hlsl|Query");
         applyLightingShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\lighting.hlsl|Lighting");
 
-        // Both are written via RWTexture2D by this pass's raytracing dispatches every frame and
-        // otherwise only ever read as SRV (implicit-promotion-from-COMMON-eligible) -- unlike depth
-        // or the render-target-flagged gbuffers, nothing else in the frame needs them in any other
-        // state, so (like PostProcess's 'postProcessed') a single one-time transition here is enough;
-        // no per-frame bracket needed. CreateTexture leaves both in COMMON.
         Open();
         lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         specularHitDistance.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -1578,11 +1646,6 @@ public:
         auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
         auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
 
-        // GBuffers::Render leaves depth in COMMON at its own end (LightingProbes, which runs right
-        // before this pass, brackets its own read back to COMMON too) -- both dispatches below read
-        // it (GetGBufferCameraData) as a plain Texture2D SRV, which for a DEPTH_STENCIL-flagged
-        // resource is never implicitly promoted. Transitioned to DEPTH_WRITE below for next frame's
-        // zPrepass once both dispatches are done with it.
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         // Trace rays (+ temporal ReSTIR)
@@ -1623,7 +1686,6 @@ public:
 
         lighted.Get().Barrier(commandBuffer.Get());
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
         Close();
@@ -2929,108 +2991,17 @@ public:
 
 // After recording, mark this pass ready and submit every now-contiguous-ready pass from the cursor.
 // Whichever worker unblocks the cursor performs the submission inline -- no dedicated submit thread.
-#define SUBTASKVIEWPASS(pass) tf::Task pass##Task = subflow.emplace([this](){this->pass.Render(this); SubmissionList::instance->MarkReadyAndDrain(this->pass.submitIndex);}).name(#pass)
-#define SUBTASKPASS(pass) tf::Task pass##Task = subflow.emplace([this](){this->pass.Render(nullptr); SubmissionList::instance->MarkReadyAndDrain(this->pass.submitIndex);}).name(#pass)
+#define SUBTASKVIEWPASS(pass) tf::Task pass##Task = subflow.emplace([this](){this->pass.Render(this); this->submissions->MarkReadyAndDrain(this->pass.submitIndex);}).name(#pass)
+#define SUBTASKPASS(pass) tf::Task pass##Task = subflow.emplace([this](){this->pass.Render(nullptr); this->submissions->MarkReadyAndDrain(this->pass.submitIndex);}).name(#pass)
 #define SUBTASKRENDERERWORLD(pass) tf::Task pass = subflow.emplace([this, world](){this->pass(world);}).name(#pass)
 #define SUBTASKRENDERER(pass) tf::Task pass = subflow.emplace([this](){this->pass();}).name(#pass)
 
 // a view per type of render ? one for main view, one for cubemap, one for minimap ?
-// main view render should always be the last one to render ?
-// Backing storage for Components::getMainCamera (World.h bridge): a captureless lambda can't
-// close over a member, so UpdateCameras writes the main camera's already-computed HLSL::Camera
-// (frustum planes, worldPos, fovY, ...) here every frame, and the bridge just reads it back.
-static HLSL::Camera mainCameraForTerrain = {};
+// main view render should always be the last one to render ?\
 
 class MainView : public View
 {
 public:
-    // Static instance so the Instance RemoveCallback (a non-capturing lambda, see On() below) can
-    // reach the shader-bucket registry, mirroring ViewWorld::instance above.
-    static MainView* instance;
-
-    // Persistent (NOT rebuilt every frame) shader-bucket registry backing the generic multi-shader
-    // GBuffer draw-indirect: the CPU discovers the distinct Shader assets actually referenced by
-    // scene materials and issues one ExecuteIndirect per shader found (GBuffers::Render), routed
-    // GPU-side by a per-material shaderIndex (structs.hlsl HLSL::Material.shaderIndex / culling.hlsl)
-    // instead of the old opaque/cutout/terrain bool flags.
-    //
-    // Bucket *indices* are stable for the life of the view: assigned once per distinct Shader
-    // assetID the first time a material references it (GetOrRegisterShaderBucket), and never
-    // reassigned/reused -- because a material's shaderIndex, once written to the GPU materials
-    // buffer, is only re-touched when that material is dirty again (UpdateMaterials), so shifting
-    // index assignment across frames would leave untouched materials silently pointing at the wrong
-    // bucket. Bucket 0 is reserved unconditionally for the default opaque shader (see On() below),
-    // matching the "front-to-back sort only applies to bucket 0" contract in culling.hlsl.
-    //
-    // Meshlet counts are maintained INCREMENTALLY (added on an instance's first load, subtracted on
-    // release -- see UpdateInstances / ReleaseInstanceShaderContribution), NOT recomputed from a
-    // per-frame scan: UpdateInstances skips loaded-and-not-dirty instances for performance, so a
-    // naive "sum what ran this frame" total would silently undercount once instances settle into
-    // the non-dirty steady state -- the same buffer-undersizing bug class this codebase already hit
-    // once with meshletsCulledArgsTerrain.
-    std::mutex shaderBucketLock;
-    std::unordered_map<assetID, uint> shaderBucketIndex;         // assetID -> stable bucket index
-    std::vector<assetID> shaderBucketShaderAssetId;               // index -> assetID
-    // std::deque, not std::vector: std::atomic is non-movable/non-copyable so a vector could never
-    // grow past its first allocation, and deque additionally guarantees push/emplace_back at the
-    // end never invalidates references to existing elements -- required here since callers look up
-    // a bucket's atomic once (under shaderBucketLock) and may keep using that reference afterward.
-    std::deque<std::atomic<uint32_t>> shaderBucketMeshletCounts;  // index -> current live meshlet count
-    // instance -> (bucketIndex, meshletCount) it added on first load, so release can subtract
-    // exactly that back out (see ReleaseInstanceShaderContribution).
-    std::unordered_map<World::Entity, std::pair<uint, uint>> instanceShaderContribution;
-
-    // Caller must hold shaderBucketLock. Shared by GetOrRegisterShaderBucket and
-    // AddInstanceShaderContribution so lookup-or-register and any follow-up counter mutation happen
-    // under a single critical section.
-    uint GetOrRegisterShaderBucket_NoLock(assetID shaderId)
-    {
-        auto it = shaderBucketIndex.find(shaderId);
-        if (it != shaderBucketIndex.end())
-            return it->second;
-        uint index = (uint)shaderBucketShaderAssetId.size();
-        shaderBucketIndex[shaderId] = index;
-        shaderBucketShaderAssetId.push_back(shaderId);
-        shaderBucketMeshletCounts.emplace_back(0u);
-        return index;
-    }
-
-    // Look up (or, if never seen before, register) the stable bucket index for a Shader asset.
-    // Thread-safe; called from UpdateMaterials for every material processed this frame.
-    uint GetOrRegisterShaderBucket(assetID shaderId)
-    {
-        std::lock_guard<std::mutex> lk(shaderBucketLock);
-        return GetOrRegisterShaderBucket_NoLock(shaderId);
-    }
-
-    // Registers (first-load only) this instance's meshlet-count contribution to its shader's
-    // bucket, and records exactly what was added so ReleaseInstanceShaderContribution can undo it
-    // precisely. Everything happens under one lock so the bucket lookup/registration and the
-    // counter increment are atomic with respect to each other and to concurrent releases.
-    void AddInstanceShaderContribution(World::Entity entity, assetID shaderId, uint meshletCount)
-    {
-        std::lock_guard<std::mutex> lk(shaderBucketLock);
-        uint bucket = GetOrRegisterShaderBucket_NoLock(shaderId);
-        shaderBucketMeshletCounts[bucket].fetch_add(meshletCount, std::memory_order_relaxed);
-        instanceShaderContribution[entity] = { bucket, meshletCount };
-    }
-
-    // RemoveCallback hook (see On() below): undo exactly the meshlet-count contribution this
-    // instance added on its first load, so a released instance's shader bucket shrinks back down
-    // instead of leaking a stale over-large count into next frame's buffer sizing.
-    void ReleaseInstanceShaderContribution(World::Entity entity)
-    {
-        std::lock_guard<std::mutex> lk(shaderBucketLock);
-        auto it = instanceShaderContribution.find(entity);
-        if (it == instanceShaderContribution.end())
-            return;
-        uint bucket = it->second.first;
-        uint meshletCount = it->second.second;
-        if (bucket < shaderBucketMeshletCounts.size())
-            shaderBucketMeshletCounts[bucket].fetch_sub(meshletCount, std::memory_order_relaxed);
-        instanceShaderContribution.erase(it);
-    }
-
     std::mutex InstanceRTSync;
     GPUDebugInit gpuDebugInit;
     StructuredCommandBufferUpdate structuredCommandBufferUpdate;
@@ -3057,26 +3028,15 @@ public:
     Components::RenderSettingsVolume baseSettings;
     bool baseSettingsCaptured = false;
 
+    HLSL::Camera mainCamera = {}; // last-computed main (camera index 0) camera; read directly by Systems::TerrainStreaming via Renderer::instance->mainView
 
     void On(uint2 _displayResolution, uint2 _renderResolution) override
     {
         ZoneScoped;
-        MainView::instance = this;
 
         dlss.CreateDLSS(this, _displayResolution, _renderResolution);
 
         View::On(_displayResolution, _renderResolution);
-
-        // Extend the Instance component's removal callback (ViewWorld::On() above already wired it
-        // to drop the entity from viewWorld.instances) so a released instance also gives back
-        // exactly the shader-bucket meshlet-count contribution it added on first load.
-        Components::RemoveCallback[Components::Instance::bucketIndex] = [](EntityBase entity)
-        {
-            if (ViewWorld::instance)
-                ViewWorld::instance->instances.Remove(World::Entity(entity));
-            if (MainView::instance)
-                MainView::instance->ReleaseInstanceShaderContribution(World::Entity(entity));
-        };
 
         hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr, nullptr);
         structuredCommandBufferUpdate.On(this, GPU::instance->computeQueue, "structuredCommandBufferUpdate", nullptr, nullptr);
@@ -3090,11 +3050,6 @@ public:
         accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &culling.commandBuffer, nullptr);
         atmospehricScattering.On(this, GPU::instance->computeQueue, "atmospehricScattering", &accelerationStructure.commandBuffer, nullptr);
         gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
-        // Reserve bucket 0 for the default opaque shader (DefaultG), unconditionally and for the
-        // life of the view -- it's the only bucket the front-to-back sort passes operate on
-        // (culling.hlsl). Idempotent if On() runs again (e.g. resolution change): the registry
-        // already maps this assetID to index 0, so this just returns it.
-        GetOrRegisterShaderBucket(gBuffers.GetMeshShaderAssetId());
         lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &gBuffers.commandBuffer, &accelerationStructure.commandBuffer);
         lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers.commandBuffer, &lightingProbes.commandBuffer);
         forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer, &atmospehricScattering.commandBuffer);
@@ -3354,11 +3309,12 @@ public:
                     {
                         // This instance's meshlets weren't previously counted in any shader bucket
                         // -- record the exact amount so release can subtract precisely this much
-                        // back out later (Instance's RemoveCallback -> ReleaseInstanceShaderContribution,
-                        // wired in MainView::On()). Not hit again on later dirty-refresh frames, so
-                        // in-place mesh/material mutation of an already-loaded instance is a known,
-                        // documented limitation (doesn't happen anywhere in the codebase today).
-                        AddInstanceShaderContribution(ent, shaderCmp.id, effectiveMesh->LODs[0].meshletCount);
+                        // back out later (Instance's RemoveCallback -> ShaderBucketRegistry::
+                        // ReleaseInstanceContribution, wired in ViewWorld::On()). Not hit again on
+                        // later dirty-refresh frames, so in-place mesh/material mutation of an
+                        // already-loaded instance is a known, documented limitation (doesn't happen
+                        // anywhere in the codebase today).
+                        viewWorld.shaderBucketRegistry.AddInstanceContribution(ent, shaderCmp.id, effectiveMesh->LODs[0].meshletCount);
                     }
 
                     // dirty is consumed exactly here (this is its only reader): clear it so an
@@ -3411,10 +3367,22 @@ public:
 
                         // Stable per-shader-bucket index (generic multi-shader GBuffer draw
                         // indirect): culling.hlsl routes this material's meshlets by this index
-                        // instead of the old cutout/terrain bool flags.
-                        material.shaderIndex = 0;
+                        // instead of the old cutout/terrain bool flags. ~0 (same "not assigned"
+                        // convention as the texture slots below) means no shader -- culling.hlsl
+                        // skips drawing that meshlet entirely rather than falling back to a default.
+                        material.shaderIndex = ~0;
                         if (materialCmp.shader.IsValid())
-                            material.shaderIndex = this->GetOrRegisterShaderBucket(materialCmp.shader.Get().id);
+                        {
+                            // The Shader entity carries its own path (set wherever it's created --
+                            // CreateMaterials, the "New Terrain" menu, ...), so it self-registers in
+                            // AssetLibrary from saved data alone: no pass needs to hardcode it ahead
+                            // of time. Idempotent, so calling it every frame for every material is
+                            // cheap and safe (same pattern as GetOrRegister itself).
+                            Components::Shader& shaderCmp = materialCmp.shader.Get();
+                            if (shaderCmp.path[0] != 0)
+                                AssetLibrary::instance->Add(shaderCmp.path, shaderCmp.path, shaderCmp.id);
+                            material.shaderIndex = frameWorld.shaderBucketRegistry.GetOrRegister(shaderCmp.id);
+                        }
                         for (uint paramIndex = 0; paramIndex < HLSL::MaterialParametersCount; paramIndex++)
                         {
                             // memcpy ? it is even just a cashline 
@@ -3618,8 +3586,7 @@ public:
                         editorState.cameraView = mat.matrix;
                         editorState.cameraProj = hlslcam.proj;
 
-                        mainCameraForTerrain = hlslcam;
-                        Components::getMainCamera = []() { return mainCameraForTerrain; };
+                        mainCamera = hlslcam;
                     }
                 }
                 this->viewWorld.cameras.Get().Add(hlslcamPrevious);
@@ -3777,28 +3744,10 @@ public:
                 this->viewWorld.lights.Get().Upload();
                 this->viewContext.instancesCulledArgs.Resize(this->viewWorld.instances.Size());
 
-                // Exclusive prefix-sum this MainView's persistent, incrementally-maintained
-                // per-shader-bucket meshlet counts (see UpdateInstances / AddInstanceShaderContribution
-                // / ReleaseInstanceShaderContribution -- NOT viewWorld.meshletsCount, which only sums
-                // instances touched *this* frame and would silently undercount once instances settle
-                // into the loaded-and-not-dirty steady state) into per-bucket base offsets for the
-                // single shared meshletsCulledArgs buffer. O(bucket count), not O(instance count).
-                uint bucketCount = (uint)this->shaderBucketMeshletCounts.size();
-                this->viewWorld.shaderBucketOffsets.Get().Clear();
-                this->viewWorld.shaderBuckets.clear();
-                uint totalMeshlets = 0;
-                for (uint b = 0; b < bucketCount; b++)
-                {
-                    uint count = this->shaderBucketMeshletCounts[b].load(std::memory_order_relaxed);
-                    this->viewWorld.shaderBucketOffsets.Get().Add(totalMeshlets); // exclusive prefix sum
-                    ShaderBucketInfo info;
-                    info.shaderAssetId = this->shaderBucketShaderAssetId[b];
-                    info.baseOffset = totalMeshlets;
-                    info.meshletCount = count;
-                    this->viewWorld.shaderBuckets.push_back(info);
-                    totalMeshlets += count;
-                }
-                this->viewWorld.shaderBucketOffsets.Get().Upload();
+                // See ShaderBucketRegistry::BuildFrameSnapshot: NOT viewWorld.meshletsCount, which
+                // only sums instances touched *this* frame and would silently undercount once
+                // instances settle into the loaded-and-not-dirty steady state.
+                uint totalMeshlets = this->viewWorld.shaderBucketRegistry.BuildFrameSnapshot(this->viewWorld.shaderBucketOffsets.Get(), this->viewWorld.shaderBuckets);
 
                 this->viewContext.meshletsCulledArgs.Resize(totalMeshlets);
                 this->viewContext.meshletsCulledArgsSorted.Resize(totalMeshlets);
@@ -3812,7 +3761,7 @@ public:
                 // e.g. terrain nodes, which stop re-touching every frame once baked -- causing
                 // out-of-bounds atomic-counter writes that flickered.
                 this->viewContext.meshletsToCull.Resize(totalMeshlets);
-                this->viewContext.meshletsCounter.Resize(bucketCount);
+                this->viewContext.meshletsCounter.Resize((uint)this->viewWorld.shaderBuckets.size());
                 this->raytracingContext.instancesRayTracing.Resize(this->viewWorld.instances.Size());
 
                 this->viewWorld.commonResourcesIndices = SetupCommonResourcesParams();
@@ -3825,7 +3774,6 @@ public:
         return task;
     }
 };
-MainView* MainView::instance = nullptr;
 
 class Editor : public Pass
 {
@@ -3850,7 +3798,7 @@ public:
     }
 };
 
-class EditorView : View
+class EditorView : public View
 {
 public:
     Editor editor;
@@ -3895,16 +3843,13 @@ public:
     ShaderStorage shaderStorage;
     MainView mainView;
     EditorView editorView;
-    SubmissionList submissions;
+    SubmissionList submissions; // shared by every view; passes reach it through view->submissions, not a global
 
-    // (Re)build the ordered submission list: AssetLibrary first (index 0), then every pass as the
-    // views' On() register themselves. Must run whenever the views are (re)built (On() can run more
-    // than once, e.g. on a DLSS quality change / resize).
     void BuildSubmissions()
     {
-        SubmissionList::instance = &submissions;
         submissions.Clear();
-        AssetLibrary::instance->submitIndex = submissions.Register([] { AssetLibrary::instance->Execute(); });
+        mainView.submissions = &submissions;
+        editorView.submissions = &submissions;
     }
 
     void On(uint2 _displayResolution)
@@ -3916,7 +3861,7 @@ public:
         meshStorage.On();
         textureStorage.On();
         shaderStorage.On();
-        BuildSubmissions(); // before the views' On(), so passes register after AssetLibrary (slot 0)
+        BuildSubmissions();
         mainView.On(_displayResolution, float2(_displayResolution) * 1.f);
         editorView.On(_displayResolution, _displayResolution);
 
@@ -3939,13 +3884,9 @@ public:
     {
         ZoneScoped;
 
-        // New frame: clear last frame's ready flags + cursor. Then close the AssetLibrary upload
-        // buffer (all its uploads were recorded in ScheduleLoading, which precedes ScheduleRenderer)
-        // and submit it immediately as slot 0 so it never stalls the cursor for its dependents
-        // (skinning/particles/spawning). The pass Render tasks (which run after this) drain the rest.
         submissions.Reset();
         AssetLibrary::instance->Close();
-        submissions.MarkReadyAndDrain(AssetLibrary::instance->submitIndex);
+        AssetLibrary::instance->Execute();
 
         Profiler::instance->frameData.instancesCount = mainView.viewWorld.instances.Size();
         Profiler::instance->frameData.meshletsCount = mainView.viewWorld.meshletsCount;
@@ -3957,33 +3898,31 @@ public:
         auto editorViewEndTask = editorView.Schedule(world, subflow);
 
         SUBTASKRENDERER(ExecuteFrame);
+        SUBTASKRENDERER(Cleanup);
         SUBTASKRENDERER(WaitFrame);
         SUBTASKRENDERER(PresentFrame);
 
         SUBTASKRENDERER(ApplyPendingQualityChange);
 
-#define INTERLEAVEFRAMES
-#ifdef INTERLEAVEFRAMES
         ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
-        ExecuteFrame.precede(WaitFrame);
+        ExecuteFrame.precede(Cleanup);
+        Cleanup.precede(WaitFrame);
         WaitFrame.precede(PresentFrame);
         PresentFrame.precede(ApplyPendingQualityChange);
-#else
-        ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
-        WaitFrame.precede(ExecuteFrame);
-        ExecuteFrame.precede(PresentFrame);
-        PresentFrame.precede(ApplyPendingQualityChange);
-#endif
     }
 
     void ExecuteFrame()
     {
         ZoneScoped;
-
-        // Most submissions already happened inline as each pass finished recording (MarkReadyAndDrain).
-        // This is the final flush guaranteeing any tail not yet submitted (incl. the last pass) goes out
-        // before WaitFrame/PresentFrame. No dedicated submission thread.
         submissions.DrainRemaining();
+    }
+
+    void Cleanup()
+    {
+        ZoneScoped;
+        Resource::ReleaseResources();
+        // Recycle pooled upload buffers on the same schedule as the deferred frees above.
+        GPU::instance->uploadBufferPool.Recycle(GPU::instance->frameNumber);
     }
 
     void ExecuteImmediate(ID3D12GraphicsCommandList* cmd, ID3D12CommandQueue* queue)
@@ -4020,10 +3959,6 @@ public:
     void WaitFrame()
     {
         ZoneScoped;
-
-        Resource::ReleaseResources();
-        // Recycle pooled upload buffers on the same schedule as the deferred frees above.
-        GPU::instance->uploadBufferPool.Recycle(GPU::instance->frameNumber);
 
         HRESULT hr;
         // if the current fence value is still less than "fenceValue", then we know the GPU has not finished executing

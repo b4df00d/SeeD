@@ -143,6 +143,17 @@ static bool LooksLikeFieldDecl(String& firstToken, String& line)
         return false;
     return true;
 }
+// True only for a line that IS the struct's closing brace (whitespace aside) -- NOT merely a
+// line containing "};" as a substring, which a field initialized with e.g. "= {};" also matches,
+// stopping the field scan (see ParseCpp's inner while) before any field declared after it.
+static bool IsClosingBrace(String& line)
+{
+    size_t start = line.find_first_not_of(" \t\r\n");
+    if (start == String::npos)
+        return false;
+    size_t end = line.find_last_not_of(" \t\r\n");
+    return line.substr(start, end - start + 1) == "};";
+}
 void ParseCpp(String path)
 {
     std::ifstream fin(path);
@@ -168,7 +179,7 @@ void ParseCpp(String path)
                 ComponentInfoParse& cmpInfo = cmpInfos[cmpInfos.size() - 1];
                 cmpInfo.propertyDrawPtr = "nullptr";
                 cmpInfo.name = tokens[1];
-                while (line.find("};") == -1)
+                while (!IsClosingBrace(line))
                 {
                     getline(fin, line);
                     tokens = line.Split(" ");

@@ -21,7 +21,7 @@
 //          unknown border region.
 //        - Touches the same RT shaders as SER -> implement alongside point 1.
 //
-// [ ] 3. Simple terrain with Erosion
+// [X] 3. Simple terrain with Erosion
 //        https://blog.runevision.com/2026/03/fast-and-gorgeous-erosion-filter.html
 //        - GPU "terrain paint" pass: compute the base heightmap + erosion on the
 //          GPU and store the result into a final heightmap texture.
@@ -110,6 +110,19 @@
 // 
 // [ ] 21. add gpu profile for tracy
 // 
+// [ ] 22. add a validation and conversion function to convert old version of the world to the new one 
+//         (for example if a component is removed or added) and add a UI function to start the conversion
+// 
+// [ ] 23. better resource transition. always return to the comon state after a pass ?
+//         since this is the end of a commandlist for each pass, the transition event should not degrade the performance.
+// 
+// [ ] 24. DLSS hit distance for reflections are not working correctly. reflection are blurry when moving.
+//
+// [ ] 25. shader picker for Components::Shader: let the user pick a .hlsl file, scan it for the
+//         #pragma <stage> <PublicName> <entry...> lines it declares (the same convention the shader
+//         compiler itself parses in Loading.h), and pick one of the found variations to fill the
+//         Shader entity's path field, instead of typing the "path|entry" string by hand.
+//
 // ============================================================================
 
 #define WIN32_LEAN_AND_MEAN
@@ -247,8 +260,8 @@ EditorState editorState;
 Project project;
 
 #include "Loading.h"
-#include "Terrain.h"
 #include "Renderer.h"
+#include "Terrain.h"
 #include "UI.h"
 
 

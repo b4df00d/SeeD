@@ -19,9 +19,10 @@ knownComponents.push_back(
 		}
  	});
 knownComponents.push_back(
- 	{ "Shader", Components::Shader::mask, nullptr,
+ 	{ "Shader", Components::Shader::mask, Components::ShaderPropertyDraw,
  		{
 			{ "id", PropertyTypes::_assetID, NULL, 1, offsetof(Components::Shader, id) },
+			{ "path", PropertyTypes::_raw, NULL, ECS_SHADER_PATH, offsetof(Components::Shader, path) },
 		}
  	});
 knownComponents.push_back(

@@ -1340,6 +1340,78 @@ public:
 };
 MeshStorageWindow meshStorageWindow;
 
+class ShaderBucketsWindow : public EditorWindow
+{
+public:
+    ShaderBucketsWindow() : EditorWindow("ShaderBuckets") {}
+    void Update() override final
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("ShaderBucketsWindow", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+
+        if (Renderer::instance == nullptr)
+        {
+            ImGui::TextDisabled("Renderer not initialized.");
+            ImGui::End();
+            return;
+        }
+
+        // Snapshot under the registry's own lock (see ShaderBucketRegistry::GetDebugStats) --
+        // separate from BuildFrameSnapshot, which the render loop uses every frame and must
+        // stay minimal, so this window carries its own (slightly heavier) per-bucket walk.
+        std::vector<ShaderBucketDebugEntry> stats = Renderer::instance->mainView.viewWorld.shaderBucketRegistry.GetDebugStats();
+
+        uint totalMeshlets = 0;
+        uint totalInstances = 0;
+        for (auto& s : stats)
+        {
+            totalMeshlets += s.meshletCount;
+            totalInstances += s.instanceCount;
+        }
+        ImGui::Text("%zu buckets, %u meshlets, %u instances", stats.size(), totalMeshlets, totalInstances);
+        ImGui::Separator();
+
+        if (ImGui::BeginTable("##ShaderBuckets", 4,
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp))
+        {
+            ImGui::TableSetupColumn("Bucket", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+            ImGui::TableSetupColumn("Shader");
+            ImGui::TableSetupColumn("Meshlets", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+            ImGui::TableSetupColumn("Instances", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+            ImGui::TableHeadersRow();
+
+            for (auto& s : stats)
+            {
+                ImGui::TableNextRow();
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", s.bucketIndex);
+
+                ImGui::TableNextColumn();
+                if (AssetLibrary::instance != nullptr && AssetLibrary::instance->map.contains(s.shaderAssetId))
+                    ImGui::TextUnformatted(AssetLibrary::instance->map[s.shaderAssetId].path.c_str());
+                else
+                    ImGui::TextDisabled("<unknown %llu>", (unsigned long long)s.shaderAssetId.hash);
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", s.meshletCount);
+
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", s.instanceCount);
+            }
+
+            ImGui::EndTable();
+        }
+
+        ImGui::End();
+    }
+};
+ShaderBucketsWindow shaderBucketsWindow;
+
 class HandlePickingWindow : public EditorWindow
 {
     struct HandleEntry
@@ -2589,25 +2661,49 @@ public:
                             mat.parameters[i] = 0.0f;
                         // Routes this material's meshlets to the terrain shading bucket (generic
                         // multi-shader GBuffer draw buckets by Material::shader / shaderIndex, not a
-                        // parameter flag): AddHardCoded is keyed by path, so this resolves to the
-                        // same assetID GBuffers registers/discovers regardless of which Shader
-                        // entity holds it.
+                        // parameter flag). The Shader entity carries its own path, so UpdateMaterials
+                        // (Renderer.h) can self-register it in AssetLibrary from saved data alone --
+                        // no hardcoded registration needed anywhere for this shader.
                         Components::Handle<Components::Shader> terrainShader;
-                        terrainShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\terrainmesh.hlsl|DefaultGTerrain");
+                        auto& terrainShaderCmp = terrainShader.GetPermanent();
+                        terrainShaderCmp.id = AssetLibrary::instance->Add("src\\Shaders\\terrainmesh.hlsl|DefaultGTerrain", "src\\Shaders\\terrainmesh.hlsl|DefaultGTerrain");
+                        strcpy_s(terrainShaderCmp.path, ECS_SHADER_PATH, "src\\Shaders\\terrainmesh.hlsl|DefaultGTerrain");
                         mat.shader = terrainShader;
 
                         auto& terrain = ent.Get<Components::Terrain>();
                         terrain.heightmap = Components::Handle<Components::Texture>{ entityInvalid };
                         terrain.material = Components::Handle<Components::Material>{ matEnt };
-                        terrain.heightScale = 50.0f;
+                        terrain.useProceduralHeightmap = 1;
+                        terrain.noiseScale = 1.0f;
+                        terrain.noiseOctaves = 2;
+                        terrain.noiseLacunarity = 2.412f;
+                        terrain.noiseGain = 1.0f;
+                        terrain.noiseSeed = 1;
+                        terrain.heightScale = 1000.0f;
                         terrain.heightOffset = 0.0f;
+                        terrain.heightmapBlurRadius = 0;
                         terrain.worldExtent = 8192.0f;
-                        terrain.quadtreeDepth = 6;
+                        terrain.quadtreeDepth = 10;
                         terrain.targetScreenSize = 0.15f;
                         terrain.gridSpacing = 0.66f;
-                        terrain.gridSize = 8.0f;
-                        if (Components::buildTerrainGridMesh != nullptr)
-                            terrain.gridMesh = Components::buildTerrainGridMesh(terrain.gridSpacing, terrain.gridSize);
+                        terrain.gridSize = 16.0f;
+                        terrain.erosionEnabled = 2;
+                        terrain.erosionOctaves = 3;
+                        terrain.erosionScale = 0.16f;
+                        terrain.erosionStrength = 0.1f;
+                        terrain.erosionGullyWeight = 3.3f;
+                        terrain.erosionDetail = 1.0f;
+                        terrain.erosionLacunarity = 2.476f;
+                        terrain.erosionGain = 0.67f;
+                        terrain.erosionCellScale = 0.64f;
+                        terrain.erosionNormalization = 0.83f;
+                        terrain.erosionRidgeRounding = 0.13f;
+                        terrain.erosionCreaseRounding = 0.81f;
+                        terrain.BVHMaxDepth = 5;
+                        terrain.BVHMinRadius = 512.0f;
+                        terrain.BVHMaxRadius = 4096.0f;
+                        if (MeshLoader::instance != nullptr)
+                            terrain.gridMesh = MeshLoader::instance->BuildTerrainGridMesh(terrain.gridSpacing, terrain.gridSize);
                         editorState.dirtyHierarchy = true;
                     }
                     ImGui::EndMenu();
