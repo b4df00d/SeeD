@@ -12,6 +12,7 @@ cbuffer CustomRT : register(b3)
 
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define TRACING_DISTANCE                10000.0f
+#define SPECULAR_HITT_MAX               65504.0f // fp16 max: the specularHitDistance guide is R16_FLOAT, anything above becomes +Inf
 #define BOUNCES_MIN                     3
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
 #define SHADOW_RAY_IN_RIS               0 // Enable this to cast shadow rays for each candidate during resampling. This is expensive but increases quality
@@ -106,15 +107,16 @@ void RayGen()
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
     //lighted[dtid.xy] = float4(0,0,0,1);
-    specularHitDistance[dtid.xy] = 0;
-    
-                
-    
+    // Do NOT clear specularHitDistance here: pass 1 (raytracing2.hlsl) wrote the real
+    // primary-surface -> first-indirect-hit distance into it and this dispatch runs after.
+    // Zeroing it made DLSS-RR reproject reflections as if glued to the surface, which is what
+    // blurred them on camera motion.
+
     GBufferCameraData cd = GetGBufferCameraData(dtid);
     if(cd.reverseZ <= 0.0)
     {
         lighted[dtid.xy] = float4(Sky(cd.viewDir), 1);
-        specularHitDistance[dtid.xy] = 10000 * 100;
+        specularHitDistance[dtid.xy] = SPECULAR_HITT_MAX; // "infinitely far"; 10000*100 overflowed R16_FLOAT to +Inf
         return;
     }
     SurfaceData s = GetSurfaceData(dtid.xy);

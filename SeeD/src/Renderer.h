@@ -1662,6 +1662,8 @@ public:
         commandBuffer->cmd->DispatchRays(&drd);
 
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
+        lighted.Get().Barrier(commandBuffer.Get());
+        specularHitDistance.Get().Barrier(commandBuffer.Get());
 
         // close the "lighting" zone (trace + temporal ReSTIR) and time the second dispatch separately
         Profiler::instance->EndProfile(commandBuffer.Get());

@@ -2,6 +2,7 @@
 
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define TRACING_DISTANCE                10000.0f
+#define SPECULAR_HITT_MAX               65504.0f // fp16 max: the specularHitDistance guide is R16_FLOAT, anything above becomes +Inf
 #define BOUNCES_MIN                     0
 #define BOUNCES_MAX                     10
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
@@ -147,7 +148,21 @@ void PathTraceRays()
 
     AccumulatedSampleData accumulatedSampleData = (AccumulatedSampleData) 0;
     float3 debugColor = float3(0.0f, 0.0f, 0.0f);
-    
+
+    // DLSS-RR specular hit distance guide: world-space distance from the primary surface to
+    // the first indirect hit. RR reconstructs the virtual reflection point
+    // (surfacePos + viewDir * hitT) from it to reproject the specular history WITH parallax.
+    // Feeding 0 makes it reproject reflections as if they were painted onto the surface, the
+    // history never matches while the camera moves, and RR falls back to a wide spatial
+    // filter -> reflections blur on motion and only resharpen once the camera stops.
+    // Samples whose primary lobe was specular are the signal RR actually wants; the
+    // diffuse-lobe distance is kept as a fallback because on rough surfaces the specular lobe
+    // is wide and of the same scale (and RR weighs hitT less there anyway).
+    float specularHitTSum = 0.0f;
+    uint specularHitTCount = 0;
+    float anyHitTSum = 0.0f;
+    uint anyHitTCount = 0;
+
     uint2 pixel = launchIndex;
 #if (SHARC_UPDATE)
     float2 rand2 = float2(RNG(rngState), RNG(rngState));
@@ -303,6 +318,21 @@ void PathTraceRays()
             }
             
             hitDistance = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE * 100;
+
+            // Distance from the primary surface to the first indirect hit -> DLSS-RR guide.
+            // Clamped to the ray budget (not TRACING_DISTANCE * 100) so the R16_FLOAT target
+            // keeps a finite value on a miss.
+            if (bounce == 1)
+            {
+                float firstBounceHitT = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE;
+                anyHitTSum += firstBounceHitT;
+                anyHitTCount++;
+                if (!isDiffusePath)
+                {
+                    specularHitTSum += firstBounceHitT;
+                    specularHitTCount++;
+                }
+            }
 
             // On a miss, load the sky value and break out of the ray tracing loop
             if (!payload.Hit())
@@ -484,6 +514,11 @@ void PathTraceRays()
                 throughput /= (1.0f - specularBrdfProbability);
             }
 
+            // The lobe picked off the primary surface decides whether the bounce-1 hit distance
+            // recorded above counts as a specular hit distance for DLSS-RR.
+            if (bounce == 0)
+                isDiffusePath = (brdfType != SPECULAR_TYPE);
+
 //#if SHARC_QUERY
 #ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
             materialRoughnessPrev += brdfType == DIFFUSE_TYPE ? 1.0f : s.roughness;
@@ -600,7 +635,14 @@ void PathTraceRays()
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
     lighted[pixel] = color;
-    
+
+    // Prefer the specular-lobe samples, fall back to the diffuse-lobe first-bounce distance,
+    // and only write 0 ("reflection sits on the surface") when the path never left the primary
+    // hit. lighting.hlsl overwrites this for sky pixels and must not clear it for the rest.
+    float outSpecularHitT = specularHitTCount > 0 ? specularHitTSum / specularHitTCount
+                          : (anyHitTCount > 0 ? anyHitTSum / anyHitTCount : 0.0f);
+    specularHitDistance[pixel] = min(outSpecularHitT, SPECULAR_HITT_MAX);
+
     
     /*
     // Debug output calculation

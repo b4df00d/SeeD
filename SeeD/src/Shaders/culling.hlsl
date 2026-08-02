@@ -277,16 +277,20 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
         uint bucketBase = shaderBucketOffsets[shaderBucket];
 
         RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
-        // Each active lane writes one draw call: the first active lane reserves a contiguous block
-        // for the whole wave (within this bucket's own counter), and each lane takes its slot from
-        // the count of active lanes preceding it.
-        uint waveOffset = WavePrefixCountBits(true);
-        uint waveTotal = WaveActiveCountBits(true);
+        // Each active lane writes one draw call. A single wave can hold lanes belonging to DIFFERENT
+        // shader buckets, so the reservation has to be per-bucket, not per-wave: collapse the lanes
+        // sharing a bucket (same WaveMatch ballot the sort histogram/scatter use), let their lowest
+        // lane do one atomic on THAT bucket's counter, and give each lane its slot within that group.
+        // Reserving for the whole wave off lane 0's bucket would hand a foreign bucket's offset to
+        // every other lane (writing outside its own region, and never bumping its counter).
+        uint repLane, bucketLanes;
+        uint4 sameBucket = WaveBucketBallot(shaderBucket, repLane, bucketLanes);
+        uint rank = WaveMultiPrefixCountBits(true, sameBucket); // active lanes before me sharing this bucket
         uint waveBase = 0;
-        if (WaveIsFirstLane())
-            InterlockedAdd(meshletCounter[shaderBucket], waveTotal, waveBase);
-        waveBase = WaveReadLaneFirst(waveBase);
-        uint index = bucketBase + waveBase + waveOffset;
+        if (WaveGetLaneIndex() == repLane)
+            InterlockedAdd(meshletCounter[shaderBucket], bucketLanes, waveBase);
+        waveBase = WaveReadLaneAt(waveBase, repLane);
+        uint index = bucketBase + waveBase + rank;
         meshletsCulledArgs[index] = mdc;
 
         // Front-to-back sort only ever applies to bucket 0 (the default opaque shader): its region
@@ -305,12 +309,12 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
             RWStructuredBuffer<uint> sortHistogram = ResourceDescriptorHeap[viewContext.sortHistogramIndex];
             // Wave-aggregate the histogram: lanes sharing a bucket collapse into a single global
             // atomic (one per distinct bucket per wave) instead of one atomic per meshlet.
-            uint repLane, bucketLanes;
-            WaveBucketBallot(depthBucket, repLane, bucketLanes);
-            if (WaveGetLaneIndex() == repLane)
+            uint depthRepLane, depthLanes;
+            WaveBucketBallot(depthBucket, depthRepLane, depthLanes);
+            if (WaveGetLaneIndex() == depthRepLane)
             {
                 uint sortBase;
-                InterlockedAdd(sortHistogram[depthBucket], bucketLanes, sortBase);
+                InterlockedAdd(sortHistogram[depthBucket], depthLanes, sortBase);
             }
         }
     }
