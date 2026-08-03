@@ -102,8 +102,12 @@
 // [ ] 18. add default values ins component metadata, and use them when the component is created
 //         and to reset the component to default values (in global or one component at a time)
 // 
-// [ ] 19. rework omm resources (in a new struct with 2 entries for high and low ?)
+// [X] 19. rework omm resources (in a new struct with 2 entries for high and low ?)
 //         maybe even drop the low res omm. Put all in 1 function (formating / cleaning code)
+//         - dropped the low-res omm: only the LOD0 BLAS carries one now
+//         - GPU resources moved into Mesh::OMM (array / indices / inputs / indexFormat / textureHash)
+//         - OMMData flattened (no more LOD sections), sidecar bumped to version 2
+//         - one bake function (OMMBake::BakeAndWrite) and one build function (BuildOMMArray)
 // 
 // [ ] 20. avoid multiple upload() per frame for StructuredUploadBuffer. They can flag as dirty once
 //         and only upload once per frame. (see StructuredUploadBuffer::Upload() )

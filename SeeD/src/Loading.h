@@ -881,7 +881,7 @@ public:
     // {hash}.omm sidecar next to the {hash}.mesh cache entry: baked opacity-micromap data,
     // written at import by the OMM bake and consumed by MeshStorage::LoadBLAS.
     static constexpr uint32_t ommMagic = 0x4D4D4F53; // 'SOMM'
-    static constexpr uint32_t ommVersion = 1;
+    static constexpr uint32_t ommVersion = 2; // 2: LOD0 only, no per-LOD sections
 
     String OMMPath(String meshPath)
     {
@@ -896,25 +896,22 @@ public:
         if (!fin.is_open())
             return false;
 
-        uint32_t magic = 0, version = 0, lodCount = 0;
+        uint32_t magic = 0, version = 0, hasData = 0;
         fin.read((char*)&magic, sizeof(magic));
         fin.read((char*)&version, sizeof(version));
         if (magic != ommMagic || version != ommVersion)
             return false;
         fin.read((char*)&omm.textureHash, sizeof(omm.textureHash));
         fin.read((char*)&omm.alphaThreshold, sizeof(omm.alphaThreshold));
-        fin.read((char*)&lodCount, sizeof(lodCount));
-        omm.LODs.resize(lodCount);
-        for (auto& lod : omm.LODs)
-        {
-            fin.read((char*)&lod.lodIndex, sizeof(lod.lodIndex));
-            fin.read((char*)&lod.indexFormat, sizeof(lod.indexFormat));
-            READ_VECTOR(lod.indices);
-            READ_VECTOR(lod.descs);
-            READ_VECTOR(lod.histogram);
-            READ_VECTOR(lod.arrayData);
-        }
-        return fin.good() && lodCount > 0;
+        fin.read((char*)&hasData, sizeof(hasData)); // 0 == the "checked, nothing to gain" marker
+        if (hasData == 0)
+            return false;
+        fin.read((char*)&omm.indexFormat, sizeof(omm.indexFormat));
+        READ_VECTOR(omm.indices);
+        READ_VECTOR(omm.descs);
+        READ_VECTOR(omm.histogram);
+        READ_VECTOR(omm.arrayData);
+        return fin.good() && omm.IsValid();
     }
 
     void WriteOMM(String meshPath, OMMData& omm)
@@ -924,21 +921,19 @@ public:
         if (!fout.is_open())
             return;
 
-        uint32_t lodCount = (uint32_t)omm.LODs.size();
+        uint32_t hasData = omm.IsValid() ? 1 : 0;
         fout.write((char*)&ommMagic, sizeof(ommMagic));
         fout.write((char*)&ommVersion, sizeof(ommVersion));
         fout.write((char*)&omm.textureHash, sizeof(omm.textureHash));
         fout.write((char*)&omm.alphaThreshold, sizeof(omm.alphaThreshold));
-        fout.write((char*)&lodCount, sizeof(lodCount));
-        for (auto& lod : omm.LODs)
-        {
-            fout.write((char*)&lod.lodIndex, sizeof(lod.lodIndex));
-            fout.write((char*)&lod.indexFormat, sizeof(lod.indexFormat));
-            WRITE_VECTOR(lod.indices);
-            WRITE_VECTOR(lod.descs);
-            WRITE_VECTOR(lod.histogram);
-            WRITE_VECTOR(lod.arrayData);
-        }
+        fout.write((char*)&hasData, sizeof(hasData));
+        if (hasData == 0)
+            return;
+        fout.write((char*)&omm.indexFormat, sizeof(omm.indexFormat));
+        WRITE_VECTOR(omm.indices);
+        WRITE_VECTOR(omm.descs);
+        WRITE_VECTOR(omm.histogram);
+        WRITE_VECTOR(omm.arrayData);
     }
 
     // also DirectXMesh can do meshlets https://github.com/microsoft/DirectXMesh
@@ -1130,59 +1125,9 @@ namespace Components
 // {hash}.omm sidecar consumed by MeshStorage::LoadBLAS.
 namespace OMMBake
 {
-    // Bakes one LOD's index list; returns true only when the bake produced actual OMM data
-    // (an all-opaque texture bakes to special indices only and is not worth a section).
-    inline bool BakeLOD(omm::Baker baker, omm::Cpu::Texture texture, MeshData& mesh, uint lodIndex, OMMData::LOD& out)
-    {
-        ZoneScoped;
-        auto& lod = mesh.LODs[lodIndex];
-
-        omm::Cpu::BakeInputDesc input;
-        input.bakeFlags = omm::Cpu::BakeFlags::EnableInternalThreads;
-        input.texture = texture;
-        // must match the runtime any-hit sampling: samplerLinear = s0 = linear, WRAP
-        input.runtimeSamplerDesc = { omm::TextureAddressMode::Wrap, omm::TextureFilterMode::Linear, 0 };
-        input.alphaMode = omm::AlphaMode::Test;
-        input.texCoordFormat = omm::TexCoordFormat::UV32_FLOAT;
-        input.texCoords = (const uint8_t*)mesh.vertices.data() + offsetof(Vertex, u);
-        input.texCoordStrideInBytes = sizeof(Vertex);
-        input.indexFormat = omm::IndexFormat::UINT_32;
-        input.indexBuffer = lod.indices.data();
-        input.indexCount = (uint32_t)lod.indices.size();
-        input.alphaCutoff = 0.5f; // must match the any-hit alpha test
-        input.format = omm::Format::OC1_4_State;
-        input.maxSubdivisionLevel = 6;
-
-        omm::Cpu::BakeResult result = 0;
-        if (omm::Cpu::Bake(baker, input, &result) != omm::Result::SUCCESS)
-            return false;
-
-        const omm::Cpu::BakeResultDesc* res = nullptr;
-        omm::Cpu::GetBakeResultDesc(result, &res);
-        bool ok = res != nullptr && res->arrayDataSize > 0 && res->descArrayCount > 0 && res->indexCount > 0;
-        if (ok)
-        {
-            out.lodIndex = lodIndex;
-            out.indexFormat = res->indexFormat == omm::IndexFormat::UINT_16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
-            uint indexStride = res->indexFormat == omm::IndexFormat::UINT_16 ? 2 : 4;
-            out.indices.assign((uint8_t*)res->indexBuffer, (uint8_t*)res->indexBuffer + (size_t)res->indexCount * indexStride);
-            static_assert(sizeof(omm::Cpu::OpacityMicromapDesc) == sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC), "OMM SDK desc must alias the D3D12 desc");
-            out.descs.assign((D3D12_RAYTRACING_OPACITY_MICROMAP_DESC*)res->descArray, (D3D12_RAYTRACING_OPACITY_MICROMAP_DESC*)res->descArray + res->descArrayCount);
-            out.histogram.resize(res->descArrayHistogramCount);
-            for (uint h = 0; h < res->descArrayHistogramCount; h++)
-            {
-                out.histogram[h].Count = res->descArrayHistogram[h].count;
-                out.histogram[h].SubdivisionLevel = res->descArrayHistogram[h].subdivisionLevel;
-                out.histogram[h].Format = (D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT)res->descArrayHistogram[h].format;
-            }
-            out.arrayData.assign((uint8_t*)res->arrayData, (uint8_t*)res->arrayData + res->arrayDataSize);
-        }
-        omm::Cpu::DestroyBakeResult(result);
-        return ok;
-    }
-
-    // image is consumed. ALWAYS writes the sidecar: one with zero sections is the
-    // "checked, nothing to gain" marker that stops the runtime baker from retrying every run.
+    // image is consumed. Bakes LOD0 only -- see OMMData. ALWAYS writes the sidecar: an empty one
+    // is the "checked, nothing to gain" marker that stops the runtime baker from retrying every
+    // run (an all-opaque texture bakes to special indices only, which is not worth building).
     inline void BakeAndWrite(DirectX::ScratchImage&& image, uint64_t textureHash, MeshData& mesh, String meshPath)
     {
         ZoneScoped;
@@ -1190,7 +1135,7 @@ namespace OMMBake
         ommData.textureHash = textureHash;
         ommData.alphaThreshold = 0.5f;
 
-        if (DirectX::HasAlpha(image.GetMetadata().format))
+        if (DirectX::HasAlpha(image.GetMetadata().format) && mesh.LODs.size() > 0)
         {
             // decompress/convert to RGBA8 and generate the full mip chain: the any-hit samples
             // mip 1, and feeding every mip keeps the bake conservative for any runtime mip
@@ -1244,14 +1189,44 @@ namespace OMMBake
             omm::Cpu::Texture bakeTexture = 0;
             if (omm::Cpu::CreateTexture(baker, texDesc, &bakeTexture) == omm::Result::SUCCESS)
             {
-                OMMData::LOD lod0;
-                if (BakeLOD(baker, bakeTexture, mesh, 0, lod0))
-                    ommData.LODs.push_back(std::move(lod0));
-                if (mesh.LODs.size() > 1)
+                omm::Cpu::BakeInputDesc input;
+                input.bakeFlags = omm::Cpu::BakeFlags::EnableInternalThreads;
+                input.texture = bakeTexture;
+                // must match the runtime any-hit sampling: samplerLinear = s0 = linear, WRAP
+                input.runtimeSamplerDesc = { omm::TextureAddressMode::Wrap, omm::TextureFilterMode::Linear, 0 };
+                input.alphaMode = omm::AlphaMode::Test;
+                input.texCoordFormat = omm::TexCoordFormat::UV32_FLOAT;
+                input.texCoords = (const uint8_t*)mesh.vertices.data() + offsetof(Vertex, u);
+                input.texCoordStrideInBytes = sizeof(Vertex);
+                input.indexFormat = omm::IndexFormat::UINT_32;
+                input.indexBuffer = mesh.LODs[0].indices.data();
+                input.indexCount = (uint32_t)mesh.LODs[0].indices.size();
+                input.alphaCutoff = 0.5f; // must match the any-hit alpha test
+                input.format = omm::Format::OC1_4_State;
+                input.maxSubdivisionLevel = 6;
+
+                omm::Cpu::BakeResult result = 0;
+                if (omm::Cpu::Bake(baker, input, &result) == omm::Result::SUCCESS)
                 {
-                    OMMData::LOD lodLow;
-                    if (BakeLOD(baker, bakeTexture, mesh, (uint)mesh.LODs.size() - 1, lodLow))
-                        ommData.LODs.push_back(std::move(lodLow));
+                    const omm::Cpu::BakeResultDesc* res = nullptr;
+                    omm::Cpu::GetBakeResultDesc(result, &res);
+                    if (res != nullptr && res->arrayDataSize > 0 && res->descArrayCount > 0 && res->indexCount > 0)
+                    {
+                        ommData.indexFormat = res->indexFormat == omm::IndexFormat::UINT_16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+                        uint indexStride = res->indexFormat == omm::IndexFormat::UINT_16 ? 2 : 4;
+                        ommData.indices.assign((uint8_t*)res->indexBuffer, (uint8_t*)res->indexBuffer + (size_t)res->indexCount * indexStride);
+                        static_assert(sizeof(omm::Cpu::OpacityMicromapDesc) == sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC), "OMM SDK desc must alias the D3D12 desc");
+                        ommData.descs.assign((D3D12_RAYTRACING_OPACITY_MICROMAP_DESC*)res->descArray, (D3D12_RAYTRACING_OPACITY_MICROMAP_DESC*)res->descArray + res->descArrayCount);
+                        ommData.histogram.resize(res->descArrayHistogramCount);
+                        for (uint h = 0; h < res->descArrayHistogramCount; h++)
+                        {
+                            ommData.histogram[h].Count = res->descArrayHistogram[h].count;
+                            ommData.histogram[h].SubdivisionLevel = res->descArrayHistogram[h].subdivisionLevel;
+                            ommData.histogram[h].Format = (D3D12_RAYTRACING_OPACITY_MICROMAP_FORMAT)res->descArrayHistogram[h].format;
+                        }
+                        ommData.arrayData.assign((uint8_t*)res->arrayData, (uint8_t*)res->arrayData + res->arrayDataSize);
+                    }
+                    omm::Cpu::DestroyBakeResult(result);
                 }
                 omm::Cpu::DestroyTexture(baker, bakeTexture);
             }
@@ -1259,8 +1234,8 @@ namespace OMMBake
         }
 
         MeshLoader::instance->WriteOMM(meshPath, ommData);
-        if (ommData.LODs.size() > 0)
-            IOs::Log("baked OMM ({} lods) -> {}", ommData.LODs.size(), meshPath.c_str());
+        if (ommData.IsValid())
+            IOs::Log("baked OMM ({} micromaps) -> {}", ommData.descs.size(), meshPath.c_str());
         else
             IOs::Log("baked OMM: nothing to gain (alpha is uniform), wrote empty marker -> {}", meshPath.c_str());
     }

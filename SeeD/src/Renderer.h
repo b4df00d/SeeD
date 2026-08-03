@@ -2210,9 +2210,9 @@ public:
             UINT64 scratchOffset = 0;
             for (Mesh* m : justBaked)
             {
-                scratchOffset += MeshStorage::instance->BuildBLAS(*m, 0, m->BLAS, scratchOffset, commandBuffer.Get(), nullptr, nullptr, DXGI_FORMAT_R32_UINT, true);
+                scratchOffset += MeshStorage::instance->BuildBLAS(*m, 0, m->BLAS, scratchOffset, commandBuffer.Get(), true);
                 if (m->lodCount > 1) // terrain grids are single-LOD today, but stay correct if that changes
-                    scratchOffset += MeshStorage::instance->BuildBLAS(*m, m->lodCount - 1, m->BLASLow, scratchOffset, commandBuffer.Get(), nullptr, nullptr, DXGI_FORMAT_R32_UINT, true);
+                    scratchOffset += MeshStorage::instance->BuildBLAS(*m, m->lodCount - 1, m->BLASLow, scratchOffset, commandBuffer.Get(), true);
             }
             MeshStorage::instance->vertices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
             MeshStorage::instance->indices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
@@ -3295,10 +3295,10 @@ public:
                     instance.boundingSphereOverride = instanceCmp.boundingSphereOverride;
                     // the mesh's OMM was baked against one albedo: if the instance uses a
                     // different texture the baked opacity states are wrong, fall back to pure any-hit
-                    // (an override mesh never carries OMM -- ommTextureHash stays 0 -- so this is
+                    // (an override mesh never carries OMM -- omm.textureHash stays 0 -- so this is
                     // naturally a no-op for overridden instances)
-                    if (effectiveMesh->ommTextureHash != 0
-                        && (!materialCmp.textures[0].IsValid() || materialCmp.textures[0].Get().id.hash != effectiveMesh->ommTextureHash))
+                    if (effectiveMesh->omm.textureHash != 0
+                        && (!materialCmp.textures[0].IsValid() || materialCmp.textures[0].Get().id.hash != effectiveMesh->omm.textureHash))
                         instance.rtFlags |= HLSL::RTInstanceFlagDisableOMMs;
                     instance.rayTracingBLAS = effectiveMesh->BLAS.GetResource()->GetGPUVirtualAddress();
                     // single-LOD meshes have no low BLAS: alias the high one so culling.hlsl can select blindly

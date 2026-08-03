@@ -2947,21 +2947,21 @@ struct Meshlet : HLSL::Meshlet
 };
 
 // Baked opacity-micromap data loaded from a {hash}.omm sidecar (written at import by the OMM
-// bake, next to the {hash}.mesh cache entry). One section per BLAS LOD (LOD0 and the coarsest).
+// bake, next to the {hash}.mesh cache entry). LOD0 only: the coarse BLAS is only ever traced
+// far away, where the any-hit invocations an OMM would save are already a rounding error.
 struct OMMData
 {
-    struct LOD
-    {
-        uint lodIndex = 0;
-        DXGI_FORMAT indexFormat = DXGI_FORMAT_R32_UINT; // per-triangle OMM index buffer format
-        std::vector<unsigned char> indices;
-        std::vector<D3D12_RAYTRACING_OPACITY_MICROMAP_DESC> descs;
-        std::vector<D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY> histogram;
-        std::vector<unsigned char> arrayData; // raw opacity bit data (OMM array build input)
-    };
-    std::vector<LOD> LODs;
+    DXGI_FORMAT indexFormat = DXGI_FORMAT_R32_UINT; // per-triangle OMM index buffer format
+    std::vector<unsigned char> indices;
+    std::vector<D3D12_RAYTRACING_OPACITY_MICROMAP_DESC> descs;
+    std::vector<D3D12_RAYTRACING_OPACITY_MICROMAP_HISTOGRAM_ENTRY> histogram;
+    std::vector<unsigned char> arrayData; // raw opacity bit data (OMM array build input)
     uint64_t textureHash = 0; // albedo texture assetID.hash the bake sampled
     float alphaThreshold = 0.5f;
+
+    // a uniform-alpha texture bakes to special indices only: the sidecar is then just the
+    // "checked, nothing to gain" marker and there is nothing to build
+    bool IsValid() const { return !arrayData.empty() && !descs.empty() && !indices.empty(); }
 };
 
 struct Mesh : HLSL::Mesh
@@ -2969,15 +2969,21 @@ struct Mesh : HLSL::Mesh
     Resource BLAS;
     Resource BLASLow; // coarsest-LOD BLAS, distance-swapped into the TLAS (empty when lodCount == 1)
 
-    // opacity micromaps (only set for cutout meshes with a baked {hash}.omm sidecar, tier 1.2+)
-    // the arrays and index buffers are referenced by the BLAS and must outlive them
-    Resource ommArray;
-    Resource ommArrayLow;
-    Resource ommIndices;
-    Resource ommIndicesLow;
-    Resource ommInputs;    // raw bits + per-OMM descs; only read by the OMM array build
-    Resource ommInputsLow;
-    uint64_t ommTextureHash = 0; // != 0 means the BLAS carries OMM; used for the material-mismatch DISABLE_OMMS fallback
+    // GPU-side opacity micromap, linked into the LOD0 BLAS only (set for cutout meshes with a
+    // baked {hash}.omm sidecar, tier 1.2+). The array and index buffer are referenced by that
+    // BLAS and must outlive it.
+    struct OMM
+    {
+        Resource array;
+        Resource indices;
+        Resource inputs; // raw bits + per-OMM descs; only read by the OMM array build
+        DXGI_FORMAT indexFormat = DXGI_FORMAT_R32_UINT;
+        uint64_t textureHash = 0; // != 0 means the BLAS carries OMM; used for the material-mismatch DISABLE_OMMS fallback
+
+        bool IsValid() { return array.GetResource() != nullptr; }
+        void Release() { array.Release(); indices.Release(); inputs.Release(); }
+    };
+    OMM omm;
 };
 
 struct MeshData
@@ -3108,12 +3114,7 @@ struct MeshStorage
             Mesh& mesh = kv.second;
             mesh.BLAS.Release();
             mesh.BLASLow.Release();
-            mesh.ommArray.Release();
-            mesh.ommArrayLow.Release();
-            mesh.ommIndices.Release();
-            mesh.ommIndicesLow.Release();
-            mesh.ommInputs.Release();
-            mesh.ommInputsLow.Release();
+            mesh.omm.Release();
         }
         allMeshes.clear();
         overrideFreeListBySource.clear();
@@ -3329,30 +3330,13 @@ struct MeshStorage
 
         lock.lock();
 
-        // Opacity micromaps: build the OMM arrays first, then link them into the BLAS builds
-        // below so the RT cores can skip any-hit for known-opaque/transparent micro-triangles.
-        const OMMData::LOD* omm0 = nullptr;
-        const OMMData::LOD* ommLow = nullptr;
-        if (omm != nullptr && GPU::instance->features.raytracingTier12)
+        // Opacity micromap: build the OMM array first, BuildBLAS below links it into the LOD0
+        // build so the RT cores can skip any-hit for known-opaque/transparent micro-triangles.
+        if (omm != nullptr && omm->IsValid() && GPU::instance->features.raytracingTier12)
         {
-            mesh.ommTextureHash = omm->textureHash;
-            for (auto& lod : omm->LODs)
-            {
-                if (lod.lodIndex == 0)
-                    omm0 = &lod;
-                else
-                    ommLow = &lod;
-            }
-            if (ommLow != nullptr && mesh.lodCount <= 1)
-                ommLow = nullptr;
+            BuildOMMArray(*omm, mesh, commandBuffer);
 
-            UINT64 ommScratchUsed = 0;
-            if (omm0 != nullptr)
-                ommScratchUsed = BuildOMMArray(*omm0, mesh.ommArray, mesh.ommIndices, mesh.ommInputs, 0, commandBuffer);
-            if (ommLow != nullptr)
-                BuildOMMArray(*ommLow, mesh.ommArrayLow, mesh.ommIndicesLow, mesh.ommInputsLow, ommScratchUsed, commandBuffer);
-
-            // the BLAS builds read the OMM arrays and reuse the scratch ranges the array builds wrote
+            // the BLAS build reads the OMM array and reuses the scratch range the array build wrote
             D3D12_RESOURCE_BARRIER uavBarrier;
             uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             uavBarrier.UAV.pResource = nullptr;
@@ -3363,9 +3347,9 @@ struct MeshStorage
         // High-detail BLAS from LOD0, low-detail BLAS from the coarsest LOD: culling.hlsl picks one
         // per instance each frame when writing the TLAS instance descs. The two builds share the
         // scratch buffer through disjoint ranges so no UAV barrier is needed between them.
-        UINT64 scratchUsed = BuildBLAS(mesh, 0, mesh.BLAS, 0, commandBuffer, omm0 ? &mesh.ommArray : nullptr, omm0 ? &mesh.ommIndices : nullptr, omm0 ? omm0->indexFormat : DXGI_FORMAT_R32_UINT);
+        UINT64 scratchUsed = BuildBLAS(mesh, 0, mesh.BLAS, 0, commandBuffer);
         if (mesh.lodCount > 1)
-            BuildBLAS(mesh, mesh.lodCount - 1, mesh.BLASLow, scratchUsed, commandBuffer, ommLow ? &mesh.ommArrayLow : nullptr, ommLow ? &mesh.ommIndicesLow : nullptr, ommLow ? ommLow->indexFormat : DXGI_FORMAT_R32_UINT);
+            BuildBLAS(mesh, mesh.lodCount - 1, mesh.BLASLow, scratchUsed, commandBuffer);
 
         // Every LoadBLAS call restarts at scratchOffset 0 in the SAME shared scratchBLAS buffer (see
         // comment above -- that reasoning only covers the disjoint high/low offsets within THIS call).
@@ -3382,29 +3366,33 @@ struct MeshStorage
         lock.unlock();
     }
 
-    // Uploads one LOD's baked OMM data and records the OMM array build on the command buffer.
-    // Returns the 256-aligned scratch consumed so a following build can start past it.
-    UINT64 BuildOMMArray(const OMMData::LOD& omm, Resource& ommArray, Resource& ommIndexBuffer, Resource& ommInputs, UINT64 scratchOffset, CommandBuffer& commandBuffer)
+    // Uploads the baked OMM data into mesh.omm and records the OMM array build on the command
+    // buffer, so the LOD0 BuildBLAS that follows can link it. Always builds at scratch offset 0:
+    // the BLAS builds restart there too, behind the UAV barrier LoadBLAS inserts.
+    void BuildOMMArray(const OMMData& ommData, Mesh& mesh, CommandBuffer& commandBuffer)
     {
         ZoneScoped;
 
-        // one buffer for the two build inputs: [raw opacity bits][per-OMM descs]
-        uint descsOffset = (uint)ROUND_UP(omm.arrayData.size(), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
-        uint descsSize = (uint)(omm.descs.size() * sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC));
-        ommInputs.CreateBuffer(descsOffset + descsSize, 1, false, "OMMInputs", D3D12_RESOURCE_STATE_COPY_DEST);
-        ommInputs.UploadElements((void*)omm.arrayData.data(), (uint)omm.arrayData.size(), 0, commandBuffer);
-        ommInputs.UploadElements((void*)omm.descs.data(), descsSize, descsOffset, commandBuffer);
-        ommInputs.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        mesh.omm.textureHash = ommData.textureHash;
+        mesh.omm.indexFormat = ommData.indexFormat;
 
-        ommIndexBuffer.CreateBuffer((uint)omm.indices.size(), 1, false, "OMMIndices", D3D12_RESOURCE_STATE_COPY_DEST);
-        ommIndexBuffer.UploadElements((void*)omm.indices.data(), (uint)omm.indices.size(), 0, commandBuffer);
-        ommIndexBuffer.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        // one buffer for the two build inputs: [raw opacity bits][per-OMM descs]
+        uint descsOffset = (uint)ROUND_UP(ommData.arrayData.size(), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        uint descsSize = (uint)(ommData.descs.size() * sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC));
+        mesh.omm.inputs.CreateBuffer(descsOffset + descsSize, 1, false, "OMMInputs", D3D12_RESOURCE_STATE_COPY_DEST);
+        mesh.omm.inputs.UploadElements((void*)ommData.arrayData.data(), (uint)ommData.arrayData.size(), 0, commandBuffer);
+        mesh.omm.inputs.UploadElements((void*)ommData.descs.data(), descsSize, descsOffset, commandBuffer);
+        mesh.omm.inputs.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        mesh.omm.indices.CreateBuffer((uint)ommData.indices.size(), 1, false, "OMMIndices", D3D12_RESOURCE_STATE_COPY_DEST);
+        mesh.omm.indices.UploadElements((void*)ommData.indices.data(), (uint)ommData.indices.size(), 0, commandBuffer);
+        mesh.omm.indices.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC arrayDesc = {};
-        arrayDesc.NumOmmHistogramEntries = (uint)omm.histogram.size();
-        arrayDesc.pOmmHistogram = omm.histogram.data();
-        arrayDesc.InputBuffer = ommInputs.GetResource()->GetGPUVirtualAddress();
-        arrayDesc.PerOmmDescs.StartAddress = ommInputs.GetResource()->GetGPUVirtualAddress() + descsOffset;
+        arrayDesc.NumOmmHistogramEntries = (uint)ommData.histogram.size();
+        arrayDesc.pOmmHistogram = ommData.histogram.data();
+        arrayDesc.InputBuffer = mesh.omm.inputs.GetResource()->GetGPUVirtualAddress();
+        arrayDesc.PerOmmDescs.StartAddress = mesh.omm.inputs.GetResource()->GetGPUVirtualAddress() + descsOffset;
         arrayDesc.PerOmmDescs.StrideInBytes = sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC);
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputsDesc = {};
@@ -3420,22 +3408,20 @@ struct MeshStorage
         {
             IOs::Log("Raytracing OMM array Creation Error");
         }
-        seedAssert(scratchOffset + info.ScratchDataSizeInBytes < maxScratchSizeInBytes);
+        seedAssert(info.ScratchDataSizeInBytes < maxScratchSizeInBytes);
 
-        ommArray.CreateAccelerationStructure((uint)ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT), "OMMArray");
+        mesh.omm.array.CreateAccelerationStructure((uint)ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT), "OMMArray");
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc;
         buildDesc.Inputs = inputsDesc;
-        buildDesc.DestAccelerationStructureData = ommArray.GetResource()->GetGPUVirtualAddress();
-        buildDesc.ScratchAccelerationStructureData = scratchBLAS.GetResource()->GetGPUVirtualAddress() + scratchOffset;
+        buildDesc.DestAccelerationStructureData = mesh.omm.array.GetResource()->GetGPUVirtualAddress();
+        buildDesc.ScratchAccelerationStructureData = scratchBLAS.GetResource()->GetGPUVirtualAddress();
         buildDesc.SourceAccelerationStructureData = 0;
 
         commandBuffer.cmd->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
-
-        return ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
     }
 
-    UINT64 BuildBLAS(Mesh& mesh, uint lodIndex, Resource& blas, UINT64 scratchOffset, CommandBuffer& commandBuffer, Resource* ommArray = nullptr, Resource* ommIndexBuffer = nullptr, DXGI_FORMAT ommIndexFormat = DXGI_FORMAT_R32_UINT, bool allowInPlaceRebuild = false)
+    UINT64 BuildBLAS(Mesh& mesh, uint lodIndex, Resource& blas, UINT64 scratchOffset, CommandBuffer& commandBuffer, bool allowInPlaceRebuild = false)
     {
         seedAssert(mesh.LODs[lodIndex].indexCount > 0);
 
@@ -3456,17 +3442,18 @@ struct MeshStorage
         // in hardware and only invoke any-hit for the unknown border ones. Geometry stays
         // non-opaque so those unknowns still alpha-test. ALLOW_DISABLE_OMMS enables the
         // per-instance DISABLE_OMMS fallback culling.hlsl applies on material mismatch.
+        // Only LOD0 carries an OMM (see Mesh::OMM); every other build is plain triangles.
         D3D12_RAYTRACING_GEOMETRY_OMM_LINKAGE_DESC ommLinkage = {};
         D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};
         descriptor.Flags = isOpaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS buildFlags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-        if (ommArray != nullptr && ommIndexBuffer != nullptr)
+        if (lodIndex == 0 && mesh.omm.IsValid())
         {
-            ommLinkage.OpacityMicromapIndexBuffer.StartAddress = ommIndexBuffer->GetResource()->GetGPUVirtualAddress();
-            ommLinkage.OpacityMicromapIndexBuffer.StrideInBytes = ommIndexFormat == DXGI_FORMAT_R16_UINT ? 2 : 4;
-            ommLinkage.OpacityMicromapIndexFormat = ommIndexFormat;
+            ommLinkage.OpacityMicromapIndexBuffer.StartAddress = mesh.omm.indices.GetResource()->GetGPUVirtualAddress();
+            ommLinkage.OpacityMicromapIndexBuffer.StrideInBytes = mesh.omm.indexFormat == DXGI_FORMAT_R16_UINT ? 2 : 4;
+            ommLinkage.OpacityMicromapIndexFormat = mesh.omm.indexFormat;
             ommLinkage.OpacityMicromapBaseLocation = 0;
-            ommLinkage.OpacityMicromapArray = ommArray->GetResource()->GetGPUVirtualAddress();
+            ommLinkage.OpacityMicromapArray = mesh.omm.array.GetResource()->GetGPUVirtualAddress();
             descriptor.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_OMM_TRIANGLES;
             descriptor.OmmTriangles.pTriangles = &triangles;
             descriptor.OmmTriangles.pOmmLinkage = &ommLinkage;
