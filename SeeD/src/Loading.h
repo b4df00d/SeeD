@@ -2955,6 +2955,83 @@ public :
         */
     }
 
+    static constexpr const char* shadersPath = "src\\Shaders\\";
+
+    // One "#pragma <stage> <PublicName> <entry...> [defines]" line: how a .hlsl declares the
+    // shader variations it holds. <PublicName> is what goes after '|' in a shader asset path
+    // ("src\Shaders\mesh.hlsl|DefaultG"). Parse() below compiles from these, and the editor's
+    // shader picker (Components::ShaderPropertyDraw, UI.h) lists from them -- one reader for both,
+    // so the picker can never offer a variation the compiler wouldn't find.
+    struct Variation
+    {
+        String stage;               // gBuffer / zPrepass / forward / debug / compute / raytracing
+        String name;                // the PublicName
+        String file;                // the .hlsl it was declared in (may be an #include of the picked one)
+        std::vector<String> tokens; // the whole line, padded so the optional tokens need no bounds check
+    };
+
+    static bool IsKnownStage(const String& stage)
+    {
+        return stage == "gBuffer" || stage == "zPrepass" || stage == "forward"
+            || stage == "debug" || stage == "compute" || stage == "raytracing";
+    }
+
+    // False for any line that isn't a variation declaration (#pragma once, an unknown stage, ...).
+    static bool ParsePragma(String line, Variation& out)
+    {
+        if (!line._Starts_with("#pragma "))
+            return false;
+
+        out.tokens = line.Split(" ");
+        // add empty strings for the optional entry/define tokens to avoid checking if a token is there
+        for (uint i = (uint)out.tokens.size(); i < 10; i++)
+            out.tokens.push_back("");
+
+        out.stage = out.tokens[1];
+        out.name = out.tokens[2];
+        return out.name.size() > 0 && IsKnownStage(out.stage);
+    }
+
+    // Every variation `file` declares, following #include exactly like Parse() does: a variation
+    // declared in an included file IS compilable through the includer, so the picker must list it.
+    // `visited` breaks the include diamonds these shaders are full of (structs/binding/common).
+    void ListVariations(String file, std::vector<Variation>& out, std::vector<String>* visited = nullptr)
+    {
+        ZoneScoped;
+
+        std::vector<String> ownedVisited;
+        if (visited == nullptr)
+            visited = &ownedVisited;
+        for (auto& seen : *visited)
+            if (seen == file)
+                return;
+        visited->push_back(file);
+
+        String line;
+        std::ifstream myfile((std::string)file);
+        if (!myfile.is_open())
+            return;
+
+        while (getline(myfile, line))
+        {
+            if (line.find("#include") != -1)
+            {
+                size_t index = line.find("\"");
+                if (index != -1)
+                    ListVariations(String(shadersPath + line.substr(index + 1, line.find_last_of("\"") - 1 - index)), out, visited);
+            }
+            else
+            {
+                Variation variation;
+                if (ParsePragma(line, variation))
+                {
+                    variation.file = file;
+                    out.push_back(variation);
+                }
+            }
+        }
+    }
+
     bool Parse(Shader& shader, String& file, String& shaderName)
     {
 		ZoneScoped;
@@ -2978,7 +3055,7 @@ public :
 					if (index != -1)
 					{
 						// open include file
-						String includeFile = String(("src\\Shaders\\" + line.substr(index + 1, line.find_last_of("\"") - 1 - index)).c_str());
+						String includeFile = String((shadersPath + line.substr(index + 1, line.find_last_of("\"") - 1 - index)).c_str());
                         compiled = Parse(shader, includeFile, shaderName);
 					}
 				}
@@ -2994,18 +3071,13 @@ public :
                 }
                 */
 
-				else if (line._Starts_with("#pragma "))
+				else
 				{
-					auto tokens = line.Split(" ");
-                    // add empty strings for shaders passes names to avoid checking if a token is there
-                    for (uint i = (uint)tokens.size(); i < 10; i++)
+					Variation variation;
+                    if (ParsePragma(line, variation) && variation.name == shaderName) // only compile the requested shader
                     {
-                        tokens.push_back("");
-                    }
-
-                    if (tokens[2] == shaderName) // only compile the requested shader
-                    {
-                        if (tokens[1] == "gBuffer")
+                        auto& tokens = variation.tokens;
+                        if (variation.stage == "gBuffer")
                         {
                             auto defines = tokens[5].Split(",");
 
@@ -3043,7 +3115,7 @@ public :
                             shader.pso = CreatePSO(stream);
                             compiled = shader.pso != nullptr;
                         }
-                        else if (tokens[1] == "zPrepass")
+                        else if (variation.stage == "zPrepass")
                         {
                             auto defines = tokens[4].Split(",");
 
@@ -3054,7 +3126,7 @@ public :
                             shader.pso = CreatePSO(stream);
                             compiled = shader.pso != nullptr;
                         }
-                        else if (tokens[1] == "forward")
+                        else if (variation.stage == "forward")
                         {
                             auto defines = tokens[5].Split(",");
 
@@ -3080,7 +3152,7 @@ public :
                             shader.pso = CreatePSO(stream);
                             compiled = shader.pso != nullptr;
                         }
-                        else if (tokens[1] == "debug")
+                        else if (variation.stage == "debug")
                         {
                             auto defines = tokens[5].Split(",");
 
@@ -3107,7 +3179,7 @@ public :
                             shader.primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
                             compiled = shader.pso != nullptr;
                         }
-                        else if (tokens[1] == "compute")
+                        else if (variation.stage == "compute")
                         {
                             auto defines = tokens[4].Split(",");
 
@@ -3120,7 +3192,7 @@ public :
                             shader.pso = CreatePSO(stream);
                             compiled = shader.pso != nullptr;
                         }
-                        else if (tokens[1] == "raytracing")
+                        else if (variation.stage == "raytracing")
                         {
                             auto defines = tokens[3].Split(",");
 

@@ -162,11 +162,9 @@ namespace Components
         #define ECS_SHADER_PATH 256
         char path[ECS_SHADER_PATH] = {};
     };
-    static void ShaderPropertyDraw(char* p)
-    {
-        Shader* shader = (Shader*)p;
-        ImGui::InputText("path", shader->path, ECS_SHADER_PATH);
-    }
+    // Defined in UI.h: the picker lists the "#pragma <stage> <PublicName> ..." variations of a
+    // .hlsl, which only ShaderLoader (Loading.h) knows how to read.
+    static void ShaderPropertyDraw(char* p);
 
     struct Mesh : ComponentBase<Mesh>
     {

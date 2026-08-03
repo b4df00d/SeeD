@@ -122,10 +122,13 @@
 // 
 // [ ] 24. DLSS hit distance for reflections are not working correctly. reflection are blurry when moving.
 //
-// [ ] 25. shader picker for Components::Shader: let the user pick a .hlsl file, scan it for the
+// [X] 25. shader picker for Components::Shader: let the user pick a .hlsl file, scan it for the
 //         #pragma <stage> <PublicName> <entry...> lines it declares (the same convention the shader
 //         compiler itself parses in Loading.h), and pick one of the found variations to fill the
 //         Shader entity's path field, instead of typing the "path|entry" string by hand.
+//         - ShaderLoader::ParsePragma/ListVariations (Loading.h) read the pragmas; Parse() now
+//           uses the same reader, so the picker can only offer what the compiler would find
+//         - Components::ShaderPropertyDraw (UI.h) is the file + variation combo pair
 //
 // ============================================================================
 

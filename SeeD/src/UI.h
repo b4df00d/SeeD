@@ -1957,6 +1957,116 @@ void DefaultPropertyDraw(Components::Mask mask, char* cmpData)
     }
 }
 
+namespace Components
+{
+    // Shader picker (declared in World.h). A shader asset path is "<file.hlsl>|<PublicName>", and
+    // PublicName is declared by a "#pragma <stage> <PublicName> <entry...>" line in that file --
+    // so instead of typing the string, pick the file in one combo and one of the variations it
+    // declares in the other. ShaderLoader::ListVariations reads those pragmas with the very
+    // parser the compiler uses, so a listed variation always compiles.
+    // Only `path` is written: the renderer re-Adds it to the AssetLibrary under the component's
+    // EXISTING assetID every frame (see the material pass in Renderer.h), which is what actually
+    // recompiles it. Minting a new id here would orphan the old asset entry and its shader bucket.
+    static void ShaderPropertyDraw(char* p)
+    {
+        Shader* shader = (Shader*)p;
+
+        struct ShaderFile
+        {
+            String path;
+            std::vector<ShaderLoader::Variation> variations;
+        };
+        // Scanned once (~25 file reads). Files declaring no variation (common.hlsl, structs.hlsl,
+        // ...) are dropped: picking one could only ever build an uncompilable path. Shaders
+        // hot-reload, so a #pragma can appear while the editor runs -- hence the rescan button
+        // rather than a cache that can only go stale.
+        static std::vector<ShaderFile> shaderFiles;
+        static bool scanned = false;
+        if (!scanned && ShaderLoader::instance != nullptr)
+        {
+            scanned = true;
+            std::error_code ec;
+            for (auto& entry : std::filesystem::directory_iterator(ShaderLoader::shadersPath, ec))
+            {
+                if (entry.is_directory() || entry.path().extension() != ".hlsl")
+                    continue;
+                ShaderFile shaderFile;
+                shaderFile.path = String(ShaderLoader::shadersPath + entry.path().filename().string());
+                ShaderLoader::instance->ListVariations(shaderFile.path, shaderFile.variations);
+                if (!shaderFile.variations.empty())
+                    shaderFiles.push_back(shaderFile);
+            }
+        }
+
+        // split the current path so both combos open on whatever is already set
+        String current(shader->path);
+        size_t separator = current.find("|");
+        String file = separator == String::npos ? current : String(current.substr(0, separator));
+        String variation = separator == String::npos ? String() : String(current.substr(separator + 1));
+
+        ShaderFile* pickedFile = nullptr;
+        for (auto& shaderFile : shaderFiles)
+            if (shaderFile.path.ToLower() == file.ToLower()) // hardcoded paths don't all match the file's case
+                pickedFile = &shaderFile;
+
+        if (ImGui::BeginCombo("file", file.size() > 0 ? file.c_str() : "<none>"))
+        {
+            for (uint i = 0; i < (uint)shaderFiles.size(); i++)
+            {
+                ImGui::PushID(i);
+                if (ImGui::Selectable(shaderFiles[i].path.c_str(), &shaderFiles[i] == pickedFile))
+                {
+                    // every listed file has at least one variation (see the scan above), so take
+                    // the first: "<file>|" on its own is not a loadable path
+                    String path = shaderFiles[i].path + "|" + shaderFiles[i].variations[0].name;
+                    strcpy_s(shader->path, ECS_SHADER_PATH, path.c_str());
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+
+        bool variationFound = false;
+        if (ImGui::BeginCombo("variation", variation.size() > 0 ? variation.c_str() : "<none>"))
+        {
+            if (pickedFile != nullptr)
+            {
+                for (uint i = 0; i < (uint)pickedFile->variations.size(); i++)
+                {
+                    auto& v = pickedFile->variations[i];
+                    // a variation declared in an #include compiles through the includer too, but
+                    // say where it came from so it doesn't look like a stray entry
+                    String label = v.file == pickedFile->path
+                        ? String(std::format("{} ({})", v.name.c_str(), v.stage.c_str()))
+                        : String(std::format("{} ({}, from {})", v.name.c_str(), v.stage.c_str(), v.file.c_str()));
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(label.c_str(), v.name == variation))
+                    {
+                        String path = pickedFile->path + "|" + v.name;
+                        strcpy_s(shader->path, ECS_SHADER_PATH, path.c_str());
+                    }
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (pickedFile != nullptr)
+            for (auto& v : pickedFile->variations)
+                variationFound |= v.name == variation;
+
+        // the combos can't express every path (a shader outside src\Shaders, a file the scan
+        // predates), so the raw string stays editable -- and says so when it doesn't resolve
+        ImGui::InputText("path", shader->path, ECS_SHADER_PATH);
+        if (!variationFound && current.size() > 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), pickedFile == nullptr ? "unknown shader file" : "no such variation in that file");
+        if (ImGui::SmallButton("rescan"))
+        {
+            shaderFiles.clear();
+            scanned = false;
+        }
+    }
+}
+
 // InitKnownComponents() is declared in ComponentMetaData.h, included from World.h.
 class PropertyWindow : public EditorWindow
 {
