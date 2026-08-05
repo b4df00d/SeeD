@@ -48,8 +48,6 @@ public:
         {
             commandBuffer.Get(i).On(GPU::instance->computeQueue, name); //not copyQueue because creation of blas needs it :(
         }
-        assetsPath = Project::instance->CacheDirAbs();
-        importPath = Project::instance->SourceDirAbs();
         namespace fs = std::filesystem;
         std::error_code ec;
         fs::create_directories((std::string)assetsPath, ec);
@@ -2006,6 +2004,9 @@ struct ShaderStatsCollector
     static thread_local Pass* current;              // pass being compiled on the calling thread
     uint writeSeq = 0;
 
+    float shaderStatsSecondsSinceReload = 0.0f;
+    float shaderStatsCsvTimer = 0.0f;
+
     static std::string Key(const String& file, const String& pass)
     {
         return std::string(file.c_str()) + "|" + std::string(pass.c_str());
@@ -2135,6 +2136,32 @@ struct ShaderStatsCollector
 
         f.close();
         MoveFileExA(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING);
+    }
+
+    void Update()
+    {
+        // Live shader stats: when a shader hot-reloads, restart the GPU timing window so the
+        // averages reflect the NEW shader, then periodically dump shaderStats.csv. The external
+        // optimize loop watches each pass's reloadId (bumps on recompile) + secondsSinceReload.
+        if (options.shaderStatsCsv)
+        {
+            float dt = Time::instance->deltaSeconds;
+            if (AssetLibrary::instance->shaderLoaded > 0)
+            {
+                shaderStatsSecondsSinceReload = 0.0f;
+                Profiler::instance->ResetSamples();
+            }
+            else
+            {
+                shaderStatsSecondsSinceReload += dt;
+            }
+            shaderStatsCsvTimer += dt;
+            if (shaderStatsCsvTimer >= 0.5f)
+            {
+                shaderStatsCsvTimer = 0.0f;
+                WriteCsv("..\\shaderStats.csv", shaderStatsSecondsSinceReload);
+            }
+        }
     }
 };
 ShaderStatsCollector* ShaderStatsCollector::instance = nullptr;
@@ -3258,8 +3285,6 @@ inline void AssetLibrary::LoadAsset(assetID id, bool ignoreBudget)
             {
                 OMMData ommData;
                 bool hasOMM = MeshLoader::instance->ReadOMM(map[id].path, ommData);
-                // GetOrCreate() inserts directly into MeshStorage::allMeshes and returns a
-                // reference into it -- map-owned, not new'd, so we just point this asset's data at it.
                 Mesh& mesh = MeshStorage::instance->GetOrCreate(meshData, commandBuffer.Get(), hasOMM ? &ommData : nullptr);
                 lock.lock();
                 map[id].data = &mesh;

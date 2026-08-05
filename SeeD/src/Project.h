@@ -9,6 +9,8 @@ class Project
 public:
     static Project* instance;
 
+    Engine* enginePtr = nullptr; // set by Setup(); Save() reads the live engine state through it
+
     String filePath;     // absolute path to project.seedproj
     String projectDir;   // absolute dir containing it, trailing separator
     String imguiIniPath; // absolute; owned here so ImGui's io.IniFilename can point at it
@@ -102,6 +104,12 @@ public:
 
     void Save()
     {
+        windows.clear();
+        for (EditorWindow* ew : EditorWindow::guiWindows)
+        {
+            windows.push_back({ ew->name, ew->isOpen });
+        }
+
         std::ofstream f(filePath);
         if (!f.is_open()) { IOs::Log("Fail to write project {}", filePath.c_str()); return; }
         f << "SEEDPROJ 1\n";
@@ -109,34 +117,103 @@ public:
         f << "sourceDir " << sourceDir << "\n";
         f << "cacheDir " << cacheDir << "\n";
         f << "startupScene " << startupScene << "\n";
-        f << "windowWidth " << windowWidth << "\n";
-        f << "windowHeight " << windowHeight << "\n";
-        f << "vsync " << (vsync ? 1 : 0) << "\n";
-        f << "fullscreen " << (fullscreen ? 1 : 0) << "\n";
-        f << "frontToBackSort " << (frontToBackSort ? 1 : 0) << "\n";
-        f << "sortMaxDistance " << sortMaxDistance << "\n";
-        f << "lodDistanceMultiplier " << lodDistanceMultiplier << "\n";
-        f << "distanceCullingValue " << distanceCullingValue << "\n";
-        f << "distanceCullingValueRT " << distanceCullingValueRT << "\n";
-        f << "maxFrameFilteringCount " << maxFrameFilteringCount << "\n";
-        f << "spacialRadius " << spacialRadius << "\n";
-        f << "spacialSampleCount " << spacialSampleCount << "\n";
-        f << "reservoirRandBias " << reservoirRandBias << "\n";
-        f << "reservoirSpacialRandBias " << reservoirSpacialRandBias << "\n";
-        f << "SHARCSceneScale " << SHARCSceneScale << "\n";
-        f << "SHARCRadianceScale " << SHARCRadianceScale << "\n";
-        f << "SHARCRoughnessThreshold " << SHARCRoughnessThreshold << "\n";
-        f << "SHARCSamplesPerPixel " << SHARCSamplesPerPixel << "\n";
-        f << "SHARCAccumulationFrameNum " << SHARCAccumulationFrameNum << "\n";
-        f << "upscalingTechnique " << upscalingTechnique << "\n";
-        f << "dlssQuality " << dlssQuality << "\n";
-        f << "dlssPreset " << dlssPreset << "\n";
-        f << "dlssdPreset " << dlssdPreset << "\n";
+
+        auto& window = enginePtr->ios.window;
+        f << "windowWidth " << window.windowResolution.x << "\n";
+        f << "windowHeight " << window.windowResolution.y << "\n";
+        f << "vsync " << (window.usevSync ? 1 : 0) << "\n";
+        f << "fullscreen " << (window.fullScreen ? 1 : 0) << "\n";
+
+        f << "frontToBackSort " << (options.frontToBackSort ? 1 : 0) << "\n";
+        f << "sortMaxDistance " << options.sortMaxDistance << "\n";
+        f << "lodDistanceMultiplier " << options.lodDistanceMultiplier << "\n";
+        f << "distanceCullingValue " << options.distanceCullingValue << "\n";
+        f << "distanceCullingValueRT " << options.distanceCullingValueRT << "\n";
+
+        auto& rt = enginePtr->renderer.mainView.raytracingContext.rtParameters;
+        f << "maxFrameFilteringCount " << rt.maxFrameFilteringCount << "\n";
+        f << "spacialRadius " << rt.spacialRadius << "\n";
+        f << "spacialSampleCount " << rt.spacialSampleCount << "\n";
+        f << "reservoirRandBias " << rt.reservoirRandBias << "\n";
+        f << "reservoirSpacialRandBias " << rt.reservoirSpacialRandBias << "\n";
+        f << "SHARCSceneScale " << rt.SHARCSceneScale << "\n";
+        f << "SHARCRadianceScale " << rt.SHARCRadianceScale << "\n";
+        f << "SHARCRoughnessThreshold " << rt.SHARCRoughnessThreshold << "\n";
+        f << "SHARCSamplesPerPixel " << rt.SHARCSamplesPerPixel << "\n";
+        f << "SHARCAccumulationFrameNum " << rt.SHARCAccumulationFrameNum << "\n";
+
+        auto& dlss = enginePtr->renderer.mainView.dlss;
+        f << "upscalingTechnique " << (uint)enginePtr->renderer.mainView.upscaling << "\n";
+        f << "dlssQuality " << (int)dlss.requestedQuality << "\n";
+        f << "dlssPreset " << (int)dlss.dlssPreset << "\n";
+        f << "dlssdPreset " << (int)dlss.dlssdPreset << "\n";
+
         f << "camera " << cameraPos[0] << " " << cameraPos[1] << " " << cameraPos[2]
           << " " << cameraRot[0] << " " << cameraRot[1] << " " << cameraRot[2] << " " << cameraRot[3] << "\n";
+
         f << "[uilayout]\n";
         for (auto& w : windows) f << w.name << " " << (w.open ? 1 : 0) << "\n";
+
         IOs::Log("Project saved to {}", filePath.c_str());
+    }
+
+    void Setup(Engine& engine)
+    {
+        enginePtr = &engine;
+
+        auto& window = engine.ios.window;
+        window.usevSync = vsync;
+        window.fullScreen = fullscreen;
+        window.windowResolution = uint2(windowWidth, windowHeight);
+
+        options.frontToBackSort = frontToBackSort;
+        options.sortMaxDistance = sortMaxDistance;
+        options.lodDistanceMultiplier = lodDistanceMultiplier;
+        options.distanceCullingValue = distanceCullingValue;
+        options.distanceCullingValueRT = distanceCullingValueRT;
+
+        // Rendering window "Ray Tracing" + "Upscaling" sections live directly on the view/DLSS
+        // objects rather than in Options, so restore them there instead.
+        auto& rt = engine.renderer.mainView.raytracingContext.rtParameters;
+        rt.maxFrameFilteringCount = maxFrameFilteringCount;
+        rt.spacialRadius = spacialRadius;
+        rt.spacialSampleCount = spacialSampleCount;
+        rt.reservoirRandBias = reservoirRandBias;
+        rt.reservoirSpacialRandBias = reservoirSpacialRandBias;
+        rt.SHARCSceneScale = SHARCSceneScale;
+        rt.SHARCRadianceScale = SHARCRadianceScale;
+        rt.SHARCRoughnessThreshold = SHARCRoughnessThreshold;
+        rt.SHARCSamplesPerPixel = SHARCSamplesPerPixel;
+        rt.SHARCAccumulationFrameNum = SHARCAccumulationFrameNum;
+
+        DLSS& dlss = engine.renderer.mainView.dlss;
+        engine.renderer.mainView.upscaling = (HLSL::Upscaling)upscalingTechnique;
+        dlss.dlssPreset = (NVSDK_NGX_DLSS_Hint_Render_Preset)dlssPreset;
+        dlss.dlssdPreset = (NVSDK_NGX_RayReconstruction_Hint_Render_Preset)dlssdPreset;
+        dlss.requestedQuality = (NVSDK_NGX_PerfQuality_Value)dlssQuality;
+        dlss.qualityChangePending = (dlss.requestedQuality != dlss.perf_quality); // triggers the existing rebuild path if it differs from the just-created default
+
+        AssetLibrary& al = engine.assetLibrary;
+        al.assetsPath = Project::instance->CacheDirAbs();
+        al.importPath = Project::instance->SourceDirAbs();
+
+        Systems::Player& player = engine.player;
+        player.position = float3(cameraPos[0], cameraPos[1], cameraPos[2]);
+        player.rotation = quaternion(cameraRot[0], cameraRot[1], cameraRot[2], cameraRot[3]);
+
+        UI& ui = engine.ui;
+        ui.imguiIniPath = imguiIniPath;
+        for (EditorWindow* ew : EditorWindow::guiWindows)
+        {
+            for (const auto& w : windows)
+            {
+                if (ew->name == w.name)
+                {
+                    ew->isOpen = w.open;
+                    break;
+                }
+            }
+        }
     }
 
 private:

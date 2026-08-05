@@ -112,7 +112,8 @@
 // [ ] 20. avoid multiple upload() per frame for StructuredUploadBuffer. They can flag as dirty once
 //         and only upload once per frame. (see StructuredUploadBuffer::Upload() )
 // 
-// [ ] 21. add gpu profile for tracy
+// [ ] 21. add gpu profile for tracy : tracy gpu zone with multithreaded command buffer recording is not working well.
+//         it create a lane per thread that did the recording... not nice
 // 
 // [ ] 22. add a validation and conversion function to convert old version of the world to the new one 
 //         (for example if a component is removed or added) and add a UI function to start the conversion
@@ -129,6 +130,13 @@
 //         - ShaderLoader::ParsePragma/ListVariations (Loading.h) read the pragmas; Parse() now
 //           uses the same reader, so the picker can only offer what the compiler would find
 //         - Components::ShaderPropertyDraw (UI.h) is the file + variation combo pair
+// 
+// [X] 26. add feature validation for DMA/GPUUpload: check if the GPU supports it, and if not, fall back to CPU upload.
+//         - GPU::features.gpuUploadHeap comes from OPTIONS16.GPUUploadHeapSupported (needs ReBAR);
+//           Resource::CreateBuffer(upload) picks GPU_UPLOAD or plain UPLOAD from it, with the
+//           initial state each heap requires (COMMON vs GENERIC_READ).
+// 
+// [ ] 27. do a smater system to check cpu and gpu struct sizes and alignments. (structs.h)
 //
 // ============================================================================
 
@@ -210,7 +218,7 @@ struct Options
 #else
     bool shaderReload = false;
 #endif
-    bool shaderStatsCsv = true; // dump ..\shaderStats.csv for the live edit/profile loop
+    bool shaderStatsCsv = true;
     bool frontToBackSort = true;
     float sortMaxDistance = 512.0f;
     float lodDistanceMultiplier = 0.25f;
@@ -256,287 +264,35 @@ struct EditorState
     World::Entity selectedObject = entityInvalid;
     bool dirtyHierarchy = true;
 
-    String currentWorldPath; // absolute path of the world last loaded/saved ("" = none yet); proposed by the Save World file browser
+    String currentWorldPath;
 
     float4x4 cameraView;
     float4x4 cameraProj;
 };
 EditorState editorState;
 
-#include "Project.h"
-Project project;
-
 #include "Loading.h"
 #include "Renderer.h"
 #include "Terrain.h"
 #include "UI.h"
-
-
-class Engine
-{
-public:
-
-    Time time;
-    GPU gpu;
-    Profiler profiler;
-    IOs ios;
-    AssetLibrary assetLibrary;
-    World world;
-    Renderer renderer;
-    UI ui;
-    MeshLoader meshLoader;
-    SceneLoader sceneLoader;
-    TextureLoader textureLoader;
-    ShaderLoader shaderLoader;
-    OMMBaker ommBaker;
-
-    Systems::Player player;
-    Systems::PrefabStreaming prefabStreaming;
-    Systems::TerrainStreaming terrainStreaming; // Milestone 1 CPU quadtree, see World.h
-
-    // live shader stats (edit -> hot-reload -> profile loop)
-    float shaderStatsSecondsSinceReload = 0.0f;
-    float shaderStatsCsvTimer = 0.0f;
-
-    void On(IOs::WindowInformation window)
-    {
-        ZoneScoped;
-        time.On();
-        ios.On(window);
-        world.On();
-        gpu.On(&ios.window);
-        assetLibrary.On();
-        profiler.On();
-        meshLoader.On();
-        sceneLoader.On();
-        textureLoader.On();
-        shaderLoader.On();
-        ommBaker.On();
-        renderer.On(uint2(gpu.backBuffer.Get().GetResource()->GetDesc().Width, gpu.backBuffer.Get().GetResource()->GetDesc().Height));
-        ui.On(&ios.window, gpu.device, gpu.swapChain);
-        EditorWindow::Load();
-
-        player.On(float3(project.cameraPos[0], project.cameraPos[1], project.cameraPos[2]), quaternion(project.cameraRot[0], project.cameraRot[1], project.cameraRot[2], project.cameraRot[3]));
-        prefabStreaming.On();
-        terrainStreaming.On();
-    }
-
-    void Loop()
-    {
-        while (IsRunning())
-        {
-            ZoneScoped;
-
-            world.structureChanged = false;
-
-            Time::instance->Update();
-            gpu.FrameStart();
-            ui.FrameStart();
-            ios.ProcessMessages();
-
-            TASK(UpdateWindow);
-            TASKWITHSUBFLOW(ScheduleInputs);
-            TASKWITHSUBFLOW(ScheduleLoading);
-            TASKWITHSUBFLOW(ScheduleWorld);
-            TASKWITHSUBFLOW(ScheduleEditor);
-            TASKWITHSUBFLOW(ScheduleRenderer);
-
-            UpdateWindow.precede(ScheduleInputs);
-            ScheduleInputs.precede(ScheduleWorld);
-            ScheduleWorld.succeed(ScheduleLoading);
-            ScheduleWorld.precede(ScheduleEditor);
-            ScheduleRenderer.succeed(ScheduleEditor, ScheduleLoading);
-
-            RUN();
-            CLEAR();
-
-            // Live shader stats: when a shader hot-reloads, restart the GPU timing window so the
-            // averages reflect the NEW shader, then periodically dump shaderStats.csv. The external
-            // optimize loop watches each pass's reloadId (bumps on recompile) + secondsSinceReload.
-            if (options.shaderStatsCsv)
-            {
-                float dt = Time::instance->deltaSeconds;
-                if (assetLibrary.shaderLoaded > 0)
-                {
-                    shaderStatsSecondsSinceReload = 0.0f;
-                    profiler.ResetSamples();
-                }
-                else
-                {
-                    shaderStatsSecondsSinceReload += dt;
-                }
-                shaderStatsCsvTimer += dt;
-                if (shaderStatsCsvTimer >= 0.5f)
-                {
-                    shaderStatsCsvTimer = 0.0f;
-                    if (ShaderStatsCollector::instance)
-                        ShaderStatsCollector::instance->WriteCsv("..\\shaderStats.csv", shaderStatsSecondsSinceReload);
-                }
-            }
-
-            if (options.stepMotion)
-                Sleep(250);
-
-            FrameMark;
-        }
-    }
-
-    void Off()
-    {
-        ZoneScoped;
-        renderer.WaitFrame(); // wait previous frame
-        gpu.FrameStart();
-        renderer.WaitFrame(); // wait current frame
-
-        player.Off();
-        prefabStreaming.Off();
-        terrainStreaming.Off();
-
-        shaderLoader.Off();
-        ommBaker.Off();
-        textureLoader.Off();
-        meshLoader.Off();
-        sceneLoader.Off();
-        ui.Off();
-        profiler.Off();
-        renderer.Off();
-        world.Off();
-        assetLibrary.Off();
-        gpu.Off();
-        ios.Off();
-        time.Off();
-    }
-
-    void ScheduleInputs(tf::Subflow& subflow)
-    {
-        ZoneScoped;
-        SUBTASK_(InputsUpdate, ios.Update);
-        SUBTASK_(GetWindow, ios.GetWindow);
-
-        // no link all 3 sub task paralell
-    }
-
-    void UpdateWindow()
-    {
-        ZoneScoped;
-        if (ios.Resize())
-        {
-            renderer.WaitFrame();
-            gpu.Resize(&ios.window);
-        }
-        if (ios.DropFile())
-        {
-            sceneLoader.Load(ios.window.dropFile);
-        }
-    }
-
-    tf::Task ScheduleLoading(tf::Subflow& subflow)
-    {
-        ZoneScoped;
-
-        // Open() must run before ScheduleWorld's prefab/terrain streaming (see ScheduleWorld.
-        // succeed(ScheduleLoading) in Loop()) -- both can record GPU commands directly into this
-        // command buffer, which isn't valid to record into until Open() has run this frame.
-        tf::Task loadingTask = subflow.emplace([]() {AssetLibrary::instance->Open(); AssetLibrary::instance->LoadAssets(); }).name("Loading");
-
-        return loadingTask;
-    }
-
-    void ScheduleWorld(tf::Subflow& subflow)
-    {
-        ZoneScoped;
-
-        tf::Task prefabTask = subflow.emplace([this]() { prefabStreaming.Update(&world); }).name("PrefabStreaming");
-        tf::Task terrainTask = subflow.emplace([this]() { terrainStreaming.Update(&world); }).name("TerrainStreaming");
-        tf::Task deferredReleaseTask = subflow.emplace([this]() { world.DeferredRelease(); }).name("DeferredRelease"); // thread this ?
-        prefabTask.precede(terrainTask);
-        terrainTask.precede(deferredReleaseTask);
-
-        world.Schedule(subflow, deferredReleaseTask);
-    }
-
-    void ScheduleEditor(tf::Subflow& subflow)
-    {
-        EditorWindow::UpdateWindows();
-        /*
-        for (uint i = 0; i < EditorWindow::guiWindows.size(); i++)
-        {
-            auto window = EditorWindow::guiWindows[i];
-            //SUBTASKWINDOW(window); // no multithreading draw for imgui ?
-            window->Update();
-        }
-        */
-    }
-     
-    void ScheduleRenderer(tf::Subflow& subflow)
-    {
-        renderer.Schedule(world, subflow);
-    }
-
-    bool IsRunning()
-    {
-        if (ios.keys.pressed[VK_ESCAPE])
-        {
-            if (handlePickingWindow.isOpen)
-                handlePickingWindow.Close();
-            else if (fileBrowserWindow.isOpen)
-                fileBrowserWindow.Close();
-            else if (editorState.selectedObject != entityInvalid)
-                editorState.selectedObject = entityInvalid;
-            else
-                return false;
-        }
-        return true;
-    }
-};
+#include "Engine.h"
+#include "Project.h"
+#include "Editor.h"
 
 int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nCmdShow)
 {
-    // call that each time to force the correctness of component metadata ?
-    //ParseCpp("G:\\Work\\Dev\\SeeD\\SeeD\\src\\World.h");
-
-    // The project (asset dirs + window/render settings + editor layout) must be loaded BEFORE the
-    // window/GPU are created, since it supplies the window settings.
-    project.Load(lpCmdLine ? String(lpCmdLine) : String(""));
-
-    IOs::WindowInformation window;
-    window.usevSync = project.vsync;
-#ifdef _DEBUG
-    window.usevSync = true;
-#endif
-    window.fullScreen = project.fullscreen;
-    window.windowInstance = hInstance;
-    window.windowResolution = uint2(project.windowWidth, project.windowHeight);
-
     Engine engine;
-    engine.On(window);
 
-    options.frontToBackSort = project.frontToBackSort;
-    options.sortMaxDistance = project.sortMaxDistance;
-    options.lodDistanceMultiplier = project.lodDistanceMultiplier;
-    options.distanceCullingValue = project.distanceCullingValue;
-    options.distanceCullingValueRT = project.distanceCullingValueRT;
+#ifdef _DEBUG
+    engine.ios.window.usevSync = true;
+#endif
+    engine.ios.window.windowInstance = hInstance;
 
-    // Rendering window "Ray Tracing" + "Upscaling" sections live directly on the view/DLSS
-    // objects rather than in Options, so restore them there instead.
-    auto& rt = engine.renderer.mainView.raytracingContext.rtParameters;
-    rt.maxFrameFilteringCount = project.maxFrameFilteringCount;
-    rt.spacialRadius = project.spacialRadius;
-    rt.spacialSampleCount = project.spacialSampleCount;
-    rt.reservoirRandBias = project.reservoirRandBias;
-    rt.reservoirSpacialRandBias = project.reservoirSpacialRandBias;
-    rt.SHARCSceneScale = project.SHARCSceneScale;
-    rt.SHARCRadianceScale = project.SHARCRadianceScale;
-    rt.SHARCRoughnessThreshold = project.SHARCRoughnessThreshold;
-    rt.SHARCSamplesPerPixel = project.SHARCSamplesPerPixel;
-    rt.SHARCAccumulationFrameNum = project.SHARCAccumulationFrameNum;
+    Project project;
+    project.Load(lpCmdLine ? String(lpCmdLine) : String(""));
+    project.Setup(engine);
 
-    DLSS& dlss = engine.renderer.mainView.dlss;
-    engine.renderer.mainView.upscaling = (HLSL::Upscaling)project.upscalingTechnique;
-    dlss.dlssPreset = (NVSDK_NGX_DLSS_Hint_Render_Preset)project.dlssPreset;
-    dlss.dlssdPreset = (NVSDK_NGX_RayReconstruction_Hint_Render_Preset)project.dlssdPreset;
-    dlss.requestedQuality = (NVSDK_NGX_PerfQuality_Value)project.dlssQuality;
-    dlss.qualityChangePending = (dlss.requestedQuality != dlss.perf_quality); // triggers the existing rebuild path if it differs from the just-created default
+    engine.On();
 
     if (!project.startupScene.empty())
     {

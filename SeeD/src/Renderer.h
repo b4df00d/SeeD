@@ -17,10 +17,12 @@ class UI
     ID3D12CommandAllocator* cmdAlloc = nullptr;
 
 public:
+    static UI* instance;
 
     D3D12_CPU_DESCRIPTOR_HANDLE  imgCPUHandle = {};
     D3D12_GPU_DESCRIPTOR_HANDLE  imgGPUHandle = {};
-    static UI* instance;
+    String imguiIniPath;
+
     void On(IOs::WindowInformation* window, ID3D12Device9* device, IDXGISwapChain3* swapchain)
     {
         ZoneScoped;
@@ -32,8 +34,7 @@ public:
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // IF using Docking Branch
-        if (Project::instance) io.IniFilename = Project::instance->imguiIniPath.c_str();
-
+        io.IniFilename = imguiIniPath.c_str();
 
         DXGI_SWAP_CHAIN_DESC sc;
         swapchain->GetDesc(&sc);

@@ -180,6 +180,7 @@ copy /Y "..\Third\omm-main\bin\*.*" "..\x64\Release\"</Command>
     <ClInclude Include="src\ComponentMetaTypes.h" />
     <ClInclude Include="src\Containers.h" />
     <ClInclude Include="src\Editor.h" />
+    <ClInclude Include="src\Engine.h" />
     <ClInclude Include="src\GPU.h" />
     <ClInclude Include="src\IO.h" />
     <ClInclude Include="src\Loading.h" />

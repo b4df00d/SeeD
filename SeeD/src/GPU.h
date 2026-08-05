@@ -60,7 +60,6 @@ struct DSV
 
 struct CommandBuffer;
 
-// VRAM accounting buckets, surfaced grouped in the GPUResources window.
 enum class ResourceCategory
 {
     AssetTexture,           // textures streamed in from assets
@@ -89,6 +88,7 @@ class Resource
 {
 public:
     D3D12MA::Allocation* allocation{ 0 };
+    void* mapped{ nullptr };
     uint stride{ 0 };
     ResourceCategory category{ ResourceCategory::RenderingBuffer };
     SRV srv{ UINT32_MAX };
@@ -115,7 +115,7 @@ public:
     void FreeNow();
     ID3D12Resource* GetResource();
     uint BufferSize();
-    void UploadTexture(std::vector<D3D12_SUBRESOURCE_DATA> subresources, CommandBuffer& cb);
+    void* Map();
     void Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb);
     void UploadElements(void* data, uint count, uint index, CommandBuffer& cb);
     void Transition(CommandBuffer& cb, D3D12_RESOURCE_STATES stateBefore, D3D12_RESOURCE_STATES stateAfter);
@@ -318,7 +318,6 @@ struct Shader
         uint hitGroupSize = ROUND_UP(progIdSize * hitGroups.size(), D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT);
 
         uint bufferSize = rayGenSize + missSize + hitGroupSize;
-        bufferSize *= 100;
         if (shaderBindingTable.GetResource() == nullptr || shaderBindingTable.GetResource()->GetDesc().Width < bufferSize)
         {
             shaderBindingTable.Release();
@@ -395,7 +394,6 @@ struct Fence
 
 struct CommandBuffer
 {
-    // everything is a graphic command, why no compute list ?
     ID3D12GraphicsCommandList7* cmd = NULL;
     ID3D12CommandAllocator* cmdAlloc = NULL;
     ID3D12CommandQueue* queue = NULL;
@@ -413,6 +411,7 @@ struct CommandBuffer
 struct DescriptorHeap
 {
     static const uint maxDescriptorCount = 65535;
+    static const uint maxRTVDSVDescriptorCount = 1024;
     ID3D12DescriptorHeap* globalDescriptorHeap;
     Slots globalDescriptorHeapSlots;
     int descriptorIncrementSize;
@@ -449,7 +448,7 @@ struct DescriptorHeap
             D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
             heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
             heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-            heapDesc.NumDescriptors = maxDescriptorCount;
+            heapDesc.NumDescriptors = maxRTVDSVDescriptorCount;
 
             auto hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&rtvDescriptorHeap));
             if (FAILED(hr))
@@ -458,7 +457,7 @@ struct DescriptorHeap
             }
             rtvDescriptorHeap->SetName(L"RTV Desc Heap");
 
-            rtvDescriptorHeapSlots.On(maxDescriptorCount);
+            rtvDescriptorHeapSlots.On(maxRTVDSVDescriptorCount);
 
             rtvdescriptorIncrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         }
@@ -467,7 +466,7 @@ struct DescriptorHeap
             D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
             heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
             heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-            heapDesc.NumDescriptors = maxDescriptorCount;
+            heapDesc.NumDescriptors = maxRTVDSVDescriptorCount;
 
             auto hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&dsvDescriptorHeap));
             if (FAILED(hr))
@@ -476,7 +475,7 @@ struct DescriptorHeap
             }
             dsvDescriptorHeap->SetName(L"DSV Desc Heap");
 
-            dsvDescriptorHeapSlots.On(maxDescriptorCount);
+            dsvDescriptorHeapSlots.On(maxRTVDSVDescriptorCount);
 
             dsvdescriptorIncrementSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
         }
@@ -618,7 +617,7 @@ static PerFrame<CommandBuffer>* endOfLastFrame = nullptr;
 class UploadBufferPool
 {
 public:
-    static constexpr uint MIN_SHIFT = 14;                         // 16 KB smallest bucket
+    static constexpr uint MIN_SHIFT = 12;                         // 4 KB smallest bucket
     static constexpr uint MAX_SHIFT = 22;                         // 4 MB  largest bucket
     static constexpr uint MAX_SIZE = 1u << MAX_SHIFT;             // 4 MB
     static constexpr uint NUM_BUCKETS = MAX_SHIFT - MIN_SHIFT + 1;
@@ -637,10 +636,10 @@ public:
         int bucket;
     };
 
-    D3D12MA::Allocator* allocator = nullptr; // borrowed from GPU; set in On()
+    D3D12MA::Allocator* allocator = nullptr;
     std::vector<Buffer> freeLists[NUM_BUCKETS];
     std::vector<Pending> pending;
-    std::mutex poolLock; // guards freeLists / pending
+    std::mutex poolLock;
 
     void On(D3D12MA::Allocator* alloc)
     {
@@ -678,8 +677,6 @@ public:
         }
         poolLock.unlock();
 
-        // Miss: create a new upload buffer of the bucket capacity (outside the lock, as the original
-        // per-call path did) and map it once for its whole lifetime.
         uint capacity = 1u << (MIN_SHIFT + (uint)bucket);
 
         D3D12_RESOURCE_DESC resourceDesc = {};
@@ -776,6 +773,7 @@ public:
         bool meshShader : 1;
         bool raytracing : 1;
         bool raytracingTier12 : 1;
+        bool gpuUploadHeap : 1;
     };
     Features features{};
 
@@ -821,7 +819,7 @@ public:
 
         Resource::ReleaseResources(true);
         //Resource::CleanUploadResources(true);
-        uploadBufferPool.Off(); // free pooled upload buffers before the allocator goes away
+        uploadBufferPool.Off();
         for (uint i = 0; i < Resource::allResourcesNames.size(); i++)
         {
             IOs::Log("{}", Resource::allResourcesNames[i].c_str());
@@ -857,8 +855,7 @@ public:
         {
             debugController->EnableDebugLayer();
 
-            // GPU-Based Validation: catches out-of-bounds descriptor access, uninitialized
-            // resources, etc. Much slower - enable when hunting a stubborn GPU-side bug.
+            // GPU-Based Validation: catches out-of-bounds descriptor access, uninitialized resources, etc.
             ID3D12Debug1* debugController1 = nullptr;
             if (SUCCEEDED(debugController->QueryInterface(IID_PPV_ARGS(&debugController1))))
             {
@@ -869,10 +866,7 @@ public:
             debugController->Release();
         }
 
-        // DRED: if GBV doesn't catch the corruption before a TDR actually happens, this gives a
-        // post-mortem on device removal -- which named command list's breadcrumb was last executing
-        // and, for a page fault, the faulting GPU VA plus nearby live/recently-freed allocations.
-        // See PrintDeviceRemovedReason below, which dumps both. Must be set before device creation.
+        // DRED: if GPU-Based Validation doesn't catch the corruption before a TDR actually happens
         {
             ID3D12DeviceRemovedExtendedDataSettings* dredSettings = nullptr;
             if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings))))
@@ -917,15 +911,13 @@ public:
         }
 
 #if defined(_DEBUG)
-        // Break in the debugger on debug-layer errors. The break fires on the thread and
-        // call stack that made the offending call - walk up the stack to find the bad call.
-        // The message text is in the Output window.
+        // Break in the debugger on debug-layer errors.
         ID3D12InfoQueue* infoQueue = nullptr;
         if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&infoQueue))))
         {
             infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
             infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
-            //infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE); // noisy, enable when hunting
+            //infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE);
 
             // Pre-existing GBV noise from the third-party FidelityFX SPD component (Third\FidelityFX-SDK-v1.1.3):
             // its 'SPD_AtomicCounter' UAV is created with StructureByteStride 4 but some bindless shader
@@ -946,6 +938,7 @@ public:
         D3D12_FEATURE_DATA_D3D12_OPTIONS7 featureData = {};
         device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &featureData, sizeof(featureData));
         features.meshShader = (featureData.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1);
+        IOs::Log("D3D12 runtime {} | mesh shader tier {}", (uint)D3D12_SDK_VERSION, (int)featureData.MeshShaderTier);
 
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 featureData5 = {};
         device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &featureData5, sizeof(featureData5));
@@ -955,6 +948,13 @@ public:
         D3D12_FEATURE_DATA_D3D12_OPTIONS22 featureData22 = {};
         device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS22, &featureData22, sizeof(featureData22));
         IOs::Log("D3D12 runtime {} | raytracing tier {} | SER reorders {}", (uint)D3D12_SDK_VERSION, (int)featureData5.RaytracingTier, featureData22.ShaderExecutionReorderingActuallyReorders ? "yes" : "no");
+
+        // A failed CheckFeatureSupport leaves the zero-initialized struct alone, so an old runtime
+        // reports "unsupported" and Resource::CreateBuffer takes the plain UPLOAD heap path.
+        D3D12_FEATURE_DATA_D3D12_OPTIONS16 featureData16 = {};
+        device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS16, &featureData16, sizeof(featureData16));
+        features.gpuUploadHeap = featureData16.GPUUploadHeapSupported;
+        IOs::Log("D3D12 runtime {} | GPU upload heap {}", (uint)D3D12_SDK_VERSION, features.gpuUploadHeap ? "yes" : "no (falling back to UPLOAD)");
 
 
         D3D12_COMMAND_QUEUE_DESC commandQueueDesc;
@@ -971,6 +971,7 @@ public:
         graphicQueue->SetName(L"graphicQueue");
 
 #ifdef ASYNC_COMPUTE
+        commandQueueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_ALLOW_DYNAMIC_PRIORITY;
         commandQueueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
         commandQueueDesc.Type = D3D12_COMMAND_LIST_TYPE::D3D12_COMMAND_LIST_TYPE_COMPUTE;
         hr = device->CreateCommandQueue(&commandQueueDesc, IID_PPV_ARGS(&computeQueue));
@@ -1139,6 +1140,9 @@ public:
 };
 GPU* GPU::instance;
 
+//------------------------------
+// definitions of Resource
+//------------------------------
 
 void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name, ResourceCategory category)
 {
@@ -1200,7 +1204,6 @@ void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name, ResourceCat
     }
 }
 
-// definitions of Resource
 void Resource::CreateTexture(uint2 resolution, DXGI_FORMAT format, bool mips, String name)
 {
     CreateTexture(uint3(resolution.x, resolution.y, 1), format, mips, name);
@@ -1491,7 +1494,16 @@ void Resource::CreateBuffer(uint size, uint _stride, bool upload, String name, D
 
     if (upload)
     {
-        allocationDesc.HeapType = D3D12_HEAP_TYPE_GPU_UPLOAD;
+        if (GPU::instance->features.gpuUploadHeap)
+        {
+            allocationDesc.HeapType = D3D12_HEAP_TYPE_GPU_UPLOAD;
+            initialState = D3D12_RESOURCE_STATE_COMMON;
+        }
+        else
+        {
+            allocationDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+            initialState = D3D12_RESOURCE_STATE_GENERIC_READ;
+        }
         resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
     }
 
@@ -1812,6 +1824,7 @@ void Resource::Release(bool deferred)
         }
     }
     allocation = { 0 };
+    mapped = nullptr;
     stride = { 0 };
     srv = { UINT32_MAX };
     uav = { UINT32_MAX };
@@ -1833,60 +1846,15 @@ uint Resource::BufferSize()
     return (uint)GetResource()->GetDesc().Width;
 }
 
-void Resource::UploadTexture(std::vector<D3D12_SUBRESOURCE_DATA> subresources, CommandBuffer& cb)
+void* Resource::Map()
 {
-
-    //UINT64 uploadBufferSize = GPU::instance->device->GetCopyableFootprints(&GetResource()->GetDesc(), 0, subresources.size(), 0, nullptr, nullptr, nullptr, &uploadBufferSize);
-
-    D3D12MA::Allocation* uploadAllocation;
-
-    D3D12MA::ALLOCATION_DESC allocationDesc = {};
-    allocationDesc.HeapType = D3D12_HEAP_TYPE_UPLOAD;
-
-    D3D12_RESOURCE_DESC desc = GetResource()->GetDesc();
-
-    HRESULT hr = GPU::instance->allocator->CreateResource(
-        &allocationDesc,
-        &desc,
-        D3D12_RESOURCE_STATE_COPY_SOURCE,
-        NULL,
-        &uploadAllocation,
-        IID_NULL, NULL);
-
-    Resource* tmpUpRes = new Resource();
-    tmpUpRes->allocation = uploadAllocation;
-
-    /*
-    uploadAllocation->SetName(L"UploadTexture");
-    lock.lock();
-    releaseResources.push_back({ GPU::instance->frameNumber, *tmpUpRes });
-    lock.unlock();
-
-    void* buf;
-    uploadAllocation->GetResource()->Map(0, nullptr, &buf);
-    memcpy(buf, data, dataSize);
-    uploadAllocation->GetResource()->Unmap(0, nullptr);
-
-    BYTE* pData;
-    HRESULT hr = tmpUpRes->GetResource()->Map(0, nullptr, reinterpret_cast<void**>(&pData));
-    if (FAILED(hr))
+    if (mapped == nullptr)
     {
-        return;
+        ID3D12Resource* res = GetResource();
+        if (res == nullptr || FAILED(res->Map(0, nullptr, &mapped)))
+            mapped = nullptr;
     }
-    for (UINT i = 0; i < NumSubresources; ++i)
-    {
-        if (pRowSizesInBytes[i] > SIZE_T(-1)) return 0;
-        D3D12_MEMCPY_DEST DestData = { pData + pLayouts[i].Offset, pLayouts[i].Footprint.RowPitch, SIZE_T(pLayouts[i].Footprint.RowPitch) * SIZE_T(pNumRows[i]) };
-        MemcpySubresource(&DestData, &pSrcData[i], static_cast<SIZE_T>(pRowSizesInBytes[i]), pNumRows[i], pLayouts[i].Footprint.Depth);
-    }
-    pIntermediate->Unmap(0, nullptr);
-
-    lock.lock();
-    Transition(cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-    cb.cmd->CopyTextureRegion(GetResource(), offset, uploadAllocation->GetResource(), 0, dataSize);
-    Transition(cb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
-    lock.unlock();
-    */
+    return mapped;
 }
 
 void Resource::Upload(void* data, uint dataSize, uint offset, CommandBuffer& cb)
@@ -2007,9 +1975,15 @@ std::mutex Resource::lock;
 std::vector<Resource> Resource::allResources;
 std::vector<String> Resource::allResourcesNames;
 std::vector< std::pair<uint, Resource>> Resource::releaseResources;
-// end of definitions of Resource
 
-// definitions of CommandBuffer      
+//------------------------------
+// end of definitions of Resource
+//------------------------------
+
+//------------------------------
+// definitions of CommandBuffer 
+//------------------------------
+    
 void CommandBuffer::SetCompute(Shader& shader)
 {
     // SetDescriptorHeaps must be set before SetPipelineState because of dynamic indexing in descriptorHeap
@@ -2093,7 +2067,9 @@ void CommandBuffer::Off()
         passEnd.fenceEvent = nullptr;
     }
 }
+//------------------------------
 // end of definitions of CommandBuffer
+//------------------------------
 
 class ConstantBuffer
 {
@@ -2534,6 +2510,7 @@ public:
             // Check if cached allocation can be reused
             if (cachedUploadAllocation->GetResource() && cachedUploadAllocation->GetResource()->GetDesc().Width > totalUploadSize)
             {
+                // nothing to do, we can reuse the existing upload buffer
             }
             else if (totalUploadSize > MAX_CACHED_UPLOAD_SIZE)
             {
@@ -2555,10 +2532,13 @@ public:
                     std::vector<uint> sortedIndices = dirtyIndices;
                     std::sort(sortedIndices.begin(), sortedIndices.end());
 
-
                     // Copy all dirty entries into upload buffer
-                    void* uploadBuf;
-                    cachedUploadAllocation->GetResource()->Map(0, nullptr, &uploadBuf);
+                    void* uploadBuf = cachedUploadAllocation->Map();
+                    if (uploadBuf == nullptr)
+                    {
+                        Resource::lock.unlock();
+                        return;
+                    }
 
                     uint uploadOffset = 0;
                     for (uint dirtyIdx : sortedIndices)
@@ -2569,8 +2549,6 @@ public:
                             uploadOffset += sizeof(T);
                         }
                     }
-
-                    cachedUploadAllocation->GetResource()->Unmap(0, nullptr);
 
 
                     // Find and copy contiguous ranges
@@ -2612,9 +2590,13 @@ public:
                 {
                     // No batching - individual CopyBufferRegion per dirty index
 
-                // Copy all dirty entries into upload buffer
-                    void* uploadBuf;
-                    cachedUploadAllocation->GetResource()->Map(0, nullptr, &uploadBuf);
+                    // Copy all dirty entries into upload buffer
+                    void* uploadBuf = cachedUploadAllocation->Map();
+                    if (uploadBuf == nullptr)
+                    {
+                        Resource::lock.unlock();
+                        return;
+                    }
 
                     uint uploadOffset = 0;
                     for (uint dirtyIdx : dirtyIndices)
@@ -2625,8 +2607,6 @@ public:
                             uploadOffset += sizeof(T);
                         }
                     }
-
-                    cachedUploadAllocation->GetResource()->Unmap(0, nullptr);
 
                     uploadOffset = 0;
                     for (uint dirtyIdx : dirtyIndices)
@@ -2654,6 +2634,7 @@ public:
 
 //github.com/TheRealMJP/DeferredTexturing/blob/experimental/SampleFramework12/v1.01/Graphics/Profiler.cpp
 // use https://github.com/Raikiri/LegitProfiler for display ?
+// TODO : I´ll prefere a display with horitontal bars, like Tracy
 struct Profiler
 {
     static Profiler* instance;
@@ -2946,9 +2927,6 @@ struct Meshlet : HLSL::Meshlet
 {
 };
 
-// Baked opacity-micromap data loaded from a {hash}.omm sidecar (written at import by the OMM
-// bake, next to the {hash}.mesh cache entry). LOD0 only: the coarse BLAS is only ever traced
-// far away, where the any-hit invocations an OMM would save are already a rounding error.
 struct OMMData
 {
     DXGI_FORMAT indexFormat = DXGI_FORMAT_R32_UINT; // per-triangle OMM index buffer format
@@ -2959,29 +2937,22 @@ struct OMMData
     uint64_t textureHash = 0; // albedo texture assetID.hash the bake sampled
     float alphaThreshold = 0.5f;
 
-    // a uniform-alpha texture bakes to special indices only: the sidecar is then just the
-    // "checked, nothing to gain" marker and there is nothing to build
     bool IsValid() const { return !arrayData.empty() && !descs.empty() && !indices.empty(); }
 };
 
 struct Mesh : HLSL::Mesh
 {
     Resource BLAS;
-    Resource BLASLow; // coarsest-LOD BLAS, distance-swapped into the TLAS (empty when lodCount == 1)
-
-    // GPU-side opacity micromap, linked into the LOD0 BLAS only (set for cutout meshes with a
-    // baked {hash}.omm sidecar, tier 1.2+). The array and index buffer are referenced by that
-    // BLAS and must outlive it.
+    Resource BLASLow;
     struct OMM
     {
         Resource array;
         Resource indices;
-        Resource inputs; // raw bits + per-OMM descs; only read by the OMM array build
         DXGI_FORMAT indexFormat = DXGI_FORMAT_R32_UINT;
         uint64_t textureHash = 0; // != 0 means the BLAS carries OMM; used for the material-mismatch DISABLE_OMMS fallback
 
         bool IsValid() { return array.GetResource() != nullptr; }
-        void Release() { array.Release(); indices.Release(); inputs.Release(); }
+        void Release() { array.Release(); indices.Release(); }
     };
     OMM omm;
 };
@@ -3000,17 +2971,6 @@ struct MeshData
     float4 boundingSphere;
 };
 
-/*
-struct ResourcePool
-{
-    uint poolSize;
-    uint nextOffset;
-    uint stride;
-    std::vector<Resource> resource;
-
-};
-*/
-
 struct MeshStorage
 {
     static MeshStorage* instance;
@@ -3028,8 +2988,7 @@ struct MeshStorage
     uint nextIndexOffset = 0;
     Resource indices;
 
-    // The CPU-side owner of every Mesh (BLAS Resources included), both regular AND override
-    // (terrain node displacement baking; later shared by skinning, roadmap item 6): keyed by the
+    // The CPU-side owner of every Mesh (BLAS Resources included), both regular AND override : keyed by the
     // SAME index namespace as HLSL::Mesh.storageIndex (both come from nextMeshOffset, into the
     // same `meshes` GPU buffer), so `meshes[instance.meshIndex]` resolves identically either way.
     // unordered_map (not vector): element addresses stay stable across insertions, which is what
@@ -3042,7 +3001,7 @@ struct MeshStorage
     std::unordered_map<uint, std::vector<uint>> overrideFreeListBySource;
 
     Resource scratchBLAS;
-    uint maxScratchSizeInBytes = 150 * 1024 * 1024; // 150 MB of wasted mem for BLAS compute ? a little much na ?
+    uint maxScratchSizeInBytes = 150 * 1024 * 1024; // TODO : 150 MB of wasted mem for BLAS compute ? a little much na ? but before that add a tmp variable to monitor the max scratch size used in a frame, and use that to set this value
 
     std::recursive_mutex lock;
 
@@ -3051,7 +3010,7 @@ struct MeshStorage
     uint meshletMaxCount = meshesMaxCount * 256;
     uint meshletVertexMaxCount = meshletMaxCount * HLSL::max_vertices;
     uint meshletTrianglesMaxCount = meshletMaxCount * HLSL::max_triangles * 2;
-    uint vertexMaxCount = meshletVertexMaxCount / 1.5f;
+    uint vertexMaxCount = (uint)(meshletVertexMaxCount / 1.5f);
     uint indexMaxCount = meshletTrianglesMaxCount;
 
     // Current allocated sizes (may exceed initial max counts)
@@ -3062,12 +3021,9 @@ struct MeshStorage
     uint verticesAllocatedCount = 0;
     uint indicesAllocatedCount = 0;
 
-    // Growth factor for dynamic reallocation (1.5x growth)
     static constexpr float GROWTH_FACTOR = 1.5f;
 
     StructuredUploadBuffer<float4x4> identityMatrix;
-    // One row-major 3x4 dequantization transform per mesh (indexed by Mesh.storageIndex), used as the
-    // DXR Triangles.Transform3x4 so the BLAS reconstructs object-space positions from SNORM16 data.
     StructuredUploadBuffer<BLASTransform> meshTransforms;
 
     void On()
@@ -3092,8 +3048,6 @@ struct MeshStorage
         identityMatrix.Add(iden);
         identityMatrix.Upload();
 
-        // Pre-size the per-mesh transform buffer so it doesn't reallocate (and change GPU VA) while a
-        // batch of meshes is being loaded into a not-yet-executed command buffer.
         meshTransforms.Resize(meshesMaxCount);
         meshTransforms.Upload();
     }
@@ -3121,14 +3075,12 @@ struct MeshStorage
         instance = nullptr;
     }
 
-    // Helper function to grow a buffer if needed
     void EnsureBufferCapacity(Resource& resource, uint& allocatedCount, uint requiredCount, uint elementStride, const String& bufferName, CommandBuffer& commandBuffer)
     {
         ZoneScoped;
 
         if (allocatedCount < requiredCount)
         {
-            // Calculate new size with growth factor
             uint newCount = (uint)ceil(requiredCount * GROWTH_FACTOR);
             uint oldByteSize = allocatedCount * elementStride;
             uint newByteSize = newCount * elementStride;
@@ -3137,22 +3089,17 @@ struct MeshStorage
                      bufferName.c_str(), allocatedCount, newCount,
                      oldByteSize / (1024 * 1024), newByteSize / (1024 * 1024));
 
-            // Save old resource for copying
             Resource oldResource = resource;
 
-            // Create new larger buffer
             if (elementStride == 1)
             {
-                // For byte buffers like meshletTriangles
                 resource.CreateBuffer(newCount, elementStride, false, bufferName);
             }
             else
             {
-                // For other element types
                 resource.CreateBuffer(newCount * elementStride, elementStride, false, bufferName);
             }
 
-            // If old resource exists, copy old data to new resource via GPU
             if (oldResource.GetResource() != nullptr && allocatedCount > 0)
             {
                 IOs::Log("  Copying {} existing elements ({} bytes) to new buffer", allocatedCount, oldByteSize);
@@ -3160,18 +3107,10 @@ struct MeshStorage
                 oldResource.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
                 resource.Transition(commandBuffer, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
 
-                commandBuffer.cmd->CopyBufferRegion(
-                    resource.GetResource(),      // destination
-                    0,                            // destination offset
-                    oldResource.GetResource(),    // source
-                    0,                            // source offset
-                    oldByteSize                   // size to copy
-                );
+                commandBuffer.cmd->CopyBufferRegion(resource.GetResource(), 0, oldResource.GetResource(), 0, oldByteSize);
 
                 resource.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
 
-                // Old resource will be released after transitions
-                // Release deferred so it's not freed until a few frames later
                 oldResource.Release(true);
             }
 
@@ -3195,13 +3134,11 @@ struct MeshStorage
 
         Mesh& newMesh = allMeshes[_nextMeshOffset];
 
-        // Ensure mesh buffer has capacity
         EnsureBufferCapacity(meshes, meshesAllocatedCount, nextMeshOffset, sizeof(HLSL::Mesh), "meshes", commandBuffer);
         EnsureBufferCapacity(vertices, verticesAllocatedCount, nextVertexOffset, sizeof(VertexPacked), "vertices", commandBuffer);
 
-        // Mesh AABB drives both the SNORM16 position quantization and the per-mesh BLAS dequant transform.
         float mnx = FLT_MAX, mny = FLT_MAX, mnz = FLT_MAX, mxx = -FLT_MAX, mxy = -FLT_MAX, mxz = -FLT_MAX;
-        for (auto& sv : meshData.vertices)
+        for (auto& sv : meshData.vertices) // TODO : store the AABB in the .mesh file to avoid this loop on load
         {
             mnx = min(mnx, sv.px); mny = min(mny, sv.py); mnz = min(mnz, sv.pz);
             mxx = max(mxx, sv.px); mxy = max(mxy, sv.py); mxz = max(mxz, sv.pz);
@@ -3235,7 +3172,6 @@ struct MeshStorage
             nextMeshletTriangleOffset += (uint)lod.meshlet_triangles.size();
             nextIndexOffset += (uint)lod.indices.size();
 
-            // Ensure LOD buffers have capacity before allocation
             EnsureBufferCapacity(meshlets, meshletsAllocatedCount, nextMeshletOffset, sizeof(HLSL::Meshlet), "meshlets", commandBuffer);
             EnsureBufferCapacity(meshletVertices, meshletVerticesAllocatedCount, nextMeshletVertexOffset, sizeof(unsigned int), "meshlet vertices", commandBuffer);
             EnsureBufferCapacity(meshletTriangles, meshletTrianglesAllocatedCount, nextMeshletTriangleOffset, sizeof(unsigned char), "meshlet triangles", commandBuffer);
@@ -3246,7 +3182,7 @@ struct MeshStorage
             newMeshLOD.indexCount = (uint)lod.indices.size();
             newMeshLOD.indexOffset = _nextIndexOffset;
 
-            for (uint i = 0; i < lod.meshlets.size(); i++)
+            for (uint i = 0; i < lod.meshlets.size(); i++) // TODO : could we avoid this loop ?
             {
                 lod.meshlets[i].triangleOffset += _nextMeshletTriangleOffset;
                 lod.meshlets[i].vertexOffset += _nextMeshletVertexOffset;
@@ -3266,7 +3202,7 @@ struct MeshStorage
         float invz = ez > 0 ? 1.0f / ez : 0.0f;
         {
             ZoneScopedN("Pack vertices");
-            for (size_t i = 0; i < meshData.vertices.size(); i++)
+            for (size_t i = 0; i < meshData.vertices.size(); i++) // TODO : could we avoid this loop ? pack in the .mesh file to avoid this on load
             {
                 const Vertex& s = meshData.vertices[i];
                 VertexPacked& d = packed[i];
@@ -3289,7 +3225,7 @@ struct MeshStorage
             }
         }
 
-        // Per-mesh BLAS dequant transform: objectPos = diag(halfExtent) * q + center, q in [-1,1].    
+        //objectPos = diag(halfExtent) * q + center, q in [-1,1].    
         {
             ZoneScopedN("BLAS transform");
             float hx = ex * 0.5f, hy = ey * 0.5f, hz = ez * 0.5f;
@@ -3305,7 +3241,6 @@ struct MeshStorage
 
         meshes.UploadElements(&newMesh, 1, _nextMeshOffset, commandBuffer);
         vertices.UploadElements(packed.data(), (uint)packed.size(), _nextVertexOffset, commandBuffer);
-        
         
         meshes.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         meshlets.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
@@ -3330,13 +3265,12 @@ struct MeshStorage
 
         lock.lock();
 
-        // Opacity micromap: build the OMM array first, BuildBLAS below links it into the LOD0
-        // build so the RT cores can skip any-hit for known-opaque/transparent micro-triangles.
+        // TODO : since BuildOMMArray and BuildBLAS are called just once, put all code in LoadBLAS and remove BuildOMMArray and BuildBLAS functions
+
         if (omm != nullptr && omm->IsValid() && GPU::instance->features.raytracingTier12)
         {
             BuildOMMArray(*omm, mesh, commandBuffer);
 
-            // the BLAS build reads the OMM array and reuses the scratch range the array build wrote
             D3D12_RESOURCE_BARRIER uavBarrier;
             uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             uavBarrier.UAV.pResource = nullptr;
@@ -3344,19 +3278,10 @@ struct MeshStorage
             commandBuffer.cmd->ResourceBarrier(1, &uavBarrier);
         }
 
-        // High-detail BLAS from LOD0, low-detail BLAS from the coarsest LOD: culling.hlsl picks one
-        // per instance each frame when writing the TLAS instance descs. The two builds share the
-        // scratch buffer through disjoint ranges so no UAV barrier is needed between them.
         UINT64 scratchUsed = BuildBLAS(mesh, 0, mesh.BLAS, 0, commandBuffer);
         if (mesh.lodCount > 1)
             BuildBLAS(mesh, mesh.lodCount - 1, mesh.BLASLow, scratchUsed, commandBuffer);
 
-        // Every LoadBLAS call restarts at scratchOffset 0 in the SAME shared scratchBLAS buffer (see
-        // comment above -- that reasoning only covers the disjoint high/low offsets within THIS call).
-        // Without this, back-to-back LoadBLAS calls for different meshes in the same frame (e.g. a
-        // burst of terrain nodes streaming in as the camera moves) race on scratchBLAS with no
-        // ordering between them: the driver is free to overlap the builds, corrupting whichever one
-        // loses the race and producing a malformed BLAS that hangs the RT cores on traversal.
         D3D12_RESOURCE_BARRIER scratchBarrier;
         scratchBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         scratchBarrier.UAV.pResource = scratchBLAS.GetResource();
@@ -3365,10 +3290,7 @@ struct MeshStorage
 
         lock.unlock();
     }
-
-    // Uploads the baked OMM data into mesh.omm and records the OMM array build on the command
-    // buffer, so the LOD0 BuildBLAS that follows can link it. Always builds at scratch offset 0:
-    // the BLAS builds restart there too, behind the UAV barrier LoadBLAS inserts.
+    
     void BuildOMMArray(const OMMData& ommData, Mesh& mesh, CommandBuffer& commandBuffer)
     {
         ZoneScoped;
@@ -3376,13 +3298,14 @@ struct MeshStorage
         mesh.omm.textureHash = ommData.textureHash;
         mesh.omm.indexFormat = ommData.indexFormat;
 
-        // one buffer for the two build inputs: [raw opacity bits][per-OMM descs]
+        // one buffer for the two build inputs: [raw opacity bits][per-OMM descs].
+        Resource inputs;
         uint descsOffset = (uint)ROUND_UP(ommData.arrayData.size(), D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
         uint descsSize = (uint)(ommData.descs.size() * sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC));
-        mesh.omm.inputs.CreateBuffer(descsOffset + descsSize, 1, false, "OMMInputs", D3D12_RESOURCE_STATE_COPY_DEST);
-        mesh.omm.inputs.UploadElements((void*)ommData.arrayData.data(), (uint)ommData.arrayData.size(), 0, commandBuffer);
-        mesh.omm.inputs.UploadElements((void*)ommData.descs.data(), descsSize, descsOffset, commandBuffer);
-        mesh.omm.inputs.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        inputs.CreateBuffer(descsOffset + descsSize, 1, false, "OMMInputs", D3D12_RESOURCE_STATE_COPY_DEST);
+        inputs.UploadElements((void*)ommData.arrayData.data(), (uint)ommData.arrayData.size(), 0, commandBuffer);
+        inputs.UploadElements((void*)ommData.descs.data(), descsSize, descsOffset, commandBuffer);
+        inputs.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         mesh.omm.indices.CreateBuffer((uint)ommData.indices.size(), 1, false, "OMMIndices", D3D12_RESOURCE_STATE_COPY_DEST);
         mesh.omm.indices.UploadElements((void*)ommData.indices.data(), (uint)ommData.indices.size(), 0, commandBuffer);
@@ -3391,8 +3314,8 @@ struct MeshStorage
         D3D12_RAYTRACING_OPACITY_MICROMAP_ARRAY_DESC arrayDesc = {};
         arrayDesc.NumOmmHistogramEntries = (uint)ommData.histogram.size();
         arrayDesc.pOmmHistogram = ommData.histogram.data();
-        arrayDesc.InputBuffer = mesh.omm.inputs.GetResource()->GetGPUVirtualAddress();
-        arrayDesc.PerOmmDescs.StartAddress = mesh.omm.inputs.GetResource()->GetGPUVirtualAddress() + descsOffset;
+        arrayDesc.InputBuffer = inputs.GetResource()->GetGPUVirtualAddress();
+        arrayDesc.PerOmmDescs.StartAddress = inputs.GetResource()->GetGPUVirtualAddress() + descsOffset;
         arrayDesc.PerOmmDescs.StrideInBytes = sizeof(D3D12_RAYTRACING_OPACITY_MICROMAP_DESC);
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputsDesc = {};
@@ -3419,6 +3342,8 @@ struct MeshStorage
         buildDesc.SourceAccelerationStructureData = 0;
 
         commandBuffer.cmd->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+
+        inputs.Release(true);
     }
 
     UINT64 BuildBLAS(Mesh& mesh, uint lodIndex, Resource& blas, UINT64 scratchOffset, CommandBuffer& commandBuffer, bool allowInPlaceRebuild = false)
@@ -3442,7 +3367,6 @@ struct MeshStorage
         // in hardware and only invoke any-hit for the unknown border ones. Geometry stays
         // non-opaque so those unknowns still alpha-test. ALLOW_DISABLE_OMMS enables the
         // per-instance DISABLE_OMMS fallback culling.hlsl applies on material mismatch.
-        // Only LOD0 carries an OMM (see Mesh::OMM); every other build is plain triangles.
         D3D12_RAYTRACING_GEOMETRY_OMM_LINKAGE_DESC ommLinkage = {};
         D3D12_RAYTRACING_GEOMETRY_DESC descriptor = {};
         descriptor.Flags = isOpaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;

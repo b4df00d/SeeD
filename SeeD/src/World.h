@@ -1509,6 +1509,9 @@ namespace Systems
         float sensibility = 1.0f;
         float sensibilityLook = 0.003f;
 
+        float3 position = float3(0, 1, -2);
+        quaternion rotation = quaternion::identity();
+
         void On() override
         {
             auto& cam = camera.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Camera::mask).Get<Components::Camera>();
@@ -1516,21 +1519,12 @@ namespace Systems
             cam.nearClip = 0.02;
             cam.farClip = 8000.0f;
             auto& trans = camera.Get<Components::Transform>();
-            trans.position = float3(0, 1, -2);
-            trans.rotation = quaternion::identity();
+            trans.position = position;
+            trans.rotation = rotation;
             trans.scale = 1;
             camera.Get<Components::State>().flags |= Components::State::Flags::transient;
 
             World::instance->systems.push_back(this);
-        }
-
-        void On(float3 position, quaternion rotation)
-        {
-            On();
-
-            auto& trans = camera.Get<Components::Transform>();
-            trans.position = position;
-            trans.rotation = rotation;
         }
 
         void Off() override

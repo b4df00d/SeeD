@@ -365,11 +365,9 @@ public:
 		return 0;
 	}
 
-	void On(WindowInformation _window)
+	void On()
 	{
 		ZoneScoped;
-
-		window = _window;
 
 		WNDCLASSEX wc;
 		//DEVMODE dmScreenSettings;
