@@ -1164,6 +1164,154 @@ RenderingWindow renderingWindow;
 
 class MeshStorageWindow : public EditorWindow
 {
+    void DrawASTable(MeshStorage* ms, double toMB)
+    {
+        ImGui::SeparatorText("Acceleration structures");
+
+        struct Row
+        {
+            std::string name;
+            const char* kind;
+            uint primitives;
+            uint scratchBytes;
+            uint scratchEnd;
+            uint resultBytes;
+            uint builds;
+            uint lastFrame;
+            uint meshIndex;
+            bool isOverride;
+        };
+        std::vector<Row> rows;
+        {
+            std::lock_guard<std::mutex> lk(ms->asBuildsLock);
+            rows.reserve(ms->asBuilds.size());
+            for (auto& kv : ms->asBuilds)
+            {
+                auto& b = kv.second;
+                Row r;
+                r.kind = MeshStorage::ASKindName(b.kind);
+                r.primitives = b.primitives;
+                r.scratchBytes = b.scratchBytes;
+                r.scratchEnd = b.scratchEnd;
+                r.resultBytes = b.resultBytes;
+                r.builds = b.builds;
+                r.lastFrame = b.lastFrame;
+                r.meshIndex = b.index;
+                r.isOverride = false;
+                r.name = b.kind == MeshStorage::AS_TLAS ? std::format("view {}", b.index) : std::format("mesh {}", b.index);
+                if (b.kind != MeshStorage::AS_TLAS)
+                {
+                    // a terrain node's BLAS belongs to an override mesh : follow it back to the
+                    // source asset, which is the name that means something to the reader
+                    auto src = ms->overrideSourceByIndex.find(b.index);
+                    if (src != ms->overrideSourceByIndex.end())
+                    {
+                        r.meshIndex = src->second;
+                        r.isOverride = true;
+                    }
+                }
+                rows.push_back(std::move(r));
+            }
+        }
+
+        if (AssetLibrary::instance != nullptr)
+        {
+            std::unordered_map<uint, std::string> namesByStorageIndex;
+            for (auto& kv : AssetLibrary::instance->map)
+            {
+                if (kv.second.type != AssetLibrary::AssetType::mesh || kv.second.storageIndex == ~0u)
+                    continue;
+                const String& path = kv.second.originalFilePath.size() > 0 ? kv.second.originalFilePath : kv.second.path;
+                std::string name = path.c_str();
+                size_t slash = name.find_last_of("/\\");
+                namesByStorageIndex[kv.second.storageIndex] = slash == std::string::npos ? name : name.substr(slash + 1);
+            }
+            for (auto& r : rows)
+            {
+                if (r.kind == MeshStorage::ASKindName(MeshStorage::AS_TLAS))
+                    continue;
+                auto it = namesByStorageIndex.find(r.meshIndex);
+                if (it != namesByStorageIndex.end())
+                    r.name = r.isOverride ? it->second + " (terrain node)" : it->second;
+                else if (r.isOverride)
+                    r.name += " (terrain node)";
+            }
+        }
+
+        if (rows.empty())
+        {
+            ImGui::TextDisabled("No acceleration structure built yet.");
+            return;
+        }
+
+        uint resultTotal = 0, batchEndMax = 0;
+        for (auto& r : rows) { resultTotal += r.resultBytes; batchEndMax = max(batchEndMax, r.scratchEnd); }
+        ImGui::Text("%zu structures | %.2f MB live", rows.size(), resultTotal * toMB);
+        ImGui::Text("largest batch end %.2f MB -> what the %.0f MB reservation must cover",
+            batchEndMax * toMB, ms->maxScratchSizeInBytes * toMB);
+
+        const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY
+            | ImGuiTableFlags_Sortable | ImGuiTableFlags_Resizable | ImGuiTableFlags_HighlightHoveredColumn;
+        if (ImGui::BeginTable("##ASBuilds", 7, flags, ImVec2(0, 220)))
+        {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableSetupColumn("asset", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("kind", ImGuiTableColumnFlags_WidthFixed, 70);
+            ImGui::TableSetupColumn("primitives", ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableSetupColumn("scratch MB", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_PreferSortDescending, 85);
+            ImGui::TableSetupColumn("batch end MB", ImGuiTableColumnFlags_WidthFixed, 95);
+            ImGui::TableSetupColumn("size MB", ImGuiTableColumnFlags_WidthFixed, 75);
+            ImGui::TableSetupColumn("builds", ImGuiTableColumnFlags_WidthFixed, 55);
+            ImGui::TableHeadersRow();
+
+            if (ImGuiTableSortSpecs* sort = ImGui::TableGetSortSpecs())
+            {
+                if (sort->SpecsCount > 0)
+                {
+                    const ImGuiTableColumnSortSpecs& spec = sort->Specs[0];
+                    bool asc = spec.SortDirection == ImGuiSortDirection_Ascending;
+                    std::sort(rows.begin(), rows.end(), [&](const Row& a, const Row& b)
+                        {
+                            int cmp = 0;
+                            switch (spec.ColumnIndex)
+                            {
+                            case 0: cmp = a.name.compare(b.name); break;
+                            case 1: cmp = strcmp(a.kind, b.kind); break;
+                            case 2: cmp = a.primitives < b.primitives ? -1 : (a.primitives > b.primitives ? 1 : 0); break;
+                            case 3: cmp = a.scratchBytes < b.scratchBytes ? -1 : (a.scratchBytes > b.scratchBytes ? 1 : 0); break;
+                            case 4: cmp = a.scratchEnd < b.scratchEnd ? -1 : (a.scratchEnd > b.scratchEnd ? 1 : 0); break;
+                            case 5: cmp = a.resultBytes < b.resultBytes ? -1 : (a.resultBytes > b.resultBytes ? 1 : 0); break;
+                            default: cmp = a.builds < b.builds ? -1 : (a.builds > b.builds ? 1 : 0); break;
+                            }
+                            return asc ? cmp < 0 : cmp > 0;
+                        });
+                }
+            }
+
+            uint frameNumber = GPU::instance != nullptr ? GPU::instance->frameNumber : 0;
+            for (auto& r : rows)
+            {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                // built this frame -> highlighted, so a mesh rebuilding every frame stands out
+                bool rebuiltNow = frameNumber > 0 && r.lastFrame + 2 >= frameNumber;
+                if (rebuiltNow)
+                    ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f), "%s", r.name.c_str());
+                else
+                    ImGui::TextUnformatted(r.name.c_str());
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("last built on frame %u (%u builds)", r.lastFrame, r.builds);
+                ImGui::TableNextColumn(); ImGui::TextUnformatted(r.kind);
+                ImGui::TableNextColumn(); ImGui::Text("%u", r.primitives);
+                ImGui::TableNextColumn(); ImGui::Text("%.3f", r.scratchBytes * toMB);
+                ImGui::TableNextColumn(); ImGui::Text("%.3f", r.scratchEnd * toMB);
+                ImGui::TableNextColumn(); ImGui::Text("%.3f", r.resultBytes * toMB);
+                ImGui::TableNextColumn(); ImGui::Text("%u", r.builds);
+            }
+            ImGui::EndTable();
+        }
+    }
+
 public:
     MeshStorageWindow() : EditorWindow("MeshStorage") {}
     void Update() override final
@@ -1225,6 +1373,18 @@ public:
         ImGui::Separator();
         ImGui::Text("Total %.2f / %.2f MB across %zu meshes",
             totalUsed * toMB, totalCap * toMB, ms->allMeshes.size());
+
+        ImGui::SeparatorText("BLAS scratch");
+        uint scratchPeakFrame = ms->scratchPeakLastFrame.load(std::memory_order_relaxed);
+        uint scratchPeakEver = ms->scratchPeakEver.load(std::memory_order_relaxed);
+        bar("last frame", scratchPeakFrame, ms->maxScratchSizeInBytes, 1);
+        ImGui::Text("session peak %.2f MB (%.1f%% of the %.0f MB reserved)",
+            scratchPeakEver * toMB,
+            ms->maxScratchSizeInBytes > 0 ? 100.0 * scratchPeakEver / ms->maxScratchSizeInBytes : 0.0,
+            ms->maxScratchSizeInBytes * toMB);
+        ImGui::Text("extra batches last frame %u", ms->scratchBatchesLastFrame.load(std::memory_order_relaxed));
+
+        DrawASTable(ms, toMB);
 
         // Visual layout of the vertices buffer: each mesh occupies [vertexOffset, +vertexCount].
         ImGui::SeparatorText("Vertex buffer layout");

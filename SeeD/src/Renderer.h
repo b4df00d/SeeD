@@ -1050,6 +1050,8 @@ public:
 class AccelerationStructure : public Pass
 {
 public:
+    uint tlasSlot = UINT32_MAX; // row this view's TLAS owns in the AS table, claimed on first build
+
     void Setup(View* view) override
     {
         ZoneScoped;
@@ -1098,6 +1100,10 @@ public:
         // Buffer sizes need to be 256-byte-aligned
         uint scratchSizeInBytes = ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
         uint resultSizeInBytes = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        // this build borrows MeshStorage's scratchBLAS at offset 0, like the BLAS ones
+        if (tlasSlot == UINT32_MAX)
+            tlasSlot = MeshStorage::instance->NextTLASSlot();
+        MeshStorage::instance->RecordASBuild(MeshStorage::AS_TLAS, tlasSlot, scratchSizeInBytes, scratchSizeInBytes, resultSizeInBytes, instanceCount);
         // The instance descriptors are stored as-is in GPU memory, so we can deduce
         // the required size from the instance count
         uint descriptorsSizeInBytes = ROUND_UP(sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instanceCount, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
@@ -2198,22 +2204,23 @@ public:
             }
         }
 
-        // Same-frame BLAS rebuild for everything just baked, IN PLACE (stable VA -- see
-        // BuildBLAS's allowInPlaceRebuild): graphics-queue submission order alone (this pass ->
-        // culling -> AccelerationStructure's TLAS build, compute queue, fenced behind culling)
-        // guarantees the TLAS built this frame already reflects the fresh geometry. Shares
-        // MeshStorage's scratchBLAS with that TLAS build (also starting at offset 0) -- safe for
-        // the same reason, the fences serialize them.
+        // Same-frame BLAS rebuild for everything just baked, IN PLACE (stable VA -- see BuildBLAS's
+        // allowInPlaceRebuild). This pass runs on the compute queue, ahead of the TLAS build on that
+        // same queue, so the TLAS built this frame already reflects the fresh geometry -- and sharing
+        // MeshStorage's scratchBLAS with it (both from offset 0) is safe for the same reason. The
+        // raster side gets there through culling, which waits on the last compute pass of the frame.
         if (!justBaked.empty())
         {
             MeshStorage::instance->vertices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             MeshStorage::instance->indices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            // One batch as long as the scratch buffer holds : BuildBLAS splits it into several
+            // GPU-serialized batches by itself when it runs out of room.
             UINT64 scratchOffset = 0;
             for (Mesh* m : justBaked)
             {
-                scratchOffset += MeshStorage::instance->BuildBLAS(*m, 0, m->BLAS, scratchOffset, commandBuffer.Get(), true);
+                MeshStorage::instance->BuildBLAS(*m, 0, m->BLAS, scratchOffset, commandBuffer.Get(), true);
                 if (m->lodCount > 1) // terrain grids are single-LOD today, but stay correct if that changes
-                    scratchOffset += MeshStorage::instance->BuildBLAS(*m, m->lodCount - 1, m->BLASLow, scratchOffset, commandBuffer.Get(), true);
+                    MeshStorage::instance->BuildBLAS(*m, m->lodCount - 1, m->BLASLow, scratchOffset, commandBuffer.Get(), true);
             }
             MeshStorage::instance->vertices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
             MeshStorage::instance->indices.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
@@ -3044,11 +3051,11 @@ public:
         hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr, nullptr);
         structuredCommandBufferUpdate.On(this, GPU::instance->computeQueue, "structuredCommandBufferUpdate", nullptr, nullptr);
         gpuDebugInit.On(this, GPU::instance->graphicQueue, "gpuDebugInit", &hzb.commandBuffer, nullptr);
-        terrain.On(this, GPU::instance->graphicQueue, "terrain", &AssetLibrary::instance->commandBuffer, nullptr);
+        terrain.On(this, GPU::instance->computeQueue, "terrain", &AssetLibrary::instance->commandBuffer, nullptr);
         skinning.On(this, GPU::instance->computeQueue, "skinning", &AssetLibrary::instance->commandBuffer, &structuredCommandBufferUpdate.commandBuffer);
         particles.On(this, GPU::instance->computeQueue, "particles", &AssetLibrary::instance->commandBuffer, nullptr);
         spawning.On(this, GPU::instance->computeQueue, "spawning", &AssetLibrary::instance->commandBuffer, nullptr);
-        culling.On(this, GPU::instance->graphicQueue, "culling", &structuredCommandBufferUpdate.commandBuffer , &hzb.commandBuffer);
+        culling.On(this, GPU::instance->graphicQueue, "culling", &spawning.commandBuffer , &hzb.commandBuffer);
         zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer, nullptr);
         accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &culling.commandBuffer, nullptr);
         atmospehricScattering.On(this, GPU::instance->computeQueue, "atmospehricScattering", &accelerationStructure.commandBuffer, nullptr);
@@ -3926,6 +3933,8 @@ public:
         Resource::ReleaseResources();
         // Recycle pooled upload buffers on the same schedule as the deferred frees above.
         GPU::instance->uploadBufferPool.Recycle(GPU::instance->frameNumber);
+        if (MeshStorage::instance != nullptr)
+            MeshStorage::instance->EndFrameScratchStats();
     }
 
     void ExecuteImmediate(ID3D12GraphicsCommandList* cmd, ID3D12CommandQueue* queue)

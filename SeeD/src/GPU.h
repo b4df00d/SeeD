@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <vector>
 #include <map>
+#include <atomic>
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -3001,7 +3002,117 @@ struct MeshStorage
     std::unordered_map<uint, std::vector<uint>> overrideFreeListBySource;
 
     Resource scratchBLAS;
-    uint maxScratchSizeInBytes = 150 * 1024 * 1024; // TODO : 150 MB of wasted mem for BLAS compute ? a little much na ? but before that add a tmp variable to monitor the max scratch size used in a frame, and use that to set this value
+    uint maxScratchSizeInBytes = 16 * 1024 * 1024;
+
+    std::atomic<uint> scratchPeakThisFrame{ 0 };
+    std::atomic<uint> scratchPeakLastFrame{ 0 };
+    std::atomic<uint> scratchPeakEver{ 0 };
+    std::atomic<uint> scratchBatchesThisFrame{ 0 };
+    std::atomic<uint> scratchBatchesLastFrame{ 0 };
+
+    void TrackScratchUsage(UINT64 endOffset)
+    {
+        uint used = (uint)endOffset;
+        uint prev = scratchPeakThisFrame.load(std::memory_order_relaxed);
+        while (used > prev && !scratchPeakThisFrame.compare_exchange_weak(prev, used, std::memory_order_relaxed)) {}
+        prev = scratchPeakEver.load(std::memory_order_relaxed);
+        while (used > prev && !scratchPeakEver.compare_exchange_weak(prev, used, std::memory_order_relaxed)) {}
+    }
+
+    void EndFrameScratchStats()
+    {
+        scratchPeakLastFrame.store(scratchPeakThisFrame.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
+        scratchBatchesLastFrame.store(scratchBatchesThisFrame.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
+
+        uint peak = scratchPeakEver.load(std::memory_order_relaxed);
+        if (peak > scratchPeakLogged)
+        {
+            scratchPeakLogged = peak;
+            IOs::Log("BLAS scratch peak {:.2f} MB / {:.2f} MB reserved", peak / (1024.0 * 1024.0), maxScratchSizeInBytes / (1024.0 * 1024.0));
+        }
+    }
+    uint scratchPeakLogged = 0; // renderer thread only
+    std::atomic<uint> scratchOverflowLogged{ 0 };
+
+    void CheckScratch(UINT64 endOffset, const char* what)
+    {
+        TrackScratchUsage(endOffset);
+
+        if (endOffset <= (UINT64)maxScratchSizeInBytes)
+            return;
+
+        uint needed = (uint)endOffset;
+        uint prev = scratchOverflowLogged.load(std::memory_order_relaxed);
+        bool worstSoFar = false;
+        while (needed > prev)
+        {
+            if (scratchOverflowLogged.compare_exchange_weak(prev, needed, std::memory_order_relaxed))
+            {
+                worstSoFar = true;
+                break;
+            }
+        }
+        if (worstSoFar)
+        {
+            const double toMB = 1.0 / (1024.0 * 1024.0);
+            uint suggestedMB = (uint)(((needed + (16u * 1024 * 1024) - 1) / (16u * 1024 * 1024)) * 16);
+            IOs::Log("RAYTRACING SCRATCH TOO SMALL : this project needs {:.1f} MB to build its {}, but only {:.1f} MB is reserved."
+                     " The build runs anyway and writes past the scratch buffer : expect corrupted geometry then a GPU crash."
+                     " FIX : set MeshStorage::maxScratchSizeInBytes in SeeD/src/GPU.h to {} MB and restart.",
+                     needed * toMB, what, maxScratchSizeInBytes * toMB, suggestedMB);
+        }
+        seedAssert(false);
+    }
+
+    enum ASKind : uint { AS_BLAS = 0, AS_BLASLow, AS_OMMArray, AS_TLAS, AS_KindCount };
+    static const char* ASKindName(uint kind)
+    {
+        switch (kind)
+        {
+        case AS_BLAS:     return "BLAS";
+        case AS_BLASLow:  return "BLAS low";
+        case AS_OMMArray: return "OMM array";
+        case AS_TLAS:     return "TLAS";
+        default:          return "?";
+        }
+    }
+    struct ASBuild
+    {
+        uint kind;
+        uint index;         // mesh storage index, or the view slot for a TLAS
+        uint scratchBytes;  // what this build alone asks of scratchBLAS
+        uint scratchEnd;    // where it lands in the shared buffer : batched builds stack, and the
+                            // largest value here across all rows IS what maxScratchSizeInBytes must cover
+        uint resultBytes;   // the acceleration structure itself
+        uint primitives;    // triangles for a BLAS, micromaps for an OMM array, instances for a TLAS
+        uint builds;
+        uint lastFrame;
+    };
+    std::unordered_map<uint64_t, ASBuild> asBuilds; // keyed by kind|index, rebuilds update in place
+    std::mutex asBuildsLock;
+    std::atomic<uint> nextTLASSlot{ 0 };
+    // override mesh index -> the source mesh it was cloned from, so the table can name terrain nodes
+    // after the asset they displace instead of leaving them as anonymous storage indices.
+    std::unordered_map<uint, uint> overrideSourceByIndex;
+
+    uint NextTLASSlot() { return nextTLASSlot.fetch_add(1, std::memory_order_relaxed); }
+
+    void RecordASBuild(uint kind, uint index, UINT64 scratchEnd, UINT64 scratchBytes, UINT64 resultBytes, uint primitives)
+    {
+        CheckScratch(scratchEnd, ASKindName(kind));
+
+        uint64_t key = ((uint64_t)kind << 32) | index;
+        std::lock_guard<std::mutex> lk(asBuildsLock);
+        ASBuild& row = asBuilds[key];
+        row.kind = kind;
+        row.index = index;
+        row.scratchBytes = (uint)scratchBytes;
+        row.scratchEnd = (uint)scratchEnd;
+        row.resultBytes = (uint)resultBytes;
+        row.primitives = primitives;
+        row.builds++;
+        row.lastFrame = GPU::instance->frameNumber;
+    }
 
     std::recursive_mutex lock;
 
@@ -3278,9 +3389,10 @@ struct MeshStorage
             commandBuffer.cmd->ResourceBarrier(1, &uavBarrier);
         }
 
-        UINT64 scratchUsed = BuildBLAS(mesh, 0, mesh.BLAS, 0, commandBuffer);
+        UINT64 scratchOffset = 0;
+        BuildBLAS(mesh, 0, mesh.BLAS, scratchOffset, commandBuffer);
         if (mesh.lodCount > 1)
-            BuildBLAS(mesh, mesh.lodCount - 1, mesh.BLASLow, scratchUsed, commandBuffer);
+            BuildBLAS(mesh, mesh.lodCount - 1, mesh.BLASLow, scratchOffset, commandBuffer);
 
         D3D12_RESOURCE_BARRIER scratchBarrier;
         scratchBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -3331,9 +3443,11 @@ struct MeshStorage
         {
             IOs::Log("Raytracing OMM array Creation Error");
         }
-        seedAssert(info.ScratchDataSizeInBytes < maxScratchSizeInBytes);
+        UINT64 ommScratchSize = ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        UINT64 ommResultSize = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+        RecordASBuild(AS_OMMArray, mesh.storageIndex, ommScratchSize, ommScratchSize, ommResultSize, (uint)ommData.descs.size());
 
-        mesh.omm.array.CreateAccelerationStructure((uint)ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT), "OMMArray");
+        mesh.omm.array.CreateAccelerationStructure((uint)ommResultSize, "OMMArray");
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc;
         buildDesc.Inputs = inputsDesc;
@@ -3346,7 +3460,7 @@ struct MeshStorage
         inputs.Release(true);
     }
 
-    UINT64 BuildBLAS(Mesh& mesh, uint lodIndex, Resource& blas, UINT64 scratchOffset, CommandBuffer& commandBuffer, bool allowInPlaceRebuild = false)
+    void BuildBLAS(Mesh& mesh, uint lodIndex, Resource& blas, UINT64& scratchOffset, CommandBuffer& commandBuffer, bool allowInPlaceRebuild = false)
     {
         seedAssert(mesh.LODs[lodIndex].indexCount > 0);
 
@@ -3403,11 +3517,25 @@ struct MeshStorage
         {
             IOs::Log("Raytracing BLAS Creation Error");
         }
-        seedAssert(scratchOffset + info.ScratchDataSizeInBytes < maxScratchSizeInBytes);
-
         // Buffer sizes need to be 256-byte-aligned
         UINT64 scratchSizeInBytes = ROUND_UP(info.ScratchDataSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
         UINT64 resultSizeInBytes = ROUND_UP(info.ResultDataMaxSizeInBytes, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT);
+
+        if (scratchOffset != 0 && scratchOffset + scratchSizeInBytes > (UINT64)maxScratchSizeInBytes)
+        {
+            D3D12_RESOURCE_BARRIER scratchBarrier;
+            scratchBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            scratchBarrier.UAV.pResource = scratchBLAS.GetResource();
+            scratchBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            commandBuffer.cmd->ResourceBarrier(1, &scratchBarrier);
+
+            scratchOffset = 0;
+            scratchBatchesThisFrame.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        RecordASBuild(lodIndex == 0 ? AS_BLAS : AS_BLASLow, mesh.storageIndex,
+                      scratchOffset + scratchSizeInBytes, scratchSizeInBytes, resultSizeInBytes,
+                      mesh.LODs[lodIndex].indexCount / 3);
 
         if (!(allowInPlaceRebuild && blas.GetResource() != nullptr))
             blas.CreateAccelerationStructure((uint)resultSizeInBytes, lodIndex == 0 ? "BLAS" : "BLASLow");
@@ -3430,7 +3558,7 @@ struct MeshStorage
         uavBarrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
         commandBuffer.cmd->ResourceBarrier(1, &uavBarrier);
 
-        return scratchSizeInBytes;
+        scratchOffset += scratchSizeInBytes;
     }
 
     // aabbMin/aabbExtent are the override's own encode domain for its SNORM16 positions -- callers
@@ -3463,6 +3591,8 @@ struct MeshStorage
             nextVertexOffset += source.vertexCount;
             EnsureBufferCapacity(vertices, verticesAllocatedCount, nextVertexOffset, sizeof(VertexPacked), "vertices", commandBuffer);
         }
+
+        overrideSourceByIndex[overrideIndex] = source.storageIndex;
 
         Mesh& ov = allMeshes[overrideIndex];
         (HLSL::Mesh&)ov = (HLSL::Mesh&)source; // copy of original buffers indices/offsets
