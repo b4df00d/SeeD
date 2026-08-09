@@ -233,9 +233,10 @@ namespace Components
         enum class Flags : uint
         {
             loaded = 1 << 0,
-            dirty = 1 << 1,
+            instanceDirty = 1 << 1,
             BLAS = 1 << 2,
-            transient = 1 << 3
+            transient = 1 << 3,
+            physicsDirty = 1 << 4
         };
         BitFlags<Flags> flags;
     };

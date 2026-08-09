@@ -48,6 +48,26 @@ PS_OUTPUT PixelMain(VS_OUTPUT inVerts)
     return o;
 }
 
+#pragma debug DebugCPU CPUVertexMain PixelMain
+
+[RootSignature(SeeDRootSignature)]
+VS_OUTPUT CPUVertexMain(in uint vertexID : SV_VertexID, in uint instanceID : SV_InstanceID)
+{
+    VS_OUTPUT o;
+
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    HLSL::Camera camera = cameras[viewContext.cameraIndex];
+
+    StructuredBuffer<HLSL::DebugVertex> debugVertices = ResourceDescriptorHeap[editorContext.cpuDebugVerticesHeapIndex];
+    HLSL::DebugVertex vertex = debugVertices[vertexID];
+
+    float4 worldPos = float4(vertex.pos.xyz, 1);
+    o.pos = mul(camera.viewProj, worldPos);
+    o.color = float4(vertex.color, 0);
+
+    return o;
+}
+
 #pragma compute DebugInit DebugInit
 
 [RootSignature(SeeDRootSignature)]

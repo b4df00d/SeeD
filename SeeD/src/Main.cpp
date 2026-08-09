@@ -150,6 +150,34 @@
 // 
 // [ ] 27. do a smater system to check cpu and gpu struct sizes and alignments. (structs.h)
 //
+// [ ] 28. PSO render target formats are guessed from PS reflection and do not match the textures
+//         they are bound to. ShaderLoader fills shader.outputs from the PS output signature
+//         (Loading.h ~2860), so a "float4 : SV_Target0" always becomes R32G32B32A32_FLOAT. The
+//         shaders already declare the real format in the comment after the semantic, but the
+//         parser meant to read it is commented out (Loading.h ~3094), so the comment is currently
+//         decoration. Every graphics PSO branch (gBuffer/forward/debug) then copies the guessed
+//         formats into RTFormats. Current mismatches:
+//         - mesh.hlsl: 5 of 6 slots wrong (albedo/specularAlbedo R32G32B32A32_FLOAT vs
+//           R8G8B8A8_UNORM, normal vs R16G16B16A16_FLOAT, metalness R32_FLOAT vs R8_UNORM,
+//           motion R32G32_FLOAT vs R16G16_FLOAT). Only instanceID (uint -> R32_UINT) matches.
+//         - terrainmesh.hlsl: same shape.
+//         - debug.hlsl: R32G32B32A32_FLOAT vs 'lighted' R16G16B16A16_FLOAT.
+//         D3D12 only validates this on an EXECUTED draw (ERROR #613
+//         RENDER_TARGET_FORMAT_MISMATCH_PIPELINE_STATE), not at PSO creation or
+//         OMSetRenderTargets -- and the gBuffer draws via ExecuteIndirect, which does nothing when
+//         the GPU-side count is 0. That is why this has stayed hidden: it only fires once
+//         something actually draws, and only under the debug layer. In Release it is undefined
+//         behaviour that drivers tend to absorb silently.
+//         Fix: finish the SV_Target comment parser and feed it into shader.outputs so the
+//         declared format wins over the reflected one; the comments already name the right
+//         formats everywhere except debug.hlsl (needs R16G16B16A16_FLOAT for 'lighted').
+//         Then assert at pass setup that each bound RT's format equals the PSO's slot format,
+//         so the next mismatch is caught at bind time instead of on the first draw.
+//         Related: resources bound as RTs must be created with CreateRenderTarget, not
+//         CreateTexture -- 'lighted' was CreateTexture (SRV+UAV only), so its RTV handle was null
+//         and OMSetRenderTargets died with INVALID_DESCRIPTOR_HANDLE (#646). Fixed for 'lighted';
+//         the same trap applies to anything else that later becomes a render target.
+//
 // ============================================================================
 
 #define WIN32_LEAN_AND_MEAN
@@ -231,6 +259,7 @@ struct Options
     bool shaderReload = false;
 #endif
     bool shaderStatsCsv = true;
+    bool drawPhysicsShapes = false;
     bool frontToBackSort = true;
     float sortMaxDistance = 512.0f;
     float lodDistanceMultiplier = 0.25f;
@@ -276,23 +305,11 @@ struct Options
 bool GetMainViewCamera(HLSL::Camera& camera);
 
 #include "World.h"
-struct EditorState
-{
-    bool show = true;
-    World::Entity selectedObject = entityInvalid;
-    bool dirtyHierarchy = true;
-
-    String currentWorldPath;
-
-    float4x4 cameraView;
-    float4x4 cameraProj;
-};
-EditorState editorState;
-
+#include "UI.h"
 #include "Loading.h"
 #include "Terrain.h"   // terrain components + systems: after Loading.h (MeshLoader/AssetLibrary),
+#include "Physic.h"    // Jolt + the physics components; needs ComponentBase/Handle from World.h only
 #include "Renderer.h"  // before Renderer.h, which queries Components::Terrain
-#include "UI.h"
 #include "Engine.h"
 #include "Project.h"
 #include "Editor.h"

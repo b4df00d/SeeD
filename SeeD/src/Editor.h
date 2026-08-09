@@ -1175,6 +1175,8 @@ public:
             ImGui::SetItemTooltip("Reload shaders from disk when they change.");
             ImGui::Checkbox("enableStructuredCommandBuffersReadback", &options.enableStructuredCommandBuffersReadback);
             ImGui::SetItemTooltip("Read back structured command buffers from the GPU for inspection.");
+            ImGui::Checkbox("drawPhysicsShapes", &options.drawPhysicsShapes);
+            ImGui::SetItemTooltip("Wireframe every physics collider, coloured by motion type (static / kinematic / dynamic).\nThe SELECTED entity's collider is drawn even when this is off.");
         }
 
         if (ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen))
@@ -2387,6 +2389,10 @@ public:
                     }
                     if (isopen)
                     {
+                        uint editStride = Components::strides[Components::MaskToBucket(metaData.mask)];
+                        static std::vector<char> editSnapshot;
+                        editSnapshot.assign(cmpData, cmpData + editStride);
+
                         if (metaData.PropertyDraw != nullptr)
                         {
                             metaData.PropertyDraw(cmpData);
@@ -2395,6 +2401,14 @@ public:
                         {
                             DefaultPropertyDraw(metaData.mask, cmpData);
                         }
+
+                        if (memcmp(editSnapshot.data(), cmpData, editStride) != 0)
+                        {
+                            auto& state = editorState.selectedObject.Get<Components::State>();
+                            state.flags |= Components::State::Flags::instanceDirty;
+                            state.flags |= Components::State::Flags::physicsDirty;
+                        }
+
                         ImGui::PopID();
                     }
                 }
@@ -2405,7 +2419,23 @@ public:
             ImGui::SameLine();
             if (ImGui::Button("add"))
             {
-                editorState.selectedObject.Add(knownComponents[componentAddIndex].mask);
+                auto& addInfo = knownComponents[componentAddIndex];
+                editorState.selectedObject.Add(addInfo.mask);
+
+                // TODO : 18 (default values in the component metadata).
+                uint addBucket = Components::MaskToBucket(addInfo.mask);
+                char* addData = editorState.selectedObject.Get(addBucket);
+                memset(addData, 0, Components::strides[addBucket]);
+                for (uint m = 0; m < (uint)addInfo.members.size(); m++)
+                {
+                    auto& member = addInfo.members[m];
+                    if (member.dataType != PropertyTypes::_Handle)
+                        continue;
+                    int elementStride = (member.dataCount > 0) ? (member.size / member.dataCount) : member.size;
+                    for (int dc = 0; dc < member.dataCount; dc++)
+                        *(EntityBase*)(addData + member.offset + dc * elementStride) = entityInvalid;
+                }
+
                 editorState.dirtyHierarchy = true;
             }
         }
@@ -2465,7 +2495,7 @@ public:
         t.version++;
 
         auto& state = ent.Get<Components::State>();
-        state.flags |= Components::State::Flags::dirty;
+        state.flags |= Components::State::Flags::instanceDirty;
     }
 
     void EditTransform(const float4x4& cameraView, const float4x4& cameraProj, World::Entity selectedObject)

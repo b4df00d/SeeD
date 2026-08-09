@@ -163,8 +163,8 @@ public:
         style.Colors[ImGuiCol_Button] = ImVec4(0.11764706f, 0.13333334f, 0.14901961f, 1.0f);
         style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.18039216f, 0.1882353f, 0.19607843f, 1.0f);
         style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.15294118f, 0.15294118f, 0.15294118f, 1.0f);
-        style.Colors[ImGuiCol_Header] = ImVec4(0.14117648f, 0.16470589f, 0.20784314f, 1.0f);
-        style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.105882354f, 0.105882354f, 0.105882354f, 1.0f);
+        style.Colors[ImGuiCol_Header] = ImVec4(0.972549f * 0.75f, 1.0f * 0.75f, 0.49803922f * 0.75f, 1.0f);
+        style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.972549f * 0.85f, 1.0f * 0.85f, 0.49803922f * 0.85f, 1.0f);
         style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.078431375f, 0.08627451f, 0.101960786f, 1.0f);
         style.Colors[ImGuiCol_Separator] = ImVec4(0.12941177f, 0.14901961f, 0.19215687f, 1.0f);
         style.Colors[ImGuiCol_SeparatorHovered] = ImVec4(0.15686275f, 0.18431373f, 0.2509804f, 1.0f);
@@ -457,6 +457,7 @@ struct EditorContext
     StructuredBuffer<HLSL::IndirectCommand> indirectDebugBuffer;
     StructuredBuffer<HLSL::DebugVertex> indirectDebugVertices;
     StructuredBuffer<uint> indirectDebugVerticesCount; // draw count, vertex index count
+    StructuredUploadBuffer<PhysicsDebugVertex> cpuDebugVertices;
 
     StructuredBuffer<HLSL::SelectionResult> selectionResult;
 
@@ -474,6 +475,7 @@ struct EditorContext
         indirectDebugBuffer.Release();
         indirectDebugVertices.Release();
         indirectDebugVerticesCount.Release();
+        cpuDebugVertices.Release();
 
         selectionResult.Release();
     }
@@ -709,6 +711,8 @@ public:
         editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
         editorContextParams.debugVerticesHeapIndex = editorContext.indirectDebugVertices.GetResource().uav.offset;
         editorContextParams.debugVerticesCountHeapIndex = editorContext.indirectDebugVerticesCount.GetResource().uav.offset;
+        editorContextParams.cpuDebugVerticesHeapIndex = editorContext.cpuDebugVertices.GetResource().GetResource() != nullptr
+            ? editorContext.cpuDebugVertices.GetResource().srv.offset : 0;
         editorContextParams.selectionResultIndex = editorContext.selectionResult.GetResource().uav.offset;
 
         return editorContextParams;
@@ -1636,7 +1640,7 @@ public:
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
         lighted.Register("lighted", view);
-        lighted.Get().CreateTexture(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, false, "lighted");
+        lighted.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "lighted");
         specularHitDistance.Register("specularHitDistance", view);
         specularHitDistance.Get().CreateTexture(view->renderResolution, DXGI_FORMAT_R16_FLOAT, false, "specularHitDistance");
         albedo.Register("albedo", view);
@@ -1761,6 +1765,7 @@ class GPUDebug : public Pass
     ViewResource depth;
     ViewResource overdraw;
     Components::Handle<Components::Shader> indirectDebugShader;
+    Components::Handle<Components::Shader> cpuDebugShader;
     Components::Handle<Components::Shader> selectionShader;
     Components::Handle<Components::Shader> debugBuffersShader;
 
@@ -1773,6 +1778,7 @@ public:
         depth.Register("depth", view);
         overdraw.Register("overdraw", view);
         indirectDebugShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debug.hlsl|Debug");
+        cpuDebugShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debug.hlsl|DebugCPU");
         selectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\selection.hlsl|Selection");
         debugBuffersShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\debugBuffers.hlsl|Lighting");
     }
@@ -1854,6 +1860,24 @@ public:
 
                 lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
+        }
+
+        uint cpuDebugVertexCount = view->editorContext.cpuDebugVertices.Size();
+        if (cpuDebugVertexCount > 0 && view->editorContext.cpuDebugVertices.GetResource().GetResource() != nullptr)
+        {
+            Resource rts[] = { lighted.Get() };
+            SetupView(view, rts, ARRAYSIZE(rts), false, &depth.Get(), false, false);
+
+            lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RENDER_TARGET);
+
+            Shader& cpuDebug = *AssetLibrary::instance->Get<Shader>(cpuDebugShader.Get().id, true);
+            commandBuffer->SetGraphic(cpuDebug);
+            commandBuffer->cmd->SetGraphicsRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetGraphicsRootConstantBufferView(EditorContextRegister, editorContextAddress);
+            commandBuffer->cmd->DrawInstanced(cpuDebugVertexCount, 1, 0, 0);
+
+            lighted.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
         Close();
@@ -3248,7 +3272,7 @@ public:
 
                     Components::State& state = slot.Get<Components::State>();
                     bool loaded = state.flags & Components::State::Flags::loaded;
-                    bool dirty = state.flags & Components::State::Flags::dirty;
+                    bool dirty = state.flags & Components::State::Flags::instanceDirty;
 
                     // Catches the case dirty can't: this instance itself wasn't touched, but an
                     // ancestor's Transform was (e.g. moving a parent in the editor) -- see
@@ -3351,12 +3375,13 @@ public:
                         viewWorld.shaderBucketRegistry.AddInstanceContribution(ent, shaderCmp.id, effectiveMesh->LODs[0].meshletCount);
                     }
 
-                    // dirty is consumed exactly here (this is its only reader): clear it so an
-                    // instance edited once (gizmo, terrain node pool reuse) is re-uploaded once,
+                    // instanceDirty is consumed exactly here (this is its only reader): clear it so
+                    // an instance edited once (gizmo, terrain node pool reuse) is re-uploaded once,
                     // not every frame forever. Cleared only when actually processed -- the
                     // early-continues above (mesh/material/shader not ready) keep the flag so the
-                    // pending change isn't lost.
-                    state.flags.Unset(Components::State::Flags::dirty);
+                    // pending change isn't lost. Physics has its own bit (State::Flags) precisely
+                    // so it doesn't have to share this one's lifetime.
+                    state.flags.Unset(Components::State::Flags::instanceDirty);
 
                     // count instances with shader
                     instanceCount++;
@@ -3797,6 +3822,16 @@ public:
                 this->viewContext.meshletsToCull.Resize(totalMeshlets);
                 this->viewContext.meshletsCounter.Resize((uint)this->viewWorld.shaderBuckets.size());
                 this->raytracingContext.instancesRayTracing.Resize(this->viewWorld.instances.Size());
+
+                // TODO : when physics will be a system, we can do a world.GetSystem<Physics>()->GetDebugLines() instead of accessing the singleton
+                this->editorContext.cpuDebugVertices.Clear();
+                if (Physics::instance != nullptr && Physics::instance->debugRenderer != nullptr
+                    && !Physics::instance->debugRenderer->lines.empty())
+                {
+                    auto& lines = Physics::instance->debugRenderer->lines;
+                    this->editorContext.cpuDebugVertices.AddRange(lines.data(), (uint)lines.size());
+                }
+                this->editorContext.cpuDebugVertices.Upload();
 
                 this->viewWorld.commonResourcesIndices = SetupCommonResourcesParams();
                 this->viewContext.viewContext = SetupViewContextParams();

@@ -625,6 +625,7 @@ namespace HLSL
         uint debugBufferHeapIndex;
         uint debugVerticesHeapIndex;
         uint debugVerticesCountHeapIndex;
+        uint cpuDebugVerticesHeapIndex; // CPU-authored lines (physics colliders), drawn directly
         uint selectionResultIndex;
     };
     

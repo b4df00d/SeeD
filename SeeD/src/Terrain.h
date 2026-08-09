@@ -482,7 +482,7 @@ namespace Systems
                             tr.position = position;
                             tr.version++;
                             inst.boundingSphereOverride = boundingSphere;
-                            ent.Get<Components::State>().flags |= Components::State::Flags::dirty;
+                            ent.Get<Components::State>().flags |= Components::State::Flags::instanceDirty;
                             churn.reusedRewritten++;
 
                             // scaleXZ is baked into the override's own AABB/vertex positions (see
@@ -517,10 +517,10 @@ namespace Systems
                                 // A (re)attach that just succeeded needs UpdateInstances (Renderer.h)
                                 // to re-upload this instance -- it currently points at the
                                 // fallback source mesh, and won't be revisited otherwise (its
-                                // "loaded && !dirty" skip only reacts to Components::State::dirty,
+                                // "loaded && !dirty" skip only reacts to State::Flags::instanceDirty,
                                 // separate from MeshOverride::dirty above).
                                 if (ov.overrideMeshIndex != ~0u)
-                                    ent.Get<Components::State>().flags |= Components::State::Flags::dirty;
+                                    ent.Get<Components::State>().flags |= Components::State::Flags::instanceDirty;
                             }
                         }
 

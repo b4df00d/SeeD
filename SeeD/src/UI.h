@@ -4,7 +4,18 @@
 // knownComponents) and the metadata generator (GenerateComponentMetaData) now live in
 // ComponentMetaTypes.h, included from World.h. Only the call sites remain in this file.
 
-#include "UIHelpers.h"
+struct EditorState
+{
+    bool show = true;
+    World::Entity selectedObject = entityInvalid;
+    bool dirtyHierarchy = true;
+
+    String currentWorldPath;
+
+    float4x4 cameraView;
+    float4x4 cameraProj;
+};
+EditorState editorState;
 
 class EditorWindow
 {

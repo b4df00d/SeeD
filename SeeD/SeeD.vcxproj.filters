@@ -101,6 +101,9 @@
     <ClInclude Include="src\Engine.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\Physic.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Main.cpp">

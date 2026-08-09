@@ -148,6 +148,14 @@ public:
         f << "dlssPreset " << (int)dlss.dlssPreset << "\n";
         f << "dlssdPreset " << (int)dlss.dlssdPreset << "\n";
 
+        World::Entity& cam = enginePtr->player.camera;
+        if (cam.IsValid() && cam.Has<Components::Transform>())
+        {
+            auto& trans = cam.Get<Components::Transform>();
+            store(trans.position, cameraPos);
+            for (uint i = 0; i < 4; i++) cameraRot[i] = trans.rotation.f32[i];
+            hasCamera = true;
+        }
         f << "camera " << cameraPos[0] << " " << cameraPos[1] << " " << cameraPos[2]
           << " " << cameraRot[0] << " " << cameraRot[1] << " " << cameraRot[2] << " " << cameraRot[3] << "\n";
 

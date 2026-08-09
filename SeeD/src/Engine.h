@@ -20,6 +20,7 @@ public:
     Systems::Player player;
     Systems::PrefabStreaming prefabStreaming;
     Systems::TerrainStreaming terrainStreaming;
+    Physics physics;
 
     void On()
     {
@@ -41,6 +42,7 @@ public:
         player.On();
         prefabStreaming.On();
         terrainStreaming.On();
+        physics.On();
     }
 
     void Loop()
@@ -62,9 +64,11 @@ public:
             TASKWITHSUBFLOW(ScheduleWorld);
             TASKWITHSUBFLOW(ScheduleEditor);
             TASKWITHSUBFLOW(ScheduleRenderer);
+            TASK_(PhysicsStep, physics.Step);
 
             UpdateWindow.precede(ScheduleInputs);
             ScheduleInputs.precede(ScheduleWorld);
+            PhysicsStep.succeed(ScheduleWorld);
             ScheduleWorld.succeed(ScheduleLoading);
             ScheduleWorld.precede(ScheduleEditor);
             ScheduleRenderer.succeed(ScheduleEditor, ScheduleLoading);
@@ -89,6 +93,7 @@ public:
         gpu.FrameStart();
         renderer.WaitFrame(); // wait current frame
 
+        physics.Off();
         player.Off();
         prefabStreaming.Off();
         terrainStreaming.Off();
@@ -144,8 +149,10 @@ public:
         tf::Task prefabTask = subflow.emplace([this]() { prefabStreaming.Update(&world); }).name("PrefabStreaming");
         tf::Task terrainTask = subflow.emplace([this]() { terrainStreaming.Update(&world); }).name("TerrainStreaming");
         tf::Task deferredReleaseTask = subflow.emplace([this]() { world.DeferredRelease(); }).name("DeferredRelease"); // thread this ?
+        tf::Task physicsSyncTask = subflow.emplace([this]() { physics.SyncAndReadback(&world); }).name("PhysicsSyncReadback");
         prefabTask.precede(terrainTask);
-        terrainTask.precede(deferredReleaseTask);
+        terrainTask.precede(physicsSyncTask);
+        physicsSyncTask.precede(deferredReleaseTask);
 
         world.Schedule(subflow, deferredReleaseTask);
     }
