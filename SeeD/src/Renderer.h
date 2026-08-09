@@ -1201,6 +1201,14 @@ public:
     {
         ZoneScoped;
         Open();
+
+        // Resolving the timestamps has to happen in the FIRST pass of the frame, not the last. This
+        // pass is submission slot 0 and waits on the previous frame's last pass, so the readback here
+        // sees a whole finished frame. Done in the last pass instead, that pass' own end timestamp
+        // would not exist yet and its zone would be read one frame stale -- which put the editor,
+        // last on the queue, at the far LEFT of the timeline, looking like it ran first.
+        Profiler::instance->EndProfilerFrame(commandBuffer.Get());
+
         if (options.stopFrustumUpdate)
         {
             Close();
@@ -3057,9 +3065,9 @@ public:
         spawning.On(this, GPU::instance->computeQueue, "spawning", &AssetLibrary::instance->commandBuffer, nullptr);
         culling.On(this, GPU::instance->graphicQueue, "culling", &spawning.commandBuffer , &hzb.commandBuffer);
         zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer, nullptr);
+        gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
         accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &culling.commandBuffer, nullptr);
         atmospehricScattering.On(this, GPU::instance->computeQueue, "atmospehricScattering", &accelerationStructure.commandBuffer, nullptr);
-        gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
         lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &gBuffers.commandBuffer, &accelerationStructure.commandBuffer);
         lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers.commandBuffer, &lightingProbes.commandBuffer);
         forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer, &atmospehricScattering.commandBuffer);
@@ -3803,7 +3811,6 @@ public:
 
         GPU::instance->backBuffer->Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
 
-        Profiler::instance->EndProfilerFrame(commandBuffer.Get());
         Close();
     }
 };

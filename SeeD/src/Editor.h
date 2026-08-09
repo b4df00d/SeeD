@@ -1,6 +1,171 @@
 
 class ProfilerWindow : public EditorWindow
 {
+    enum Stat { Stat_Cur = 0, Stat_Avg, Stat_Min, Stat_Max };
+    int statMode = Stat_Avg;
+
+    struct Bar
+    {
+        const char* name;
+        double start, length;
+        double cur, mn, avg, mx;
+    };
+
+    double GatherBars(std::vector<Bar>* lanes)
+    {
+        double span = 0.0;
+        for (uint q = 0; q < ARRAYSIZE(Profiler::instance->queueProfile); q++)
+        {
+            for (Profiler::ProfileData& profile : Profiler::instance->queueProfile[q].entries)
+            {
+                if (profile.name == nullptr || profile.name[0] == '\0')
+                    continue;
+
+                // CurrSample is where the NEXT frame will write, so the last one is just behind it
+                UINT64 last = (profile.CurrSample + Profiler::ProfileData::FilterSize - 1) % Profiler::ProfileData::FilterSize;
+
+                Bar bar = { profile.name, 0.0, 0.0, profile.TimeSamples[last], 0.0, 0.0, 0.0 };
+                double startSum = 0.0;
+                uint samples = 0;
+                for (uint s = 0; s < Profiler::ProfileData::FilterSize; s++)
+                {
+                    double t = profile.TimeSamples[s];
+                    if (t <= 0.0)
+                        continue;
+                    if (samples == 0) { bar.mn = t; bar.mx = t; }
+                    else { bar.mn = min(bar.mn, t); bar.mx = max(bar.mx, t); }
+                    bar.avg += t;
+                    startSum += profile.StartSamples[s];
+                    samples++;
+                }
+                if (samples == 0)
+                    continue;
+
+                bar.avg /= samples;
+                if (statMode == Stat_Cur)
+                {
+                    if (bar.cur <= 0.0) // did not run last frame : no zone to show
+                        continue;
+                    bar.start = profile.StartSamples[last];
+                    bar.length = bar.cur;
+                }
+                else
+                {
+                    bar.start = startSum / samples;
+                    bar.length = statMode == Stat_Min ? bar.mn : (statMode == Stat_Max ? bar.mx : bar.avg);
+                }
+
+                span = max(span, bar.start + bar.length);
+                lanes[q].push_back(bar);
+            }
+        }
+        return span;
+    }
+
+    void DrawLanes(std::vector<Bar>* lanes, double span)
+    {
+        if (span <= 0.0)
+        {
+            ImGui::TextDisabled("No GPU timings yet.");
+            return;
+        }
+
+        const char* queueNames[Profiler::PerQueueData::queueCount] = { "Graphic", "Compute", "Copy" };
+        const float labelWidth = 62.0f;
+        const float laneHeight = 20.0f;
+        const float lanePadding = 3.0f;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        for (uint q = 0; q < Profiler::PerQueueData::queueCount; q++)
+        {
+            double queueTotal = 0.0;
+            for (const Bar& bar : lanes[q])
+                queueTotal += bar.length;
+
+            ImVec2 origin = ImGui::GetCursorScreenPos();
+            float width = max(ImGui::GetContentRegionAvail().x - labelWidth, 1.0f);
+            ImVec2 trackMin = ImVec2(origin.x + labelWidth, origin.y);
+            ImVec2 trackMax = ImVec2(trackMin.x + width, origin.y + laneHeight);
+
+            dl->AddText(ImVec2(origin.x, origin.y + 3.0f), IM_COL32(180, 180, 180, 255), queueNames[q]);
+            dl->AddRectFilled(trackMin, trackMax, IM_COL32(32, 32, 32, 255));
+
+            for (const Bar& bar : lanes[q])
+            {
+                float x0 = trackMin.x + width * (float)(bar.start / span);
+                float x1 = trackMin.x + width * (float)((bar.start + bar.length) / span);
+                x1 = max(x1, x0 + 1.0f); // a zone shorter than a pixel still has to be visible
+                ImVec2 barMin = ImVec2(x0, trackMin.y + 1.0f);
+                ImVec2 barMax = ImVec2(x1, trackMax.y - 1.0f);
+
+                float hue = (float)((uintptr_t)bar.name * 2654435761u % 1000) / 1000.0f;
+                dl->AddRectFilled(barMin, barMax, (ImU32)ImColor::HSV(hue, 0.55f, 0.8f));
+
+                char label[128];
+                snprintf(label, sizeof(label), "%s  %.3f", bar.name, bar.length);
+                float textRoom = x1 - x0 - 6.0f;
+                const char* text = nullptr;
+                if (ImGui::CalcTextSize(label).x <= textRoom)
+                    text = label;
+                else if (ImGui::CalcTextSize(bar.name).x <= textRoom)
+                    text = bar.name;
+                if (text != nullptr)
+                {
+                    dl->PushClipRect(barMin, barMax, true);
+                    dl->AddText(ImVec2(x0 + 3.0f, trackMin.y + 3.0f), IM_COL32(16, 16, 16, 255), text);
+                    dl->PopClipRect();
+                }
+
+                if (ImGui::IsMouseHoveringRect(barMin, barMax))
+                {
+                    ImGui::SetTooltip("%s (%s)\ncur %.3f ms | avg %.3f ms | min %.3f ms | max %.3f ms\nstart %.3f ms | end %.3f ms",
+                        bar.name, queueNames[q], bar.cur, bar.avg, bar.mn, bar.mx, bar.start, bar.start + bar.length);
+                    dl->AddRect(barMin, barMax, IM_COL32(255, 255, 255, 255));
+                }
+            }
+
+            dl->AddRect(trackMin, trackMax, IM_COL32(90, 90, 90, 255));
+
+            char total[32];
+            snprintf(total, sizeof(total), "%.2f ms", queueTotal);
+            ImVec2 totalSize = ImGui::CalcTextSize(total);
+            dl->AddText(ImVec2(trackMax.x - totalSize.x - 4.0f, trackMin.y + 3.0f), IM_COL32(210, 210, 210, 255), total);
+
+            ImGui::Dummy(ImVec2(labelWidth + width, laneHeight + lanePadding));
+        }
+    }
+
+    void OpenTracy()
+    {
+        // additional information
+        STARTUPINFO si;
+        PROCESS_INFORMATION pi;
+
+        // set the size of the structures
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        ZeroMemory(&pi, sizeof(pi));
+
+        WCHAR tracycmd[] = L" -a 127.0.0.1";
+
+        CreateProcess(L"..\\Third\\tracy-master\\profiler\\build\\Release\\tracy-profiler.exe",   // the path
+            tracycmd,        // Command line
+            nullptr,           // Process handle not inheritable
+            nullptr,           // Thread handle not inheritable
+            false,          // Set handle inheritance to FALSE
+            0,              // No creation flags
+            nullptr,           // Use parent's environment block
+            nullptr,           // Use parent's starting directory
+            &si,            // Pointer to STARTUPINFO structure
+            &pi             // Pointer to PROCESS_INFORMATION structure (removed extra parentheses)
+        );
+        /*
+        // Close process and thread handles.
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        */
+    }
+
 public:
     ProfilerWindow() : EditorWindow("Profiler") {}
     void Update() override final
@@ -11,77 +176,25 @@ public:
             ImGui::End();
             return;
         }
-        ImGui::Text("average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
 
-        ImGui::Text("instances %u | meshlets %u", Profiler::instance->frameData.instancesCount, Profiler::instance->frameData.meshletsCount);
+        // gathered before the header : the header shows the span the lanes below are scaled to
+        std::vector<Bar> lanes[Profiler::PerQueueData::queueCount];
+        double span = GatherBars(lanes);
 
         if (ImGui::Button("Open Tracy"))
-        {
-            // additional information
-            STARTUPINFO si;
-            PROCESS_INFORMATION pi;
-
-            // set the size of the structures
-            ZeroMemory(&si, sizeof(si));
-            si.cb = sizeof(si);
-            ZeroMemory(&pi, sizeof(pi));
-
-            WCHAR tracycmd[] = L" -a 127.0.0.1";
-
-            CreateProcess(L"..\\Third\\tracy-master\\profiler\\build\\Release\\tracy-profiler.exe",   // the path
-                tracycmd,        // Command line
-                nullptr,           // Process handle not inheritable
-                nullptr,           // Thread handle not inheritable
-                false,          // Set handle inheritance to FALSE
-                0,              // No creation flags
-                nullptr,           // Use parent's environment block
-                nullptr,           // Use parent's starting directory 
-                &si,            // Pointer to STARTUPINFO structure
-                &pi             // Pointer to PROCESS_INFORMATION structure (removed extra parentheses)
-            );
-            /*
-            // Close process and thread handles.
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-            */
-        }
+            OpenTracy();
+        ImGui::SameLine();
+        ImGui::RadioButton("cur", &statMode, Stat_Cur); ImGui::SameLine();
+        ImGui::RadioButton("avg", &statMode, Stat_Avg); ImGui::SameLine();
+        ImGui::RadioButton("min", &statMode, Stat_Min); ImGui::SameLine();
+        ImGui::RadioButton("max", &statMode, Stat_Max); ImGui::SameLine();
+        ImGui::Text("| cpu %.2f ms (%.0f fps)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate); ImGui::SameLine();
+        ImGui::Text("| gpu %.2f ms", span); ImGui::SameLine();
+        ImGui::Text("| instances %u | meshlets %u", Profiler::instance->frameData.instancesCount, Profiler::instance->frameData.meshletsCount);
 
         ImGui::Separator();
 
-        for (uint j = 0; j < ARRAYSIZE(Profiler::instance->queueProfile); j++)
-        {
-            if (j == 0)
-                ImGui::Text("Graphic");
-            if (j == 1)
-                ImGui::Text("Compute");
-            if (j == 2)
-                ImGui::Text("Copy");
-
-            auto& prof = Profiler::instance->queueProfile[j];
-            for (int i = 0; i < prof.entries.size(); i++)
-            {
-                Profiler::ProfileData& profile = prof.entries[i];
-                if (profile.name == nullptr)
-                    continue;
-
-                double maxTime = 0.0;
-                double avgTime = 0.0;
-                UINT64 avgTimeSamples = 0;
-                for (UINT i = 0; i < Profiler::ProfileData::FilterSize; ++i)
-                {
-                    if (profile.TimeSamples[i] <= 0.0)
-                        continue;
-                    maxTime = profile.TimeSamples[i] > maxTime ? profile.TimeSamples[i] : maxTime;
-                    avgTime += profile.TimeSamples[i];
-                    ++avgTimeSamples;
-                }
-
-                if (avgTimeSamples > 0)
-                    avgTime /= double(avgTimeSamples);
-
-                ImGui::Text("\t %s: %.2fms (%.2fms max)", profile.name, avgTime, maxTime);
-            }
-        }
+        DrawLanes(lanes, span);
 
         ImGui::End();
     }

@@ -76,7 +76,7 @@ public:
                 ShaderStatsCollector::instance->Update();
 
             if (options.stepMotion)
-                Sleep(250);
+                Sleep(100);
 
             FrameMark;
         }

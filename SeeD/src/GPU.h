@@ -2634,8 +2634,6 @@ public:
 };
 
 //github.com/TheRealMJP/DeferredTexturing/blob/experimental/SampleFramework12/v1.01/Graphics/Profiler.cpp
-// use https://github.com/Raikiri/LegitProfiler for display ?
-// TODO : I´ll prefere a display with horitontal bars, like Tracy
 struct Profiler
 {
     static Profiler* instance;
@@ -2653,8 +2651,28 @@ struct Profiler
         INT64 EndTime = 0;
 
         static const UINT64 FilterSize = 64;
+        double StartSamples[FilterSize] = { };
         double TimeSamples[FilterSize] = { };
         UINT64 CurrSample = 0;
+
+        double lastStartMs = 0.0; // scratch between the two phases of EndProfilerFrame
+        bool ranThisFrame = false;
+    };
+
+    struct QueueClock
+    {
+        UINT64 gpuFrequency = 0;
+        UINT64 gpuRef = 0;
+        double cpuRefMs = 0.0;
+        bool valid = false;
+
+        double ToCommonMs(UINT64 gpuTick) const
+        {
+            if (!valid)
+                return 0.0;
+            double deltaMs = (double)((INT64)gpuTick - (INT64)gpuRef) * 1000.0 / (double)gpuFrequency;
+            return cpuRefMs + deltaMs;
+        }
     };
 
     ID3D12QueryHeap* queryHeap = NULL;
@@ -2781,7 +2799,9 @@ struct Profiler
         }
     }
 
-    void UpdateProfile(ProfileData& profile, UINT64 profileIdx, UINT64 gpuFrequency, const UINT64* frameQueryData)
+    // Phase 1 : the duration lands in TimeSamples, the start is only remembered. The frame origin is
+    // not known until every queue has been read, so StartSamples is filled in phase 2 below.
+    void UpdateProfile(ProfileData& profile, UINT64 profileIdx, const QueueClock& clock, const UINT64* frameQueryData)
     {
         ZoneScoped;
         profile.QueryFinished = false;
@@ -2803,26 +2823,40 @@ struct Profiler
             if (endTime > startTime)
             {
                 UINT64 delta = endTime - startTime;
-                double frequency = double(gpuFrequency);
+                double frequency = double(clock.gpuFrequency);
                 time = (delta / frequency) * 1000.0;
             }
         }
 
         profile.TimeSamples[profile.CurrSample] = time;
-        profile.CurrSample = (profile.CurrSample + 1) % ProfileData::FilterSize;
-
-        profile.Active = false;
+        profile.ranThisFrame = time > 0.0 && clock.valid;
+        profile.lastStartMs = profile.ranThisFrame ? clock.ToCommonMs(startTime) : 0.0;
     }
 
     void EndProfilerFrame(CommandBuffer& cb)
     {
         ZoneScoped;
-        UINT64 gpuFrequency = 0;
 
-        cb.queue->GetTimestampFrequency(&gpuFrequency);
+        UINT64 qpcFrequency = 1;
+        QueryPerformanceFrequency((LARGE_INTEGER*)&qpcFrequency);
+
+        ID3D12CommandQueue* queues[PerQueueData::queueCount] =
+            { GPU::instance->graphicQueue, GPU::instance->computeQueue, GPU::instance->copyQueue };
 
         for (uint i = 0; i < ARRAYSIZE(queueProfile); i++)
         {
+            QueueClock clock;
+            ID3D12CommandQueue* queue = queues[i];
+            if (queue != nullptr && SUCCEEDED(queue->GetTimestampFrequency(&clock.gpuFrequency)) && clock.gpuFrequency != 0)
+            {
+                UINT64 cpuRef = 0;
+                if (SUCCEEDED(queue->GetClockCalibration(&clock.gpuRef, &cpuRef)))
+                {
+                    clock.cpuRefMs = (double)cpuRef * 1000.0 / (double)qpcFrequency;
+                    clock.valid = true;
+                }
+            }
+
             auto& prof = queueProfile[i];
             prof.profileBuffer.ReadBack(cb);
 
@@ -2831,11 +2865,27 @@ struct Profiler
 
             // Iterate over all of the profiles
             for (UINT64 profileIdx = 0; profileIdx < prof.entries.size(); ++profileIdx)
-                UpdateProfile(prof.entries[profileIdx], profileIdx, gpuFrequency, queryData);
+                UpdateProfile(prof.entries[profileIdx], profileIdx, clock, queryData);
 
             prof.profileBuffer.ReadBackUnMap();
         }
 
+        double frameStartMs = DBL_MAX;
+        for (uint i = 0; i < ARRAYSIZE(queueProfile); i++)
+            for (auto& profile : queueProfile[i].entries)
+                if (profile.ranThisFrame)
+                    frameStartMs = std::min(frameStartMs, profile.lastStartMs);
+
+        for (uint i = 0; i < ARRAYSIZE(queueProfile); i++)
+        {
+            for (auto& profile : queueProfile[i].entries)
+            {
+                profile.StartSamples[profile.CurrSample] = profile.ranThisFrame ? profile.lastStartMs - frameStartMs : 0.0;
+                profile.CurrSample = (profile.CurrSample + 1) % ProfileData::FilterSize;
+                profile.ranThisFrame = false;
+                profile.Active = false;
+            }
+        }
     }
 
     // Clear the rolling timing history of every pass. Called when a shader hot-reloads
