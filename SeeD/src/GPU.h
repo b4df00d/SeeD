@@ -2673,9 +2673,6 @@ struct Profiler
         uint instancesCount;
         uint meshletsCount;
         uint verticesCount;
-        // terrain quadtree instance churn (written by Systems::TerrainStreaming::Update, shown in
-        // ProfilerWindow): baseline for the override-mesh work, where rewritten+created becomes
-        // the per-frame vertex-bake + BLAS-build count
         uint terrainReusedUnchanged;
         uint terrainReusedRewritten;
         uint terrainCreated;

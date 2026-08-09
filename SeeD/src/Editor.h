@@ -15,44 +15,6 @@ public:
 
         ImGui::Text("instances %u | meshlets %u", Profiler::instance->frameData.instancesCount, Profiler::instance->frameData.meshletsCount);
 
-        {
-            //TODO : move this to a TerrainWindow
-            struct ChurnStat
-            {
-                enum { FilterSize = 64 }; // local classes can't have static members
-                uint samples[FilterSize] = {};
-                uint pushed = 0;
-                void Push(uint v) { samples[pushed % FilterSize] = v; pushed++; }
-                void Stats(uint& mn, uint& mx, float& avg) const
-                {
-                    uint n = pushed < FilterSize ? pushed : FilterSize;
-                    mn = ~0u; mx = 0; uint sum = 0;
-                    for (uint i = 0; i < n; i++)
-                    {
-                        mn = samples[i] < mn ? samples[i] : mn;
-                        mx = samples[i] > mx ? samples[i] : mx;
-                        sum += samples[i];
-                    }
-                    avg = n > 0 ? (float)sum / n : 0.0f;
-                    if (n == 0) mn = 0;
-                }
-            };
-            static ChurnStat churnStats[4];
-            const char* churnNames[4] = { "unchanged", "rewritten", "created  ", "released " };
-            uint churnValues[4] = {
-                Profiler::instance->frameData.terrainReusedUnchanged,
-                Profiler::instance->frameData.terrainReusedRewritten,
-                Profiler::instance->frameData.terrainCreated,
-                Profiler::instance->frameData.terrainReleased };
-            for (uint i = 0; i < 4; i++)
-            {
-                churnStats[i].Push(churnValues[i]);
-                uint mn, mx; float avg;
-                churnStats[i].Stats(mn, mx, avg);
-                ImGui::Text("terrain %s : %4u | min %4u | max %4u | avg %7.1f", churnNames[i], churnValues[i], mn, mx, avg);
-            }
-        }
-
         if (ImGui::Button("Open Tracy"))
         {
             // additional information
@@ -125,6 +87,61 @@ public:
     }
 };
 ProfilerWindow profilerWindow;
+
+class TerrainWindow : public EditorWindow
+{
+    struct ChurnStat
+    {
+        static const uint FilterSize = 64;
+        uint samples[FilterSize] = {};
+        uint pushed = 0;
+        void Push(uint v) { samples[pushed % FilterSize] = v; pushed++; }
+        void Stats(uint& mn, uint& mx, float& avg) const
+        {
+            uint n = pushed < FilterSize ? pushed : FilterSize;
+            mn = ~0u; mx = 0; uint sum = 0;
+            for (uint i = 0; i < n; i++)
+            {
+                mn = samples[i] < mn ? samples[i] : mn;
+                mx = samples[i] > mx ? samples[i] : mx;
+                sum += samples[i];
+            }
+            avg = n > 0 ? (float)sum / n : 0.0f;
+            if (n == 0) mn = 0;
+        }
+    };
+    ChurnStat churnStats[4];
+
+public:
+    TerrainWindow() : EditorWindow("Terrain") {}
+    void Update() override final
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("Terrain", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+
+        ImGui::SeparatorText("Quadtree node churn");
+        const char* churnNames[4] = { "unchanged", "rewritten", "created  ", "released " };
+        uint churnValues[4] = {
+            Profiler::instance->frameData.terrainReusedUnchanged,
+            Profiler::instance->frameData.terrainReusedRewritten,
+            Profiler::instance->frameData.terrainCreated,
+            Profiler::instance->frameData.terrainReleased };
+        for (uint i = 0; i < 4; i++)
+        {
+            churnStats[i].Push(churnValues[i]);
+            uint mn, mx; float avg;
+            churnStats[i].Stats(mn, mx, avg);
+            ImGui::Text("%s : %4u | min %4u | max %4u | avg %7.1f", churnNames[i], churnValues[i], mn, mx, avg);
+        }
+
+        ImGui::End();
+    }
+};
+TerrainWindow terrainWindow;
 
 class AssetLibraryWindow : public EditorWindow
 {
