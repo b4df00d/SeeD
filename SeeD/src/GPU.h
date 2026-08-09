@@ -3015,9 +3015,55 @@ struct MeshData
         std::vector<unsigned int> indices;
     };
     std::vector<LOD> LODs;
-    std::vector<Vertex> vertices;
+    std::vector<VertexPacked> vertices;
     float4 boundingSphere;
+    float4 aabbMin;
+    float4 aabbExtent;
 };
+
+inline void PackMeshVertices(const std::vector<Vertex>& source, MeshData& meshData)
+{
+    ZoneScoped;
+
+    float mnx = FLT_MAX, mny = FLT_MAX, mnz = FLT_MAX, mxx = -FLT_MAX, mxy = -FLT_MAX, mxz = -FLT_MAX;
+    for (const Vertex& sv : source)
+    {
+        mnx = min(mnx, sv.px); mny = min(mny, sv.py); mnz = min(mnz, sv.pz);
+        mxx = max(mxx, sv.px); mxy = max(mxy, sv.py); mxz = max(mxz, sv.pz);
+    }
+    if (source.empty()) { mnx = mny = mnz = 0; mxx = mxy = mxz = 0; }
+
+    float ex = mxx - mnx, ey = mxy - mny, ez = mxz - mnz;
+    meshData.aabbMin = float4(mnx, mny, mnz, 0);
+    meshData.aabbExtent = float4(ex, ey, ez, 0);
+
+    float invx = ex > 0 ? 1.0f / ex : 0.0f;
+    float invy = ey > 0 ? 1.0f / ey : 0.0f;
+    float invz = ez > 0 ? 1.0f / ez : 0.0f;
+
+    meshData.vertices.resize(source.size());
+    for (size_t i = 0; i < source.size(); i++)
+    {
+        const Vertex& s = source[i];
+        VertexPacked& d = meshData.vertices[i];
+        int16_t qx = QuantizeSNorm16((s.px - mnx) * invx * 2.0f - 1.0f);
+        int16_t qy = QuantizeSNorm16((s.py - mny) * invy * 2.0f - 1.0f);
+        int16_t qz = QuantizeSNorm16((s.pz - mnz) * invz * 2.0f - 1.0f);
+
+        // TBN handedness = sign(dot(cross(normal, tangent), binormal)); stored as the 4th SNORM16.
+        float cx = s.ny * s.tz - s.nz * s.ty;
+        float cy = s.nz * s.tx - s.nx * s.tz;
+        float cz = s.nx * s.ty - s.ny * s.tx;
+        float hdot = cx * s.bx + cy * s.by + cz * s.bz;
+        int16_t hSnorm = hdot >= 0.0f ? (int16_t)32767 : (int16_t)-32767;
+
+        d.packedPos0 = (uint32_t)(uint16_t)qx | ((uint32_t)(uint16_t)qy << 16);
+        d.packedPos1 = (uint32_t)(uint16_t)qz | ((uint32_t)(uint16_t)hSnorm << 16);
+        d.u = s.u; d.v = s.v;
+        d.normalOct = OctEncode32(s.nx, s.ny, s.nz);
+        d.tangentOct = OctEncode32(s.tx, s.ty, s.tz);
+    }
+}
 
 struct MeshStorage
 {
@@ -3295,17 +3341,8 @@ struct MeshStorage
         EnsureBufferCapacity(meshes, meshesAllocatedCount, nextMeshOffset, sizeof(HLSL::Mesh), "meshes", commandBuffer);
         EnsureBufferCapacity(vertices, verticesAllocatedCount, nextVertexOffset, sizeof(VertexPacked), "vertices", commandBuffer);
 
-        float mnx = FLT_MAX, mny = FLT_MAX, mnz = FLT_MAX, mxx = -FLT_MAX, mxy = -FLT_MAX, mxz = -FLT_MAX;
-        for (auto& sv : meshData.vertices) // TODO : store the AABB in the .mesh file to avoid this loop on load
-        {
-            mnx = min(mnx, sv.px); mny = min(mny, sv.py); mnz = min(mnz, sv.pz);
-            mxx = max(mxx, sv.px); mxy = max(mxy, sv.py); mxz = max(mxz, sv.pz);
-        }
-        if (meshData.vertices.empty()) { mnx = mny = mnz = 0; mxx = mxy = mxz = 0; }
-        float ex = mxx - mnx, ey = mxy - mny, ez = mxz - mnz;
-
-        newMesh.aabbMin = float4(mnx, mny, mnz, 0);
-        newMesh.aabbExtent = float4(ex, ey, ez, 0);
+        newMesh.aabbMin = meshData.aabbMin;
+        newMesh.aabbExtent = meshData.aabbExtent;
         newMesh.lodCount = (uint)min((int)meshData.LODs.size(), 4);
         newMesh.storageIndex = _nextMeshOffset;
         newMesh.vertexCount = (uint)meshData.vertices.size();
@@ -3352,45 +3389,14 @@ struct MeshStorage
             indices.UploadElements(lod.indices.data(), (uint)lod.indices.size(), _nextIndexOffset, commandBuffer);
         }
 
-        // Pack vertices: SNORM16 position (local to the mesh AABB) + octahedral normal/tangent + uv.
-        // The binormal is dropped and rebuilt on the GPU from the handedness sign stored in packedPos.w.
-        std::vector<VertexPacked> packed(meshData.vertices.size());
-        float invx = ex > 0 ? 1.0f / ex : 0.0f;
-        float invy = ey > 0 ? 1.0f / ey : 0.0f;
-        float invz = ez > 0 ? 1.0f / ez : 0.0f;
-        {
-            ZoneScopedN("Pack vertices");
-            for (size_t i = 0; i < meshData.vertices.size(); i++) // TODO : could we avoid this loop ? pack in the .mesh file to avoid this on load
-            {
-                const Vertex& s = meshData.vertices[i];
-                VertexPacked& d = packed[i];
-                int16_t qx = QuantizeSNorm16((s.px - mnx) * invx * 2.0f - 1.0f);
-                int16_t qy = QuantizeSNorm16((s.py - mny) * invy * 2.0f - 1.0f);
-                int16_t qz = QuantizeSNorm16((s.pz - mnz) * invz * 2.0f - 1.0f);
-
-                // TBN handedness = sign(dot(cross(normal, tangent), binormal)); stored as the 4th SNORM16.
-                float cx = s.ny * s.tz - s.nz * s.ty;
-                float cy = s.nz * s.tx - s.nx * s.tz;
-                float cz = s.nx * s.ty - s.ny * s.tx;
-                float hdot = cx * s.bx + cy * s.by + cz * s.bz;
-                int16_t hSnorm = hdot >= 0.0f ? (int16_t)32767 : (int16_t)-32767;
-
-                d.packedPos0 = (uint32_t)(uint16_t)qx | ((uint32_t)(uint16_t)qy << 16);
-                d.packedPos1 = (uint32_t)(uint16_t)qz | ((uint32_t)(uint16_t)hSnorm << 16);
-                d.u = s.u; d.v = s.v;
-                d.normalOct = OctEncode32(s.nx, s.ny, s.nz);
-                d.tangentOct = OctEncode32(s.tx, s.ty, s.tz);
-            }
-        }
-
-        //objectPos = diag(halfExtent) * q + center, q in [-1,1].    
+        //objectPos = diag(halfExtent) * q + center, q in [-1,1].
         {
             ZoneScopedN("BLAS transform");
-            float hx = ex * 0.5f, hy = ey * 0.5f, hz = ez * 0.5f;
+            float hx = (float)meshData.aabbExtent.x * 0.5f, hy = (float)meshData.aabbExtent.y * 0.5f, hz = (float)meshData.aabbExtent.z * 0.5f;
             BLASTransform xf = {};
-            xf.m[0] = hx;  xf.m[3]  = mnx + hx;
-            xf.m[5] = hy;  xf.m[7]  = mny + hy;
-            xf.m[10] = hz; xf.m[11] = mnz + hz;
+            xf.m[0] = hx;  xf.m[3]  = (float)meshData.aabbMin.x + hx;
+            xf.m[5] = hy;  xf.m[7]  = (float)meshData.aabbMin.y + hy;
+            xf.m[10] = hz; xf.m[11] = (float)meshData.aabbMin.z + hz;
             if (_nextMeshOffset >= meshTransforms.Size())
                 meshTransforms.Resize(_nextMeshOffset + 64);
             meshTransforms[_nextMeshOffset] = xf;
@@ -3398,7 +3404,7 @@ struct MeshStorage
         }
 
         meshes.UploadElements(&newMesh, 1, _nextMeshOffset, commandBuffer);
-        vertices.UploadElements(packed.data(), (uint)packed.size(), _nextVertexOffset, commandBuffer);
+        vertices.UploadElements(meshData.vertices.data(), (uint)meshData.vertices.size(), _nextVertexOffset, commandBuffer);
         
         meshes.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         meshlets.Transition(commandBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);

@@ -2107,36 +2107,41 @@ void DefaultPropertyDraw(Components::Mask mask, char* cmpData)
         ImGui::PushID(pushID++);
         auto& m = metaData->members[memberIndex];
         char* data = cmpData + m.offset;
+        // Element stride from the metadata rather than the C++ element type: hlslpp's float3 and
+        // float4x4 are wider than the floats they expose, so indexing them as a float array walks
+        // off the element boundary.
+        int elementStride = (m.dataCount > 0) ? (m.size / m.dataCount) : m.size;
         ImGui::Text(m.name.c_str());
         if (m.dataCount == 1)
             ImGui::SameLine();
         for (int dc = 0; dc < m.dataCount; dc++)
         {
             ImGui::PushID(pushID++);
+            char* element = data + dc * elementStride;
             switch (m.dataType)
             {
             case PropertyTypes::_int:
             case PropertyTypes::_uint:
-                ImGui::InputInt("", &((int*)data)[dc]);
+                ImGui::InputInt("", (int*)element);
                 break;
             case PropertyTypes::_float:
-                ImGui::DragFloat("", &((float*)data)[dc]);
+                ImGui::DragFloat("", (float*)element);
                 break;
             case PropertyTypes::_float2:
-                ImGui::DragFloat2("", &((float*)data)[dc]);
+                ImGui::DragFloat2("", (float*)element);
                 break;
             case PropertyTypes::_float3:
-                ImGui::DragFloat3("", &((float*)data)[dc]);
+                ImGui::DragFloat3("", (float*)element);
                 break;
             case PropertyTypes::_float4:
-                ImGui::DragFloat4("", &((float*)data)[dc]);
+                ImGui::DragFloat4("", (float*)element);
                 break;
             case PropertyTypes::_quaternion:
-                ImGui::DragFloat4("", &((float*)data)[dc]);
+                ImGui::DragFloat4("", (float*)element);
                 break;
             case PropertyTypes::_float4x4:
             {
-                float4x4& mat = ((float4x4*)data)[dc];
+                float4x4& mat = *(float4x4*)element;
                 ImGui::DragFloat4("x", (float*)&mat[0]);
                 ImGui::DragFloat4("y", (float*)&mat[1]);
                 ImGui::DragFloat4("z", (float*)&mat[2]);
@@ -2145,7 +2150,7 @@ void DefaultPropertyDraw(Components::Mask mask, char* cmpData)
             break;
             case PropertyTypes::_assetID:
             {
-                assetID id = ((assetID*)data)[dc];
+                assetID id = *(assetID*)element;
                 if (AssetLibrary::instance->map.contains(id))
                 {
                     if (ImGui::SmallButton("o"))
@@ -2165,11 +2170,11 @@ void DefaultPropertyDraw(Components::Mask mask, char* cmpData)
             break;
             case PropertyTypes::_Handle:
             {
-                UIHelpers::DrawHandle(((EntityBase*)data)[dc], m.dataTemplateType);
+                UIHelpers::DrawHandle(*(EntityBase*)element, m.dataTemplateType);
             }
             break;
             case PropertyTypes::_bool:
-                ImGui::Checkbox("", &((bool*)data)[dc]);
+                ImGui::Checkbox("", (bool*)element);
                 break;
             default:
                 break;
@@ -3007,7 +3012,9 @@ public:
                 }
                 if (ImGui::MenuItem("Generate components Metadata"))
                 {
-                    ParseCpp("G:\\Work\\Dev\\SeeD\\SeeD\\src\\World.h");
+                    // Rewrites ComponentMetaData.h from every header of the engine source folder.
+                    // Takes effect on the next build; watch the log for skipped fields.
+                    GenerateComponentMetaData();
                 }
 
                 if (ImGui::MenuItem("Recompute Bounding Boxes"))

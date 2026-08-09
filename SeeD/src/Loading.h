@@ -806,6 +806,9 @@ public:
         instance = nullptr;
 	}
 
+    static const uint32_t MeshFileMagic = 0x4853454D;   // 'MESH'
+    static const uint32_t MeshFileVersion = 2;          // 2 : AABB + GPU-packed vertices
+
     MeshData Read(String path)
     {
 		ZoneScoped;
@@ -814,7 +817,18 @@ public:
         std::ifstream fin(path, std::ios::binary);
         if (fin.is_open())
         {
+            uint32_t magic = 0, version = 0;
+            fin.read((char*)&magic, sizeof(magic));
+            fin.read((char*)&version, sizeof(version));
+            if (magic != MeshFileMagic || version != MeshFileVersion)
+            {
+                IOs::Log("{} was written by another version of the mesh format (magic {:#x}, version {}, expected {}) : delete the project cache folder and re-import", path.c_str(), magic, version, MeshFileVersion);
+                return mesh;
+            }
+
             fin.read((char*)&mesh.boundingSphere, sizeof(mesh.boundingSphere));
+            fin.read((char*)&mesh.aabbMin, sizeof(mesh.aabbMin));
+            fin.read((char*)&mesh.aabbExtent, sizeof(mesh.aabbExtent));
 #define READ_VECTOR(vector)  { size_t size; fin.read((char*)&size, sizeof(size)); vector.resize(size); fin.read((char*)&vector[0], size * sizeof(vector[0])); }
             READ_VECTOR(mesh.vertices);
             uint lodCount = (uint)mesh.LODs.size();
@@ -845,7 +859,11 @@ public:
         std::ofstream fout(path, std::ios::binary);
         if (fout.is_open())
         {
+            fout.write((char*)&MeshFileMagic, sizeof(MeshFileMagic));
+            fout.write((char*)&MeshFileVersion, sizeof(MeshFileVersion));
             fout.write((char*)&mesh.boundingSphere, sizeof(mesh.boundingSphere));
+            fout.write((char*)&mesh.aabbMin, sizeof(mesh.aabbMin));
+            fout.write((char*)&mesh.aabbExtent, sizeof(mesh.aabbExtent));
 #define WRITE_VECTOR(vector)  { size_t size = vector.size(); fout.write((char*)&size, sizeof(size)); fout.write((char*)&vector[0], size * sizeof(vector[0])); }
             WRITE_VECTOR(mesh.vertices);
             uint lodCount = (uint)mesh.LODs.size();
@@ -939,7 +957,7 @@ public:
     {
 		ZoneScoped;
         MeshData optimizedMesh;
-        optimizedMesh.vertices = originalMesh.vertices;
+        PackMeshVertices(originalMesh.vertices, optimizedMesh);
         optimizedMesh.boundingSphere = originalMesh.boundingSphere;
 
         const float cone_weight = 0.5f;
@@ -1095,20 +1113,6 @@ public:
 };
 MeshLoader* MeshLoader::instance = nullptr;
 
-namespace Components
-{
-    // Declared in World.h; defined here so the "Build Grid Mesh" button can call MeshLoader
-    // directly instead of going through a function pointer set up during MeshLoader::On().
-    static void TerrainPropertyDraw(char* p)
-    {
-        DefaultPropertyDraw(Terrain::mask, p);
-
-        Terrain* t = (Terrain*)p;
-        if (MeshLoader::instance != nullptr && ImGui::Button("Build Grid Mesh"))
-            t->gridMesh = MeshLoader::instance->BuildTerrainGridMesh(t->gridSpacing, t->gridSize);
-    }
-}
-
 #include "../../Third/assimp-master/include/assimp/Importer.hpp"
 #include "../../Third/assimp-master/include/assimp/Exporter.hpp"
 #include "../../Third/assimp-master/include/assimp/scene.h"
@@ -1194,8 +1198,8 @@ namespace OMMBake
                 input.runtimeSamplerDesc = { omm::TextureAddressMode::Wrap, omm::TextureFilterMode::Linear, 0 };
                 input.alphaMode = omm::AlphaMode::Test;
                 input.texCoordFormat = omm::TexCoordFormat::UV32_FLOAT;
-                input.texCoords = (const uint8_t*)mesh.vertices.data() + offsetof(Vertex, u);
-                input.texCoordStrideInBytes = sizeof(Vertex);
+                input.texCoords = (const uint8_t*)mesh.vertices.data() + offsetof(VertexPacked, u);
+                input.texCoordStrideInBytes = sizeof(VertexPacked);
                 input.indexFormat = omm::IndexFormat::UINT_32;
                 input.indexBuffer = mesh.LODs[0].indices.data();
                 input.indexCount = (uint32_t)mesh.LODs[0].indices.size();

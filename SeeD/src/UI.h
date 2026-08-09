@@ -1,7 +1,7 @@
 #pragma once
 
 // Component reflection metadata (PropertyTypes / MemberInfo / ComponentInfo /
-// knownComponents) and the metadata generator (ParseCpp) now live in
+// knownComponents) and the metadata generator (GenerateComponentMetaData) now live in
 // ComponentMetaTypes.h, included from World.h. Only the call sites remain in this file.
 
 #include "UIHelpers.h"

@@ -112,9 +112,6 @@ public:
     {
         ZoneScoped;
         SUBTASK_(InputsUpdate, ios.Update);
-        SUBTASK_(GetWindow, ios.GetWindow);
-
-        // TODO : no link all 2 sub task paralell ?
     }
 
     void UpdateWindow()

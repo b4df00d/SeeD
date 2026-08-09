@@ -1154,6 +1154,24 @@ public:
     }
 };
 
+class ProfileReadback : public Pass
+{
+public:
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        Profiler::instance->EndProfilerFrame(commandBuffer.Get());
+
+        Close();
+    }
+};
+
 class HZB : public Pass
 {
     ViewResource depth;
@@ -1201,13 +1219,6 @@ public:
     {
         ZoneScoped;
         Open();
-
-        // Resolving the timestamps has to happen in the FIRST pass of the frame, not the last. This
-        // pass is submission slot 0 and waits on the previous frame's last pass, so the readback here
-        // sees a whole finished frame. Done in the last pass instead, that pass' own end timestamp
-        // would not exist yet and its zone would be read one frame stale -- which put the editor,
-        // last on the queue, at the far LEFT of the timeline, looking like it ran first.
-        Profiler::instance->EndProfilerFrame(commandBuffer.Get());
 
         if (options.stopFrustumUpdate)
         {
@@ -3021,6 +3032,7 @@ class MainView : public View
 {
 public:
     std::mutex InstanceRTSync;
+    ProfileReadback profileReadback;
     GPUDebugInit gpuDebugInit;
     StructuredCommandBufferUpdate structuredCommandBufferUpdate;
     HZB hzb;
@@ -3056,6 +3068,7 @@ public:
 
         View::On(_displayResolution, _renderResolution);
 
+        profileReadback.On(this, GPU::instance->graphicQueue, "profileReadback", nullptr, nullptr);
         hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr, nullptr);
         structuredCommandBufferUpdate.On(this, GPU::instance->computeQueue, "structuredCommandBufferUpdate", nullptr, nullptr);
         gpuDebugInit.On(this, GPU::instance->graphicQueue, "gpuDebugInit", &hzb.commandBuffer, nullptr);
@@ -3081,6 +3094,7 @@ public:
     void Off() override
     {
         ZoneScoped;
+        profileReadback.Off();
         gpuDebugInit.Off();
         structuredCommandBufferUpdate.Off();
         hzb.Off();
@@ -3118,6 +3132,7 @@ public:
 
         tf::Task uploadAndSetup = UploadAndSetup(world, subflow);
 
+        SUBTASKVIEWPASS(profileReadback);
         SUBTASKVIEWPASS(gpuDebugInit);
         SUBTASKVIEWPASS(structuredCommandBufferUpdate);
         SUBTASKVIEWPASS(hzb);
@@ -3155,6 +3170,7 @@ public:
         uploadAndSetup.precede(skinningTask, terrainTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, atmospehricScatteringTask, postProcessHalfResTask, forwardTask, dlssTask, postProcessTask, gpuDebugInitTask, gpuDebugTask);
 
         presentTask.succeed(uploadAndSetup,
+            profileReadbackTask,
             structuredCommandBufferUpdateTask,
             hzbTask,
             skinningTask,
@@ -4076,3 +4092,14 @@ public:
     }
 };
 Renderer* Renderer::instance;
+
+// Declared in Terrain.h, which is included before this file (the renderer queries the terrain
+// components, so they have to be declared first) -- this is the only thing its streaming system
+// needs back from the renderer.
+bool GetMainViewCamera(HLSL::Camera& camera)
+{
+    if (Renderer::instance == nullptr)
+        return false;
+    camera = Renderer::instance->mainView.mainCamera;
+    return true;
+}

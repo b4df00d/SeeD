@@ -101,11 +101,6 @@ public:
 	Mouse mouse{};
     WindowInformation window;
 
-    void GetWindow()
-    {
-        ZoneScoped;
-    }
-
     bool Resize()
     {
 		bool ret = window.windowResized;

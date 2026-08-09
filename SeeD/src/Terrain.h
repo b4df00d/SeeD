@@ -1,4 +1,69 @@
 #pragma once
+
+// Terrain components + the systems that drive them. Main.cpp includes this right after Loading.h
+// (whose MeshLoader / AssetLibrary / DirectXTex the systems below use) and BEFORE Renderer.h,
+// which queries these components. The one thing the streaming system needs from the renderer --
+// the main view camera -- comes through GetMainViewCamera, declared in Main.cpp and defined in
+// Renderer.h.
+namespace Components
+{
+    struct Terrain : ComponentBase<Terrain>
+    {
+        Handle<Texture> heightmap;
+        Handle<Mesh> gridMesh;
+        Handle<Material> material;
+        //-------------------------------------------------
+        uint  useProceduralHeightmap = 1;
+        float noiseScale = 1.0f;       // fraction of the terrain footprint per octave-0 feature (same convention as erosionScale)
+        uint  noiseOctaves = 2;
+        float noiseLacunarity = 2.412f;  // per-octave frequency multiplier
+        float noiseGain = 1.0f;        // per-octave amplitude multiplier
+        uint  noiseSeed = 1;           // varies the pattern; same seed + params -> identical terrain
+        //-------------------------------------------------
+        float heightScale = 1000.0f;
+        float heightOffset = 0.0f;
+        uint  heightmapBlurRadius = 0; // box-blur radius in heightmap texels (0 = off): softens banding from low-precision (e.g. 8-bit) imported heightmaps; applied wherever the heightmap is sampled for displacement (terrainMeshBake.hlsl, terrainmesh.hlsl's live fallback)
+        float worldExtent = 8192.0f;   // total terrain footprint (world units), centered on Transform
+        uint  quadtreeDepth = 10;       // leaf node size = worldExtent / 2^quadtreeDepth
+        float targetScreenSize = 0.15f; // fraction of viewport height (NDC-style, resolution-independent): a visible node subdivides while its estimated on-screen footprint exceeds this
+        //-------------------------------------------------
+        float gridSpacing = 0.66f;     // meters/vertex at the most detailed quadtree level
+        float gridSize = 16.0f;       // meters, most detailed quadtree level patch size
+        //-------------------------------------------------
+        uint  erosionEnabled = 2;      // 0 = off (maps freed), 1 = bake once (freezes after the first bake; a heightmap swap re-bakes, param edits don't), 2 = bake continuously (every frame, for live iteration)
+        uint  erosionOctaves = 3;
+        float erosionScale = 0.16f;    // horizontal+vertical erosion scale, fraction of the terrain footprint
+        float erosionStrength = 0.1f; // culling pad = strength * scale * sum(gain^o) * max(1, gullyWeight) (ComputeNodeBoundingSphere)
+        float erosionGullyWeight = 3.3f;
+        float erosionDetail = 1.0f;    // lower restricts high-frequency gullies to steeper slopes
+        float erosionLacunarity = 2.476f;
+        float erosionGain = 0.67f;     // per-octave strength multiplier
+        float erosionCellScale = 0.64f; // phacelle cell size relative to erosion scale, keep close to 1
+        float erosionNormalization = 0.83f; // phacelle magnitude normalization degree, 0..1
+        float erosionRidgeRounding = 0.13f;
+        float erosionCreaseRounding = 0.81f;
+        //-------------------------------------------------
+        uint  BVHMaxDepth = 5;
+        float BVHMinRadius = 512.0f;
+        float BVHMaxRadius = 4096.0f;
+    };
+    // The "Build Grid Mesh" button calls MeshLoader directly instead of going through a function
+    // pointer set up during MeshLoader::On() -- hence this file sitting after Loading.h.
+    static void TerrainPropertyDraw(char* p)
+    {
+        DefaultPropertyDraw(Terrain::mask, p);
+
+        Terrain* t = (Terrain*)p;
+        if (MeshLoader::instance != nullptr && ImGui::Button("Build Grid Mesh"))
+            t->gridMesh = MeshLoader::instance->BuildTerrainGridMesh(t->gridSpacing, t->gridSize);
+    }
+
+    struct TerrainBaking : ComponentBase<TerrainBaking>
+    {
+        Handle<Terrain> terrain;
+    };
+}
+
 namespace Systems
 {
     struct TerrainStreaming : SystemBase
@@ -526,12 +591,12 @@ namespace Systems
             auto& terrains = world->frameQueries[terrainQueryIndex];
             if (terrains.empty()) { ClearAll(); PublishChurn(); return; }
 
-            if (Renderer::instance == nullptr)
+            HLSL::Camera camera;
+            if (!GetMainViewCamera(camera))
             {
                 PublishChurn();
                 return;
             }
-            HLSL::Camera camera = Renderer::instance->mainView.mainCamera;
             float invTanHalfFovY = 1.0f / tanf(camera.fovY * (3.14159265f / 180.0f) * 0.5f);
 
             presentTerrains.clear();
