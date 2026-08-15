@@ -911,7 +911,7 @@ public:
             return;
         }
 
-#if defined(_DEBUG)
+#if 0 //defined(_DEBUG)
         // Break in the debugger on debug-layer errors.
         ID3D12InfoQueue* infoQueue = nullptr;
         if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&infoQueue))))

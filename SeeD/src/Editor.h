@@ -2089,6 +2089,100 @@ static World::Entity* pendingTextureImportTarget = nullptr;
 // found in knownComponents for `mask`, exactly like the property window's path for components
 // with no custom PropertyDraw -- callable from a custom PropertyDraw that wants the generic
 // rendering plus its own controls (e.g. Components::InstancePropertyDraw, in World.h).
+// Adds `mask` to the entity if it doesn't already have it, leaving the new component ZEROED with all
+// its Handles reset to entityInvalid. Returns true only when it actually added something.
+//
+// The zeroing is not optional: component pools are raw malloc and nothing runs the default member
+// initializers (World::Pool::On allocates, GetSlot just bumps a counter), so a freshly added
+// component starts as garbage -- or as a released entity's leftovers. The Handle pass matters just as
+// much, because a *zeroed* handle is id 0 / rev 0, which resolves to a REAL entity and is worse than
+// garbage. Proper fix is TODO 18 (default values in the component metadata); until then the caller
+// has to write meaningful defaults itself, since zero is rarely a neutral value.
+bool AddComponentIfMissing(World::Entity ent, Components::Mask mask)
+{
+    if (!ent.IsValid() || (ent.GetMask() & mask) != 0)
+        return false;
+
+    ComponentInfo* info = nullptr;
+    for (uint i = 0; i < knownComponents.size(); i++)
+    {
+        if (knownComponents[i].mask == mask)
+        {
+            info = &knownComponents[i];
+            break;
+        }
+    }
+    if (info == nullptr)
+        return false;
+
+    ent.Add(mask);
+
+    uint bucket = Components::MaskToBucket(mask);
+    char* data = ent.Get(bucket);
+    memset(data, 0, Components::strides[bucket]);
+    for (uint m = 0; m < (uint)info->members.size(); m++)
+    {
+        auto& member = info->members[m];
+        if (member.dataType != PropertyTypes::_Handle)
+            continue;
+        int elementStride = (member.dataCount > 0) ? (member.size / member.dataCount) : member.size;
+        for (int dc = 0; dc < member.dataCount; dc++)
+            *(EntityBase*)(data + member.offset + dc * elementStride) = entityInvalid;
+    }
+    return true;
+}
+
+// The two collider presets on the property window's button row. "Static" is a static body with a
+// concave Mesh collider, "Dynamic" is a dynamic body with a ConvexHull -- the only two combinations
+// Jolt accepts without falling back, since it cannot simulate a concave mesh as a moving body.
+// Existing components keep whatever the user tuned; only what the preset is about is overwritten.
+void SetPhysicsPreset(World::Entity ent, uint motionType, uint shapeType)
+{
+    if (!ent.IsValid())
+        return;
+    if (!ent.Has<Components::Transform>())
+    {
+        IOs::Log("Physics preset: the selected entity has no Transform -- a rigid body needs one, nothing changed");
+        return;
+    }
+
+    // Each Add invalidates every component reference on this entity (Entity::Add -> Copy), so the
+    // defaults are written inside their own scope and everything is re-Get after both Adds.
+    if (AddComponentIfMissing(ent, Components::RigidBody::mask))
+    {
+        auto& rigidBody = ent.Get<Components::RigidBody>();
+        rigidBody.objectLayer = 0;
+        rigidBody.mass = 1.0f;
+        rigidBody.friction = 0.2f;
+        rigidBody.restitution = 0.0f;
+        rigidBody.linearDamping = 0.05f;
+        rigidBody.angularDamping = 0.05f;
+        rigidBody.gravityFactor = 1.0f;
+        rigidBody.allowSleeping = 1;
+        rigidBody.isSensor = 0;
+    }
+    if (AddComponentIfMissing(ent, Components::CollisionShape::mask))
+    {
+        auto& collisionShape = ent.Get<Components::CollisionShape>();
+        collisionShape.halfExtent = float3(0.5f, 0.5f, 0.5f);
+        collisionShape.offset = float3(0.0f, 0.0f, 0.0f);
+        collisionShape.convexRadius = 0.05f;
+    }
+
+    ent.Get<Components::RigidBody>().motionType = motionType;
+
+    auto& collisionShape = ent.Get<Components::CollisionShape>();
+    collisionShape.shapeType = shapeType;
+    // Both presets are mesh-derived, so the collider comes from whatever the entity renders.
+    if (ent.Has<Components::Instance>())
+        collisionShape.mesh = ent.Get<Components::Instance>().mesh;
+
+    // Sync recreates the body on a motionType change and SetShapes it on a shapeType change.
+    auto& state = ent.Get<Components::State>();
+    state.flags |= Components::State::Flags::physicsDirty;
+    state.flags |= Components::State::Flags::instanceDirty;
+}
+
 void DefaultPropertyDraw(Components::Mask mask, char* cmpData)
 {
     ComponentInfo* metaData = nullptr;
@@ -2363,6 +2457,20 @@ public:
                 ImGui::End();
                 return;
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Static"))
+            {
+                SetPhysicsPreset(editorState.selectedObject, 0 /*Static*/, 5 /*Mesh*/);
+                editorState.dirtyHierarchy = true;
+            }
+            ImGui::SetItemTooltip("Make this a STATIC rigid body with a concave Mesh collider, taken from its rendered mesh.\nAdds RigidBody / CollisionShape with sane defaults if missing; keeps values you already tuned.");
+            ImGui::SameLine();
+            if (ImGui::Button("Dynamic"))
+            {
+                SetPhysicsPreset(editorState.selectedObject, 2 /*Dynamic*/, 4 /*ConvexHull*/);
+                editorState.dirtyHierarchy = true;
+            }
+            ImGui::SetItemTooltip("Make this a DYNAMIC rigid body with a ConvexHull collider, taken from its rendered mesh.\nAdds RigidBody / CollisionShape with sane defaults if missing; keeps values you already tuned.");
 
             uint pushID = 0;
             for (uint i = 0; i < knownComponents.size(); i++)
@@ -2404,9 +2512,12 @@ public:
 
                         if (memcmp(editSnapshot.data(), cmpData, editStride) != 0)
                         {
+                            // All of them, because this code has no idea which component it just drew.
+                            // Each consumer clears its own bit.
                             auto& state = editorState.selectedObject.Get<Components::State>();
                             state.flags |= Components::State::Flags::instanceDirty;
                             state.flags |= Components::State::Flags::physicsDirty;
+                            state.flags |= Components::State::Flags::constraintDirty;
                         }
 
                         ImGui::PopID();
@@ -2419,23 +2530,7 @@ public:
             ImGui::SameLine();
             if (ImGui::Button("add"))
             {
-                auto& addInfo = knownComponents[componentAddIndex];
-                editorState.selectedObject.Add(addInfo.mask);
-
-                // TODO : 18 (default values in the component metadata).
-                uint addBucket = Components::MaskToBucket(addInfo.mask);
-                char* addData = editorState.selectedObject.Get(addBucket);
-                memset(addData, 0, Components::strides[addBucket]);
-                for (uint m = 0; m < (uint)addInfo.members.size(); m++)
-                {
-                    auto& member = addInfo.members[m];
-                    if (member.dataType != PropertyTypes::_Handle)
-                        continue;
-                    int elementStride = (member.dataCount > 0) ? (member.size / member.dataCount) : member.size;
-                    for (int dc = 0; dc < member.dataCount; dc++)
-                        *(EntityBase*)(addData + member.offset + dc * elementStride) = entityInvalid;
-                }
-
+                AddComponentIfMissing(editorState.selectedObject, knownComponents[componentAddIndex].mask);
                 editorState.dirtyHierarchy = true;
             }
         }

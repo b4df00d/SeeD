@@ -233,10 +233,18 @@ namespace Components
         enum class Flags : uint
         {
             loaded = 1 << 0,
+            // Each dirty bit names the consumer that clears it -- they are NOT interchangeable, and
+            // sharing one between two consumers means whichever runs first steals it from the other.
+            // instanceDirty : cleared by MainView::UpdateInstances (Renderer.h)
+            // physicsDirty  : cleared by Physics::Sync (Physic.h)
+            // constraintDirty : cleared by Physics::SyncConstraints, which runs AFTER Sync -- it
+            //   cannot share physicsDirty for exactly that reason.
+            // All are set together when the property window edits an entity (Editor.h).
             instanceDirty = 1 << 1,
             BLAS = 1 << 2,
             transient = 1 << 3,
-            physicsDirty = 1 << 4
+            physicsDirty = 1 << 4,
+            constraintDirty = 1 << 5
         };
         BitFlags<Flags> flags;
     };

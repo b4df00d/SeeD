@@ -17,6 +17,7 @@
 #include <Jolt/Physics/Body/MotionType.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Physics/Body/BodyLockMulti.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/ObjectLayer.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
@@ -340,7 +341,18 @@ struct Physics
     // Entities already warned about a not-yet-available collision mesh, so the retry does not log
     // every frame. Cleared per entity once its body finally gets created.
     std::unordered_set<uint> pendingMeshWarned;
-    
+
+    struct ConstraintRecord
+    {
+        JPH::Ref<JPH::Constraint> constraint;
+        uint rev;
+        uint seenFrame;
+        JPH::BodyID bodyA;
+        JPH::BodyID bodyB;      // invalid when anchored to the world
+    };
+    std::unordered_map<uint, ConstraintRecord> constraints;   // key = entity id
+    std::unordered_set<uint> pendingConstraintWarned;
+
     uint syncFrame = 0;
     float accumulator = 0.0f;
 
@@ -408,10 +420,15 @@ struct Physics
 
         if (tempAllocator != nullptr)
         {
+            for (auto it = constraints.begin(); it != constraints.end(); ++it)
+                DestroyConstraintRecord(it);
+            constraints.clear();
+
             JPH::BodyInterface& bodyInterface = physicsSystem.GetBodyInterface();
             for (auto& kv : bodies)
                 DestroyBody(bodyInterface, kv.second.bodyID);
         }
+        constraints.clear();
         bodies.clear();
 
 #ifdef JPH_DEBUG_RENDERER
@@ -438,6 +455,7 @@ struct Physics
         ZoneScopedN("PhysicsSyncReadback");
         Readback(world);
         Sync(world);
+        SyncConstraints(world);
         DrawDebugShapes();
     }
 
@@ -615,13 +633,262 @@ private:
         return result.Get();
     }
 
+    void DestroyConstraintRecord(std::unordered_map<uint, ConstraintRecord>::iterator it)
+    {
+        if (it->second.constraint != nullptr)
+            physicsSystem.RemoveConstraint(it->second.constraint);
+        pendingConstraintWarned.erase(it->first);
+    }
+
+    void RemoveConstraintsForBody(JPH::BodyID bodyID)
+    {
+        if (bodyID.IsInvalid() || constraints.empty())
+            return;
+        for (auto it = constraints.begin(); it != constraints.end();)
+        {
+            if (it->second.bodyA == bodyID || it->second.bodyB == bodyID)
+            {
+                DestroyConstraintRecord(it);
+                it = constraints.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
     void DestroyBody(JPH::BodyInterface& bodyInterface, JPH::BodyID bodyID)
     {
+        RemoveConstraintsForBody(bodyID);
+
         if (bodyID.IsInvalid())
             return;
         if (bodyInterface.IsAdded(bodyID))
             bodyInterface.RemoveBody(bodyID);
         bodyInterface.DestroyBody(bodyID);
+    }
+
+    // Anchors and axes are authored in the entity's LOCAL space, but the constraint is built in
+    // EConstraintSpace::WorldSpace on purpose: Jolt's local space is relative to the body's CENTER OF
+    // MASS, not its origin ("you need to subtract Shape::GetCenterOfMass()"), which is not what
+    // Components::Constraint means. Converting here with the body's own transform is exact and needs
+    // no COM correction.
+    static JPH::Vec3 LocalPointToWorld(const JPH::Body& body, float3 localPoint)
+    {
+        float values[3];
+        store(localPoint, values);
+        for (uint axis = 0; axis < 3; axis++)
+        {
+            if (!PHYSICS_VALID(values[axis]))
+                values[axis] = 0.0f;
+        }
+        return JPH::Vec3(body.GetWorldTransform() * JPH::Vec3(values[0], values[1], values[2]));
+    }
+
+    static JPH::Vec3 LocalAxisToWorld(const JPH::Body& body, float3 localAxis)
+    {
+        float values[3];
+        store(localAxis, values);
+        for (uint axis = 0; axis < 3; axis++)
+        {
+            if (!PHYSICS_VALID(values[axis]))
+                values[axis] = 0.0f;
+        }
+        JPH::Vec3 result = body.GetWorldTransform().Multiply3x3(JPH::Vec3(values[0], values[1], values[2]));
+        return result.LengthSq() > 1.0e-8f ? result.Normalized() : JPH::Vec3::sAxisY();
+    }
+
+    JPH::Ref<JPH::Constraint> BuildConstraint(World::Entity ent, JPH::BodyID idA, JPH::BodyID idB, bool anchoredToWorld, bool& outRetry)
+    {
+        outRetry = false;
+        uint entityId = ent.id;
+
+        Components::Constraint authored = ent.Get<Components::Constraint>();
+
+        JPH::BodyID lockIds[2] = { idA, idB };
+        JPH::BodyLockMultiWrite lock(physicsSystem.GetBodyLockInterface(), lockIds, anchoredToWorld ? 1 : 2);
+        JPH::Body* bodyA = lock.GetBody(0);
+        JPH::Body* bodyB = anchoredToWorld ? &JPH::Body::sFixedToWorld : lock.GetBody(1);
+        if (bodyA == nullptr || bodyB == nullptr)
+        {
+            outRetry = true;
+            return nullptr;
+        }
+
+        JPH::Vec3 pointA = LocalPointToWorld(*bodyA, authored.anchorLocal);
+        // World-anchored: the second attachment point is the same world position, so the body starts
+        // pinned where it already is rather than being yanked to the origin.
+        JPH::Vec3 pointB = anchoredToWorld ? pointA : LocalPointToWorld(*bodyB, authored.anchorTarget);
+        JPH::Vec3 axis = LocalAxisToWorld(*bodyA, authored.axis);
+        JPH::Vec3 normalAxis = axis.GetNormalizedPerpendicular();
+
+        bool hasLimits = PHYSICS_VALID(authored.limitMin) && PHYSICS_VALID(authored.limitMax) && authored.limitMin < authored.limitMax;
+
+        JPH::Ref<JPH::Constraint> created;
+        switch (authored.constraintType)
+        {
+        case 0:
+        {
+            JPH::FixedConstraintSettings settings;
+            settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+            settings.mAutoDetectPoint = false;
+            settings.mPoint1 = pointA;
+            settings.mPoint2 = pointB;
+            created = settings.Create(*bodyA, *bodyB);
+            break;
+        }
+        case 1:
+        {
+            JPH::PointConstraintSettings settings;
+            settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+            settings.mPoint1 = pointA;
+            settings.mPoint2 = pointB;
+            created = settings.Create(*bodyA, *bodyB);
+            break;
+        }
+        case 2:
+        {
+            JPH::HingeConstraintSettings settings;
+            settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+            settings.mPoint1 = pointA;
+            settings.mPoint2 = pointB;
+            settings.mHingeAxis1 = settings.mHingeAxis2 = axis;
+            settings.mNormalAxis1 = settings.mNormalAxis2 = normalAxis;
+            if (hasLimits)
+            {
+                // Jolt requires min in [-pi, 0] and max in [0, pi].
+                settings.mLimitsMin = JPH::Clamp(authored.limitMin, -JPH::JPH_PI, 0.0f);
+                settings.mLimitsMax = JPH::Clamp(authored.limitMax, 0.0f, JPH::JPH_PI);
+            }
+            created = settings.Create(*bodyA, *bodyB);
+            break;
+        }
+        case 3:
+        {
+            JPH::SliderConstraintSettings settings;
+            settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+            settings.mPoint1 = pointA;
+            settings.mPoint2 = pointB;
+            settings.mSliderAxis1 = settings.mSliderAxis2 = axis;
+            settings.mNormalAxis1 = settings.mNormalAxis2 = normalAxis;
+            if (hasLimits)
+            {
+                settings.mLimitsMin = authored.limitMin;
+                settings.mLimitsMax = authored.limitMax;
+            }
+            created = settings.Create(*bodyA, *bodyB);
+            break;
+        }
+        case 4:
+        {
+            JPH::DistanceConstraintSettings settings;
+            settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+            settings.mPoint1 = pointA;
+            settings.mPoint2 = pointB;
+            if (hasLimits)
+            {
+                settings.mMinDistance = authored.limitMin;
+                settings.mMaxDistance = authored.limitMax;
+            }
+            // else left at -1/-1, which tells Jolt to keep the current separation
+            created = settings.Create(*bodyA, *bodyB);
+            break;
+        }
+        default:
+        {
+            uint constraintType = authored.constraintType;
+            IOs::Log("Physics: entity {} has unknown Constraint.constraintType {}, no constraint created", entityId, constraintType);
+            return nullptr;
+        }
+        }
+
+        if (created == nullptr)
+        {
+            IOs::Log("Physics: entity {} constraint creation failed", entityId);
+            return nullptr;
+        }
+
+        physicsSystem.AddConstraint(created);
+        pendingConstraintWarned.erase(entityId);
+        return created;
+    }
+
+    void SyncConstraints(World* world)
+    {
+        ZoneScopedN("PhysicsSyncConstraints");
+
+        uint queryIndex = world->Query(Components::Constraint::mask, 0, true);
+        auto& queryResult = world->frameQueries[queryIndex];
+        for (uint i = 0; i < (uint)queryResult.size(); i++)
+        {
+            World::Entity ent = queryResult[i];
+
+            auto record = constraints.find(ent.id);
+            bool constraintDirty = ent.Has<Components::State>() && (ent.Get<Components::State>().flags & Components::State::Flags::constraintDirty);
+
+            if (record != constraints.end() && (record->second.rev != ent.rev || constraintDirty))
+            {
+                DestroyConstraintRecord(record);
+                constraints.erase(record);
+                record = constraints.end();
+            }
+            if (record != constraints.end())
+            {
+                record->second.seenFrame = syncFrame;
+                if (constraintDirty)
+                    ent.Get<Components::State>().flags.Unset(Components::State::Flags::constraintDirty);
+                continue;
+            }
+
+            auto bodyA = bodies.find(ent.id);
+            if (bodyA == bodies.end() || bodyA->second.rev != ent.rev)
+                continue;
+
+            auto& authored = ent.Get<Components::Constraint>();
+            World::Entity target = World::Entity(authored.target);
+            bool anchoredToWorld = target.id == entityInvalid.id || !target.IsValid();
+
+            JPH::BodyID idB;
+            if (!anchoredToWorld)
+            {
+                auto bodyB = bodies.find(target.id);
+                if (bodyB == bodies.end() || bodyB->second.rev != target.rev)
+                {
+                    uint entityId = ent.id;
+                    if (pendingConstraintWarned.insert(entityId).second)
+                        IOs::Log("Physics: entity {} constraint is waiting on its target's body, retrying", entityId);
+                    continue;
+                }
+                idB = bodyB->second.bodyID;
+            }
+
+            bool retry = false;
+            JPH::Ref<JPH::Constraint> created = BuildConstraint(ent, bodyA->second.bodyID, idB, anchoredToWorld, retry);
+            if (created == nullptr)
+            {
+                if (!retry && ent.Has<Components::State>())
+                    ent.Get<Components::State>().flags.Unset(Components::State::Flags::constraintDirty);
+                continue;
+            }
+
+            constraints[ent.id] = { created, ent.rev, syncFrame, bodyA->second.bodyID, idB };
+            if (ent.Has<Components::State>())
+                ent.Get<Components::State>().flags.Unset(Components::State::Flags::constraintDirty);
+        }
+
+        for (auto it = constraints.begin(); it != constraints.end();)
+        {
+            if (it->second.seenFrame != syncFrame)
+            {
+                DestroyConstraintRecord(it);
+                it = constraints.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
     }
 
     void Readback(World* world)
