@@ -551,6 +551,14 @@ public:
                 selection.Clear();
             }
 
+            // The tree's left gutter is pure style: the theme sets FramePadding.x to 20 (Moonlight,
+            // SetupImGuiStyle in Renderer.h), and a tree node reserves FontSize + 2*FramePadding.x
+            // before its label for the collapsing arrow (TreeNodeBehavior) -- ~54px of empty space
+            // on EVERY row, on top of the 20px the FrameStyle child uses as its own padding. Both
+            // read from FramePadding.x, so one push shrinks them together, down to the arrow itself.
+            // Kept local to the tree: the 20px is what gives the filter/combo widgets above their
+            // pill shape, and those are drawn outside this scope.
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.0f, ImGui::GetStyle().FramePadding.y));
             if (world.childs.size() > 0 && ImGui::BeginChild("##Tree", ImVec2(-FLT_MIN, -FLT_MIN), ImGuiChildFlags_FrameStyle))
             {
                 ImGuiMultiSelectFlags ms_flags = ImGuiMultiSelectFlags_ClearOnEscape | ImGuiMultiSelectFlags_BoxSelect2d;
@@ -570,6 +578,7 @@ public:
 
                 ImGui::EndChild();
             }
+            ImGui::PopStyleVar();
         }
 
         //always add selected object to selection storage

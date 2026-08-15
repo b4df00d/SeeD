@@ -84,7 +84,7 @@ knownComponents.push_back(
  	}); 
 // World.h
 knownComponents.push_back(
- 	{ "State", Components::State::mask, nullptr, alignof(Components::State), 
+ 	{ "State", Components::State::mask, Components::StatePropertyDraw, alignof(Components::State), 
  		{
 			{ "flags", PropertyTypes::_raw, NULL, 1, offsetof(Components::State, flags), sizeof(Components::State::flags) },
 		}

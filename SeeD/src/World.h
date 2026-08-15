@@ -249,6 +249,56 @@ namespace Components
         BitFlags<Flags> flags;
     };
     bool State::transient = true;
+    // `flags` is a BitFlags<Flags>, which the metadata can only describe as _raw -- so
+    // DefaultPropertyDraw shows nothing at all for this component. One checkbox per bit instead.
+    //
+    // Two things this window cannot change, both by design:
+    //  - State is a transient COMPONENT (State::transient above), so nothing edited here is written
+    //    to the .seed -- these bits are runtime scratch, they always come back at their default.
+    //  - a dirty bit unchecked here is ORed straight back on: the property window sets
+    //    instanceDirty|physicsDirty|constraintDirty whenever a drawer changed its component's bytes
+    //    (Editor.h, right after the PropertyDraw call), and unchecking one IS such a change. So the
+    //    dirty checkboxes are for RAISING a bit (forcing a re-sync); clearing is the consumer's job
+    //    and happens on its own next frame.
+    static void StatePropertyDraw(char* p)
+    {
+        State* state = (State*)p;
+
+        struct FlagRow { State::Flags bit; const char* name; const char* tooltip; };
+        const FlagRow rows[] =
+        {
+            { State::Flags::loaded,          "loaded",          "Set by MainView::UpdateInstances (Renderer.h) the first frame the instance is fully uploaded (mesh, material and shader all resolved)." },
+            { State::Flags::instanceDirty,   "instanceDirty",   "Re-upload the instance. Cleared by MainView::UpdateInstances (Renderer.h), its only reader." },
+            { State::Flags::BLAS,            "BLAS",            "Declared but unused -- nothing in the engine reads it today." },
+            { State::Flags::transient,       "transient",       "Regenerated every frame by a system (terrain quadtree instances, editor camera): SaveEntities skips the entity entirely, so it is never written to a .seed." },
+            { State::Flags::physicsDirty,    "physicsDirty",    "Re-apply the body properties, recreating the body when motionType changed. Cleared by Physics::Sync (Physic.h)." },
+            { State::Flags::constraintDirty, "constraintDirty", "Rebuild the constraint. Cleared by Physics::SyncConstraints, which runs AFTER Sync -- which is why it cannot share physicsDirty." },
+        };
+
+        for (uint i = 0; i < ARRAYSIZE(rows); i++)
+        {
+            bool on = state->flags.IsSet(rows[i].bit);
+            if (ImGui::Checkbox(rows[i].name, &on))
+            {
+                if (on) state->flags.Set(rows[i].bit);
+                else    state->flags.Unset(rows[i].bit);
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", rows[i].tooltip);
+        }
+
+        ImGui::Spacing();
+        // The same three bits the property window raises on any edit -- here without having to
+        // actually change something, to re-push an entity through the instance and physics syncs.
+        if (ImGui::Button("Force re-sync"))
+        {
+            state->flags.Set(State::Flags::instanceDirty);
+            state->flags.Set(State::Flags::physicsDirty);
+            state->flags.Set(State::Flags::constraintDirty);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("raw 0x%02X", state->flags.ToRaw());
+    }
 
     struct Parent : ComponentBase<Parent>
     {
