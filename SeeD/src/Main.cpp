@@ -260,6 +260,15 @@ struct Options
 #endif
     bool shaderStatsCsv = true;
     bool drawPhysicsShapes = false;
+    bool drawPhysicsConstraints = false;
+    // Chase camera (Systems::Player, World.h). The two distances are multiples of the followed
+    // car's chassis half length, not metres, so the same rig frames a 4 m road car and a 400 mm
+    // buggy without touching anything.
+    bool  followVehicle = true;
+    float followDistance = 3.0f;        // behind the car
+    float followHeight = 1.0f;          // above it
+    float followLookAtHeight = 0.5f;    // where on the car the rig aims, above its origin
+    float followSmoothTime = 0.25f;     // seconds for the spring to close the gap
     bool frontToBackSort = true;
     float sortMaxDistance = 512.0f;
     float lodDistanceMultiplier = 0.25f;
@@ -292,6 +301,13 @@ struct Options
     };
     DebugDraw debugDraw = DebugDraw::none;
 } options;
+
+
+struct EngineState
+{
+    bool playing = false;
+};
+EngineState engineState;
 
 
 #include "Time.h"
@@ -339,6 +355,7 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     {
         editorState.currentWorldPath = project.SceneAbs(project.startupScene);
         World::instance->Load(editorState.currentWorldPath);
+        editorState.dirtyHierarchy = true;
     }
 
     engine.Loop();

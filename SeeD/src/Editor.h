@@ -1186,6 +1186,21 @@ public:
             ImGui::SetItemTooltip("Read back structured command buffers from the GPU for inspection.");
             ImGui::Checkbox("drawPhysicsShapes", &options.drawPhysicsShapes);
             ImGui::SetItemTooltip("Wireframe every physics collider, coloured by motion type (static / kinematic / dynamic).\nThe SELECTED entity's collider is drawn even when this is off.");
+            ImGui::Checkbox("drawPhysicsConstraints", &options.drawPhysicsConstraints);
+            ImGui::SetItemTooltip("Draw every physics constraint: anchors, axes, limits, and a yellow line joining the two bodies.\nWorld-anchored constraints show a yellow marker at the pinned point instead.\nConstraints touching the SELECTED entity are drawn even when this is off, whether it owns the Constraint or is its target.");
+            ImGui::Checkbox("followVehicle", &options.followVehicle);
+            ImGui::SetItemTooltip("While playing, park the camera behind the car Systems::Driver is steering, on a critically\ndamped spring. Off gives the free-fly camera back. The free-fly WASD keys do nothing while this\nis following -- press R to set the car back on its wheels.");
+            if (options.followVehicle)
+            {
+                ImGui::DragFloat("followDistance", &options.followDistance, 0.05f, 0.5f, 20.0f);
+                ImGui::SetItemTooltip("How far behind the car the camera sits, in multiples of the chassis half length.");
+                ImGui::DragFloat("followHeight", &options.followHeight, 0.05f, -2.0f, 20.0f);
+                ImGui::SetItemTooltip("How far above the car the camera sits, in multiples of the chassis half length.");
+                ImGui::DragFloat("followLookAtHeight", &options.followLookAtHeight, 0.05f, -2.0f, 20.0f);
+                ImGui::SetItemTooltip("Where on the car the camera aims, above its origin, in multiples of the chassis half length.");
+                ImGui::DragFloat("followSmoothTime", &options.followSmoothTime, 0.01f, 0.0f, 2.0f);
+                ImGui::SetItemTooltip("Seconds the spring takes to close the gap. 0 welds the camera to the car, 0.25 is a normal\nchase lag, past ~0.6 it starts feeling like the car is towing the camera on a rope.");
+            }
         }
 
         if (ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen))
@@ -2192,6 +2207,237 @@ void SetPhysicsPreset(World::Entity ent, uint motionType, uint shapeType)
     state.flags |= Components::State::Flags::instanceDirty;
 }
 
+// The authored numbers that separate one vehicle preset from another. Everything MakeVehicle does
+// with them -- the component masks, the axis convention, which wheel steers, which one holds the
+// hand brake -- is the same for every car and is not worth a field.
+struct VehiclePreset
+{
+    const char* name;
+
+    // Chassis box half extents. X = width, Y = height, Z = length, the forward axis.
+    float halfWidth;
+    float halfHeight;
+    float halfLength;
+    float chassisOffsetY;           // box center relative to the entity origin. Negative drops the
+                                    // center of mass with it, which is what keeps a car off its roof
+    float convexRadius;             // box bevel; BuildShape clamps it to half the smallest extent
+    float spawnHeight;              // room for the suspension to settle instead of starting buried
+    float mass;                     // kg
+
+    // Front and rear authored apart, because on anything but a toy they differ: a buggy runs fatter
+    // rear tires than front, a different track each end, and axles that are not symmetric about the
+    // body origin. Authored outright rather than derived from the chassis box -- Jolt's sample puts
+    // the axles at halfLength - 2 * wheelRadius, which only holds while the tires are small next to
+    // the body: on a buggy that rule gives a 500 mm wheelbase against a 330 mm class limit.
+    float halfTrackFront;           // |X| of a front wheel center
+    float halfTrackRear;
+    float axleZFront;               // signed Z of the front axle, chassis local
+    float axleZRear;                // signed Z of the rear axle, so negative on a normal car
+    float wheelAttachY;             // Y of the suspension hard point, chassis local
+    float wheelRadius;
+    float wheelWidthFront;
+    float wheelWidthRear;
+    float suspensionMinLength;
+    float suspensionMaxLength;
+    // Static sag is g / (2*pi*f)^2, which does NOT scale with the vehicle: 1.5 Hz always sags
+    // 110 mm. A car's 200 mm of travel swallows that; a buggy's 40 mm does not, and it would sit on
+    // its bump stops before it ever moved. Shrinking a vehicle means raising this.
+    float suspensionFrequency;      // Hz
+    float wheelInertia;             // kg m^2, 0.5 * wheelMass * radius^2
+    float maxBrakeTorque;           // Nm, has to beat friction * wheel load * radius to lock a wheel
+    float maxHandBrakeTorque;       // Nm, rear axle only
+
+    float engineMaxTorque;          // Nm at the crank, multiplied by the gear and differentialRatio
+    float engineMaxRPM;
+    float engineInertia;            // kg m^2
+    float clutchStrength;           // kg m^2 / s, sized by the engine rather than by the car
+    float differentialRatio;        // axle reduction; multiplies the gear ratio into wheel torque
+    uint  collisionTester;          // 0 = ray, 1 = sphere, 2 = cylinder
+};
+
+// Roughly the proportions of Jolt's own vehicle sample, which is what its default engine,
+// suspension and friction numbers were tuned against: a 4 m, 1500 kg road car.
+static constexpr VehiclePreset vehiclePresetCar =
+{
+    .name = "Vehicle",
+    .halfWidth = 0.9f,
+    .halfHeight = 0.2f,
+    .halfLength = 2.0f,
+    .chassisOffsetY = 0.0f,
+    .convexRadius = 0.05f,
+    .spawnHeight = 2.0f,
+    .mass = 1500.0f,
+    .halfTrackFront = 0.9f,
+    .halfTrackRear = 0.9f,
+    .axleZFront = 1.4f,             // halfLength - 2 * wheelRadius, the sample's own placement
+    .axleZRear = -1.4f,
+    .wheelAttachY = -0.18f,         // -0.9 * halfHeight
+    .wheelRadius = 0.3f,
+    .wheelWidthFront = 0.1f,
+    .wheelWidthRear = 0.1f,
+    .suspensionMinLength = 0.3f,
+    .suspensionMaxLength = 0.5f,
+    .suspensionFrequency = 1.5f,
+    .wheelInertia = 0.9f,
+    .maxBrakeTorque = 1500.0f,
+    .maxHandBrakeTorque = 4000.0f,
+    .engineMaxTorque = 500.0f,
+    .engineMaxRPM = 6000.0f,
+    .engineInertia = 0.5f,
+    .clutchStrength = 10.0f,
+    .differentialRatio = 3.42f,
+    .collisionTester = 0,
+};
+
+// 1/8 scale electric off-road buggy. The class rules bound the envelope -- 730 mm long, 310 mm wide,
+// a wheelbase of 270-330 mm, 3200 g minimum -- and the dimensions below stay inside them, but the
+// numbers themselves came off a tuning pass in the property window, not off the rule sheet, so a few
+// (mass, tire diameter) sit under the legal floor on purpose. The chassis box is the BODY: that
+// 730 x 310 envelope is measured over the bumper, the rear wing and the tires, none of which are
+// colliders here.
+static constexpr VehiclePreset vehiclePresetBuggy =
+{
+    .name = "Buggy",
+    .halfWidth = 0.07f,             // 140 mm body, clear of the inner tire faces at both ends
+    .halfHeight = 0.045f,           // 90 mm
+    .halfLength = 0.20f,            // 400 mm of the 730 mm envelope
+    .chassisOffsetY = -0.023f,      // body slung below the axle line, and the mass with it
+    .convexRadius = 0.01f,          // 0.05 would be bigger than halfHeight
+    .spawnHeight = 0.3f,
+    .mass = 3.0f,                   // by feel; the real class floor is 3.2 kg
+    .halfTrackFront = 0.13f,        // 295 mm over the front tires, against a 310 mm limit
+    .halfTrackRear = 0.12f,         // 285 mm over the rear
+    .axleZFront = 0.17f,
+    .axleZRear = -0.157f,           // 327 mm wheelbase, just inside the legal 330
+    .wheelAttachY = 0.02f,          // upper shock mount, near the top of the body
+    .wheelRadius = 0.051f,          // 102 mm tire, a little under the legal 109.22 minimum
+    .wheelWidthFront = 0.035f,      // narrow front, fat rear: the usual off-road split
+    .wheelWidthRear = 0.045f,
+    .suspensionMinLength = 0.025f,
+    .suspensionMaxLength = 0.065f,  // 40 mm of travel
+    .suspensionFrequency = 7.0f,    // stiff: 4 mm of static sag, so it rests near full droop
+    .wheelInertia = 0.0003f,        // 0.5 * 180 g * radius^2. Leave it POSITIVE -- a zero here makes
+                                    // PhysicsAuthoredPositive fall back to 0.9, a road car's wheel
+    .maxBrakeTorque = 2.0f,         // a wheel locks at about 0.5 Nm at this weight
+    .maxHandBrakeTorque = 4.0f,
+    .engineMaxTorque = 1.0f,      // far past traction; the tires give up long before the engine
+    .engineMaxRPM = 16000.0f,
+    .engineInertia = 0.001f,
+    .clutchStrength = 1.0f,
+    .differentialRatio = 1.0f,      // 1:1, no axle reduction -- this one gets its speed from revs
+    .collisionTester = 1,           // sphere: a 51 mm ray-cast wheel drops into cracks a tire rolls over
+};
+
+// "New Entity > Vehicle" and "> Buggy": a complete, drivable car in one click -- a dynamic box
+// chassis carrying the Vehicle component, plus the four child entities carrying Wheel that
+// Physics::SyncVehicles looks for through Parent (Physic.h).
+//
+// Every field of every component is assigned on purpose: Entity::Make hands back RAW POOL MEMORY
+// (it only clears State), so anything left out would be garbage, not the declared default.
+//
+// The car renders nothing -- there is no built-in box or wheel mesh -- so it shows up through
+// drawPhysicsShapes / drawPhysicsConstraints until an Instance is hung on the chassis and wheels.
+void MakeVehicle(const VehiclePreset& preset)
+{
+    World::Entity chassis;
+    chassis.Make(Components::Transform::mask | Components::RigidBody::mask | Components::CollisionShape::mask | Components::Vehicle::mask, preset.name);
+
+    auto& transform = chassis.Get<Components::Transform>();
+    transform.position = float3(0, preset.spawnHeight, 0);
+    transform.rotation = quaternion::identity();
+    transform.scale = float3(1);
+    transform.version = 0;
+
+    auto& rigidBody = chassis.Get<Components::RigidBody>();
+    rigidBody.motionType = 2;               // Dynamic: the only kind Jolt will drive
+    rigidBody.objectLayer = 0;
+    rigidBody.mass = preset.mass;
+    rigidBody.friction = 0.2f;
+    rigidBody.restitution = 0.0f;
+    rigidBody.linearDamping = 0.05f;
+    rigidBody.angularDamping = 0.05f;
+    rigidBody.gravityFactor = 1.0f;
+    rigidBody.allowSleeping = 1;
+    rigidBody.isSensor = 0;
+
+    auto& collisionShape = chassis.Get<Components::CollisionShape>();
+    collisionShape.shapeType = 0;           // Box
+    collisionShape.mesh = Components::Handle<Components::Mesh>{ entityInvalid };
+    collisionShape.halfExtent = float3(preset.halfWidth, preset.halfHeight, preset.halfLength);
+    collisionShape.offset = float3(0, preset.chassisOffsetY, 0);
+    collisionShape.convexRadius = preset.convexRadius;
+
+    auto& vehicle = chassis.Get<Components::Vehicle>();
+    vehicle.up = float3(0, 1, 0);
+    vehicle.forward = float3(0, 0, 1);
+    vehicle.maxPitchRollAngle = 3.14159265f;    // pi = never righted by the constraint
+    vehicle.collisionTester = preset.collisionTester;
+    vehicle.maxSlopeAngle = 1.3962634f;         // 80 deg
+    vehicle.engineMaxTorque = preset.engineMaxTorque;
+    vehicle.engineMinRPM = 1000.0f;
+    vehicle.engineMaxRPM = preset.engineMaxRPM;
+    vehicle.engineInertia = preset.engineInertia;
+    vehicle.shiftUpRPM = 4000.0f;
+    vehicle.shiftDownRPM = 2000.0f;
+    vehicle.clutchStrength = preset.clutchStrength;
+    vehicle.differentialRatio = preset.differentialRatio;
+    vehicle.forwardInput = 0.0f;
+    vehicle.rightInput = 0.0f;
+    vehicle.brakeInput = 0.0f;
+    vehicle.handBrakeInput = 0.0f;
+
+    // SeeD is LEFT-handed -- +X right, +Y up, +Z forward, the axes the camera's WASD keys move along
+    // (World.h) -- so a wheel on the car's LEFT sits at -X. Which side a wheel is on only picks its
+    // slot in the axle's differential, but the names may as well tell the truth.
+    const char* wheelNames[4] = { "Wheel Front Left", "Wheel Front Right", "Wheel Rear Left", "Wheel Rear Right" };
+    for (uint i = 0; i < 4; i++)
+    {
+        bool front = i < 2;
+        bool left = (i % 2) == 0;
+
+        World::Entity wheelEnt;
+        wheelEnt.Make(Components::Transform::mask | Components::Parent::mask | Components::Wheel::mask, wheelNames[i]);
+        wheelEnt.Get<Components::Parent>().entity.Set(chassis);
+
+        float halfTrack = front ? preset.halfTrackFront : preset.halfTrackRear;
+        float3 attachment = float3(
+            left ? -halfTrack : halfTrack,
+            preset.wheelAttachY,
+            front ? preset.axleZFront : preset.axleZRear);
+
+        // Output only -- WriteBackWheelTransforms overwrites it every frame from the simulated
+        // pose. Seeded with the attachment point so the hierarchy looks right before the first step.
+        auto& wheelTransform = wheelEnt.Get<Components::Transform>();
+        wheelTransform.position = attachment;
+        wheelTransform.rotation = quaternion::identity();
+        wheelTransform.scale = float3(1);
+        wheelTransform.version = 0;
+
+        auto& wheel = wheelEnt.Get<Components::Wheel>();
+        wheel.position = attachment;                        // the suspension hard point, chassis local space
+        wheel.suspensionDirection = float3(0, -1, 0);
+        wheel.radius = preset.wheelRadius;
+        wheel.width = front ? preset.wheelWidthFront : preset.wheelWidthRear;
+        wheel.suspensionMinLength = preset.suspensionMinLength;
+        wheel.suspensionMaxLength = preset.suspensionMaxLength;
+        wheel.suspensionFrequency = preset.suspensionFrequency;
+        wheel.suspensionDamping = 0.5f;
+        wheel.maxSteerAngle = front ? 0.5235988f : 0.0f;    // 30 deg, front axle only
+        wheel.maxBrakeTorque = preset.maxBrakeTorque;
+        wheel.maxHandBrakeTorque = front ? 0.0f : preset.maxHandBrakeTorque;   // the hand brake locks the rear
+        wheel.inertia = preset.wheelInertia;
+        wheel.angularDamping = 0.2f;
+        wheel.axle = front ? 0 : 1;
+        wheel.driven = 1;                                   // four wheel drive: the forgiving default
+    }
+
+    editorState.selectedObject = chassis;
+    editorState.dirtyHierarchy = true;
+}
+
+void MakeDefaultVehicle() { MakeVehicle(vehiclePresetCar); }
+void MakeDefaultBuggy() { MakeVehicle(vehiclePresetBuggy); }
+
 void DefaultPropertyDraw(Components::Mask mask, char* cmpData)
 {
     ComponentInfo* metaData = nullptr;
@@ -2442,6 +2688,7 @@ public:
                 editorState.selectedObject = clone;
                 editorState.dirtyHierarchy = true;
             }
+            /*
             ImGui::SameLine();
             if (ImGui::Button("Clone lot"))
             {
@@ -2456,6 +2703,7 @@ public:
                 }
                 editorState.dirtyHierarchy = true;
             }
+            */
             ImGui::SameLine();
             if (ImGui::Button("Delete"))
             {
@@ -2527,6 +2775,7 @@ public:
                             state.flags |= Components::State::Flags::instanceDirty;
                             state.flags |= Components::State::Flags::physicsDirty;
                             state.flags |= Components::State::Flags::constraintDirty;
+                            state.flags |= Components::State::Flags::vehicleDirty;
                         }
 
                         ImGui::PopID();
@@ -3023,6 +3272,7 @@ public:
                             //World::instance->ClearImmediate();
                             editorState.currentWorldPath = path; // remember for Save/Load World
                             World::instance->Load(path);
+                            editorState.dirtyHierarchy = true;
                         });
                 }
                 if (ImGui::MenuItem("Add Prefab"))
@@ -3142,6 +3392,16 @@ public:
                             terrain.gridMesh = MeshLoader::instance->BuildTerrainGridMesh(terrain.gridSpacing, terrain.gridSize);
                         editorState.dirtyHierarchy = true;
                     }
+                    if (ImGui::MenuItem("Vehicle"))
+                    {
+                        MakeDefaultVehicle();
+                    }
+                    ImGui::SetItemTooltip("A drivable 4-wheel car: a dynamic box chassis plus four child Wheel entities.\nIt renders nothing on its own -- turn on drawPhysicsShapes / drawPhysicsConstraints to see it,\nand drive it from the Vehicle component's forwardInput / rightInput while playing.");
+                    if (ImGui::MenuItem("Buggy (1/8 scale)"))
+                    {
+                        MakeDefaultBuggy();
+                    }
+                    ImGui::SetItemTooltip("The same thing at 1/8 RC scale: a 400 x 140 x 90 mm body, 327 mm wheelbase, 102 mm\ntires narrow at the front and fat at the rear, 3 kg. Every number that does not scale with the\nvehicle is re-tuned for it -- suspension frequency above all, since static sag is g / (2*pi*f)^2\nno matter how small the car gets.");
                     ImGui::EndMenu();
                 }
                 if (ImGui::MenuItem("Generate components Metadata"))
@@ -3176,9 +3436,9 @@ public:
             width += ImGui::CalcTextSize("average %.3f ms/frame (%.1f FPS)").x;
             AlignForWidth(width);
 
-            if (ImGui::MenuItem(World::instance->playing ? "Stop" : "Play") || IOs::instance->keys.pressed[VK_F2])
+            if (ImGui::MenuItem(engineState.playing ? "Stop" : "Play") || IOs::instance->keys.pressed[VK_F2])
             {
-                World::instance->playing = !World::instance->playing;
+                engineState.playing = !engineState.playing;
             }
             ImGui::Separator();
 

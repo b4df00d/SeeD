@@ -18,6 +18,7 @@ public:
     OMMBaker ommBaker;
 
     Systems::Player player;
+    Systems::Driver driver;
     Systems::PrefabStreaming prefabStreaming;
     Systems::TerrainStreaming terrainStreaming;
     Physics physics;
@@ -40,6 +41,7 @@ public:
         ui.On(&ios.window, gpu.device, gpu.swapChain);
 
         player.On();
+        driver.On();
         prefabStreaming.On();
         terrainStreaming.On();
         physics.On();
@@ -95,6 +97,7 @@ public:
 
         physics.Off();
         player.Off();
+        driver.Off();
         prefabStreaming.Off();
         terrainStreaming.Off();
 

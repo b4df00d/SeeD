@@ -1,5 +1,6 @@
 #pragma once
 #include <bitset>
+#include <atomic>
 #include <concepts>
 #include <type_traits>
 #include <filesystem>
@@ -244,7 +245,8 @@ namespace Components
             BLAS = 1 << 2,
             transient = 1 << 3,
             physicsDirty = 1 << 4,
-            constraintDirty = 1 << 5
+            constraintDirty = 1 << 5,
+            vehicleDirty = 1 << 6,
         };
         BitFlags<Flags> flags;
     };
@@ -805,13 +807,11 @@ public:
 
     std::vector<Systems::SystemBase*> systems;
 
-    bool playing;
     bool structureChanged = false;
 
     void On()
     {
         instance = this;
-        playing = false;
         structureChanged = false;
         entitySlots.reserve(1024 * 1024);
         entityFreeSlots.reserve(entitySlots.size());
@@ -1513,6 +1513,20 @@ float Rand01()
     return float(std::rand()) / float(RAND_MAX);
 }
 
+// What Systems::Driver (Physic.h) hands to Systems::Player's chase camera. It is the only state
+// that crosses between two ECS systems, and World::Schedule emplaces them as independent tasks with
+// no edges between them -- they run in parallel, in no defined order -- so it is atomic. Reading a
+// value one frame old is fine here: it only ever names WHICH car to follow, never where it is. The
+// car's pose is read from its Transform, which PhysicsSyncReadback wrote in stage 1, before any
+// system task could start.
+static constexpr uint chaseCameraNoTarget = 0xFFFFFFFFu;   // entityInvalid, packed as ToUInt packs it
+struct ChaseCameraTarget
+{
+    std::atomic<uint> entity{ chaseCameraNoTarget };
+    std::atomic<float> scale{ 1.0f };   // chassis half length; the rig's distances are multiples of it
+};
+static ChaseCameraTarget chaseCameraTarget;
+
 namespace Systems
 {
     struct Player : SystemBase
@@ -1546,9 +1560,116 @@ namespace Systems
                 World::instance->systems.erase(item);
         }
 
+        // Chase rig state, in world space. The velocities belong to the springs, not to the camera.
+        float3 chasePosition = float3(0);
+        float3 chasePositionVelocity = float3(0);
+        float3 chaseLookAt = float3(0);
+        float3 chaseLookAtVelocity = float3(0);
+        uint chaseEntity = chaseCameraNoTarget;   // what the rig is locked onto, to know when to snap
+
+        // Critically damped spring: closes most of the gap in `smoothTime` seconds and never
+        // overshoots, so the camera lags into a corner and settles instead of ringing. The rational
+        // approximation of exp(-x) is what keeps it stable at any frame time -- integrating a spring
+        // as `velocity += -k * offset * dt` blows up the moment k * dt approaches 1, which on a
+        // camera means a hitch throws you across the level.
+        static void SmoothDamp(float3& current, float3& velocity, float3 target, float smoothTime, float dt)
+        {
+            smoothTime = smoothTime > 1.0e-4f ? smoothTime : 1.0e-4f;
+            float omega = 2.0f / smoothTime;
+            float x = omega * dt;
+            float decay = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x);
+            float3 offset = current - target;
+            float3 temp = (velocity + offset * omega) * dt;
+            velocity = (velocity - temp * omega) * decay;
+            current = target + (offset + temp) * decay;
+        }
+
+        // Sits behind and above the car Systems::Driver published, on the springs above. Returns
+        // false when there is nothing to follow, which is what hands the camera back to the free-fly
+        // controls in Update.
+        bool UpdateChaseCamera(World* world)
+        {
+            if (!options.followVehicle || !engineState.playing)
+            {
+                chaseEntity = chaseCameraNoTarget;
+                return false;
+            }
+
+            uint packed = chaseCameraTarget.entity.load(std::memory_order_relaxed);
+            World::Entity target;
+            target.FromUInt(packed);
+            if (packed == chaseCameraNoTarget || target.id >= (uint)world->entitySlots.size()
+                || !target.IsValid() || !target.Has<Components::Transform>())
+            {
+                chaseEntity = chaseCameraNoTarget;
+                return false;
+            }
+
+            float4x4 carMatrix = ComputeWorldMatrix(target);
+            float3 carPosition = carMatrix[3].xyz;
+
+            // Yaw only. Letting the rig inherit the car's pitch and roll is what turns a chase
+            // camera into a washing machine the first time the car lands on its side.
+            float3 flat = float3((float)carMatrix[2].x, 0.0f, (float)carMatrix[2].z);
+            float flatLength = (float)length(flat);
+            float3 carForward = flatLength > 1.0e-4f ? flat * (1.0f / flatLength) : float3(0, 0, 1);
+
+            float scale = chaseCameraTarget.scale.load(std::memory_order_relaxed);
+            float3 desiredPosition = carPosition - carForward * (options.followDistance * scale)
+                                                 + float3(0, options.followHeight * scale, 0);
+            float3 desiredLookAt = carPosition + float3(0, options.followLookAtHeight * scale, 0);
+
+            // A different car (or the first frame of following one) is a cut, not a move: springing
+            // across the level from wherever the free camera was left would take seconds.
+            if (chaseEntity != packed)
+            {
+                chaseEntity = packed;
+                chasePosition = desiredPosition;
+                chaseLookAt = desiredLookAt;
+                chasePositionVelocity = float3(0);
+                chaseLookAtVelocity = float3(0);
+            }
+            else
+            {
+                float dt = Time::instance->deltaSeconds;
+                SmoothDamp(chasePosition, chasePositionVelocity, desiredPosition, options.followSmoothTime, dt);
+                // Half the smooth time: the aim has to settle before the position does, or the car
+                // slides around the frame while the rig catches up behind it.
+                SmoothDamp(chaseLookAt, chaseLookAtVelocity, desiredLookAt, options.followSmoothTime * 0.5f, dt);
+            }
+
+            auto& trans = camera.Get<Components::Transform>();
+            trans.position = chasePosition;
+            trans.scale = float3(1);
+
+            float3 toTarget = chaseLookAt - chasePosition;
+            float toTargetLength = (float)length(toTarget);
+            if (toTargetLength < 1.0e-4f)
+                return true;   // sitting on the car; keep last frame's rotation rather than NaN it
+
+            // Rows are right / up / forward, the same left-handed basis the free camera rebuilds at
+            // the end of Update, so right = up x forward and up = forward x right.
+            float3 forward = toTarget * (1.0f / toTargetLength);
+            float3 right = cross(float3(0, 1, 0), forward);
+            float rightLength = (float)length(right);
+            right = rightLength > 1.0e-4f ? right * (1.0f / rightLength) : float3(1, 0, 0);
+            float3 up = cross(forward, right);
+
+            float4x4 basis = float4x4(
+                (float)right.x, (float)right.y, (float)right.z, 0,
+                (float)up.x, (float)up.y, (float)up.z, 0,
+                (float)forward.x, (float)forward.y, (float)forward.z, 0,
+                0, 0, 0, 1);
+            trans.rotation = MatrixToQuaternion(float3x3(basis));
+            return true;
+        }
+
         void Update(World* world) override
         {
             ZoneScoped;
+
+            if (UpdateChaseCamera(world))
+                return;
 
             auto& cam = camera.Get<Components::Camera>();
             auto& trans = camera.Get<Components::Transform>();
@@ -1560,19 +1681,19 @@ namespace Systems
 
             float sensDt = sensibility * Time::instance->deltaSeconds;
             float sensLookDt = sensibilityLook;
-            if (IOs::instance->keys.down[VK_W] || IOs::instance->keys.down[VK_UP])
+            if (IOs::instance->keys.down[VK_W])// || IOs::instance->keys.down[VK_UP])
             {
                 trans.position = trans.position + (float3(mat.matrix[2].xyz) * sensDt);
             }
-            if (IOs::instance->keys.down[VK_S] || IOs::instance->keys.down[VK_DOWN])
+            if (IOs::instance->keys.down[VK_S])// || IOs::instance->keys.down[VK_DOWN])
             {
                 trans.position = trans.position - (float3(mat.matrix[2].xyz) * sensDt);
             }
-            if (IOs::instance->keys.down[VK_D] || IOs::instance->keys.down[VK_RIGHT])
+            if (IOs::instance->keys.down[VK_D])// || IOs::instance->keys.down[VK_RIGHT])
             {
                 trans.position = trans.position + (float3(mat.matrix[0].xyz) * sensDt);
             }
-            if (IOs::instance->keys.down[VK_A] || IOs::instance->keys.down[VK_LEFT])
+            if (IOs::instance->keys.down[VK_A])// || IOs::instance->keys.down[VK_LEFT])
             {
                 trans.position = trans.position - (float3(mat.matrix[0].xyz) * sensDt);
             }
@@ -1661,7 +1782,7 @@ namespace Systems
         void Update(World* world) override
         {
             ZoneScoped;
-            if (!world->playing) { UnloadAll(); return; }
+            if (!engineState.playing) { UnloadAll(); return; }
             if (!FindCamera(world)) return;
 
             uint prefabBucket = Components::MaskToBucket(Components::Prefab::mask);

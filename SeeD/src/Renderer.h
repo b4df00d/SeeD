@@ -3339,7 +3339,9 @@ public:
                     float4x4 previousWorldMatrix = matrixCmp.matrix;
                     matrixCmp.matrix = ComputeWorldMatrix(ent);
                     matrixCmp.versionCache = transformVersion;
-                    previousWorldMatrix = matrixCmp.matrix;
+                    // Bitwise: hlslpp's float4x4 has no component-wise !=, and erring towards
+                    // "changed" only ever costs the one extra settle pass set up below.
+                    bool matrixChanged = memcmp(&previousWorldMatrix, &matrixCmp.matrix, sizeof(float4x4)) != 0;
 
                     HLSL::Instance instance;
                     instance.meshIndex = effectiveMesh->storageIndex;
@@ -3382,6 +3384,16 @@ public:
                     // pending change isn't lost. Physics has its own bit (State::Flags) precisely
                     // so it doesn't have to share this one's lifetime.
                     state.flags.Unset(Components::State::Flags::instanceDirty);
+
+                    // Settle frame. The record just uploaded has previous != current, and the
+                    // loaded-and-clean check at the top of this loop never revisits it -- so an
+                    // instance that stops moving would keep emitting its last frame of velocity
+                    // forever (smearing under TAA/DLSS on a now-static object). Re-arm for one
+                    // more pass: next frame recomputes the same matrix, uploads previous ==
+                    // current, and leaves matrixChanged false so it doesn't re-arm again. Free in
+                    // the steady state -- only instances that actually moved pay for it.
+                    if (matrixChanged)
+                        state.flags.Set(Components::State::Flags::instanceDirty);
 
                     // count instances with shader
                     instanceCount++;

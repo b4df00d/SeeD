@@ -15,7 +15,7 @@ struct EditorState
     float4x4 cameraView;
     float4x4 cameraProj;
 };
-EditorState editorState;
+EditorState editorState ;
 
 class EditorWindow
 {
@@ -66,9 +66,9 @@ public:
                 width += ImGui::CalcTextSize("average %.3f ms/frame (%.1f FPS)").x;
                 AlignForWidth(width);
 
-                if (ImGui::MenuItem(World::instance->playing ? "Stop" : "Play") || IOs::instance->keys.pressed[VK_F2])
+                if (ImGui::MenuItem(engineState.playing ? "Stop" : "Play") || IOs::instance->keys.pressed[VK_F2])
                 {
-                    World::instance->playing = !World::instance->playing;
+                    engineState.playing = !engineState.playing;
                 }
                 ImGui::Separator();
 
