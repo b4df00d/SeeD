@@ -3095,7 +3095,7 @@ struct MeshStorage
     std::unordered_map<uint, std::vector<uint>> overrideFreeListBySource;
 
     Resource scratchBLAS;
-    uint maxScratchSizeInBytes = 16 * 1024 * 1024;
+    uint maxScratchSizeInBytes = 128 * 1024 * 1024;
 
     std::atomic<uint> scratchPeakThisFrame{ 0 };
     std::atomic<uint> scratchPeakLastFrame{ 0 };

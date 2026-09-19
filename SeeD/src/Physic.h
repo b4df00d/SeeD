@@ -407,7 +407,7 @@ struct Physics
 
     static constexpr float fixedDeltaSeconds = 1.0f / 60.0f;
     static constexpr float maxAccumulatedSeconds = 0.25f;   // a hitch must not turn into a step spiral
-    static constexpr int   collisionSteps = 1;
+    static constexpr int   collisionSteps = 10;
     static constexpr JPH::uint maxBodies = 65536;
     static constexpr JPH::uint numBodyMutexes = 0;          // 0 = let Jolt pick
     static constexpr JPH::uint maxBodyPairs = 65536;
@@ -762,10 +762,10 @@ struct Physics
 
         // Just do a step every frame... I like it better to test
         // see if does really simulate unheavenly. If so, maybe subdivide the collisionSteps depending on deltatime?
-        //physicsSystem.Update(Time::instance->deltaSeconds, collisionSteps, tempAllocator, jobSystem);
+        physicsSystem.Update(Time::instance->deltaSeconds, collisionSteps, tempAllocator, jobSystem);
         while (accumulator >= fixedDeltaSeconds)
         {
-            physicsSystem.Update(fixedDeltaSeconds, collisionSteps, tempAllocator, jobSystem);
+            //physicsSystem.Update(fixedDeltaSeconds, collisionSteps, tempAllocator, jobSystem);
             accumulator -= fixedDeltaSeconds;
         }
 

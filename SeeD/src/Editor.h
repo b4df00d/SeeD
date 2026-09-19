@@ -2314,14 +2314,14 @@ static constexpr VehiclePreset vehiclePresetBuggy =
     .wheelWidthFront = 0.035f,      // narrow front, fat rear: the usual off-road split
     .wheelWidthRear = 0.045f,
     .suspensionMinLength = 0.025f,
-    .suspensionMaxLength = 0.065f,  // 40 mm of travel
-    .suspensionFrequency = 7.0f,    // stiff: 4 mm of static sag, so it rests near full droop
+    .suspensionMaxLength = 0.1f,  // 40 mm of travel
+    .suspensionFrequency = 4.0f,    // stiff: 4 mm of static sag, so it rests near full droop
     .wheelInertia = 0.0003f,        // 0.5 * 180 g * radius^2. Leave it POSITIVE -- a zero here makes
                                     // PhysicsAuthoredPositive fall back to 0.9, a road car's wheel
     .maxBrakeTorque = 2.0f,         // a wheel locks at about 0.5 Nm at this weight
     .maxHandBrakeTorque = 4.0f,
     .engineMaxTorque = 1.0f,      // far past traction; the tires give up long before the engine
-    .engineMaxRPM = 16000.0f,
+    .engineMaxRPM = 6000.0f,
     .engineInertia = 0.001f,
     .clutchStrength = 1.0f,
     .differentialRatio = 1.0f,      // 1:1, no axle reduction -- this one gets its speed from revs

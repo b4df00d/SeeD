@@ -975,6 +975,11 @@ public:
             lod.indices.resize(originalMesh.indices.size());
             float lod_error = 0.f;
             uint newIndexCount = (uint)meshopt_simplify(&lod.indices[0], originalMesh.indices.data(), originalMesh.indices.size(), &originalMesh.vertices[0].px, originalMesh.vertices.size(), sizeof(Vertex), target_index_count, target_error, /* options= */ 0, &lod_error);
+            if (newIndexCount == 0)
+            {
+                optimizedMesh.LODs.pop_back();
+                break;
+            }
             lod.indices.resize(newIndexCount);
 
             size_t max_meshlets = meshopt_buildMeshletsBound(lod.indices.size(), HLSL::max_vertices, HLSL::max_triangles);
@@ -1127,9 +1132,119 @@ MeshLoader* MeshLoader::instance = nullptr;
 // {hash}.omm sidecar consumed by MeshStorage::LoadBLAS.
 namespace OMMBake
 {
+    // Per-mesh CPU bake budget, in the SDK's own workload unit (number of micro-triangle / texel
+    // tests). The SDK's reference point is 1<<28 ~ "a total of 256 1k textures"; 1<<26 is about
+    // four 4k textures covered once, and a foliage atlas baked at mip 1 lands near 4M, so there
+    // is roughly 16x headroom before a mesh is rejected. Over budget the baker first degrades
+    // quality to fit and only fails with WORKLOAD_TOO_BIG as a last resort.
+    // Calibrate against the "OMM bake:" log lines below before tightening.
+    static constexpr uint64_t maxWorkloadSize = 1ull << 26;
+    // Output budget. Over it the baker downsamples its least valuable blocks rather than failing.
+    static constexpr uint32_t maxArrayDataSize = 8u << 20;
+    // Micro-triangle count is 4^level, so 6 -> 4096, which is 1 KB of OC1_4_State per micromap.
+    static constexpr uint8_t maxSubdivisionLevel = 6;
+    // The baker picks a per-triangle subdivision level targeting one micro-triangle per
+    // (scale x scale) texel area. 2 is the SDK default, spelled out because EstimateWorkload
+    // has to model it.
+    static constexpr float dynamicSubdivisionScale = 2.0f;
+    // Weed out OMMs that resolve almost nothing: they cost array data and OMM build time for a
+    // primitive that still ends up in the any-hit shader.
+    static constexpr float rejectionThreshold = 0.1f;
+
+    // Estimate of the bake cost in the same unit as maxWorkloadSize, from data already in hand:
+    // per triangle the baker evaluates 4^N micro-triangles with N chosen so that each covers
+    // about scale^2 texels, and has to test every texel underneath them, so the cost per triangle
+    // is ~max(microTriangles, texelsCovered). Instrumentation only for now -- logged next to the
+    // measured bake time so the budget above can be calibrated from real imports rather than
+    // guessed. Triangle count alone is a poor proxy: 200k tiny-UV triangles are cheap, while 600
+    // triangles whose UVs tile a 4k albedo are not.
+    inline uint64_t EstimateWorkload(const MeshData& mesh, uint texWidth, uint texHeight)
+    {
+        ZoneScoped;
+        if (mesh.LODs.size() == 0)
+            return 0;
+
+        const uint64_t maxMicroTriangles = 1ull << (2 * maxSubdivisionLevel);
+        const double texels = (double)texWidth * (double)texHeight;
+        const double texelsPerMicroTriangle = dynamicSubdivisionScale * dynamicSubdivisionScale;
+
+        uint64_t total = 0;
+        const std::vector<unsigned int>& indices = mesh.LODs[0].indices;
+        for (size_t i = 0; i + 2 < indices.size(); i += 3)
+        {
+            const VertexPacked& a = mesh.vertices[indices[i + 0]];
+            const VertexPacked& b = mesh.vertices[indices[i + 1]];
+            const VertexPacked& c = mesh.vertices[indices[i + 2]];
+            double uvArea = fabs((b.u - a.u) * (c.v - a.v) - (c.u - a.u) * (b.v - a.v)) * 0.5;
+            double texelArea = uvArea * texels;
+
+            uint64_t microTriangles = (uint64_t)ceil(texelArea / texelsPerMicroTriangle);
+            if (microTriangles < 1) microTriangles = 1;
+            if (microTriangles > maxMicroTriangles) microTriangles = maxMicroTriangles;
+            uint64_t texelTests = (uint64_t)texelArea;
+
+            total += microTriangles > texelTests ? microTriangles : texelTests;
+        }
+        return total;
+    }
+
+    // The RT any-hit samples the albedo at one fixed mip -- common.hlsl's GetSurfaceData does
+    // SampleLevel(samplerLinear, uv, 1) under RAY_DISPATCH -- so that is the only mip worth
+    // baking against, as a single-mip texture. Feeding the whole chain instead makes the bake
+    // conservative across mips nothing samples: more texel tests for a worse result, since a
+    // conservative OMM resolves fewer triangles to pure Opaque/Transparent and leaves more
+    // Unknown states behind, which is exactly the RT win we are after.
+    // Returns the alpha plane of that mip plus its dimensions.
+    inline bool ExtractBakeMipAlpha(const DirectX::ScratchImage& image, std::vector<uint8_t>& alphaOut, uint& widthOut, uint& heightOut)
+    {
+        ZoneScoped;
+
+        // a source that already carries a chain (.dds) has the mip; otherwise halve mip 0.
+        // The runtime texture's own mip 1 comes from the texture pipeline, so this is an
+        // approximation of it either way -- harmless for a 0.5 alpha test under linear filtering.
+        bool hasBakeMip = image.GetMetadata().mipLevels > 1;
+        const DirectX::Image* src = image.GetImage(0, hasBakeMip ? 1 : 0, 0);
+        if (src == nullptr)
+            return false;
+
+        DirectX::ScratchImage rgba;
+        if (DirectX::IsCompressed(src->format))
+        {
+            if (FAILED(DirectX::Decompress(*src, DXGI_FORMAT_R8G8B8A8_UNORM, rgba)))
+                return false;
+        }
+        else if (src->format != DXGI_FORMAT_R8G8B8A8_UNORM)
+        {
+            if (FAILED(DirectX::Convert(*src, DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, rgba)))
+                return false;
+        }
+        else if (FAILED(rgba.InitializeFromImage(*src)))
+            return false;
+
+        const DirectX::Image* mip = rgba.GetImage(0, 0, 0);
+        if (!hasBakeMip && mip->width >= 2 && mip->height >= 2)
+        {
+            DirectX::ScratchImage halved;
+            if (FAILED(DirectX::Resize(*mip, mip->width / 2, mip->height / 2, DirectX::TEX_FILTER_DEFAULT, halved)))
+                return false;
+            rgba = std::move(halved);
+            mip = rgba.GetImage(0, 0, 0);
+        }
+
+        widthOut = (uint)mip->width;
+        heightOut = (uint)mip->height;
+        alphaOut.resize(mip->width * mip->height);
+        for (size_t y = 0; y < mip->height; y++)
+            for (size_t x = 0; x < mip->width; x++)
+                alphaOut[y * mip->width + x] = mip->pixels[y * mip->rowPitch + x * 4 + 3];
+        return true;
+    }
+
     // image is consumed. Bakes LOD0 only -- see OMMData. ALWAYS writes the sidecar: an empty one
     // is the "checked, nothing to gain" marker that stops the runtime baker from retrying every
     // run (an all-opaque texture bakes to special indices only, which is not worth building).
+    // NOTE: a budget rejection writes that same empty marker, so raising maxWorkloadSize needs
+    // the {hash}.omm sidecars deleted to take effect until the header records the budget used.
     inline void BakeAndWrite(DirectX::ScratchImage&& image, uint64_t textureHash, MeshData& mesh, String meshPath)
     {
         ZoneScoped;
@@ -1137,45 +1252,35 @@ namespace OMMBake
         ommData.textureHash = textureHash;
         ommData.alphaThreshold = 0.5f;
 
+        // instrumentation: the axes the workload budget has to be calibrated on
+        uint sourceWidth = (uint)image.GetMetadata().width;
+        uint sourceHeight = (uint)image.GetMetadata().height;
+        uint bakeWidth = 0, bakeHeight = 0;
+        uint64_t estimatedWorkload = 0;
+        double prepMs = 0.0, bakeMs = 0.0;
+        const char* outcome = mesh.LODs.size() == 0 ? "skipped: mesh has no LOD0"
+                                                    : "skipped: albedo has no alpha channel";
+        std::chrono::steady_clock::time_point stamp = std::chrono::steady_clock::now();
+        auto elapsedMs = [&stamp]()
+        {
+            std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(now - stamp).count();
+            stamp = now;
+            return ms;
+        };
+
         if (DirectX::HasAlpha(image.GetMetadata().format) && mesh.LODs.size() > 0)
         {
-            // decompress/convert to RGBA8 and generate the full mip chain: the any-hit samples
-            // mip 1, and feeding every mip keeps the bake conservative for any runtime mip
-            DirectX::ScratchImage rgba;
-            if (DirectX::IsCompressed(image.GetMetadata().format))
+            std::vector<uint8_t> alpha;
+            if (!ExtractBakeMipAlpha(image, alpha, bakeWidth, bakeHeight))
             {
-                if (FAILED(DirectX::Decompress(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DXGI_FORMAT_R8G8B8A8_UNORM, rgba)))
-                    return;
-            }
-            else if (image.GetMetadata().format != DXGI_FORMAT_R8G8B8A8_UNORM)
-            {
-                if (FAILED(DirectX::Convert(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, rgba)))
-                    return;
-            }
-            else
-                rgba = std::move(image);
-
-            DirectX::ScratchImage mipChain;
-            if (rgba.GetMetadata().mipLevels > 1)
-                mipChain = std::move(rgba);
-            else if (FAILED(DirectX::GenerateMipMaps(*rgba.GetImage(0, 0, 0), DirectX::TEX_FILTER_DEFAULT, 0, mipChain)))
+                // no sidecar: a decode failure is not a "checked, nothing to gain" answer
+                IOs::Log("OMM bake: failed to decode the albedo alpha -> {}", meshPath.c_str());
                 return;
-
-            uint mipCount = (uint)mipChain.GetMetadata().mipLevels;
-            std::vector<std::vector<uint8_t>> alphaMips(mipCount);
-            std::vector<omm::Cpu::TextureMipDesc> mipDescs(mipCount);
-            for (uint i = 0; i < mipCount; i++)
-            {
-                const DirectX::Image* mip = mipChain.GetImage(i, 0, 0);
-                alphaMips[i].resize(mip->width * mip->height);
-                for (uint y = 0; y < mip->height; y++)
-                    for (uint x = 0; x < mip->width; x++)
-                        alphaMips[i][y * mip->width + x] = mip->pixels[y * mip->rowPitch + x * 4 + 3];
-                mipDescs[i].width = (uint32_t)mip->width;
-                mipDescs[i].height = (uint32_t)mip->height;
-                mipDescs[i].rowPitch = (uint32_t)mip->width;
-                mipDescs[i].textureData = alphaMips[i].data();
             }
+            image.Release(); // the one mip we bake against is extracted, drop the source pixels
+            prepMs = elapsedMs();
+            estimatedWorkload = EstimateWorkload(mesh, bakeWidth, bakeHeight);
 
             omm::BakerCreationDesc bakerDesc;
             bakerDesc.type = omm::BakerType::CPU;
@@ -1183,11 +1288,18 @@ namespace OMMBake
             if (omm::CreateBaker(bakerDesc, &baker) != omm::Result::SUCCESS)
                 return;
 
+            omm::Cpu::TextureMipDesc mipDesc;
+            mipDesc.width = bakeWidth;
+            mipDesc.height = bakeHeight;
+            mipDesc.rowPitch = bakeWidth;
+            mipDesc.textureData = alpha.data();
+
             omm::Cpu::TextureDesc texDesc;
             texDesc.format = omm::Cpu::TextureFormat::UNORM8;
-            texDesc.mips = mipDescs.data();
-            texDesc.mipCount = mipCount;
+            texDesc.mips = &mipDesc;
+            texDesc.mipCount = 1;
             texDesc.alphaCutoff = 0.5f;
+            outcome = "the baker failed";
             omm::Cpu::Texture bakeTexture = 0;
             if (omm::Cpu::CreateTexture(baker, texDesc, &bakeTexture) == omm::Result::SUCCESS)
             {
@@ -1205,10 +1317,18 @@ namespace OMMBake
                 input.indexCount = (uint32_t)mesh.LODs[0].indices.size();
                 input.alphaCutoff = 0.5f; // must match the any-hit alpha test
                 input.format = omm::Format::OC1_4_State;
-                input.maxSubdivisionLevel = 6;
+                input.maxSubdivisionLevel = maxSubdivisionLevel;
+                input.dynamicSubdivisionScale = dynamicSubdivisionScale;
+                // budgets: left at the SDK's unbounded defaults a mesh whose UVs tile a 4k albedo
+                // can bake for minutes
+                input.maxWorkloadSize = maxWorkloadSize;
+                input.maxArrayDataSize = maxArrayDataSize;
+                input.rejectionThreshold = rejectionThreshold;
 
                 omm::Cpu::BakeResult result = 0;
-                if (omm::Cpu::Bake(baker, input, &result) == omm::Result::SUCCESS)
+                omm::Result bakeStatus = omm::Cpu::Bake(baker, input, &result);
+                bakeMs = elapsedMs();
+                if (bakeStatus == omm::Result::SUCCESS)
                 {
                     const omm::Cpu::BakeResultDesc* res = nullptr;
                     omm::Cpu::GetBakeResultDesc(result, &res);
@@ -1228,18 +1348,27 @@ namespace OMMBake
                         }
                         ommData.arrayData.assign((uint8_t*)res->arrayData, (uint8_t*)res->arrayData + res->arrayDataSize);
                     }
+                    outcome = ommData.IsValid() ? "baked" : "nothing to gain (alpha is uniform)";
                     omm::Cpu::DestroyBakeResult(result);
                 }
+                else if (bakeStatus == omm::Result::WORKLOAD_TOO_BIG)
+                    outcome = "skipped: over the workload budget";
                 omm::Cpu::DestroyTexture(baker, bakeTexture);
             }
             omm::DestroyBaker(baker);
         }
 
         MeshLoader::instance->WriteOMM(meshPath, ommData);
-        if (ommData.IsValid())
-            IOs::Log("baked OMM ({} micromaps) -> {}", ommData.descs.size(), meshPath.c_str());
-        else
-            IOs::Log("baked OMM: nothing to gain (alpha is uniform), wrote empty marker -> {}", meshPath.c_str());
+
+        // one greppable line per bake, to calibrate maxWorkloadSize on real imports
+        IOs::Log("OMM bake: {} | tris={} tex={}x{} (src {}x{}) estWorkload={} budget={} prep={:.1f}ms bake={:.1f}ms micromaps={} arrayData={}KB -> {}",
+            outcome,
+            mesh.LODs.size() > 0 ? mesh.LODs[0].indices.size() / 3 : 0,
+            bakeWidth, bakeHeight, sourceWidth, sourceHeight,
+            estimatedWorkload, maxWorkloadSize,
+            prepMs, bakeMs,
+            ommData.descs.size(), ommData.arrayData.size() / 1024,
+            meshPath.c_str());
     }
 }
 #include <cstdarg>
