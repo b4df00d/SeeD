@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "binding.hlsl"
 #include "structs.hlsl"
@@ -1074,7 +1074,12 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     // inverse y depth depth[uint2(launchIndex.x, rtParameters.resolution.y - launchIndex.y)]
     Texture2D<float> depth = ResourceDescriptorHeap[viewContext.depthIndex];
     cd.reverseZ = depth[pixel];
-    float3 clipSpace = float3(pixel * viewContext.renderResolution.zw * 2 - 1, cd.reverseZ);
+    // +0.5 to land on the pixel CENTRE. The depth being read was rasterised at the
+    // centre, so reconstructing from the top-left corner puts every world position
+    // half a pixel off -- and on a surface seen at a grazing angle half a pixel is a
+    // long way in world space. Every shadow and GI ray starts here, so it showed up
+    // as contact shadows sitting a couple of pixels away from the object casting them.
+    float3 clipSpace = float3((pixel + 0.5f) * viewContext.renderResolution.zw * 2 - 1, cd.reverseZ);
     #if 1
     float4 worldSpace = mul(cd.camera.viewProj_inv, float4(clipSpace.x, -clipSpace.y, clipSpace.z, 1));
     cd.worldPos = worldSpace.xyz / worldSpace.w;
@@ -1166,7 +1171,9 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     s.shadingDomain = ShadingDomain::Standard;
     uint textureIndex = ~0;
     
-    s.albedo = float4(material.parameters[0], material.parameters[0], material.parameters[0], 1);
+    // Material parameter layout: 0,1,2 albedo RGB | 3 roughness | 4 metalness |
+    // 5 normal scale | 6 cutout threshold | 7,8,9 emissive RGB.
+    s.albedo = float4(material.parameters[0], material.parameters[1], material.parameters[2], 1);
     textureIndex = material.textures[0];
     if(textureIndex != ~0)
     {
@@ -1185,10 +1192,10 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     {
         //s.albedo.xyz = float3(1, 0, 0);
         s.shadingDomain = ShadingDomain::TransmissiveAlphaTested;
-        //s.albedo.a *= material.parameters[4];
+        //s.albedo.a *= material.parameters[6];
     }
     
-    s.roughness = material.parameters[1];
+    s.roughness = material.parameters[3];
     textureIndex = material.textures[1];
     if(textureIndex != ~0)
     {
@@ -1200,7 +1207,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         #endif
     }
     
-    s.metalness = min(material.parameters[2], 0.995);
+    s.metalness = min(material.parameters[4], 0.995);
     textureIndex = material.textures[2];
     if(textureIndex != ~0)
     {
@@ -1217,7 +1224,7 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     s.tangent = tangent;
     s.binormal = binormal;
     textureIndex = material.textures[3];
-    float normalStrength = material.parameters[3];
+    float normalStrength = material.parameters[5];
     if(textureIndex != ~0)
     {
         Texture2D<float4> normals = ResourceDescriptorHeap[textureIndex];
@@ -1232,7 +1239,17 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
         
     }
     
-    s.emissiveColor = 0;
+    s.emissiveColor = float3(material.parameters[7], material.parameters[8], material.parameters[9]);
+    textureIndex = material.textures[5];
+    if(textureIndex != ~0)
+    {
+        Texture2D<float4> emissive = ResourceDescriptorHeap[textureIndex];
+        #ifdef RAY_DISPATCH
+        s.emissiveColor *= emissive.SampleLevel(samplerLinear, uv, 1).xyz;
+        #else
+        s.emissiveColor *= emissive.SampleBias(samplerLinear, uv, -1).xyz;
+        #endif
+    }
     
     s.occlusion = 1;
     s.specularTint = 1;
@@ -1265,6 +1282,7 @@ SurfaceData GetSurfaceData(uint2 pixel)
     //s.normal = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 0.01));
     s.metalness = metalness[pixel];
     s.roughness = packedNormal.a;
+    s.emissiveColor = 0;
     s.occlusion = 1;
     s.tangent = cross(s.normal, float3(1, 0, 0));
     s.binormal = cross(s.normal, s.tangent);

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 //#include "common.hlsl"
 
 #define SHADOW_RAY_INDEX                1
@@ -209,7 +209,12 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
         incidentVector = lightToSurface * rDistance;
         lightDistance = distance;
 
-        float attenuation = min(100.0f, 1.0f / pow(lightDistance, 2.0f) * 10.0f);
+        // Irradiance from a point light of radiant power P watts is P / (4*pi*d^2).
+        // This used to be 10/d^2 clamped at 100 -- off by 4*pi*10 and discontinuous.
+        // max(d^2, size^2) keeps it finite inside the light's own radius instead of
+        // relying on a clamp to hide the singularity.
+        float softenedDistanceSquared = max(dot(lightToSurface, lightToSurface), square(light.size));
+        float attenuation = 1.0f / (4.0f * M_PI * softenedDistanceSquared);
         if (light.range > 0)
         {
             float d2 = square(distance / light.range);
@@ -224,21 +229,24 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
         {
             float LdotD = dot(incidentVector, light.dir.xyz);
             float directionAngle = acos(LdotD);
-            spotlight = 1.0f - smoothstep(light.angle, light.angle*2, directionAngle);
+            // light.angle is the OUTER cone half-angle in radians. It used to be
+            // compared in radians while the editor authored degrees, so every spot
+            // was effectively fully lit. SeeD has no separate inner cone yet, so the
+            // edge softens over the outer fifth of the cone.
+            spotlight = 1.0f - smoothstep(light.angle * 0.8f, light.angle, directionAngle);
             //if (spotlight == 0) return;
         }
 
         irradiance = light.color.w;
+
+        // size is the emitter's physical radius, used for soft shadows only. It used
+        // to also rewrite irradiance as a solid-angle integral, which already carries
+        // its own 1/d^2 -- so with the attenuation above it counted distance twice and
+        // a light with any radius fell off as 1/d^4. A sphere light of the same power
+        // produces the same irradiance as a point one for d > r, so there is nothing
+        // to substitute here.
         if (light.size > 0)
-        {
             halfAngularSize = atan(min(light.size * rDistance, 1.0f));
-
-            // A good enough approximation for 2 * (1 - cos(halfAngularSize)), numerically more accurate for small angular sizes
-            float solidAngleOverPi = square(halfAngularSize);
-            float radianceTimesPi = light.color.w / square(light.size);
-
-            irradiance = radianceTimesPi * solidAngleOverPi;
-        }
 
         // Spotlight cone is part of the base weight (it is angular, not distance based), but the
         // distance attenuation is returned separately so callers apply it once after RIS selection.
@@ -314,8 +322,6 @@ bool SampleLightRIS(inout uint rngState, float3 hitPosition, float3 surfaceNorma
             float irradiance;
             float lightFalloff;
             float2 rand2 = float2(RNG(rngState), RNG(rngState));
-            // Target PDF uses the base irradiance only (no distance falloff) so the falloff survives
-            // as f / pHat in the final estimator instead of cancelling out.
             GetLightData(candidate, hitPosition, rand2, rtParameters.enableSoftShadows, lightVector, lightDistance, irradiance, lightFalloff);
 
 #if SHADOW_RAY_IN_RIS
@@ -326,7 +332,14 @@ bool SampleLightRIS(inout uint rngState, float3 hitPosition, float3 surfaceNorma
             }
 #endif
 
-            float candidatePdfG = irradiance;
+            // The target PDF has to track what the light actually contributes here,
+            // distance falloff included. Leaving falloff out (as this did) is still
+            // unbiased, but it makes pHat a bad match for f: with a 5 W/m^2 sun and a
+            // 100 W point light, the point was picked ~95% of the time even across
+            // ground where it delivers almost nothing, so the sun arrived as a rare
+            // sample carrying a ~21x weight. Correct on average, far too spiky to
+            // resolve at one sample per pixel -- it read several times too bright.
+            float candidatePdfG = irradiance * lightFalloff;
             const float candidateRISWeight = candidatePdfG * candidateWeight;
 
             totalWeights += candidateRISWeight;
@@ -548,12 +561,32 @@ float Smith_G2_Separable_GGX_Lagarde(float alphaSquared, float NdotL, float Ndot
     return 1.0f / (a * b);
 }
 
+// Smith G2 term for GGX, height-correlated: masking and shadowing are treated as
+// correlated through the microsurface height, which is what both the glTF
+// reference BRDF and Cycles use. Also returns G2 / (4 * NdotL * NdotV).
+// Source: "Moving Frostbite to Physically Based Rendering" by Lagarde & de Rousiers
+float Smith_G2_Height_Correlated_GGX_Lagarde(float alphaSquared, float NdotL, float NdotV)
+{
+    float a = NdotV * sqrt(alphaSquared + NdotL * (NdotL - alphaSquared * NdotL));
+    float b = NdotL * sqrt(alphaSquared + NdotV * (NdotV - alphaSquared * NdotV));
+    return 0.5f / (a + b);
+}
+
+// Match the reference BRDF by default. The separable form is the cheaper
+// approximation and stays available, but it is measurably darker at grazing
+// angles, which shows up against a path tracer.
+#define USE_HEIGHT_CORRELATED_SMITH 1
+
 // Evaluates G2 for selected configuration (GGX/Beckmann, optimized/non-optimized, separable/height-correlated)
 // Note that some paths aren't optimized too much...
 // Also note that when USE_OPTIMIZED_G2 is specified, returned value will be: G2 / (4 * NdotL * NdotV) if GG-X is selected
 float Smith_G2(float alpha, float alphaSquared, float NdotL, float NdotV)
 {
+#if USE_HEIGHT_CORRELATED_SMITH
+    return Smith_G2_Height_Correlated_GGX_Lagarde(alphaSquared, NdotL, NdotV);
+#else
     return Smith_G2_Separable_GGX_Lagarde(alphaSquared, NdotL, NdotV);
+#endif
 }
 
 // -------------------------------------------------------------------------
@@ -686,6 +719,18 @@ float3 evalFrostbiteDisneyDiffuse(const BrdfData data)
     return data.diffuseReflectance * (frostbiteDisneyDiffuse(data) * ONE_OVER_PI * data.NdotL);
 }
 
+// Lambert -- the glTF reference BRDF, and what Blender's Principled reduces to
+// with Diffuse Roughness 0. Frostbite-Disney stays behind the define, but note it
+// is not a subtle alternative: its energyFactor is 1/1.51 at roughness 1, so a
+// rough surface comes out about a third darker than Lambert.
+float3 evalLambertianDiffuse(const BrdfData data)
+{
+    return data.diffuseReflectance * (ONE_OVER_PI * data.NdotL);
+}
+
+// TODO : disney should be better no ??!
+#define USE_LAMBERT_DIFFUSE 1
+
 // This is an entry point for evaluation of all other BRDFs based on selected configuration (for direct light)
 float3 evalCombinedBRDF(float3 N, float3 L, float3 V, SurfaceData material)
 {
@@ -701,7 +746,11 @@ float3 evalCombinedBRDF(float3 N, float3 L, float3 V, SurfaceData material)
 
     // Eval specular and diffuse BRDFs
     float3 specular = evalMicrofacet(data);
+#if USE_LAMBERT_DIFFUSE
+    float3 diffuse = evalLambertianDiffuse(data);
+#else
     float3 diffuse = evalFrostbiteDisneyDiffuse(data);
+#endif
 
     // Combine specular and diffuse layers
     return diffuse + specular;
@@ -790,8 +839,15 @@ bool evalIndirectCombinedBRDF(float2 u,
         rayDirectionLocal = sampleHemisphere(u);
         const BrdfData data = prepareBRDFData(Nlocal, rayDirectionLocal, Vlocal, material);
 
-        // Function 'diffuseTerm' is predivided by PDF of sampling the cosine weighted hemisphere
+        // Predivided by the PDF of cosine-weighted hemisphere sampling. For Lambert
+        // that cancels exactly: (albedo/pi * cos) / (cos/pi) == albedo. Kept in step
+        // with evalCombinedBRDF -- direct and indirect must use the same diffuse
+        // model, or GI is quietly darker than the direct light it should match.
+#if USE_LAMBERT_DIFFUSE
+        sampleWeight = data.diffuseReflectance;
+#else
         sampleWeight = data.diffuseReflectance * frostbiteDisneyDiffuse(data);
+#endif
 
 #if COMBINE_BRDFS_WITH_FRESNEL
         // Sample a half-vector of specular BRDF. Note that we're reusing random variable 'u' here, but correctly it should be an new independent random number

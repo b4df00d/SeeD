@@ -22,6 +22,7 @@ public:
     Systems::PrefabStreaming prefabStreaming;
     Systems::TerrainStreaming terrainStreaming;
     Physics physics;
+    Calibration calibration;
 
     void On()
     {
@@ -40,11 +41,12 @@ public:
         renderer.On(uint2(gpu.backBuffer.Get().GetResource()->GetDesc().Width, gpu.backBuffer.Get().GetResource()->GetDesc().Height));
         ui.On(&ios.window, gpu.device, gpu.swapChain);
 
-        player.On();
+        if (options.playerSystem) player.On();
         driver.On();
         prefabStreaming.On();
         terrainStreaming.On();
         physics.On();
+        calibration.On();
     }
 
     void Loop()
@@ -81,6 +83,8 @@ public:
             if (ShaderStatsCollector::instance)
                 ShaderStatsCollector::instance->Update();
 
+            calibration.Update(renderer);
+
             if (options.stepMotion)
                 Sleep(100);
 
@@ -96,7 +100,7 @@ public:
         renderer.WaitFrame(); // wait current frame
 
         physics.Off();
-        player.Off();
+        if (options.playerSystem) player.Off();
         driver.Off();
         prefabStreaming.Off();
         terrainStreaming.Off();
@@ -132,7 +136,7 @@ public:
         }
         if (ios.DropFile())
         {
-            sceneLoader.Load(ios.window.dropFile);
+            world.Load(ios.window.dropFile);
         }
     }
 
@@ -180,6 +184,9 @@ public:
 
     bool IsRunning()
     {
+        if (calibration.Finished())
+            return false; // every [calibration] capture is written; quit
+
         bool consumed = false;
         for (auto& window : EditorWindow::guiWindows)
         {

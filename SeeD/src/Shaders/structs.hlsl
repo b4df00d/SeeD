@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #ifndef __STRUCTS__
 #define __STRUCTS__
 
@@ -11,6 +11,17 @@
 #define SeeDalign __declspec(align(16))
 #else
 #define SeeDalign
+#endif
+
+// A bool is 32 bits in an HLSL constant buffer but one byte in C++, so a shared
+// struct using `bool` silently desyncs every member laid out after the first one
+// -- the tail ends up reading past what was uploaded. Use hbool for anything
+// that crosses the boundary.
+#ifdef __cplusplus
+#define hbool uint
+static_assert(sizeof(hbool) == 4, "hbool must match HLSL's 32-bit bool");
+#else
+#define hbool bool
 #endif
 
 // CAREFULL OF ALIGNEMENT !
@@ -563,7 +574,7 @@ namespace HLSL
         uint SHARCResolvedBufferIndex;
         uint SHARCAccumulationFrameNum;
         uint SHARCStaleFrameNum;
-        bool SHARCEnableAntifirefly;
+        hbool SHARCEnableAntifirefly;
         uint SHARCSamplesPerPixel;
         float SHARCRadianceScale;
         float SHARCRoughnessThreshold;
@@ -572,11 +583,12 @@ namespace HLSL
         float throughputThreshold;
         float probeDownsampling;
         
-        bool enableBackFaceCull;
-        bool enableLighting;
-        bool enableTransmission;
-        bool enableRussianRoulette;
-        bool enableSoftShadows;
+        hbool enableBackFaceCull;
+        hbool enableLighting;
+        hbool enableTransmission;
+        hbool enableRussianRoulette;
+        hbool enableSoftShadows;
+        hbool directOnly;   // drop the ReSTIR indirect term; matches Cycles at max_bounces 0
     };
     
     struct GIReservoir

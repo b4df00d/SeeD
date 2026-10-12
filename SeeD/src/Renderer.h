@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <map>
 #include "Shaders/structs.hlsl"
@@ -507,22 +507,17 @@ struct RayTracingContext
         SHARCAccumulation.CreateBuffer(SHARCEntryCount * 16, 16, false, "SHARCAccumulation");
         SHARCResolved.CreateBuffer(SHARCEntryCount * 16, 16, false, "SHARCResolved");
 
-        rtParameters.maxFrameFilteringCount = 1;
-        rtParameters.reservoirRandBias = 0.0;
-        rtParameters.reservoirSpacialRandBias = 0.2;
-        rtParameters.spacialRadius = 64.0f;
-        rtParameters.spacialSampleCount = 16;
-        rtParameters.SHARCSceneScale = 20;
+        // Only what the resources just created above decide. Every other tunable is
+        // owned by Project (its member initialisers are the defaults) and applied by
+        // Project::SetupRenderSettings after On(); assigning them here as well would
+        // overwrite whatever the .seedproj asked for.
+        // TODO : kinda wrong... those values should be read from project but after that this is this context that owns the values
         rtParameters.SHARCEntriesNum = SHARCEntryCount;
         rtParameters.SHARCHashEntriesBufferIndex = SHARCHash.uav.offset;
         rtParameters.SHARCAccumulationBufferIndex = SHARCAccumulation.uav.offset;
         rtParameters.SHARCResolvedBufferIndex = SHARCResolved.uav.offset;
-        rtParameters.SHARCAccumulationFrameNum = 128;
         rtParameters.SHARCStaleFrameNum = 256;
         rtParameters.SHARCEnableAntifirefly = true;
-        rtParameters.SHARCSamplesPerPixel = 1;
-        rtParameters.SHARCRadianceScale = 1;
-        rtParameters.SHARCRoughnessThreshold = 0.33;
 
         rtParameters.enableBackFaceCull = true;
         rtParameters.enableLighting = true;
@@ -530,6 +525,7 @@ struct RayTracingContext
         rtParameters.bouncesMax = 5;
         rtParameters.enableRussianRoulette = true;
         rtParameters.enableSoftShadows = true;
+        rtParameters.directOnly = false;
         rtParameters.throughputThreshold = 0.0001f;
         rtParameters.probeDownsampling = 6.0f;
     }
@@ -559,6 +555,7 @@ public:
     uint2 renderResolution;
     uint2 displayResolution;
     HLSL::Upscaling upscaling;
+    bool hasValidCamera = false;
     ViewWorld viewWorld;
     RayTracingContext raytracingContext;
     ViewContext viewContext;
@@ -2305,7 +2302,7 @@ public:
         atmosphericScatteringBlurShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Blur");
         atmosphericScatteringAccumulationShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Accumulation");
 
-        asparams.density = 0.001;
+        asparams.density = 0.0;
         asparams.luminosity = 0.1;
         asparams.specialNear = 0.25;
         asparams.heightFalloff = 0.02;
@@ -2858,7 +2855,7 @@ public:
         ZoneScoped;
         Open();
 
-        if (view->upscaling == HLSL::Upscaling::dlss || view->upscaling == HLSL::Upscaling::dlssd)
+        if ((view->upscaling == HLSL::Upscaling::dlss || view->upscaling == HLSL::Upscaling::dlssd) && view->hasValidCamera)
         {
             lighted.Get().Barrier(commandBuffer.Get());
 
@@ -3520,11 +3517,9 @@ public:
 
                     HLSL::Light hlsllight;
 
-                    float tableMultiplier = lightUnitTable[options.lightUnitsIndex].multiplier;
-                    float unitMul = tableMultiplier > 0.0f ? tableMultiplier : options.customLightMultiplier;
                     hlsllight.pos = float4(worldMatrix[3].xyz, 1);
                     hlsllight.dir = float4(normalize(worldMatrix[2].xyz), 1);
-                    hlsllight.color = float4(light.color.xyz * unitMul, light.color.w);
+                    hlsllight.color = float4(light.color.xyz, light.color.w);
                     hlsllight.angle = light.angle;
                     hlsllight.range = light.range;
                     hlsllight.type = light.type;
@@ -3552,6 +3547,7 @@ public:
                 uint queryIndex = world.Query(Components::Camera::mask, 0, true);
 
                 uint entityCount = (uint)world.frameQueries[queryIndex].size();
+                this->hasValidCamera = entityCount > 0;
                 uint entityStep = 1;
                 ViewWorld& frameWorld = viewWorld;
                 auto& queryResult = world.frameQueries[queryIndex];
@@ -3568,12 +3564,11 @@ public:
                 for (uint i = 0; i < entityCount; i++)
                 {
                     auto& cam = queryResult[i].Get<Components::Camera>();
-                    auto& trans = queryResult[i].Get<Components::Transform>();
                     auto& mat = queryResult[i].Get<Components::WorldMatrix>();
                     float4x4 previousMat = mat.matrix;
-                    mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
+                    mat.matrix = ComputeWorldMatrix(queryResult[i]);
 
-                    float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->renderResolution.x) / float(this->renderResolution.y), cam.nearClip, cam.farClip, HLSL::reverseZ);
+                    float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14159265358979f / 180.0f), float(this->renderResolution.x) / float(this->renderResolution.y), cam.nearClip, cam.farClip, HLSL::reverseZ);
                     float4x4 viewProj = mul(inverse(mat.matrix), proj);
                     float4 worldPos = float4(mat.matrix[3].xyz, 1);
                     float4x4 previousViewProj = mul(inverse(previousMat), proj);
@@ -3583,7 +3578,7 @@ public:
                     float3 worldCorners[8];
 
                     // compute planes
-                    float4x4 matProj = mul(inverse(MatrixPerspectiveFovLH(cam.fovY * (3.14f / 180.0f), float(this->renderResolution.x) / float(this->renderResolution.y), cam.nearClip, cam.farClip, false)), mat.matrix);
+                    float4x4 matProj = mul(inverse(MatrixPerspectiveFovLH(cam.fovY * (3.14159265358979f / 180.0f), float(this->renderResolution.x) / float(this->renderResolution.y), cam.nearClip, cam.farClip, false)), mat.matrix);
 
                     //create the 8 points of a cube in unit-space
                     float4 cube[8];

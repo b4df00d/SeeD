@@ -37,6 +37,16 @@ public:
     int shaderLoaded = 0;
     int textureLoaded = 0;
 
+    // Nothing queued for next frame and nothing streamed in during this one.
+    // LoadAssets() clears loadingRequest as it drains it, so anything still in
+    // there was requested by a Get() later in the frame -- i.e. still missing.
+    // Callers should require this to hold for several consecutive frames, since
+    // one quiet frame does not mean the scene finished streaming.
+    bool IsIdle() const
+    {
+        return loadingRequest.empty() && meshLoaded == 0 && shaderLoaded == 0 && textureLoaded == 0;
+    }
+
     PerFrame<CommandBuffer> commandBuffer;
     const char* name = "AssetLibraryUpload";
 
@@ -1809,7 +1819,7 @@ public:
         // Registered locally (mirrors the single-entity registration this used to be); the shader
         // routing decision (which of these two a given material points at) now happens after the
         // cutout parameter is computed below, since the new generic multi-shader GBuffer draw
-        // buckets by Material::shader rather than by parameters[4] at cull time.
+        // buckets by Material::shader rather than by the cutout parameter at cull time.
         World::Entity shader;
         shader.Make(Components::Shader::mask);
         auto& shaderCmp = shader.Get<Components::Shader>();
@@ -1847,56 +1857,68 @@ public:
             newMat.textures[4] = CreateOrLoadTexture(m, 2, aiTextureType_AMBIENT_OCCLUSION, aiTextureType_AMBIENT);
             newMat.textures[5] = CreateOrLoadTexture(m, 2, aiTextureType_EMISSION_COLOR, aiTextureType_EMISSIVE);
 
+            // Parameter layout: 0,1,2 albedo RGB | 3 roughness | 4 metalness |
+            // 5 normal scale | 6 cutout threshold | 7,8,9 emissive RGB.
+            // Zero first: anything left unwritten must read as "off", and an
+            // emissive slot defaulting to 1 would make every material glow.
             for (uint j = 0; j < HLSL::MaterialParametersCount; j++)
-            {
-                newMat.parameters[j] = 1.0f;
-            }
+                newMat.parameters[j] = 0.0f;
 
-            // Albedo scalar tint
-            newMat.parameters[0] = 1.0f;
+            // Albedo, as a colour
             aiColor4D baseColor(1, 1, 1, 1);
-            if (m->Get(AI_MATKEY_BASE_COLOR, baseColor) == AI_SUCCESS || m->Get(AI_MATKEY_COLOR_DIFFUSE, baseColor) == AI_SUCCESS)
-                newMat.parameters[0] = (baseColor.r + baseColor.g + baseColor.b) / 3.0f;
+            if (m->Get(AI_MATKEY_BASE_COLOR, baseColor) != AI_SUCCESS)
+                m->Get(AI_MATKEY_COLOR_DIFFUSE, baseColor);
+            newMat.parameters[0] = baseColor.r;
+            newMat.parameters[1] = baseColor.g;
+            newMat.parameters[2] = baseColor.b;
 
             // Roughness: prefer PBR factor, fall back to shininess conversion
-            newMat.parameters[1] = 1.0f;
+            newMat.parameters[3] = 1.0f;
             float roughness = 1.0f;
             if (m->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness) == AI_SUCCESS)
-                newMat.parameters[1] = roughness;
+                newMat.parameters[3] = roughness;
             else
             {
                 float shininess = 0.0f;
                 if (m->Get(AI_MATKEY_SHININESS, shininess) == AI_SUCCESS && shininess > 0.0f)
-                    newMat.parameters[1] = 1.0f - sqrtf(shininess / 1024.0f); // perceptual remap
+                    newMat.parameters[3] = 1.0f - sqrtf(shininess / 1024.0f); // perceptual remap
             }
 
             // Metalness: PBR factor
-            newMat.parameters[2] = 0.0f;
             float metalness = 0.0f;
             if (m->Get(AI_MATKEY_METALLIC_FACTOR, metalness) == AI_SUCCESS)
-                newMat.parameters[2] = metalness;
+                newMat.parameters[4] = metalness;
 
             // Normal scale
             float normalScale = 1.0f;
             m->Get(AI_MATKEY_BUMPSCALING, normalScale);
-            newMat.parameters[3] = normalScale;
+            newMat.parameters[5] = normalScale;
 
-            // Cutout threshold — parameters[4] = 0 means opaque (no alpha test).
+            // Cutout threshold -- parameters[6] = 0 means opaque (no alpha test).
             // AI_MATKEY_OPACITY: 1=fully opaque, 0=fully transparent.
             // AI_MATKEY_TRANSPARENCYFACTOR: 0=opaque, 1=transparent (inverse convention).
-            newMat.parameters[4] = 0.0f;
             float opacity = 1.0f;
             m->Get(AI_MATKEY_OPACITY, opacity);
             float transparency = 0.0f;
             m->Get(AI_MATKEY_TRANSPARENCYFACTOR, transparency);
             float effectiveOpacity = opacity * (1.0f - transparency);
             if (effectiveOpacity < 0.99f)
-                newMat.parameters[4] = effectiveOpacity;
+                newMat.parameters[6] = effectiveOpacity;
+
+            aiColor4D emissive(0, 0, 0, 1);
+            if (m->Get(AI_MATKEY_COLOR_EMISSIVE, emissive) == AI_SUCCESS)
+            {
+                float emissiveStrength = 1.0f;
+                m->Get(AI_MATKEY_EMISSIVE_INTENSITY, emissiveStrength);
+                newMat.parameters[7] = emissive.r * emissiveStrength;
+                newMat.parameters[8] = emissive.g * emissiveStrength;
+                newMat.parameters[9] = emissive.b * emissiveStrength;
+            }
 
             // Route to the cutout mesh shader so bucketing by Material::shader (the generic
-            // multi-shader GBuffer draw) picks up the alpha-test PSO; parameters[4] keeps its
+            // multi-shader GBuffer draw) picks up the alpha-test PSO; parameters[6] keeps its
             // shading-threshold role in the cutout pixel shader regardless.
-            newMat.shader = (newMat.parameters[4] != 0.0f) ? Components::Handle<Components::Shader>{ shaderCutout } : Components::Handle<Components::Shader>{ shader };
+            newMat.shader = (newMat.parameters[6] != 0.0f) ? Components::Handle<Components::Shader>{ shaderCutout } : Components::Handle<Components::Shader>{ shader };
 
             matIndexToEntity.push_back(ent);
         }
@@ -1907,8 +1929,32 @@ public:
         ZoneScoped;
     }
 
+    // Reads one float out of a node's metadata, whatever numeric type it landed
+    // as. glTF extras arrive as doubles (glTF2Importer.cpp ParseExtensions), but
+    // other importers use float or int for the same thing.
+    static bool NodeMetaFloat(const aiNode* node, const char* key, float& out)
+    {
+        if (node == nullptr || node->mMetaData == nullptr)
+            return false;
+        double d = 0.0;
+        if (node->mMetaData->Get(key, d)) { out = (float)d; return true; }
+        float f = 0.0f;
+        if (node->mMetaData->Get(key, f)) { out = f; return true; }
+        int32_t i = 0;
+        if (node->mMetaData->Get(key, i)) { out = (float)i; return true; }
+        return false;
+    }
+
     void CreateLights(const aiScene* _scene)
     {
+        // glTF carries photometric intensities, while SeeD stores Blender's own
+        // radiometric units (see SeeD/tools/calibration/README.md): a sun is
+        // W/m^2 and a point light is watts of radiant power. The exporter's SPEC
+        // conversion is sun lux = W/m^2 * 683 and point cd = W / (4*pi) * 683, so
+        // invert exactly that. These are the same two constants Blender's own
+        // glTF importer uses (io_scene_gltf2 imp/light.py).
+        const float wattsToLumens = 683.0f;
+
         for (unsigned int i = 0; i < _scene->mNumLights; i++)
         {
             auto& l = _scene->mLights[i];
@@ -1919,49 +1965,105 @@ public:
             if (!ent.IsValid())
                 continue;
 
-            Components::Light light;
+            const aiNode* node = _scene->mRootNode->FindNode(l->mName);
 
-            if (l->mAttenuationConstant <= 0 && l->mAttenuationLinear <= 0 && l->mAttenuationQuadratic <= 0)
-                l->mAttenuationQuadratic = 1;
+            Components::Light light{};
 
-            if (l->mColorDiffuse.r == 0 && l->mColorDiffuse.g == 0 && l->mColorDiffuse.b == 0)
-                light.color = float4(1, 1, 1, 1);
+            // assimp folds the light's intensity into its colour
+            // (glTF2Importer.cpp: colorWithIntensity), so split it back out --
+            // SeeD keeps a normalised colour and the magnitude in .w.
+            float3 colour = float3(l->mColorDiffuse.r, l->mColorDiffuse.g, l->mColorDiffuse.b);
+            float intensity = max(max(colour.x, colour.y), colour.z);
+            if (intensity > 0.0f)
+                colour = colour / intensity;
             else
-                light.color = float4(l->mColorDiffuse.r, l->mColorDiffuse.g, l->mColorDiffuse.b, 1);
-            float d = 1;
-            float lightIntensity = 1.0f / (l->mAttenuationConstant + l->mAttenuationLinear * d + l->mAttenuationQuadratic * d * d);
-            light.color.a = lightIntensity;
-            light.range = lightIntensity * 20;
-
-            light.castShadow = true;
+            {
+                colour = float3(1, 1, 1);
+                intensity = 0.0f;
+            }
 
             switch (l->mType)
             {
-            case aiLightSourceType::aiLightSource_DIRECTIONAL :
+            case aiLightSourceType::aiLightSource_DIRECTIONAL:
                 light.type = HLSL::LightType::Directional;
-                break;
-            case aiLightSourceType::aiLightSource_POINT:
-                light.type = HLSL::LightType::Point;
+                intensity /= wattsToLumens;                           // lux -> W/m^2
                 break;
             case aiLightSourceType::aiLightSource_SPOT:
                 light.type = HLSL::LightType::Spot;
+                intensity *= 4.0f * 3.14159265358979f / wattsToLumens; // cd -> W
                 break;
+            case aiLightSourceType::aiLightSource_POINT:
             default:
                 light.type = HLSL::LightType::Point;
+                intensity *= 4.0f * 3.14159265358979f / wattsToLumens; // cd -> W
                 break;
             }
-            
+
+            light.color = float4(colour.x, colour.y, colour.z, intensity);
+
+            // Physical size. glTF cannot express it, so render_reference.py smuggles
+            // it through node extras; without them a light is a mathematical point.
+            light.size = 0.0f;
+            const char* sizeKey = (light.type == HLSL::LightType::Directional)
+                ? "seed_angular_radius" : "seed_radius";
+            NodeMetaFloat(node, sizeKey, light.size);
+
+            // 0 means no range cutoff. assimp parks KHR_lights_punctual's optional
+            // range on the node because aiLight has nowhere for it.
+            light.range = 0.0f;
+            NodeMetaFloat(node, "PBR_LightRange", light.range);
+
+            // Radians, like every other angle that reaches the shader. The cone is
+            // the outer one; SeeD has no separate inner cone yet.
+            light.angle = (light.type == HLSL::LightType::Spot) ? l->mAngleOuterCone : 0.0f;
+
+            light.castShadow = true;
 
             ent.Set(light);
+
+            IOs::Log("  light '{}' type {} intensity {:.4f} colour {:.3f} {:.3f} {:.3f} size {:.5f} range {}",
+                     l->mName.C_Str(), (uint)light.type, intensity,
+                     (float)colour.x, (float)colour.y, (float)colour.z, light.size, light.range);
         }
     }
 
     void CreateCameras(const aiScene* _scene)
     {
+        for (unsigned int i = 0; i < _scene->mNumCameras; i++)
+        {
+            aiCamera* cam = _scene->mCameras[i];
 
+            World::Entity ent;
+            ent.Find(cam->mName.C_Str());
+            if (!ent.IsValid())
+            {
+                IOs::Log("  camera '{}' has no matching node, ignoring it", cam->mName.C_Str());
+                continue;
+            }
+
+            Components::Camera camera{};
+            // assimp keeps only a horizontal fov and the aspect (glTF2Importer.cpp),
+            // while Components::Camera wants vertical degrees.
+            float aspect = cam->mAspect > 0.0f ? cam->mAspect : (16.0f / 9.0f);
+            float fovY = 2.0f * atanf(tanf(cam->mHorizontalFOV * 0.5f) / aspect);
+            camera.fovY = fovY * (180.0f / 3.14159265358979f);
+            camera.nearClip = cam->mClipPlaneNear > 0.0f ? cam->mClipPlaneNear : 0.02f;
+            camera.farClip = cam->mClipPlaneFar > 0.0f ? cam->mClipPlaneFar : 8000.0f;
+            ent.Set(camera);
+            
+            IOs::Log("  camera '{}' fovY {:.3f} deg, clip {} .. {}", cam->mName.C_Str(), camera.fovY, camera.nearClip, camera.farClip);
+        }
     }
 };
 SceneLoader* SceneLoader::instance = nullptr;
+
+// TODO : find a better way to avoid this forward declared stuff
+// Declared in Main.cpp ahead of World.h, so World::Load can dispatch to the importer.
+void ImportSceneFile(String path)
+{
+    if (SceneLoader::instance)
+        SceneLoader::instance->Load(path);
+}
 
 #include <deque>
 #include <unordered_set>

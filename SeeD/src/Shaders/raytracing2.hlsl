@@ -1,4 +1,4 @@
-#include "structs.hlsl"
+﻿#include "structs.hlsl"
 
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define TRACING_DISTANCE                10000.0f

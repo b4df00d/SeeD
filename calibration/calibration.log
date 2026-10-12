@@ -1,0 +1,14 @@
+[calibration] 2 capture(s) queued
+[calibration] 'direct' loading G:\Work\Dev\SeeD\calibration\Source\falloff\falloff.gltf (direct only)
+[calibration] 'direct' assets settled after 33 frames
+[calibration] 'direct' capturing 'upscaled' (upscaling 3, render 742x418 -> display 1280x720, 1 camera(s))
+[calibration]   light type 2 intensity 100.0000 colour 1.000 1.000 1.000 dir 0.0000 -1.0000 -0.0000 pos 0.000 1.500 0.000 size 0.05000 range 0.000
+[calibration]   light type 0 intensity 5.0000 colour 1.000 1.000 1.000 dir 0.5417 -0.6428 0.5417 pos 0.000 0.000 0.000 size 0.00459 range 0.000
+[calibration] 'direct' wrote G:\Work\Dev\SeeD\calibration\out\direct.exr (1280x720)
+[calibration] 'full' loading G:\Work\Dev\SeeD\calibration\Source\falloff\falloff.gltf
+[calibration] 'full' assets settled after 30 frames
+[calibration] 'full' capturing 'upscaled' (upscaling 3, render 742x418 -> display 1280x720, 1 camera(s))
+[calibration]   light type 2 intensity 100.0000 colour 1.000 1.000 1.000 dir 0.0000 -1.0000 -0.0000 pos 0.000 1.500 0.000 size 0.05000 range 0.000
+[calibration]   light type 0 intensity 5.0000 colour 1.000 1.000 1.000 dir 0.5417 -0.6428 0.5417 pos 0.000 0.000 0.000 size 0.00459 range 0.000
+[calibration] 'full' wrote G:\Work\Dev\SeeD\calibration\out\full.exr (1280x720)
+[calibration] done, exit code 0

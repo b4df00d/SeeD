@@ -1,4 +1,4 @@
-#include "structs.hlsl"
+﻿#include "structs.hlsl"
 
 cbuffer CustomRT : register(b3)
 {
@@ -83,7 +83,7 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
         HLSL::D3D12_RAYTRACING_INSTANCE_DESC instanceDesc;
         instanceDesc.InstanceID = instanceIndex | (lowLod ? HLSL::RTInstanceLowLodBit : 0);
         instanceDesc.InstanceContributionToHitGroupIndex = 0;
-        if(material.parameters[4] == 0)
+        if(material.parameters[6] == 0)
         {
             instanceDesc.Flags = HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_NONE
                                | HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;   

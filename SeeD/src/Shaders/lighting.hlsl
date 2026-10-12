@@ -1,4 +1,4 @@
-#include "structs.hlsl"
+﻿#include "structs.hlsl"
 
 cbuffer CustomRT : register(b3)
 {
@@ -278,7 +278,7 @@ void RayGen()
     float ucw = r.Wsum / max(r.Wcount * r.W, 1e-5f);
     float3 indirect = r.color * ucw * rtParameters.SHARCRadianceScale;
     
-    if ((editorContext.debugFlags & (HLSL::EditorDebugGIBounces | HLSL::EditorDebugGIAlbedo | HLSL::EditorDebugGINormals)) == 0)
+    if ((editorContext.debugFlags & (HLSL::EditorDebugGIBounces | HLSL::EditorDebugGIAlbedo | HLSL::EditorDebugGINormals)) == 0 && !rtParameters.directOnly)
         lighted[dtid.xy] += float4(indirect, 0.0f);
 
 

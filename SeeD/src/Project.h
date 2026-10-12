@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -48,11 +48,22 @@ public:
     int dlssQuality = 1;
     int dlssPreset = 0;
     int dlssdPreset = 0;
+    bool shaderStatsCsv = false;
+    bool playerSystem = true;
 
     // saved player camera (fed to Systems::Player on load). rotation is a quaternion (xyzw).
     bool hasCamera = false;
     float cameraPos[3] = { 0, 1, -2 };
     float cameraRot[4] = { 0, 0, 0, 1 };
+
+    // [calibration] : offline render captures, run in order at startup and then the
+    // app exits. Empty for every normal project, which is what keeps this free.
+    // One line each: capture <name> <scene> <output> <directOnly> <warmupFrames>
+    // Paths are project-relative and, like every other key here, may not contain
+    // spaces. Kept relative here so Save() round-trips what was written; Setup()
+    // hands Calibration its own copy with the paths resolved.
+    using CaptureEntry = Calibration::CaptureEntry;
+    std::vector<CaptureEntry> captures;
 
     // [uilayout] : editor window open-states (replaces UILayout.txt)
     struct WindowState { String name; bool open; };
@@ -159,29 +170,37 @@ public:
         f << "camera " << cameraPos[0] << " " << cameraPos[1] << " " << cameraPos[2]
           << " " << cameraRot[0] << " " << cameraRot[1] << " " << cameraRot[2] << " " << cameraRot[3] << "\n";
 
+        f << "shaderStatsCsv " << (options.shaderStatsCsv ? 1 : 0) << "\n";
+        f << "playerSystem " << (options.playerSystem ? 1 : 0) << "\n";
+
+        // Written back verbatim: Save() rewrites the whole file, so skipping this
+        // would quietly drop the calibration setup the next time the editor saves.
+        if (!captures.empty())
+        {
+            f << "[calibration]\n";
+            for (auto& c : captures)
+                f << "capture " << c.name << " " << c.scene << " " << c.output
+                  << " " << (c.directOnly ? 1 : 0) << " " << c.warmupFrames << "\n";
+        }
+
         f << "[uilayout]\n";
         for (auto& w : windows) f << w.name << " " << (w.open ? 1 : 0) << "\n";
 
         IOs::Log("Project saved to {}", filePath.c_str());
     }
 
-    void Setup(Engine& engine)
+    // TODO : this should be done in Setup(Engine&engine)... if something is overriding those value wrongly this is the issue !
+    
+    // Settings that live on objects Engine::On() creates, and which its own On()
+    // methods initialise unconditionally -- RaytracingContext::On() assigns every
+    // tunable in rtParameters, and DLSS::On() assigns view->upscaling. Applying
+    // them from Setup (which must run before On() for the window size) meant the
+    // whole "Ray Tracing" + "Upscaling" part of a .seedproj was silently
+    // discarded. So Main calls this straight after On() instead, and those On()
+    // methods no longer duplicate the defaults that already live here as member
+    // initialisers.
+    void SetupRenderSettings(Engine& engine)
     {
-        enginePtr = &engine;
-
-        auto& window = engine.ios.window;
-        window.usevSync = vsync;
-        window.fullScreen = fullscreen;
-        window.windowResolution = uint2(windowWidth, windowHeight);
-
-        options.frontToBackSort = frontToBackSort;
-        options.sortMaxDistance = sortMaxDistance;
-        options.lodDistanceMultiplier = lodDistanceMultiplier;
-        options.distanceCullingValue = distanceCullingValue;
-        options.distanceCullingValueRT = distanceCullingValueRT;
-
-        // Rendering window "Ray Tracing" + "Upscaling" sections live directly on the view/DLSS
-        // objects rather than in Options, so restore them there instead.
         auto& rt = engine.renderer.mainView.raytracingContext.rtParameters;
         rt.maxFrameFilteringCount = maxFrameFilteringCount;
         rt.spacialRadius = spacialRadius;
@@ -199,11 +218,47 @@ public:
         dlss.dlssPreset = (NVSDK_NGX_DLSS_Hint_Render_Preset)dlssPreset;
         dlss.dlssdPreset = (NVSDK_NGX_RayReconstruction_Hint_Render_Preset)dlssdPreset;
         dlss.requestedQuality = (NVSDK_NGX_PerfQuality_Value)dlssQuality;
-        dlss.qualityChangePending = (dlss.requestedQuality != dlss.perf_quality); // triggers the existing rebuild path if it differs from the just-created default
+        // Runs after DLSS::On(), so perf_quality is the created default: a differing
+        // request triggers the existing rebuild path.
+        dlss.qualityChangePending = (dlss.requestedQuality != dlss.perf_quality);
+    }
+
+    void Setup(Engine& engine)
+    {
+        enginePtr = &engine;
+
+        auto& window = engine.ios.window;
+        window.usevSync = vsync;
+        window.fullScreen = fullscreen;
+        window.windowResolution = uint2(windowWidth, windowHeight);
+
+        options.frontToBackSort = frontToBackSort;
+        options.sortMaxDistance = sortMaxDistance;
+        options.lodDistanceMultiplier = lodDistanceMultiplier;
+        options.distanceCullingValue = distanceCullingValue;
+        options.distanceCullingValueRT = distanceCullingValueRT;
+        options.shaderStatsCsv = shaderStatsCsv;
+        options.playerSystem = playerSystem;
+
 
         AssetLibrary& al = engine.assetLibrary;
         al.assetsPath = Project::instance->CacheDirAbs();
         al.importPath = Project::instance->SourceDirAbs();
+
+        // Hand the capture list over with paths already absolute, so Calibration
+        // needs nothing from Project at run time.
+        Calibration& calibration = engine.calibration;
+        calibration.captures.clear();
+        for (auto& c : captures)
+        {
+            Calibration::CaptureEntry e = c;
+            e.scene = SceneAbs(c.scene);
+            e.output = SceneAbs(c.output);
+            calibration.captures.push_back(e);
+        }
+        calibration.expectedWidth = windowWidth;
+        calibration.expectedHeight = windowHeight;
+        calibration.logPath = SceneAbs(String("calibration.log"));
 
         Systems::Player& player = engine.player;
         player.position = float3(cameraPos[0], cameraPos[1], cameraPos[2]);
@@ -276,6 +331,8 @@ private:
                 else if (key == "dlssQuality") dlssQuality = std::stoi(val);
                 else if (key == "dlssPreset") dlssPreset = std::stoi(val);
                 else if (key == "dlssdPreset") dlssdPreset = std::stoi(val);
+                else if (key == "shaderStatsCsv") shaderStatsCsv = std::stoi(val) != 0;
+                else if (key == "playerSystem") playerSystem = std::stoi(val) != 0;
                 else if (key == "camera")
                 {
                     std::istringstream ss(val);
@@ -283,6 +340,25 @@ private:
                        >> cameraRot[0] >> cameraRot[1] >> cameraRot[2] >> cameraRot[3];
                     hasCamera = true;
                 }
+            }
+            else if (section == "calibration")
+            {
+                size_t sp = line.find(' ');
+                if (sp == std::string::npos) continue;
+                if (line.substr(0, sp) != "capture") continue;
+                std::istringstream ss(line.substr(sp + 1));
+                CaptureEntry e;
+                std::string name, scene, output;
+                int directOnly = 0;
+                uint warmup = e.warmupFrames;
+                ss >> name >> scene >> output >> directOnly >> warmup;
+                if (name.empty() || scene.empty() || output.empty()) continue;
+                e.name = name;
+                e.scene = scene;
+                e.output = output;
+                e.directOnly = directOnly != 0;
+                e.warmupFrames = warmup;
+                captures.push_back(e);
             }
             else if (section == "uilayout")
             {

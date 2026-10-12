@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="..\packages\Microsoft.Direct3D.D3D12.1.619.4\build\native\Microsoft.Direct3D.D3D12.props" Condition="Exists('..\packages\Microsoft.Direct3D.D3D12.1.619.4\build\native\Microsoft.Direct3D.D3D12.props')" />
   <ItemGroup Label="ProjectConfigurations">
@@ -176,6 +176,8 @@ copy /Y "..\Third\omm-main\bin\*.*" "..\x64\Release\"</Command>
     <ClInclude Include="..\Third\imgui-docking\imgui_internal.h" />
     <ClInclude Include="..\Third\imgui-docking\misc\cpp\imgui_stdlib.h" />
     <ClInclude Include="..\Third\ImGuizmo-master\ImGuizmo.h" />
+    <ClInclude Include="src\Calibration.h" />
+    <ClInclude Include="src\ImageWriter.h" />
     <ClInclude Include="src\ComponentMetaData.h" />
     <ClInclude Include="src\ComponentMetaTypes.h" />
     <ClInclude Include="src\Containers.h" />
@@ -204,6 +206,7 @@ copy /Y "..\Third\omm-main\bin\*.*" "..\x64\Release\"</Command>
       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">..\Third\D3D12MemoryAllocator-master\include;E:\Work\Dev\SeeD15\Third\D3D12MemoryAllocator-master\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|x64'">..\Third\D3D12MemoryAllocator-master\include;E:\Work\Dev\SeeD15\Third\D3D12MemoryAllocator-master\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
+    <ClCompile Include="..\Third\DirectXTex-main\DirectXTex\DirectXTexD3D12.cpp" />
     <ClCompile Include="..\Third\imgui-docking\backends\imgui_impl_dx12.cpp" />
     <ClCompile Include="..\Third\imgui-docking\backends\imgui_impl_win32.cpp" />
     <ClCompile Include="..\Third\imgui-docking\imgui.cpp" />

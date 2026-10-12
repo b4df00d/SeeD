@@ -1,4 +1,4 @@
-#include "structs.hlsl"
+﻿#include "structs.hlsl"
 #include "binding.hlsl"
 #include "common.hlsl"
 #include "meshCommon.hlsli"
@@ -117,7 +117,7 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts, uint primitiveID : SV_PrimitiveID)
     }
 
 #ifdef CUTOUT
-    if((o.albedo.a+0.01) < material.parameters[4]) discard;
+    if((o.albedo.a+0.01) < material.parameters[6]) discard;
 #endif
 
     if (editorContext.debugFlags & HLSL::EditorDebugOverdraw) // count shaded fragments per pixel for the overdraw heatmap

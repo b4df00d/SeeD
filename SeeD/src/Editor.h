@@ -3111,21 +3111,10 @@ public:
             return;
         }
 
-        // Light units header
-        ImGui::Text("Light Units");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(180);
-        ImGui::Combo("##LightUnits", &options.lightUnitsIndex,
-            [](void*, int n) -> const char* { return lightUnitTable[n].name; },
-            nullptr, IM_ARRAYSIZE(lightUnitTable));
-        ImGui::SameLine();
-        if (lightUnitTable[options.lightUnitsIndex].multiplier > 0.0f)
-            ImGui::TextDisabled("x %.6g", lightUnitTable[options.lightUnitsIndex].multiplier);
-        else
-        {
-            ImGui::SetNextItemWidth(120);
-            ImGui::DragFloat("##customMul", &options.customLightMultiplier, 0.01f, 0.0f, 0.0f, "x %.6g", ImGuiSliderFlags_Logarithmic);
-        }
+        // Intensity is in Blender's units, so there is nothing to convert and no
+        // unit picker: a sun is irradiance in W/m^2, a point or spot light is
+        // radiant power in watts.
+        ImGui::TextDisabled("intensity: sun = W/m^2, point/spot = W");
 
         ImGui::Separator();
 
@@ -3207,10 +3196,14 @@ public:
                 ImGui::SetNextItemWidth(-1);
                 ImGui::DragFloat("##range", &light.range, 0.05f, 0.0f, 1000000.0f);
 
-                // Angle (spot cone)
+                // Angle (spot outer cone). Stored in radians, like every angle that
+                // reaches the shader; edited in degrees, which is what anyone reading
+                // the row expects.
                 ImGui::TableSetColumnIndex(6);
                 ImGui::SetNextItemWidth(-1);
-                ImGui::DragFloat("##angle", &light.angle, 0.1f, 0.0f, 180.0f);
+                float angleDegrees = light.angle * (180.0f / 3.14159265358979f);
+                if (ImGui::DragFloat("##angle", &angleDegrees, 0.1f, 0.0f, 180.0f, "%.1f deg"))
+                    light.angle = angleDegrees * (3.14159265358979f / 180.0f);
 
                 // Cast shadow
                 ImGui::TableSetColumnIndex(7);

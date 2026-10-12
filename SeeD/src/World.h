@@ -180,8 +180,10 @@ namespace Components
     struct Material : ComponentBase<Material>
     {
         Handle<Shader> shader;
-        Handle<Texture> textures[HLSL::MaterialTextureCount]; //name:[albedo, roughness, metalness, normal]
-        float parameters[HLSL::MaterialParametersCount]; //name:[albedo, roughness, metalness, normal, cutout]
+        Handle<Texture> textures[HLSL::MaterialTextureCount]; //name:[albedo, roughness, metalness, normal, occlusion, emissive]
+        // 0,1,2 albedo RGB | 3 roughness | 4 metalness | 5 normal scale |
+        // 6 cutout threshold (0 = opaque) | 7,8,9 emissive RGB
+        float parameters[HLSL::MaterialParametersCount];
     };
     static void MaterialPropertyDraw(char* mat)
     {
@@ -193,16 +195,37 @@ namespace Components
         ImGui::PopID();
         ImGui::Spacing();
 
-        const char* names[] = { "albedo", "roughness", "metalness", "normal", "cutout" };
-        for (uint i = 0; i < ARRAYSIZE(names); i++)
+        // Texture slot -> the parameter it scales. Albedo and emissive are colours
+        // (3 floats each), the rest are single values, so they cannot share one loop.
+        ImGui::Text("albedo");
+        ImGui::PushID(pushID++);
+        UIHelpers::DrawHandle(*(EntityBase*)&material->textures[0], Texture::mask);
+        ImGui::PopID();
+        ImGui::ColorEdit3("albedo", &material->parameters[0]);
+        ImGui::Spacing();
+
+        const char* scalarNames[] = { "roughness", "metalness", "normal", "cutout" };
+        const uint scalarParam[] = { 3, 4, 5, 6 };
+        const uint scalarTexture[] = { 1, 2, 3, ~0u }; // cutout has no texture of its own
+        for (uint i = 0; i < ARRAYSIZE(scalarNames); i++)
         {
-            ImGui::Text(names[i]);
-            ImGui::PushID(pushID++);
-            UIHelpers::DrawHandle(*(EntityBase*)&material->textures[i], Texture::mask);
-            ImGui::PopID();
-            ImGui::SliderFloat(names[i], &material->parameters[i], 0, 1);
+            ImGui::Text(scalarNames[i]);
+            if (scalarTexture[i] != ~0u)
+            {
+                ImGui::PushID(pushID++);
+                UIHelpers::DrawHandle(*(EntityBase*)&material->textures[scalarTexture[i]], Texture::mask);
+                ImGui::PopID();
+            }
+            ImGui::SliderFloat(scalarNames[i], &material->parameters[scalarParam[i]], 0, 1);
             ImGui::Spacing();
         }
+
+        ImGui::Text("emissive");
+        ImGui::PushID(pushID++);
+        UIHelpers::DrawHandle(*(EntityBase*)&material->textures[5], Texture::mask);
+        ImGui::PopID();
+        ImGui::ColorEdit3("emissive", &material->parameters[7], ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_Float);
+        ImGui::Spacing();
     }
 
     struct Transform : ComponentBase<Transform>
@@ -839,17 +862,42 @@ public:
     {
         std::vector<EntityBase> created;  // every entity freshly created by this load
         EntityBase root = entityInvalid;  // the prefab root, resolved to its new entity (SavePrefab files only)
+        bool imported = false;            // went through the asset importer, so `created` is not filled
     };
+
+    // .seed is the native snapshot; anything else (gltf/glb/fbx/...) is a source
+    // asset for the importer.
+    static bool IsWorldFile(String name)
+    {
+        std::string s = (std::string)name;
+        size_t dot = s.find_last_of('.');
+        if (dot == std::string::npos) return false;
+        std::string ext = s.substr(dot + 1);
+        for (auto& c : ext) c = (char)tolower((unsigned char)c);
+        return ext == "seed";
+    }
 
     LoadResult Load(String name)
     {
         //TODO : try to have the fewer allocations possible
 
         ZoneScoped;
-        InitKnownComponents();
-        VerifyKnownComponents();
 
         LoadResult result;
+
+        // TODO : not good, not terrible... think about it.
+        // Everything that is not a world snapshot goes to the importer -- the same
+        // path a file drop takes. Routed here so callers have one way to load a
+        // scene rather than each one repeating the extension test.
+        if (!IsWorldFile(name))
+        {
+            result.imported = true;
+            ImportSceneFile(name);
+            return result;
+        }
+
+        InitKnownComponents();
+        VerifyKnownComponents();
 
         std::ifstream fin((std::string)name, std::ios::binary);
         if (!fin.is_open()) { IOs::Log("Fail to open {}", name.c_str()); return result; }
@@ -1263,14 +1311,12 @@ public:
 
     void Clear()
     {
-        std::vector<Systems::SystemBase*> systemsStopped;
-        systemsStopped.reserve(systems.size());
-        for (uint i = 0; i < systems.size(); i++)
-        {
-            auto sys = systems[i];
+        // Snapshot first: SystemBase::Off() erases the system from `systems`, so
+        // walking the live vector by index skips every other entry -- half the
+        // systems would keep running against a world whose entities just died.
+        std::vector<Systems::SystemBase*> systemsStopped = systems;
+        for (auto sys : systemsStopped)
             sys->Off();
-            systemsStopped.push_back(sys);
-        }
         for (uint i = 0; i < entitySlots.size(); i++)
         {
             if (!entitySlots[i].permanent && entitySlots[i].pool != poolInvalid)

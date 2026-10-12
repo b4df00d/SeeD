@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // TODO list  
 // ============================================================================
 //
@@ -230,23 +230,6 @@ void operator delete(void* ptr) noexcept
 #include "String.h"
 
 
-struct LightUnitEntry
-{
-    const char* name;
-    float multiplier;
-};
-static constexpr LightUnitEntry lightUnitTable[] = {
-    { "Candela (cd)",         1.0f        },
-    { "Kilolux (klx)",        1000.0f     },
-    { "Megalux (Mlx)",        1000000.0f  },
-    { "Watts (680 lm/W)",     680.0f      },
-    { "EV 0  (x1)",           1.0f        },
-    { "EV 6  (x64)",          64.0f       },
-    { "EV 10 (x1024)",        1024.0f     },
-    { "EV 14 (x16384)",       16384.0f    },
-    { "Custom",               0.0f        },
-};
-
 struct Options
 {
     bool stopFrustumUpdate = false;
@@ -258,24 +241,24 @@ struct Options
 #else
     bool shaderReload = false;
 #endif
-    bool shaderStatsCsv = true;
+    bool shaderStatsCsv = false;
+    bool playerSystem = true;
     bool drawPhysicsShapes = false;
     bool drawPhysicsConstraints = false;
     // Chase camera (Systems::Player, World.h). The two distances are multiples of the followed
     // car's chassis half length, not metres, so the same rig frames a 4 m road car and a 400 mm
     // buggy without touching anything.
+    // TODO : put those in a component ? FollowCam ?
     bool  followVehicle = true;
     float followDistance = 3.0f;        // behind the car
-    float followHeight = 1.0f;          // above it
-    float followLookAtHeight = 0.5f;    // where on the car the rig aims, above its origin
-    float followSmoothTime = 0.25f;     // seconds for the spring to close the gap
+    float followHeight = 2.0f;          // above it
+    float followLookAtHeight = 0.75f;    // where on the car the rig aims, above its origin
+    float followSmoothTime = 0.05f;     // seconds for the spring to close the gap
     bool frontToBackSort = true;
     float sortMaxDistance = 512.0f;
     float lodDistanceMultiplier = 0.25f;
     float distanceCullingValue = 6.0f;
     float distanceCullingValueRT = 6.0f;
-    int lightUnitsIndex = 0;
-    float customLightMultiplier = 1.0f;
 
     enum class DebugMode
     {
@@ -315,17 +298,25 @@ EngineState engineState;
 #include "Tasks.h"
 #include "GPU.h"
 
+// TODO : find a solution for this foward declared stuff ... i dont like it
+
 // Defined in Renderer.h: the main view's camera for this frame, false while the renderer is not up
 // yet. Declared here so Terrain.h can be included before Renderer.h -- the terrain components have
 // to be declared before the renderer queries them, and this is all its streaming system needs back.
 bool GetMainViewCamera(HLSL::Camera& camera);
 
+// Defined in Loading.h. World::Load routes anything that is not a .seed to the
+// importer, but World.h is included first, so it reaches SceneLoader through this.
+void ImportSceneFile(String path);
+
 #include "World.h"
 #include "UI.h"
 #include "Loading.h"
-#include "Terrain.h"   // terrain components + systems: after Loading.h (MeshLoader/AssetLibrary),
-#include "Physic.h"    // Jolt + the physics components; needs ComponentBase/Handle from World.h only
-#include "Renderer.h"  // before Renderer.h, which queries Components::Terrain
+#include "Terrain.h"
+#include "Physic.h"
+#include "ImageWriter.h"
+#include "Renderer.h"
+#include "Calibration.h"
 #include "Engine.h"
 #include "Project.h"
 #include "Editor.h"
@@ -351,15 +342,22 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 
     engine.On();
 
+    // TODO : this is not right ! engine.on() should take all params that are setup by the function below
+    // After On(), so the project's ray tracing / upscaling settings are not
+    // overwritten by the defaults those On() methods assign.
+    project.SetupRenderSettings(engine);
+
     if (!project.startupScene.empty())
     {
-        editorState.currentWorldPath = project.SceneAbs(project.startupScene);
-        World::instance->Load(editorState.currentWorldPath);
+        String scene = project.SceneAbs(project.startupScene);
+        if (!World::instance->Load(scene).imported)
+            editorState.currentWorldPath = scene; // only a .seed is a world we can save back
         editorState.dirtyHierarchy = true;
     }
 
     engine.Loop();
     engine.Off();
 
-    return 0;
+    // TODO : not super clear... engine.Off() is already called... thats weird
+    return engine.calibration.ExitCode();
 }
