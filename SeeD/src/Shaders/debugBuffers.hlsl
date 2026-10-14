@@ -64,7 +64,11 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         gridParameters.sceneScale = rtParameters.SHARCSceneScale;
         gridParameters.levelBias = SHARC_GRID_LEVEL_BIAS;
 
-        float3 color = HashGridDebugColoredHash(cd.worldPos, cd.worldNorm, gridParameters);
+        // Must match the position the SHARC update/query passes hash at bounce 0 (raytracing2.hlsl uses
+        // cd.offsetedWorldPos). The raw depth-reconstructed worldPos jitters by +-epsilon, so on a plane lying
+        // exactly on a voxel boundary (floor at y=0, ...) floor(pos/voxelSize) flips per pixel -> random keys.
+        float3 probePos = cd.offsetedWorldPos;
+        float3 color = HashGridDebugColoredHash(probePos, cd.worldNorm, gridParameters);
         //lighted[dtid.xy] = float4(color, 1);
             
         // Initialize SHARC parameters
@@ -89,7 +93,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         }
         // Construct SharcHitData structure needed for creating a query point at this hit location
         SharcHitData sharcHitData;
-        sharcHitData.positionWorld = cd.worldPos;
+        sharcHitData.positionWorld = probePos;
         sharcHitData.normalWorld = cd.worldNorm;
 #if SHARC_MATERIAL_DEMODULATION
         sharcHitData.materialDemodulation = float3(1.0f, 1.0f, 1.0f);
@@ -103,13 +107,15 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         sharcHitData.emissive = s.emissiveColor;
 #endif // SHARC_SEPARATE_EMISSIVE
             
-            uint gridLevel = HashGridGetLevel(cd.worldPos, sharcParameters.gridParameters);
-        float voxelSize = HashGridGetVoxelSize(gridLevel, sharcParameters.gridParameters);
-
         float3 sharcRadiance;
         if (SharcGetCachedRadiance(sharcParameters, sharcHitData, sharcRadiance, false))
         {
             lighted[dtid.xy] = float4(sharcRadiance, 1);
+        }
+        else
+        {
+            // cache miss: show it explicitly instead of leaving the lit image underneath
+            lighted[dtid.xy] = float4(0, 0, 0, 1);
         }
     }
    

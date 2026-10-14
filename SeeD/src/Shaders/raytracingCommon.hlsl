@@ -209,6 +209,21 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
         incidentVector = lightToSurface * rDistance;
         lightDistance = distance;
 
+        // Soft shadows: aim the shadow ray at a random point on the emitter's disk (radius = size)
+        // facing the surface, instead of always at its center. Falloff/cone below keep using the
+        // center so only visibility gets the penumbra.
+        if (enableSoftShadows && light.size > 0)
+        {
+            float3 bitangent = normalize(GetPerpendicularVector(incidentVector));
+            float3 tangent = cross(bitangent, incidentVector);
+            float angle = rand2.x * 2.0f * M_PI;
+            float radius = sqrt(rand2.y) * min(light.size, distance * 0.99f);
+            float3 samplePos = light.pos.xyz + (bitangent * sin(angle) + tangent * cos(angle)) * radius;
+            float3 sampleToSurface = surfacePos - samplePos;
+            lightDistance = length(sampleToSurface);
+            incidentVector = sampleToSurface / lightDistance;
+        }
+
         // Irradiance from a point light of radiant power P watts is P / (4*pi*d^2).
         // This used to be 10/d^2 clamped at 100 -- off by 4*pi*10 and discontinuous.
         // max(d^2, size^2) keeps it finite inside the light's own radius instead of
@@ -227,7 +242,7 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
         float spotlight = 1.0f;
         if (light.type == HLSL::LightType::Spot)
         {
-            float LdotD = dot(incidentVector, light.dir.xyz);
+            float LdotD = dot(lightToSurface * rDistance, light.dir.xyz);
             float directionAngle = acos(LdotD);
             // light.angle is the OUTER cone half-angle in radians. It used to be
             // compared in radians while the editor authored degrees, so every spot
