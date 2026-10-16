@@ -1164,6 +1164,21 @@ struct SurfaceData
     float transmission;
     ShadingDomain shadingDomain;
 };
+
+// Exact sRGB transfer functions (IEC 61966-2-1).
+// Color textures (albedo, emissive) are stored sRGB-encoded in plain UNORM formats, so they are
+// decoded here after sampling; the post process encodes the final image for the UNORM backbuffer.
+float3 SRGBToLinear(float3 c)
+{
+    c = max(c, 0);
+    return lerp(pow((c + 0.055) / 1.055, 2.4), c / 12.92, (float3)(c <= 0.04045)); // HLSL 2021: no vector ternary
+}
+float3 LinearToSRGB(float3 c)
+{
+    c = saturate(c);
+    return lerp(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, (float3)(c <= 0.0031308));
+}
+
 SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, float3 tangent, float3 binormal)
 {
     normal = normalize(normal);
@@ -1179,14 +1194,12 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     {
         Texture2D<float4> albedo = ResourceDescriptorHeap[textureIndex];
         #ifdef RAY_DISPATCH
-        s.albedo *= albedo.SampleLevel(samplerLinear, uv, 1);
+        float4 albedoSample = albedo.SampleLevel(samplerLinear, uv, 1);
         #else
-        s.albedo *= albedo.SampleBias(samplerLinear, uv, -1);
+        float4 albedoSample = albedo.SampleBias(samplerLinear, uv, -1);
         #endif
-        //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
-        //if(length(s.albedo.xyz) < 0.001) s.albedo.xyz = float3(1,0,1);
+        s.albedo *= float4(SRGBToLinear(albedoSample.xyz), albedoSample.a); // alpha is linear coverage
     }
-    //s.albedo.xyz = lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 2);
     
     if(s.albedo.a < 0.99)
     {
@@ -1245,9 +1258,9 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     {
         Texture2D<float4> emissive = ResourceDescriptorHeap[textureIndex];
         #ifdef RAY_DISPATCH
-        s.emissiveColor *= emissive.SampleLevel(samplerLinear, uv, 1).xyz;
+        s.emissiveColor *= SRGBToLinear(emissive.SampleLevel(samplerLinear, uv, 1).xyz);
         #else
-        s.emissiveColor *= emissive.SampleBias(samplerLinear, uv, -1).xyz;
+        s.emissiveColor *= SRGBToLinear(emissive.SampleBias(samplerLinear, uv, -1).xyz);
         #endif
     }
     
@@ -1368,7 +1381,6 @@ float2 bary)
 
     SurfaceData s = GetSurfaceData(material, uv, worldNormal, 0, 0);
     s.objectNormal = worldNormal;
-    //s.albedo.xyz = pow(s.albedo.xyz, 1.f/2.2f);
     //s.albedo.xyz = 1;
     
     return s;

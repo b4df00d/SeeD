@@ -377,6 +377,7 @@ namespace Components
         RSO_l                  = 1u << 13,
         RSO_c                  = 1u << 14,
         RSO_b                  = 1u << 15,
+        RSO_tonemapper         = 1u << 16,
     };
 
     struct RenderSettingsVolume : ComponentBase<RenderSettingsVolume>
@@ -396,14 +397,15 @@ namespace Components
         float noiseThresholdHigh = 0.6f;
         float animationSpeed = 0.00000002f;
         // exposure / tonemapping
-        float expoMul = 4.0f;
+        float expoMul = 1.0f;
         float expoAdd = 0.0f;
         float P = 1.0f;
-        float a = 0.33f;
+        float a = 1.0f;
         float m = 0.22f;
         float l = 0.4f;
         float c = 1.33f;
         float b = 0.0f;
+        uint  tonemapper = 3;        // HLSL::Tonemapper* (0=None 1=GT 2=ACES 3=AgX 4=AgX Punchy 5=PBR Neutral); not blended, the strongest-weighted volume wins
     };
     static void RenderSettingsVolumePropertyDraw(char* p)
     {
@@ -444,12 +446,31 @@ namespace Components
         {
             row(RSO_expoMul, "expoMul", &v->expoMul, 0,  16, 0);
             row(RSO_expoAdd, "expoAdd", &v->expoAdd, -1, 1, 0);
-            row(RSO_P,       "P",       &v->P,       0,  2, 0);
-            row(RSO_a,       "a",       &v->a,       0,  2, 0);
-            row(RSO_m,       "m",       &v->m,       0,  2, 0);
-            row(RSO_l,       "l",       &v->l,       0,  2, 0);
-            row(RSO_c,       "c",       &v->c,       0,  3, 0);
-            row(RSO_b,       "b",       &v->b,       0,  1, 0);
+
+            // same checkbox + disabled-widget pattern as row(), with a combo instead of a slider
+            {
+                const char* tonemappers[] = { "None (clamp)", "Gran Turismo", "ACES (Narkowicz)", "AgX", "AgX Punchy", "Khronos PBR Neutral" };
+                bool on = (v->overrides & RSO_tonemapper) != 0;
+                ImGui::PushID("tonemapper");
+                if (ImGui::Checkbox("##override", &on))
+                    v->overrides = on ? (v->overrides | RSO_tonemapper) : (v->overrides & ~RSO_tonemapper);
+                ImGui::SameLine();
+                ImGui::BeginDisabled(!on);
+                ImGui::Combo("tonemapper", (int*)&v->tonemapper, tonemappers, IM_ARRAYSIZE(tonemappers));
+                ImGui::EndDisabled();
+                ImGui::PopID();
+            }
+
+            // Gran Turismo curve parameters, only meaningful for that tonemapper
+            if (v->tonemapper == 1)
+            {
+                row(RSO_P,       "P",       &v->P,       0,  2, 0);
+                row(RSO_a,       "a",       &v->a,       0,  2, 0);
+                row(RSO_m,       "m",       &v->m,       0,  2, 0);
+                row(RSO_l,       "l",       &v->l,       0,  2, 0);
+                row(RSO_c,       "c",       &v->c,       0,  3, 0);
+                row(RSO_b,       "b",       &v->b,       0,  1, 0);
+            }
         }
     }
 

@@ -71,16 +71,82 @@ float3 Saturation(float3 input, float strength)
     return lerp(luminance, input, strength);
 }
 
+// Every tonemapper below maps linear scene HDR to linear display [0,1]; the sRGB encode is done once
+// at the end of PostProcess.
+
 // ACES tone mapping curve fit to go from HDR to LDR
 //https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/
 float3 ACESFilm(float3 x)
 {
+    x *= 0.6f; // the fit bakes in the ACES RRT's 1/0.6 exposure; undo it so exposure 1 matches the other curves
     float a = 2.51f;
     float b = 0.03f;
     float c = 2.43f;
     float d = 0.59f;
     float e = 0.14f;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0f, 1.0f);
+}
+
+// AgX (Troy Sobotka), Blender's default view transform since 4.0.
+// Minimal fit by Benjamin Wrensch: https://iolite-engine.com/blog_posts/minimal_agx_implementation
+// Matrices are the GLSL column-major ones written as HLSL rows, hence mul(v, M).
+float3 AgXContrastApprox(float3 x)
+{
+    float3 x2 = x * x;
+    float3 x4 = x2 * x2;
+    return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+float3 AgX(float3 color, bool punchy)
+{
+    const float3x3 agxMat = float3x3(
+        0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+        0.0784335999999992, 0.878468636469772, 0.0784336,
+        0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+    const float3x3 agxMatInv = float3x3(
+        1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+        -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+        -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+    const float minEv = -12.47393;
+    const float maxEv = 4.026069;
+
+    color = mul(max(color, 1e-10), agxMat); // log2 of <= 0 would be -inf / NaN
+    color = clamp(log2(color), minEv, maxEv);
+    color = (color - minEv) / (maxEv - minEv);
+    color = AgXContrastApprox(color);
+
+    if (punchy) // ASC CDL "Punchy" look, as in Blender
+    {
+        const float3 lw = float3(0.2126, 0.7152, 0.0722);
+        float luma = dot(color, lw);
+        color = pow(max(color, 0), 1.35);
+        color = luma + 1.4 * (color - luma);
+    }
+
+    color = mul(color, agxMatInv);
+    return pow(saturate(color), 2.2); // AgX's output is 2.2-encoded; back to display linear
+}
+
+// Khronos PBR Neutral: keeps base colors 1:1 below the highlights, then compresses toward white.
+// https://github.com/KhronosGroup/ToneMapping/blob/main/PBR_Neutral/README.md
+float3 PBRNeutral(float3 color)
+{
+    const float startCompression = 0.8 - 0.04;
+    const float desaturation = 0.15;
+
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression)
+        return color;
+
+    const float d = 1. - startCompression;
+    float newPeak = 1. - d * d / (peak + d - startCompression);
+    color *= newPeak / peak;
+
+    float g = 1. - 1. / (desaturation * (peak - newPeak) + 1.);
+    return lerp(color, newPeak, g);
 }
 
 [RootSignature(SeeDRootSignature)]
@@ -105,24 +171,41 @@ void PostProcess(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID
     
     if (editorContext.debugFlags & (HLSL::EditorDebugGIBounces | HLSL::EditorDebugGINormals | HLSL::EditorDebugAlbedo | HLSL::EditorDebugNormals | HLSL::EditorDebugClusters | HLSL::EditorDebugTriangles))
     {
+        // albedo is linear since the texture decode: encode it so the view shows the authored colors
+        if (editorContext.debugFlags & HLSL::EditorDebugAlbedo)
+            HDR.xyz = LinearToSRGB(HDR.xyz);
         postProcessed[dtid.xy] = HDR;
         return;
     }
-    
+
     HDR *= ppParameters.expoMul;
     HDR += ppParameters.expoAdd;
-#if 1
-    float r = GranTurismoTonemapper(HDR.r);
-    float g = GranTurismoTonemapper(HDR.g);
-    float b = GranTurismoTonemapper(HDR.b);
-    float4 SDR = float4(r, g, b, HDR.a);
-#else
-    float4 SDR = float4(ACESFilm(HDR.xyz), HDR.w);
-#endif
-    
-    //SDR = pow(SDR, 2.2f);
-    
-    postProcessed[dtid.xy] = SDR; // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
+
+    float3 SDR;
+    switch (ppParameters.tonemapper)
+    {
+    case HLSL::TonemapperGT:
+        SDR = float3(GranTurismoTonemapper(HDR.r), GranTurismoTonemapper(HDR.g), GranTurismoTonemapper(HDR.b));
+        break;
+    case HLSL::TonemapperACES:
+        SDR = ACESFilm(HDR.xyz);
+        break;
+    case HLSL::TonemapperAgX:
+        SDR = AgX(HDR.xyz, false);
+        break;
+    case HLSL::TonemapperAgXPunchy:
+        SDR = AgX(HDR.xyz, true);
+        break;
+    case HLSL::TonemapperPBRNeutral:
+        SDR = PBRNeutral(HDR.xyz);
+        break;
+    default:
+        SDR = HDR.xyz;
+        break;
+    }
+
+    // the backbuffer (and postProcessed, copied into it) is plain R8G8B8A8_UNORM: encode by hand
+    postProcessed[dtid.xy] = float4(LinearToSRGB(SDR), HDR.a); // write back in the albedo becasue it has the same format as backbuffer and we'll copy it just after this compute shader
     
     
     /*

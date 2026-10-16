@@ -545,8 +545,16 @@ namespace HLSL
         float b;
         float expoAdd;
         float expoMul;
+        uint tonemapper;
     };
     static const float brightnessClippingAdjust = 1;
+    // PostProcessParameters::tonemapper (also RenderSettingsVolume::tonemapper and its combo order)
+    static const uint TonemapperNone       = 0;
+    static const uint TonemapperGT         = 1;
+    static const uint TonemapperACES       = 2;
+    static const uint TonemapperAgX        = 3;
+    static const uint TonemapperAgXPunchy  = 4;
+    static const uint TonemapperPBRNeutral = 5;
     
     // ----------------- RT stuff ------------------
     

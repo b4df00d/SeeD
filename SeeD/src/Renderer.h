@@ -2555,13 +2555,14 @@ public:
         TAAShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\TAA.hlsl|TAA");
 
         ppparams.P = 1;
-        ppparams.a = 0.33;
+        ppparams.a = 1;
         ppparams.m = 0.22;
         ppparams.l = 0.4;
         ppparams.c = 1.33;
         ppparams.b = 0.0;
         ppparams.expoAdd = 0;
         ppparams.expoMul = 1;
+        ppparams.tonemapper = HLSL::TonemapperAgX;
 
 
         Open();
@@ -3692,6 +3693,7 @@ public:
                     baseSettings.l = pp.l;
                     baseSettings.c = pp.c;
                     baseSettings.b = pp.b;
+                    baseSettings.tonemapper = pp.tonemapper;
                     baseSettingsCaptured = true;
                 }
 
@@ -3770,6 +3772,9 @@ public:
                     RSV_BLEND(RSO_c, c);
                     RSV_BLEND(RSO_b, b);
                     #undef RSV_BLEND
+                    // discrete choice: can't be interpolated, switches once the volume dominates
+                    if ((v.overrides & Components::RSO_tonemapper) && w >= 0.5f)
+                        result.tonemapper = v.tonemapper;
                 }
 
                 // Write the blended artistic fields back; leave the GPU-index fields to the passes.
@@ -3794,6 +3799,7 @@ public:
                 pp.l = result.l;
                 pp.c = result.c;
                 pp.b = result.b;
+                pp.tonemapper = result.tonemapper;
             }
         ).name("Update render settings");
 

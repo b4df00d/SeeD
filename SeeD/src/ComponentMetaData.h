@@ -150,6 +150,7 @@ knownComponents.push_back(
 			{ "l", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, l), sizeof(Components::RenderSettingsVolume::l) },
 			{ "c", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, c), sizeof(Components::RenderSettingsVolume::c) },
 			{ "b", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, b), sizeof(Components::RenderSettingsVolume::b) },
+			{ "tonemapper", PropertyTypes::_uint, NULL, 1, offsetof(Components::RenderSettingsVolume, tonemapper), sizeof(Components::RenderSettingsVolume::tonemapper) },
 		}
  	}); 
 // World.h
