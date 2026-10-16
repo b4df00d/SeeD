@@ -423,6 +423,8 @@ float4 WorldPosFromDepth(float d, float2 uvCoord, HLSL::Camera camera)
 
 	// Invert Y for DirectX-style coordinates.
     screenPos.y = -screenPos.y;
+    // depth was rasterised with the jittered projection (meshCommon.hlsli) but viewProj_inv is unjittered
+    screenPos -= viewContext.jitter.xy;
 
 	// Unproject the pixel coordinate into a ray.
     float4 world = mul(float4(screenPos, d, 1), camera.viewProj_inv);
@@ -1035,13 +1037,16 @@ float3 i_octahedral_32(uint data, uint sh)
 }
 // end octahedron encodeing
 
+// The normal gbuffer is R16G16B16A16_FLOAT: store the full-range world normal directly, which is
+// also the layout DLSS-RR reads. No pass may rewrite it in place: lighting.hlsl used to decode it
+// while its own spatial-reuse neighbours were still reading it, a race that showed as horizontal bands.
 float3 StoreNormal(float3 normal)
 {
-    return normal * 0.5 + 0.5;
+    return normal;
 }
 float3 ReadNormal(float3 normal)
 {
-    return normal * 2 - 1;
+    return normal;
 }
 
 struct GBufferCameraData
@@ -1080,11 +1085,15 @@ GBufferCameraData GetGBufferCameraData(uint2 pixel)
     // long way in world space. Every shadow and GI ray starts here, so it showed up
     // as contact shadows sitting a couple of pixels away from the object casting them.
     float3 clipSpace = float3((pixel + 0.5f) * viewContext.renderResolution.zw * 2 - 1, cd.reverseZ);
+    clipSpace.y = -clipSpace.y;
+    // The depth was rasterised with the jittered projection (meshCommon.hlsli adds jitter.xy in NDC)
+    // but viewProj_inv is unjittered: the surface seen at this pixel centre sits at centre - jitter.
+    clipSpace.xy -= viewContext.jitter.xy;
     #if 1
-    float4 worldSpace = mul(cd.camera.viewProj_inv, float4(clipSpace.x, -clipSpace.y, clipSpace.z, 1));
+    float4 worldSpace = mul(cd.camera.viewProj_inv, float4(clipSpace.x, clipSpace.y, clipSpace.z, 1));
     cd.worldPos = worldSpace.xyz / worldSpace.w;
     #else
-    float4 worldSpace = mul(cd.camera.proj_inv, float4(clipSpace.x, -clipSpace.y, clipSpace.z, 1));
+    float4 worldSpace = mul(cd.camera.proj_inv, float4(clipSpace.x, clipSpace.y, clipSpace.z, 1));
     worldSpace.xyzw /= worldSpace.w;
     worldSpace = mul(cd.camera.view_inv, worldSpace);
     cd.worldPos = worldSpace.xyz;

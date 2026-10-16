@@ -189,38 +189,12 @@ public:
         IOs::Log("Project saved to {}", filePath.c_str());
     }
 
-    // TODO : this should be done in Setup(Engine&engine)... if something is overriding those value wrongly this is the issue !
-    
-    // Settings that live on objects Engine::On() creates, and which its own On()
-    // methods initialise unconditionally -- RaytracingContext::On() assigns every
-    // tunable in rtParameters, and DLSS::On() assigns view->upscaling. Applying
-    // them from Setup (which must run before On() for the window size) meant the
-    // whole "Ray Tracing" + "Upscaling" part of a .seedproj was silently
-    // discarded. So Main calls this straight after On() instead, and those On()
-    // methods no longer duplicate the defaults that already live here as member
-    // initialisers.
+    // DLSS settings live on state DLSS::On() initialises unconditionally (view->upscaling,
+    // perf_quality), so they are applied straight after Engine::On(). The ray tracing
+    // tunables are NOT here: Setup() hands them to the RayTracingContext once, before On(),
+    // and from then on that context owns them (ImGui edits them, Save() reads them back).
     void SetupRenderSettings(Engine& engine)
     {
-        auto& rt = engine.renderer.mainView.raytracingContext.rtParameters;
-        rt.maxFrameFilteringCount = maxFrameFilteringCount;
-        rt.spacialRadius = spacialRadius;
-        rt.spacialSampleCount = spacialSampleCount;
-        rt.reservoirRandBias = reservoirRandBias;
-        rt.reservoirSpacialRandBias = reservoirSpacialRandBias;
-        rt.SHARCSceneScale = SHARCSceneScale;
-        rt.SHARCRadianceScale = SHARCRadianceScale;
-        rt.SHARCRoughnessThreshold = SHARCRoughnessThreshold;
-        rt.SHARCSamplesPerPixel = SHARCSamplesPerPixel;
-        rt.SHARCAccumulationFrameNum = SHARCAccumulationFrameNum;
-
-        DLSS& dlss = engine.renderer.mainView.dlss;
-        engine.renderer.mainView.upscaling = (HLSL::Upscaling)upscalingTechnique;
-        dlss.dlssPreset = (NVSDK_NGX_DLSS_Hint_Render_Preset)dlssPreset;
-        dlss.dlssdPreset = (NVSDK_NGX_RayReconstruction_Hint_Render_Preset)dlssdPreset;
-        dlss.requestedQuality = (NVSDK_NGX_PerfQuality_Value)dlssQuality;
-        // Runs after DLSS::On(), so perf_quality is the created default: a differing
-        // request triggers the existing rebuild path.
-        dlss.qualityChangePending = (dlss.requestedQuality != dlss.perf_quality);
     }
 
     void Setup(Engine& engine)
@@ -240,6 +214,24 @@ public:
         options.shaderStatsCsv = shaderStatsCsv;
         options.playerSystem = playerSystem;
 
+        auto& rt = engine.renderer.mainView.raytracingContext.rtParameters;
+        rt.maxFrameFilteringCount = maxFrameFilteringCount;
+        rt.spacialRadius = spacialRadius;
+        rt.spacialSampleCount = spacialSampleCount;
+        rt.reservoirRandBias = reservoirRandBias;
+        rt.reservoirSpacialRandBias = reservoirSpacialRandBias;
+        rt.SHARCSceneScale = SHARCSceneScale;
+        rt.SHARCRadianceScale = SHARCRadianceScale;
+        rt.SHARCRoughnessThreshold = SHARCRoughnessThreshold;
+        rt.SHARCSamplesPerPixel = SHARCSamplesPerPixel;
+        rt.SHARCAccumulationFrameNum = SHARCAccumulationFrameNum;
+
+        DLSS& dlss = engine.renderer.mainView.dlss;
+        engine.renderer.mainView.upscaling = (HLSL::Upscaling)upscalingTechnique;
+        dlss.dlssPreset = (NVSDK_NGX_DLSS_Hint_Render_Preset)dlssPreset;
+        dlss.dlssdPreset = (NVSDK_NGX_RayReconstruction_Hint_Render_Preset)dlssdPreset;
+        dlss.requestedQuality = (NVSDK_NGX_PerfQuality_Value)dlssQuality;
+        dlss.qualityChangePending = (dlss.requestedQuality != dlss.perf_quality);
 
         AssetLibrary& al = engine.assetLibrary;
         al.assetsPath = Project::instance->CacheDirAbs();

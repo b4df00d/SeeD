@@ -339,13 +339,9 @@ int CALLBACK WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     Project project;
     project.Load(lpCmdLine ? String(lpCmdLine) : String(""));
     project.Setup(engine);
+    project.SetupRenderSettings(engine);
 
     engine.On();
-
-    // TODO : this is not right ! engine.on() should take all params that are setup by the function below
-    // After On(), so the project's ray tracing / upscaling settings are not
-    // overwritten by the defaults those On() methods assign.
-    project.SetupRenderSettings(engine);
 
     if (!project.startupScene.empty())
     {

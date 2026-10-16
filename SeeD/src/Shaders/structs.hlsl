@@ -178,7 +178,7 @@ namespace HLSL
         uint albedoIndex;
         uint metalnessIndex;
         uint normalIndex; // gbuffer normal, a = roughness (DLSS-RR packed mode); SRV slot, every reader (GetGBufferCameraData) samples it read-only
-        uint normalUAVIndex; // same resource's UAV slot -- lighting.hlsl is the one writer (packs roughness into .a via RWTexture2D), needs a heap index of the matching descriptor type
+        uint normalUAVIndex; // same resource's UAV slot -- currently unused: the gbuffer pass writes the final full-range normal + roughness, nothing rewrites it
         uint motionIndex;
         uint instanceIDIndex;
         uint overdrawIndex;

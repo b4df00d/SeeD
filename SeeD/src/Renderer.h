@@ -403,25 +403,24 @@ struct ViewContext
     StructuredBuffer<uint> instancesCounter;
     StructuredBuffer<uint> meshletsCounter;
 
-    float2 jitter[16] = {
-        float2(0.500000, 0.333333),
-        float2(0.250000, 0.666667),
-        float2(0.750000, 0.111111),
-        float2(0.125000, 0.444444),
-        float2(0.625000, 0.777778),
-        float2(0.375000, 0.222222),
-        float2(0.875000, 0.555556),
-        float2(0.062500, 0.888889),
-        float2(0.562500, 0.037037),
-        float2(0.312500, 0.370370),
-        float2(0.812500, 0.703704),
-        float2(0.187500, 0.148148),
-        float2(0.687500, 0.481481),
-        float2(0.437500, 0.814815),
-        float2(0.937500, 0.259259),
-        float2(0.031250, 0.592593)
-    };
+    // Sub-pixel sample offset of the current frame in render-resolution PIXEL space, x right / y down,
+    // in [-0.5, 0.5] (Halton 2,3). This is exactly what DLSS expects as InJitterOffset; the shader-side
+    // NDC offset is derived from it in SetupViewContextParams.
+    float2 jitterPixel;
     uint jitterIndex;
+
+    static float Halton(uint index, uint base)
+    {
+        float f = 1.0f;
+        float r = 0.0f;
+        while (index > 0)
+        {
+            f /= (float)base;
+            r += f * (float)(index % base);
+            index /= base;
+        }
+        return r;
+    }
 
     void On()
     {
@@ -434,6 +433,7 @@ struct ViewContext
         meshletBuckets.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
         jitterIndex = 0;
+        jitterPixel = float2(0.0f, 0.0f);
     }
 
     void Off()
@@ -507,11 +507,16 @@ struct RayTracingContext
         SHARCAccumulation.CreateBuffer(SHARCEntryCount * 16, 16, false, "SHARCAccumulation");
         SHARCResolved.CreateBuffer(SHARCEntryCount * 16, 16, false, "SHARCResolved");
 
-        // Only what the resources just created above decide. Every other tunable is
-        // owned by Project (its member initialisers are the defaults) and applied by
-        // Project::SetupRenderSettings after On(); assigning them here as well would
-        // overwrite whatever the .seedproj asked for.
-        // TODO : kinda wrong... those values should be read from project but after that this is this context that owns the values
+        //rtParameters.maxFrameFilteringCount = 1;
+        //rtParameters.spacialRadius = 64.0f;
+        //rtParameters.spacialSampleCount = 16;
+        //rtParameters.reservoirRandBias = 0.0;
+        //rtParameters.reservoirSpacialRandBias = 0.2;
+        //rtParameters.SHARCSceneScale = 20;
+        //rtParameters.SHARCRadianceScale = 1;
+        //rtParameters.SHARCRoughnessThreshold = 0.33;
+        //rtParameters.SHARCSamplesPerPixel = 1;
+        //rtParameters.SHARCAccumulationFrameNum = 128;
         rtParameters.SHARCEntriesNum = SHARCEntryCount;
         rtParameters.SHARCHashEntriesBufferIndex = SHARCHash.uav.offset;
         rtParameters.SHARCAccumulationBufferIndex = SHARCAccumulation.uav.offset;
@@ -665,9 +670,16 @@ public:
         viewContextParams.distanceCullingValue = options.distanceCullingValue;
         viewContextParams.distanceCullingValueRT = options.distanceCullingValueRT;
         viewContextParams.mousePixel = int4(IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1], IOs::instance->mouse.mousePos[2], IOs::instance->mouse.mousePos[3]);
-        float2 previousJit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy);
-        viewContext.jitterIndex = (viewContextParams.frameNumber) % ARRAYSIZE(viewContext.jitter);
-        float2 jit = ((viewContext.jitter[viewContext.jitterIndex] - float2(0.5f, 0.5f)) / viewContextParams.renderResolution.xy);
+        // DLSS guide: phase count = 8 * (display/render)^2 so every output pixel gets enough distinct samples.
+        float upscaleRatio = (float)displayResolution.x / (float)renderResolution.x;
+        uint jitterPhases = max(8u, (uint)ceilf(8.0f * upscaleRatio * upscaleRatio));
+        // pixel space -> NDC: one pixel is 2/res wide, and NDC y points up while pixel y points down
+        auto pixelToNDC = [&](float2 p) { return float2(2.0f * (float)p.x / (float)renderResolution.x, -2.0f * (float)p.y / (float)renderResolution.y); };
+        float2 previousJit = pixelToNDC(viewContext.jitterPixel);
+        viewContext.jitterIndex = viewContextParams.frameNumber % jitterPhases;
+        // +1: Halton index 0 is (0,0), skip it so the sequence is the usual one starting at (0.5, 0.333)
+        viewContext.jitterPixel = float2(ViewContext::Halton(viewContext.jitterIndex + 1, 2), ViewContext::Halton(viewContext.jitterIndex + 1, 3)) - float2(0.5f, 0.5f);
+        float2 jit = pixelToNDC(viewContext.jitterPixel);
         viewContextParams.jitter = float4(jit.x, jit.y, previousJit.x, previousJit.y);
         
         return viewContextParams;
@@ -2897,7 +2909,7 @@ public:
                     dlss_create_params.Feature.InPerfQualityValue = perf_quality;
                     dlss_create_params.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR |
                         NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
-                        NVSDK_NGX_DLSS_Feature_Flags_MVJittered |
+                        //NVSDK_NGX_DLSS_Feature_Flags_MVJittered | // our MVs are built from unjittered clip positions (meshCommon.hlsli)
                         //NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
                         //NVSDK_NGX_DLSS_Feature_Flags_DoSharpening |
                         NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
@@ -2948,12 +2960,10 @@ public:
                 dlss_eval_params.pInExposureTexture = nullptr;
                 dlss_eval_params.InExposureScale = 1.0f;
 
-                // Jitter offset must ALWAYS be supplied (independent of MVJittered). Our projection
-                // applies an NDC offset of (halton-0.5)/renderResolution, so the pixel-space offset
-                // DLSS expects is (halton-0.5)*0.5.
-                float2 dlssJitter = view->viewContext.jitter[view->viewContext.jitterIndex];
-                dlss_eval_params.InJitterOffsetX = (dlssJitter.x - 0.5f) * 0.5f;
-                dlss_eval_params.InJitterOffsetY = (dlssJitter.y - 0.5f) * 0.5f;
+                // Jitter offset must ALWAYS be supplied (independent of MVJittered). jitterPixel is the
+                // pixel-space (y down) offset the projection applies, see SetupViewContextParams.
+                dlss_eval_params.InJitterOffsetX = view->viewContext.jitterPixel.x;
+                dlss_eval_params.InJitterOffsetY = view->viewContext.jitterPixel.y;
 
                 dlss_eval_params.InReset = false;
                 dlss_eval_params.InRenderSubrectDimensions = { view->renderResolution.x, view->renderResolution.y };
@@ -2987,12 +2997,10 @@ public:
                 //dlss_eval_params.pInAlpha = albedo.Get().GetResource();
 
                 // Jitter offset must ALWAYS be supplied (independent of MVJittered, which only
-                // describes whether the MVs already contain jitter). Our projection applies an
-                // NDC offset of (halton-0.5)/renderResolution (see mesh.hlsl), so the pixel-space
-                // offset DLSS expects is (halton-0.5)*0.5.
-                float2 dlssdJitter = view->viewContext.jitter[view->viewContext.jitterIndex];
-                dlss_eval_params.InJitterOffsetX = (dlssdJitter.x - 0.5f) * 0.5f;
-                dlss_eval_params.InJitterOffsetY = (dlssdJitter.y - 0.5f) * 0.5f;
+                // describes whether the MVs already contain jitter). jitterPixel is the pixel-space
+                // (y down) offset the projection applies, see SetupViewContextParams.
+                dlss_eval_params.InJitterOffsetX = view->viewContext.jitterPixel.x;
+                dlss_eval_params.InJitterOffsetY = view->viewContext.jitterPixel.y;
 
                 NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSSD_EXT(commandBuffer->cmd, dlss_feature, ngx_parameters, &dlss_eval_params);
                 seedAssert(NVSDK_NGX_SUCCEED(result));

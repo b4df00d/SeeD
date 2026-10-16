@@ -281,11 +281,6 @@ void RayGen()
     if ((editorContext.debugFlags & (HLSL::EditorDebugGIBounces | HLSL::EditorDebugGIAlbedo | HLSL::EditorDebugGINormals)) == 0 && !rtParameters.directOnly)
         lighted[dtid.xy] += float4(indirect, 0.0f);
 
-
-    
-    RWTexture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalUAVIndex];
-    normal[dtid.xy] = float4(cd.worldNorm, s.roughness); // full-range fp16 normal; .a must keep roughness (DLSS-RR packed mode)
-    
 }
 
 [shader("miss")]
