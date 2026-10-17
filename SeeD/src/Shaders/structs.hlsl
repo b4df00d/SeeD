@@ -165,7 +165,7 @@ namespace HLSL
         uint cameraIndex;
         uint lightsIndex;
         uint instancesCulledArgsIndex;
-        uint meshletsToCullIndex;
+        uint instanceMeshletRangesIndex;
         uint meshletsCulledArgsIndex; // single shared draw-args buffer; each shader bucket owns a region at its prefix-sum base offset (see shaderBucketOffsetsIndex)
         uint meshletsCulledArgsSortedIndex;
         uint sortHistogramIndex;
@@ -409,10 +409,13 @@ namespace HLSL
 	    D3D12_DRAW_ARGUMENTS drawArguments;
     };
     
-    struct GroupedCullingDispatch
+    // One per instance, indexed by instance. CullingInstances writes the selected LOD's meshlet
+    // count (0 if culled) into meshletPrefix, InstanceMeshletPrefix scans it in place into an
+    // exclusive prefix, and each CullingMeshlets thread binary-searches it for its owning instance.
+    struct InstanceMeshletRange
     {
-        uint instanceIndex;
-        uint meshletIndex;
+        uint meshletPrefix;
+        uint firstMeshlet;
     };
     
     static const uint cullMeshletThreadCount = 32;

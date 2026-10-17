@@ -140,30 +140,70 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
     culled |= rawLod > viewContext.distanceCullingValue;
     
     lodIndex = min(lodIndex, mesh.lodCount - 1);
-    
+
+    // One record per instance instead of expanding its meshlets here: this pass has only one thread
+    // per instance, so writing N meshlets per thread serialized whole waves behind their largest
+    // instance. InstanceMeshletPrefix scans the counts and CullingMeshlets (one thread per meshlet)
+    // finds its owning instance by binary search.
+    RWStructuredBuffer<HLSL::InstanceMeshletRange> instanceMeshletRanges = ResourceDescriptorHeap[viewContext.instanceMeshletRangesIndex];
+    HLSL::InstanceMeshletRange range;
+    range.meshletPrefix = 0; // meshlet count until scanned
+    range.firstMeshlet = 0;
     if (!culled)
     {
         HLSL::Mesh::LOD lod = mesh.LODs[lodIndex];
-        
-        // Reserve space for the whole wave with a single atomic: the first
-        // active lane adds the wave total, and each lane derives its slot from
-        // the exclusive prefix sum of meshlet counts across active lanes.
-        uint waveOffset = WavePrefixSum(lod.meshletCount);
-        uint waveTotal = WaveActiveSum(lod.meshletCount);
-        uint waveBase = 0;
-        if (WaveIsFirstLane())
-            InterlockedAdd(counter[1], waveTotal, waveBase);
-        waveBase = WaveReadLaneFirst(waveBase);
-        uint meshletIndex = waveBase + waveOffset;
-        
-        RWStructuredBuffer<HLSL::GroupedCullingDispatch> meshletsToCull = ResourceDescriptorHeap[viewContext.meshletsToCullIndex];
-        HLSL::GroupedCullingDispatch mdc = (HLSL::GroupedCullingDispatch) 0;
-        mdc.instanceIndex = instanceIndex;
-        for (uint i = 0; i < lod.meshletCount; i++)
-        {
-            mdc.meshletIndex = lod.meshletOffset+i;
-            meshletsToCull[meshletIndex+i] = mdc;
-        }
+        range.meshletPrefix = lod.meshletCount;
+        range.firstMeshlet = lod.meshletOffset;
+    }
+    instanceMeshletRanges[instanceIndex] = range;
+}
+
+// ---- Exclusive prefix over the per-instance meshlet counts ----
+// Single group: each thread serially sums one contiguous chunk of instances, the chunk totals are
+// scanned in groupshared, then each thread rewrites its chunk as exclusive prefixes. Also publishes
+// the total as counter[1], the meshlet count CountMeshletsDispatch / CullingMeshlets work from.
+
+#define INSTANCE_PREFIX_THREADS 1024
+
+groupshared uint gsChunkPrefix[INSTANCE_PREFIX_THREADS];
+
+#pragma compute InstancePrefix InstanceMeshletPrefix
+
+[RootSignature(SeeDRootSignature)]
+[numthreads(INSTANCE_PREFIX_THREADS, 1, 1)]
+void InstanceMeshletPrefix(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
+{
+    RWStructuredBuffer<HLSL::InstanceMeshletRange> instanceMeshletRanges = ResourceDescriptorHeap[viewContext.instanceMeshletRangesIndex];
+    RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[viewContext.instancesCounterIndex];
+
+    uint instanceCount = commonResourcesIndices.instanceCount;
+    uint chunkSize = (instanceCount + INSTANCE_PREFIX_THREADS - 1) / INSTANCE_PREFIX_THREADS;
+    uint chunkBegin = min(gtid.x * chunkSize, instanceCount);
+    uint chunkEnd = min(chunkBegin + chunkSize, instanceCount);
+
+    uint chunkTotal = 0;
+    for (uint i = chunkBegin; i < chunkEnd; i++)
+        chunkTotal += instanceMeshletRanges[i].meshletPrefix;
+
+    // inclusive scan of the chunk totals in groupshared (Hillis-Steele, log2(threads) steps)
+    gsChunkPrefix[gtid.x] = chunkTotal;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint offset = 1; offset < INSTANCE_PREFIX_THREADS; offset <<= 1)
+    {
+        uint add = gtid.x >= offset ? gsChunkPrefix[gtid.x - offset] : 0;
+        GroupMemoryBarrierWithGroupSync();
+        gsChunkPrefix[gtid.x] += add;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (gtid.x == INSTANCE_PREFIX_THREADS - 1)
+        counter[1] = gsChunkPrefix[gtid.x];
+
+    uint running = gsChunkPrefix[gtid.x] - chunkTotal; // exclusive
+    for (uint j = chunkBegin; j < chunkEnd; j++)
+    {
+        uint count = instanceMeshletRanges[j].meshletPrefix;
+        instanceMeshletRanges[j].meshletPrefix = running;
+        running += count;
     }
 }
 
@@ -228,8 +268,23 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[viewContext.cameraIndex];
     
-    RWStructuredBuffer<HLSL::GroupedCullingDispatch> meshletsToCull = ResourceDescriptorHeap[viewContext.meshletsToCullIndex];
-    HLSL::GroupedCullingDispatch meshletToCull = meshletsToCull[localMeshletIndex];
+    // Owning instance = last one whose exclusive meshlet prefix <= this thread's index. Culled
+    // instances (0 meshlets) share their prefix with a later instance, so they never win.
+    RWStructuredBuffer<HLSL::InstanceMeshletRange> instanceMeshletRanges = ResourceDescriptorHeap[viewContext.instanceMeshletRangesIndex];
+    uint lo = 0;
+    uint hi = commonResourcesIndices.instanceCount - 1;
+    while (lo < hi)
+    {
+        uint mid = (lo + hi + 1) / 2;
+        if (instanceMeshletRanges[mid].meshletPrefix <= localMeshletIndex)
+            lo = mid;
+        else
+            hi = mid - 1;
+    }
+    HLSL::InstanceMeshletRange owner = instanceMeshletRanges[lo];
+    HLSL::MeshletDraw meshletToCull;
+    meshletToCull.instanceIndex = lo;
+    meshletToCull.meshletIndex = owner.firstMeshlet + (localMeshletIndex - owner.meshletPrefix);
     
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[meshletToCull.instanceIndex];

@@ -395,7 +395,7 @@ struct ViewContext
     StructuredBuffer<HLSL::Camera> camera;
     StructuredBuffer<HLSL::Light> lights;
     StructuredBuffer<HLSL::InstanceCullingDispatch> instancesCulledArgs;
-    StructuredBuffer<HLSL::GroupedCullingDispatch> meshletsToCull;
+    StructuredBuffer<HLSL::InstanceMeshletRange> instanceMeshletRanges; // per instance: culled-LOD meshlet count, scanned in place into a prefix (culling.hlsl)
     StructuredBuffer<HLSL::MeshletDraw> meshletsCulledArgs; // single shared culled-meshlet list: every shader bucket owns a region at its own prefix-sum base offset (see ViewWorld::shaderBuckets)
     StructuredBuffer<HLSL::MeshletDraw> meshletsCulledArgsSorted; // front-to-back ordered copy of bucket 0 only (the sort-eligible default opaque shader)
     StructuredBuffer<HLSL::MeshDispatchArgs> meshDispatchArgs; // one indirect DispatchMesh per shader bucket, built on GPU after culling
@@ -426,7 +426,7 @@ struct ViewContext
     void On()
     {
         instancesCulledArgs.CreateBuffer(10, D3D12_RESOURCE_STATE_COMMON);
-        meshletsToCull.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
+        instanceMeshletRanges.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         instancesCounter.CreateBuffer(2, D3D12_RESOURCE_STATE_COMMON);
         meshletsCulledArgs.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         meshletsCulledArgsSorted.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
@@ -443,7 +443,7 @@ struct ViewContext
         camera.Release();
         lights.Release();
         instancesCulledArgs.Release();
-        meshletsToCull.Release();
+        instanceMeshletRanges.Release();
         meshletsCulledArgs.Release();
         meshletsCulledArgsSorted.Release();
         sortHistogram.Release();
@@ -646,7 +646,7 @@ public:
         viewContextParams.cameraIndex = options.stopFrustumUpdate ? 1 : 0;
         viewContextParams.lightsIndex = 0;
         viewContextParams.instancesCulledArgsIndex = viewContext.instancesCulledArgs.GetResource().uav.offset;
-        viewContextParams.meshletsToCullIndex = viewContext.meshletsToCull.GetResource().uav.offset;
+        viewContextParams.instanceMeshletRangesIndex = viewContext.instanceMeshletRanges.GetResource().uav.offset;
         viewContextParams.instancesCounterIndex = viewContext.instancesCounter.GetResource().uav.offset;
         viewContextParams.meshletsCulledArgsIndex = viewContext.meshletsCulledArgs.GetResource().uav.offset;
         viewContextParams.meshletsCulledArgsSortedIndex = viewContext.meshletsCulledArgsSorted.GetResource().uav.offset;
@@ -815,6 +815,25 @@ struct SubmissionList
         std::lock_guard lk(mutex);
         while (cursor < execute.size() && ready[cursor])
             execute[cursor++]();
+    }
+};
+
+// Nested GPU marker for one step inside a pass, so GPU Trace (Nsight / PIX) reports the step as its
+// own sub-range instead of folding it into the pass range opened in Pass::Open.
+struct GPUMarker
+{
+    ID3D12GraphicsCommandList7* cmd;
+    GPUMarker(CommandBuffer& cb, const char* name) : cmd(cb.cmd)
+    {
+#ifdef USE_PIX
+        PIXBeginEvent(cmd, PIX_COLOR_INDEX((BYTE)(UINT64)name), name);
+#endif
+    }
+    ~GPUMarker()
+    {
+#ifdef USE_PIX
+        PIXEndEvent(cmd);
+#endif
     }
 };
 
@@ -1282,6 +1301,7 @@ class Culling : public Pass
     Components::Handle<Components::Shader> sortPrefixShader;
     Components::Handle<Components::Shader> sortScatterShader;
     Components::Handle<Components::Shader> buildMeshDispatchShader;
+    Components::Handle<Components::Shader> instancePrefixShader;
 public:
     virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
@@ -1295,6 +1315,7 @@ public:
         sortPrefixShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|SortPrefix");
         sortScatterShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|SortScatter");
         buildMeshDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|BuildMeshDispatch");
+        instancePrefixShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|InstancePrefix");
     }
     void Setup(View* view) override
     {
@@ -1317,41 +1338,62 @@ public:
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
         auto raytracingContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->raytracingContext.rtParameters);
 
-        Shader& reset = *AssetLibrary::instance->Get<Shader>(cullingResetShader.Get().id, true);
-        commandBuffer->SetCompute(reset);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
-        commandBuffer->cmd->Dispatch(1, 1, 1);
+        { GPUMarker marker(commandBuffer.Get(), "cullingReset");
+            Shader& reset = *AssetLibrary::instance->Get<Shader>(cullingResetShader.Get().id, true);
+            commandBuffer->SetCompute(reset);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
+            commandBuffer->cmd->Dispatch(1, 1, 1);
+        }
 
         view->viewContext.instancesCounter.GetResource().Barrier(commandBuffer.Get());
 
-        Shader& cullingInstances = *AssetLibrary::instance->Get<Shader>(cullingInstancesShader.Get().id, true);
-        commandBuffer->SetCompute(cullingInstances);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
-        commandBuffer->cmd->Dispatch(cullingInstances.DispatchX(view->viewWorld.commonResourcesIndices.instanceCount), 1, 1);
+        { GPUMarker marker(commandBuffer.Get(), "cullingInstances");
+            Shader& cullingInstances = *AssetLibrary::instance->Get<Shader>(cullingInstancesShader.Get().id, true);
+            commandBuffer->SetCompute(cullingInstances);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
+            commandBuffer->cmd->Dispatch(cullingInstances.DispatchX(view->viewWorld.commonResourcesIndices.instanceCount), 1, 1);
+        }
 
+        view->viewContext.instanceMeshletRanges.GetResource().Barrier(commandBuffer.Get());
+
+        // per-instance meshlet counts -> exclusive prefix (read by CullingMeshlets) + total in counter[1]
+        { GPUMarker marker(commandBuffer.Get(), "instancePrefix");
+            Shader& instancePrefix = *AssetLibrary::instance->Get<Shader>(instancePrefixShader.Get().id, true);
+            commandBuffer->SetCompute(instancePrefix);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
+            commandBuffer->cmd->Dispatch(1, 1, 1);
+        }
+
+        view->viewContext.instanceMeshletRanges.GetResource().Barrier(commandBuffer.Get());
         view->viewContext.instancesCounter.GetResource().Barrier(commandBuffer.Get());
         view->viewContext.instancesCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         view->viewContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
-        Shader& cullingCountMeshletsDispatch = *AssetLibrary::instance->Get<Shader>(cullingCountMeshletsDispatchShader.Get().id, true);
-        commandBuffer->SetCompute(cullingCountMeshletsDispatch);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
-        commandBuffer->cmd->Dispatch(1, 1, 1);
+        { GPUMarker marker(commandBuffer.Get(), "cullingCount");
+            Shader& cullingCountMeshletsDispatch = *AssetLibrary::instance->Get<Shader>(cullingCountMeshletsDispatchShader.Get().id, true);
+            commandBuffer->SetCompute(cullingCountMeshletsDispatch);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
+            commandBuffer->cmd->Dispatch(1, 1, 1);
+        }
 
         view->viewContext.instancesCulledArgs.GetResource().Barrier(commandBuffer.Get());
 
-        Shader& cullingMeshlets = *AssetLibrary::instance->Get<Shader>(cullingMeshletsShader.Get().id, true);
-        commandBuffer->SetCompute(cullingMeshlets);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
-        commandBuffer->cmd->ExecuteIndirect(cullingMeshlets.commandSignature, view->viewWorld.commonResourcesIndices.instanceCount, view->viewContext.instancesCulledArgs.GetResourcePtr(), 0, view->viewContext.instancesCounter.GetResourcePtr(), 0);
+        { GPUMarker marker(commandBuffer.Get(), "cullingMeshlets");
+            Shader& cullingMeshlets = *AssetLibrary::instance->Get<Shader>(cullingMeshletsShader.Get().id, true);
+            commandBuffer->SetCompute(cullingMeshlets);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
+            commandBuffer->cmd->ExecuteIndirect(cullingMeshlets.commandSignature, view->viewWorld.commonResourcesIndices.instanceCount, view->viewContext.instancesCulledArgs.GetResourcePtr(), 0, view->viewContext.instancesCounter.GetResourcePtr(), 0);
+        }
 
         if (options.frontToBackSort)
         {
@@ -1362,29 +1404,35 @@ public:
 
             uint sortElements = view->viewContext.meshletsCulledArgs.Size();
 
-            Shader& sortPrefix = *AssetLibrary::instance->Get<Shader>(sortPrefixShader.Get().id, true);
-            commandBuffer->SetCompute(sortPrefix);
-            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-            commandBuffer->cmd->Dispatch(1, 1, 1);
+            { GPUMarker marker(commandBuffer.Get(), "sortPrefix");
+                Shader& sortPrefix = *AssetLibrary::instance->Get<Shader>(sortPrefixShader.Get().id, true);
+                commandBuffer->SetCompute(sortPrefix);
+                commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+                commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+                commandBuffer->cmd->Dispatch(1, 1, 1);
+            }
 
             view->viewContext.sortHistogram.GetResource().Barrier(commandBuffer.Get());
 
-            Shader& sortScatter = *AssetLibrary::instance->Get<Shader>(sortScatterShader.Get().id, true);
-            commandBuffer->SetCompute(sortScatter);
-            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-            commandBuffer->cmd->Dispatch(sortScatter.DispatchX(sortElements), 1, 1);
+            { GPUMarker marker(commandBuffer.Get(), "sortScatter");
+                Shader& sortScatter = *AssetLibrary::instance->Get<Shader>(sortScatterShader.Get().id, true);
+                commandBuffer->SetCompute(sortScatter);
+                commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+                commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+                commandBuffer->cmd->Dispatch(sortScatter.DispatchX(sortElements), 1, 1);
+            }
         }
 
         // every bucket counter is final once CullingMeshlets is done (the sort doesn't touch them)
         view->viewContext.meshletsCounter.GetResource().Barrier(commandBuffer.Get());
 
-        Shader& buildMeshDispatch = *AssetLibrary::instance->Get<Shader>(buildMeshDispatchShader.Get().id, true);
-        commandBuffer->SetCompute(buildMeshDispatch);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
-        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
-        commandBuffer->cmd->Dispatch(buildMeshDispatch.DispatchX((uint)view->viewWorld.shaderBuckets.size()), 1, 1);
+        { GPUMarker marker(commandBuffer.Get(), "buildMeshDispatch");
+            Shader& buildMeshDispatch = *AssetLibrary::instance->Get<Shader>(buildMeshDispatchShader.Get().id, true);
+            commandBuffer->SetCompute(buildMeshDispatch);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->Dispatch(buildMeshDispatch.DispatchX((uint)view->viewWorld.shaderBuckets.size()), 1, 1);
+        }
 
         // unconditional (was inside the sort branch): the frame-start transition above always assumes this state
         view->viewContext.meshletsCulledArgsSorted.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -3845,15 +3893,9 @@ public:
                 this->viewContext.meshletsCulledArgs.Resize(totalMeshlets);
                 this->viewContext.meshletsCulledArgsSorted.Resize(totalMeshlets);
                 this->viewContext.meshletBuckets.Resize(totalMeshlets);
-                // CullingInstances (culling.hlsl) writes one meshletsToCull entry per meshlet of
-                // EVERY instance that survives frustum/occlusion/distance culling this frame -- that
-                // can be any currently-loaded instance, not just ones touched this frame, so this
-                // must share totalMeshlets' persistent accounting (see the comment above), not
-                // viewWorld.meshletsCount. Sizing it off the per-frame-touched count undersized the
-                // buffer once enough settled (loaded, non-dirty) instances existed simultaneously --
-                // e.g. terrain nodes, which stop re-touching every frame once baked -- causing
-                // out-of-bounds atomic-counter writes that flickered.
-                this->viewContext.meshletsToCull.Resize(totalMeshlets);
+                // one entry per instance (CullingInstances writes every in-range instance, culled ones
+                // with 0 meshlets), so it scales with the instance count, not the meshlet count
+                this->viewContext.instanceMeshletRanges.Resize(this->viewWorld.instances.Size());
                 this->viewContext.meshletsCounter.Resize((uint)this->viewWorld.shaderBuckets.size());
                 this->viewContext.meshDispatchArgs.Resize((uint)this->viewWorld.shaderBuckets.size());
                 this->raytracingContext.instancesRayTracing.Resize(this->viewWorld.instances.Size());
