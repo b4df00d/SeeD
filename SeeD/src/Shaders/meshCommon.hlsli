@@ -6,7 +6,8 @@
 //
 // Callers must #include "structs.hlsl", "binding.hlsl" and "common.hlsl" first (for
 // ResourceDescriptorHeap-bound heap indices, i_octahedral_32, samplers, viewContext, etc.), then
-// call LoadMeshletShared(groupThreadId) from thread 0 followed by GroupMemoryBarrierWithGroupSync()
+// early-out groups with MeshDrawIndex(groupId) >= meshDrawCount, then
+// call LoadMeshletShared(groupThreadId, drawIndex) followed by GroupMemoryBarrierWithGroupSync()
 // before using any of the decode/output helpers below or calling SetMeshOutputCounts.
 
 struct MSVert
@@ -21,11 +22,17 @@ struct MSVert
 
 // Mesh pipelines don't auto-generate SV_PrimitiveID for the pixel shader: the mesh shader
 // must export it as a per-primitive attribute (used by the 'triangles' debug view).
+// instanceIndex/meshletIndex vary per group now that one DispatchMesh covers a whole shader
+// bucket, so the pixel shader gets them per primitive instead of from root constants.
 struct MSPrim
 {
     uint primitiveID : SV_PrimitiveID; // triangle index within the meshlet
+    nointerpolation uint instanceIndex : INSTANCE_INDEX;
+    nointerpolation uint meshletIndex : MESHLET_INDEX;
 };
 
+groupshared uint drawInstanceIndex;
+groupshared uint drawMeshletIndex;
 groupshared HLSL::Mesh mesh;
 groupshared HLSL::Meshlet meshlet;
 groupshared float4x4 worldMatrix;     // object->world (for normal/tangent)
@@ -33,18 +40,31 @@ groupshared float4x4 mvp;             // viewProj * world
 groupshared float4x4 previousMvp;     // previousViewProj * previousWorld
 groupshared float worldDetSign;       // sign(det(world)) -> keeps binormal handedness correct on mirrored instances
 
+// Flattened index of this group within the bucket's 2D dispatch grid (see HLSL::meshDispatchWidth).
+// Group-uniform; groups at or past meshDrawCount (tail of the last row) must output nothing.
+uint MeshDrawIndex(uint3 groupId)
+{
+    return groupId.y * HLSL::meshDispatchWidth + groupId.x;
+}
+
 // Thread 0 only: fetches the instance/mesh/meshlet for this group and populates the groupshared
 // state above. Caller must GroupMemoryBarrierWithGroupSync() before using it / SetMeshOutputCounts.
-void LoadMeshletShared(uint groupThreadId)
+void LoadMeshletShared(uint groupThreadId, uint drawIndex)
 {
     if (groupThreadId != 0)
         return;
+
+    bool sorted = (meshDrawBase & HLSL::meshDrawSortedBit) != 0;
+    StructuredBuffer<HLSL::MeshletDraw> draws = ResourceDescriptorHeap[sorted ? viewContext.meshletsCulledArgsSortedSRVIndex : viewContext.meshletsCulledArgsSRVIndex];
+    HLSL::MeshletDraw draw = draws[(meshDrawBase & ~HLSL::meshDrawSortedBit) + drawIndex];
+    drawInstanceIndex = draw.instanceIndex;
+    drawMeshletIndex = draw.meshletIndex;
 
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[0]; //viewContext.cameraIndex];
 
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[instanceIndexIndirect];
+    HLSL::Instance instance = instances[draw.instanceIndex];
     worldMatrix = instance.unpack(instance.current);
     float4x4 previousWorldMatrix = instance.unpack(instance.previous);
 
@@ -57,7 +77,7 @@ void LoadMeshletShared(uint groupThreadId)
     mesh = meshes[instance.meshIndex]; // for SNORM16 position decode (aabbMin / aabbExtent)
 
     StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
-    meshlet = meshlets[meshletIndexIndirect];
+    meshlet = meshlets[draw.meshletIndex];
     meshlet.vertexCount = min(HLSL::max_vertices, meshlet.vertexCount);
     meshlet.triangleCount = min(HLSL::max_triangles, meshlet.triangleCount);
 }

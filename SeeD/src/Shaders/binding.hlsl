@@ -125,14 +125,17 @@ cbuffer Custom2 : register(b4)
 };
 #endif
 //---------------------------------------------------------------------------------------------
+// b5/b6 root constants. For the GBuffer mesh dispatch (GBuffers::Render): b5 = offset of the
+// bucket's first entry in the culled meshlet list (| HLSL::meshDrawSortedBit for the sorted copy),
+// b6 = the bucket's culled meshlet count, written by the indirect command.
 cbuffer InstanceIndex : register(b5)
 {
-    uint instanceIndexIndirect;
+    uint meshDrawBase;
 };
 //---------------------------------------------------------------------------------------------
 cbuffer MeshletIndex : register(b6)
 {
-    uint meshletIndexIndirect;
+    uint meshDrawCount;
 };
 
 SamplerState samplerLinear : register(s0);

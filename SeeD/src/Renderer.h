@@ -396,8 +396,9 @@ struct ViewContext
     StructuredBuffer<HLSL::Light> lights;
     StructuredBuffer<HLSL::InstanceCullingDispatch> instancesCulledArgs;
     StructuredBuffer<HLSL::GroupedCullingDispatch> meshletsToCull;
-    StructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs; // single shared draw-args buffer: every shader bucket owns a region at its own prefix-sum base offset (see ViewWorld::shaderBuckets)
-    StructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgsSorted; // front-to-back ordered copy of bucket 0 only (the sort-eligible default opaque shader)
+    StructuredBuffer<HLSL::MeshletDraw> meshletsCulledArgs; // single shared culled-meshlet list: every shader bucket owns a region at its own prefix-sum base offset (see ViewWorld::shaderBuckets)
+    StructuredBuffer<HLSL::MeshletDraw> meshletsCulledArgsSorted; // front-to-back ordered copy of bucket 0 only (the sort-eligible default opaque shader)
+    StructuredBuffer<HLSL::MeshDispatchArgs> meshDispatchArgs; // one indirect DispatchMesh per shader bucket, built on GPU after culling
     StructuredBuffer<uint> sortHistogram; // depth-bucket counts / offsets for the draw sort
     StructuredBuffer<uint> meshletBuckets; // per-culled-meshlet depth bucket, filled during culling
     StructuredBuffer<uint> instancesCounter;
@@ -432,6 +433,7 @@ struct ViewContext
         sortHistogram.CreateBuffer(SORT_BUCKETS, D3D12_RESOURCE_STATE_COMMON);
         meshletBuckets.CreateBuffer(100, D3D12_RESOURCE_STATE_COMMON);
         meshletsCounter.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
+        meshDispatchArgs.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
         jitterIndex = 0;
         jitterPixel = float2(0.0f, 0.0f);
     }
@@ -448,6 +450,7 @@ struct ViewContext
         meshletBuckets.Release();
         instancesCounter.Release();
         meshletsCounter.Release();
+        meshDispatchArgs.Release();
     }
 };
 
@@ -668,6 +671,9 @@ public:
         viewContextParams.sortMaxDistance = options.sortMaxDistance;
         viewContextParams.lodDistanceMultiplier = options.lodDistanceMultiplier;
         viewContextParams.distanceCullingValue = options.distanceCullingValue;
+        viewContextParams.meshletsCulledArgsSRVIndex = viewContext.meshletsCulledArgs.GetResource().srv.offset;
+        viewContextParams.meshletsCulledArgsSortedSRVIndex = viewContext.meshletsCulledArgsSorted.GetResource().srv.offset;
+        viewContextParams.meshDispatchArgsIndex = viewContext.meshDispatchArgs.GetResource().uav.offset;
         viewContextParams.distanceCullingValueRT = options.distanceCullingValueRT;
         viewContextParams.mousePixel = int4(IOs::instance->mouse.mousePos[0], IOs::instance->mouse.mousePos[1], IOs::instance->mouse.mousePos[2], IOs::instance->mouse.mousePos[3]);
         // DLSS guide: phase count = 8 * (display/render)^2 so every output pixel gets enough distinct samples.
@@ -1275,6 +1281,7 @@ class Culling : public Pass
     Components::Handle<Components::Shader> cullingMeshletsShader;
     Components::Handle<Components::Shader> sortPrefixShader;
     Components::Handle<Components::Shader> sortScatterShader;
+    Components::Handle<Components::Shader> buildMeshDispatchShader;
 public:
     virtual void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
@@ -1287,6 +1294,7 @@ public:
         cullingMeshletsShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|Meshlets");
         sortPrefixShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|SortPrefix");
         sortScatterShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|SortScatter");
+        buildMeshDispatchShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\culling.hlsl|BuildMeshDispatch");
     }
     void Setup(View* view) override
     {
@@ -1298,10 +1306,11 @@ public:
         Open();
 
         view->viewContext.instancesCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
-        view->viewContext.meshletsCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
-        view->viewContext.meshletsCulledArgsSorted.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
+        // the culled lists are read by the GBuffer mesh shaders (SRV), only meshDispatchArgs is an indirect argument
+        view->viewContext.meshletsCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+        view->viewContext.meshletsCulledArgsSorted.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+        view->viewContext.meshDispatchArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
         view->viewContext.instancesCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
-        view->viewContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COMMON);
 
         auto& instances = view->viewWorld.instances;
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
@@ -1366,12 +1375,21 @@ public:
             commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
             commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
             commandBuffer->cmd->Dispatch(sortScatter.DispatchX(sortElements), 1, 1);
-
-            view->viewContext.meshletsCulledArgsSorted.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         }
 
-        view->viewContext.meshletsCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
-        view->viewContext.meshletsCounter.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        // every bucket counter is final once CullingMeshlets is done (the sort doesn't touch them)
+        view->viewContext.meshletsCounter.GetResource().Barrier(commandBuffer.Get());
+
+        Shader& buildMeshDispatch = *AssetLibrary::instance->Get<Shader>(buildMeshDispatchShader.Get().id, true);
+        commandBuffer->SetCompute(buildMeshDispatch);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+        commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        commandBuffer->cmd->Dispatch(buildMeshDispatch.DispatchX((uint)view->viewWorld.shaderBuckets.size()), 1, 1);
+
+        // unconditional (was inside the sort branch): the frame-start transition above always assumes this state
+        view->viewContext.meshletsCulledArgsSorted.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        view->viewContext.meshletsCulledArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        view->viewContext.meshDispatchArgs.GetResource().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
 
         Close();
     }
@@ -1528,17 +1546,12 @@ public:
             commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);
             commandBuffer->cmd->SetGraphicsRootConstantBufferView(EditorContextRegister, editorContextAddress);
 
-            uint counterOffset = bucketIndex * (uint)sizeof(uint);
-            if (bucketIndex == 0 && options.frontToBackSort)
-            {
-                auto& sortedArgs = view->viewContext.meshletsCulledArgsSorted;
-                commandBuffer->cmd->ExecuteIndirect(shader->commandSignature, bucket.meshletCount, sortedArgs.GetResourcePtr(), 0, view->viewContext.meshletsCounter.GetResourcePtr(), counterOffset);
-            }
-            else
-            {
-                auto& drawArgs = view->viewContext.meshletsCulledArgs;
-                commandBuffer->cmd->ExecuteIndirect(shader->commandSignature, bucket.meshletCount, drawArgs.GetResourcePtr(), (UINT64)bucket.baseOffset * sizeof(HLSL::MeshletDrawCall), view->viewContext.meshletsCounter.GetResourcePtr(), counterOffset);
-            }
+            // One DispatchMesh for the whole bucket (GPU-built by culling.hlsl BuildMeshDispatchArgs);
+            // each mesh-shader group reads its meshlet at drawBase + flattened group id. The sorted
+            // copy of bucket 0 starts at 0 in its own buffer, flagged by meshDrawSortedBit.
+            uint drawBase = (bucketIndex == 0 && options.frontToBackSort) ? HLSL::meshDrawSortedBit : bucket.baseOffset;
+            commandBuffer->cmd->SetGraphicsRoot32BitConstant(InstanceIndexIndirectRegister, drawBase, 0);
+            commandBuffer->cmd->ExecuteIndirect(shader->commandSignature, 1, view->viewContext.meshDispatchArgs.GetResourcePtr(), (UINT64)bucketIndex * sizeof(HLSL::MeshDispatchArgs), nullptr, 0);
         }
 
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
@@ -3842,6 +3855,7 @@ public:
                 // out-of-bounds atomic-counter writes that flickered.
                 this->viewContext.meshletsToCull.Resize(totalMeshlets);
                 this->viewContext.meshletsCounter.Resize((uint)this->viewWorld.shaderBuckets.size());
+                this->viewContext.meshDispatchArgs.Resize((uint)this->viewWorld.shaderBuckets.size());
                 this->raytracingContext.instancesRayTracing.Resize(this->viewWorld.instances.Size());
 
                 // TODO : when physics will be a system, we can do a world.GetSystem<Physics>()->GetDebugLines() instead of accessing the singleton

@@ -2618,7 +2618,7 @@ public :
         if (shader->type == Shader::Type::Graphic)
             commandSignatureDesc.ByteStride = sizeof(HLSL::IndirectCommand);
         else if (shader->type == Shader::Type::Mesh)
-            commandSignatureDesc.ByteStride = sizeof(HLSL::MeshletDrawCall);
+            commandSignatureDesc.ByteStride = sizeof(HLSL::MeshDispatchArgs);
         else if (shader->type == Shader::Type::Compute)
             commandSignatureDesc.ByteStride = sizeof(HLSL::InstanceCullingDispatch);
         else if (shader->type == Shader::Type::Raytracing)
@@ -2644,16 +2644,15 @@ public :
         }
         else if (shader->type == Shader::Type::Mesh)
         {
-            D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[3] = {};
+            // One command per shader bucket (HLSL::MeshDispatchArgs): the GPU-only meshlet count goes
+            // to b6, then one DispatchMesh covering the whole bucket. b5 (draw base offset) is
+            // CPU-known and set per bucket in GBuffers::Render.
+            D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[2] = {};
             argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[0].Constant.RootParameterIndex = InstanceIndexIndirectRegister;
+            argumentDescs[0].Constant.RootParameterIndex = meshletIndexIndirectRegister;
             argumentDescs[0].Constant.Num32BitValuesToSet = 1;
             argumentDescs[0].Constant.DestOffsetIn32BitValues = 0;
-            argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
-            argumentDescs[1].Constant.RootParameterIndex = meshletIndexIndirectRegister;
-            argumentDescs[1].Constant.Num32BitValuesToSet = 1;
-            argumentDescs[1].Constant.DestOffsetIn32BitValues = 0;
-            argumentDescs[2].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+            argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
 
             commandSignatureDesc.pArgumentDescs = argumentDescs;
             commandSignatureDesc.NumArgumentDescs = _countof(argumentDescs);

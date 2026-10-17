@@ -252,12 +252,9 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     {
         RWStructuredBuffer<uint> meshletCounter = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
 
-        HLSL::MeshletDrawCall mdc = (HLSL::MeshletDrawCall) 0;
+        HLSL::MeshletDraw mdc;
         mdc.instanceIndex = meshletToCull.instanceIndex;
         mdc.meshletIndex = meshletToCull.meshletIndex;
-        mdc.ThreadGroupCountX = 1;
-        mdc.ThreadGroupCountY = 1;
-        mdc.ThreadGroupCountZ = 1;
 
         // Route this meshlet to its material's shader bucket -- a stable per-Shader-asset index
         // assigned by the CPU-side registry (Renderer.h ShaderBucketRegistry::GetOrRegister) and
@@ -276,7 +273,7 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
         StructuredBuffer<uint> shaderBucketOffsets = ResourceDescriptorHeap[viewContext.shaderBucketOffsetsIndex];
         uint bucketBase = shaderBucketOffsets[shaderBucket];
 
-        RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
+        RWStructuredBuffer<HLSL::MeshletDraw> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
         // Each active lane writes one draw call. A single wave can hold lanes belonging to DIFFERENT
         // shader buckets, so the reservation has to be per-bucket, not per-wave: collapse the lanes
         // sharing a bucket (same WaveMatch ballot the sort histogram/scatter use), let their lowest
@@ -351,12 +348,12 @@ void DrawSortScatter(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     if (dtid.x >= meshletCounter[0])
         return;
 
-    RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
-    RWStructuredBuffer<HLSL::MeshletDrawCall> meshletsCulledArgsSorted = ResourceDescriptorHeap[viewContext.meshletsCulledArgsSortedIndex];
+    RWStructuredBuffer<HLSL::MeshletDraw> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
+    RWStructuredBuffer<HLSL::MeshletDraw> meshletsCulledArgsSorted = ResourceDescriptorHeap[viewContext.meshletsCulledArgsSortedIndex];
     RWStructuredBuffer<uint> meshletBuckets = ResourceDescriptorHeap[viewContext.meshletBucketsIndex];
     RWStructuredBuffer<uint> sortHistogram = ResourceDescriptorHeap[viewContext.sortHistogramIndex];
 
-    HLSL::MeshletDrawCall mdc = meshletsCulledArgs[dtid.x];
+    HLSL::MeshletDraw mdc = meshletsCulledArgs[dtid.x];
     uint bucket = meshletBuckets[dtid.x]; // computed once in CullingMeshlets
 
     // Wave-aggregate the slot reservation: one atomic reserves a contiguous range for all lanes
@@ -369,4 +366,32 @@ void DrawSortScatter(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
         InterlockedAdd(sortHistogram[bucket], bucketLanes, base); // running offset within the bucket
     base = WaveReadLaneAt(base, repLane);
     meshletsCulledArgsSorted[base + rank] = mdc;
+}
+
+// ---- GBuffer dispatch args: one DispatchMesh per shader bucket ----
+// Runs after CullingMeshlets has settled every bucket's counter. Each bucket's culled meshlets are
+// drawn as one 2D grid of mesh-shader groups (HLSL::meshDispatchWidth wide) instead of one indirect
+// command per meshlet; the mesh shader maps its flattened group id back to a MeshletDraw entry.
+
+#pragma compute BuildMeshDispatch BuildMeshDispatchArgs
+
+[RootSignature(SeeDRootSignature)]
+[numthreads(64, 1, 1)]
+void BuildMeshDispatchArgs(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
+{
+    uint bucket = dtid.x;
+    if (bucket >= viewContext.shaderBucketCount)
+        return;
+
+    RWStructuredBuffer<uint> meshletCounter = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
+    RWStructuredBuffer<HLSL::MeshDispatchArgs> meshDispatchArgs = ResourceDescriptorHeap[viewContext.meshDispatchArgsIndex];
+
+    uint count = min(meshletCounter[bucket], HLSL::meshDispatchMaxGroups);
+
+    HLSL::MeshDispatchArgs args;
+    args.meshletCount = count;
+    args.ThreadGroupCountX = min(count, HLSL::meshDispatchWidth);
+    args.ThreadGroupCountY = (count + HLSL::meshDispatchWidth - 1) / HLSL::meshDispatchWidth;
+    args.ThreadGroupCountZ = 1;
+    meshDispatchArgs[bucket] = args;
 }

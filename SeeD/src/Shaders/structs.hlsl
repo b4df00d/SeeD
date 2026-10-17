@@ -191,6 +191,9 @@ namespace HLSL
         float lodDistanceMultiplier; // scales distance in mesh LOD selection (culling.hlsl); higher = drop to coarser LODs sooner
         float distanceCullingValue; // instances whose unclamped LOD exceeds this are culled entirely (culling.hlsl); higher = keep farther instances
         float distanceCullingValueRT; // same threshold for the raytracing instances; the TLAS entry stays (fixed count) but points at a null BLAS
+        uint meshletsCulledArgsSRVIndex; // read-only views of the culled lists, for the GBuffer mesh shaders
+        uint meshletsCulledArgsSortedSRVIndex;
+        uint meshDispatchArgsIndex; // one MeshDispatchArgs per shader bucket (UAV, written by BuildMeshDispatchArgs)
     };
     
     struct Shader
@@ -424,16 +427,32 @@ namespace HLSL
         uint ThreadGroupCountZ;
     };
     
-    struct MeshletDrawCall
+    // One culled meshlet. Not an indirect command: each GBuffer mesh-shader group fetches its own
+    // entry by flattened SV_GroupID (meshCommon.hlsli LoadMeshletShared), so a whole shader bucket
+    // draws with a single DispatchMesh instead of one ExecuteIndirect command per meshlet.
+    struct MeshletDraw
     {
         uint instanceIndex;
         uint meshletIndex;
-        
+    };
+
+    // One indirect command per shader bucket, built by culling.hlsl BuildMeshDispatchArgs.
+    // meshletCount goes to the b6 root constant (the mesh shader's out-of-range guard).
+    struct MeshDispatchArgs
+    {
+        uint meshletCount;
+
         // for D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH
         uint ThreadGroupCountX;
         uint ThreadGroupCountY;
         uint ThreadGroupCountZ;
     };
+    // DispatchMesh caps every dimension at 65535 groups and X*Y*Z at 2^22, so a bucket is laid out
+    // as a 2D grid of fixed width; groups past meshletCount in the last row early-out.
+    static const uint meshDispatchWidth = 1024;
+    static const uint meshDispatchMaxGroups = 1u << 22;
+    // set in the b5 root constant (draw base offset) when the bucket reads meshletsCulledArgsSorted
+    static const uint meshDrawSortedBit = 0x80000000u;
     
     struct RayDispatch
     {

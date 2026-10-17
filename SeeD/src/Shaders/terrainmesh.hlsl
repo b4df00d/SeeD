@@ -23,10 +23,17 @@ struct PS_OUTPUT
 [numthreads(HLSL::max_triangles, 1, 1)]
 void MeshMainTerrain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, out vertices MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles], out primitives MSPrim outPrims[HLSL::max_triangles])
 {
-    LoadMeshletShared(groupThreadId.x);
+    // groups past the bucket's count (tail of its 2D dispatch grid) output nothing; a single
+    // SetMeshOutputCounts call site is required by the validator, hence no early return before it
+    uint drawIndex = MeshDrawIndex(groupId);
+    bool inRange = drawIndex < meshDrawCount;
+    if (inRange)
+        LoadMeshletShared(groupThreadId.x, drawIndex);
     GroupMemoryBarrierWithGroupSync();
 
-    SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
+    SetMeshOutputCounts(inRange ? meshlet.vertexCount : 0, inRange ? meshlet.triangleCount : 0);
+    if (!inRange)
+        return;
 
     StructuredBuffer<uint> meshletVertices = ResourceDescriptorHeap[commonResourcesIndices.meshletVerticesHeapIndex];
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
@@ -46,17 +53,19 @@ void MeshMainTerrain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_
     {
         outIndices[groupThreadId.x] = DecodeMeshletTriangle(groupThreadId.x);
         outPrims[groupThreadId.x].primitiveID = groupThreadId.x;
+        outPrims[groupThreadId.x].instanceIndex = drawInstanceIndex;
+        outPrims[groupThreadId.x].meshletIndex = drawMeshletIndex;
     }
 }
 
 // Same as mesh.hlsl's opaque PixelgBuffer (no CUTOUT path -- terrain has no alpha discard).
 [earlydepthstencil]
-PS_OUTPUT PixelgBufferTerrain(MSVert inVerts, uint primitiveID : SV_PrimitiveID)
+PS_OUTPUT PixelgBufferTerrain(MSVert inVerts, MSPrim inPrim)
 {
     PS_OUTPUT o;
 
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[instanceIndexIndirect];
+    HLSL::Instance instance = instances[inPrim.instanceIndex];
 
     StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
     HLSL::Material material = materials[instance.materialIndex];
@@ -69,12 +78,12 @@ PS_OUTPUT PixelgBufferTerrain(MSVert inVerts, uint primitiveID : SV_PrimitiveID)
     if (editorContext.debugFlags & HLSL::EditorDebugClusters)
     {
         o.albedo = 1;
-        o.albedo.xyz = RandUINT(meshletIndexIndirect); // per-meshlet debug color (computed here, not interpolated)
+        o.albedo.xyz = RandUINT(inPrim.meshletIndex); // per-meshlet debug color (computed here, not interpolated)
     }
     if (editorContext.debugFlags & HLSL::EditorDebugTriangles)
     {
         o.albedo = 1;
-        o.albedo.xyz = RandUINT(meshletIndexIndirect * HLSL::max_triangles + primitiveID); // unique seed per triangle
+        o.albedo.xyz = RandUINT(inPrim.meshletIndex * HLSL::max_triangles + inPrim.primitiveID); // unique seed per triangle
     }
 
     if (editorContext.debugFlags & HLSL::EditorDebugOverdraw) // count shaded fragments per pixel for the overdraw heatmap
@@ -91,7 +100,7 @@ PS_OUTPUT PixelgBufferTerrain(MSVert inVerts, uint primitiveID : SV_PrimitiveID)
 
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
 
-    o.instanceID = instanceIndexIndirect; // objectID is derived from this in selection.hlsl
+    o.instanceID = inPrim.instanceIndex; // objectID is derived from this in selection.hlsl
 
     return o;
 }
