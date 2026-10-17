@@ -6,9 +6,8 @@
 //
 // Callers must #include "structs.hlsl", "binding.hlsl" and "common.hlsl" first (for
 // ResourceDescriptorHeap-bound heap indices, i_octahedral_32, samplers, viewContext, etc.), then
-// early-out groups with MeshDrawIndex(groupId) >= meshDrawCount, then
-// call LoadMeshletShared(groupThreadId, drawIndex) followed by GroupMemoryBarrierWithGroupSync()
-// before using any of the decode/output helpers below or calling SetMeshOutputCounts.
+// early-out groups with MeshDrawIndex(groupId) >= meshDrawCount, then call LoadMeshlet(drawIndex)
+// from every thread before using any of the decode/output helpers below or SetMeshOutputCounts.
 
 struct MSVert
 {
@@ -31,14 +30,18 @@ struct MSPrim
     nointerpolation uint meshletIndex : MESHLET_INDEX;
 };
 
-groupshared uint drawInstanceIndex;
-groupshared uint drawMeshletIndex;
-groupshared HLSL::Mesh mesh;
-groupshared HLSL::Meshlet meshlet;
-groupshared float4x4 worldMatrix;     // object->world (for normal/tangent)
-groupshared float4x4 mvp;             // viewProj * world
-groupshared float4x4 previousMvp;     // previousViewProj * previousWorld
-groupshared float worldDetSign;       // sign(det(world)) -> keeps binormal handedness correct on mirrored instances
+// Per-thread copies of the group's draw state. Every thread loads it itself (the addresses are
+// group-uniform, so the loads are broadcast) instead of thread 0 filling groupshared behind a group
+// barrier: the per-vertex fetches no longer wait for that barrier, and only the fields actually used
+// get loaded (a groupshared struct copy pulled in all of HLSL::Mesh, LOD table included).
+static uint drawInstanceIndex;
+static uint drawMeshletIndex;
+static HLSL::Mesh mesh;
+static HLSL::Meshlet meshlet;
+static float4x4 worldMatrix;     // object->world (for normal/tangent)
+static float4x4 mvp;             // viewProj * world
+static float4x4 previousMvp;     // previousViewProj * previousWorld
+static float worldDetSign;       // sign(det(world)) -> keeps binormal handedness correct on mirrored instances
 
 // Flattened index of this group within the bucket's 2D dispatch grid (see HLSL::meshDispatchWidth).
 // Group-uniform; groups at or past meshDrawCount (tail of the last row) must output nothing.
@@ -47,13 +50,9 @@ uint MeshDrawIndex(uint3 groupId)
     return groupId.y * HLSL::meshDispatchWidth + groupId.x;
 }
 
-// Thread 0 only: fetches the instance/mesh/meshlet for this group and populates the groupshared
-// state above. Caller must GroupMemoryBarrierWithGroupSync() before using it / SetMeshOutputCounts.
-void LoadMeshletShared(uint groupThreadId, uint drawIndex)
+// Every thread: fetches the instance/mesh/meshlet for this group into the per-thread state above.
+void LoadMeshlet(uint drawIndex)
 {
-    if (groupThreadId != 0)
-        return;
-
     bool sorted = (meshDrawBase & HLSL::meshDrawSortedBit) != 0;
     StructuredBuffer<HLSL::MeshletDraw> draws = ResourceDescriptorHeap[sorted ? viewContext.meshletsCulledArgsSortedSRVIndex : viewContext.meshletsCulledArgsSRVIndex];
     HLSL::MeshletDraw draw = draws[(meshDrawBase & ~HLSL::meshDrawSortedBit) + drawIndex];
@@ -68,7 +67,7 @@ void LoadMeshletShared(uint groupThreadId, uint drawIndex)
     worldMatrix = instance.unpack(instance.current);
     float4x4 previousWorldMatrix = instance.unpack(instance.previous);
 
-    // Concatenate once per group so each vertex does a single matrix*vector (no intermediate worldPos).
+    // Concatenate once so each vertex does a single matrix*vector (no intermediate worldPos).
     mvp = mul(camera.viewProj, worldMatrix);
     previousMvp = mul(camera.previousViewProj, previousWorldMatrix);
     worldDetSign = determinant((float3x3)worldMatrix) >= 0.0f ? 1.0f : -1.0f;

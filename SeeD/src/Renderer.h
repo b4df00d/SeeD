@@ -1589,6 +1589,16 @@ public:
             if (!shader)
                 continue;
 
+            // one GPU Trace sub-range per bucket, named after its shader variation (e.g. "mesh.hlsl|DefaultG")
+            std::string bucketName = "bucket" + std::to_string(bucketIndex);
+            auto asset = AssetLibrary::instance->map.find(bucket.shaderAssetId);
+            if (asset != AssetLibrary::instance->map.end())
+            {
+                std::string path = asset->second.path.c_str();
+                bucketName = path.substr(path.find_last_of("\\/") + 1);
+            }
+            GPUMarker marker(commandBuffer.Get(), bucketName.c_str());
+
             commandBuffer->SetGraphic(*shader);
             commandBuffer->cmd->SetGraphicsRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
             commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);

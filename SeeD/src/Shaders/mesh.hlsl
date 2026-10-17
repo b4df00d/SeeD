@@ -19,8 +19,8 @@ struct PS_OUTPUT
 #pragma gBuffer DefaultGCutout MeshMain PixelgBuffer CUTOUT
 #pragma forward DefaultF MeshMain PixelForward
 
-// MSVert/MSPrim, the groupshared meshlet/instance state, and the fetch/decode/output helpers
-// (LoadMeshletShared, DecodeVertex*, BuildOutputVertex, DecodeMeshletTriangle) live in
+// MSVert/MSPrim, the per-thread meshlet/instance state, and the fetch/decode/output helpers
+// (LoadMeshlet, DecodeVertex*, BuildOutputVertex, DecodeMeshletTriangle) live in
 // meshCommon.hlsli, shared with terrainmesh.hlsl (Milestone 1 terrain, plan step 6).
 
 [RootSignature(SeeDRootSignature)]
@@ -28,17 +28,20 @@ struct PS_OUTPUT
 [numthreads(HLSL::max_triangles, 1, 1)]
 void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupThreadID, out vertices MSVert outVerts[HLSL::max_vertices], out indices uint3 outIndices[HLSL::max_triangles], out primitives MSPrim outPrims[HLSL::max_triangles])
 {
-    // groups past the bucket's count (tail of its 2D dispatch grid) output nothing; a single
-    // SetMeshOutputCounts call site is required by the validator, hence no early return before it
+    // Groups past the bucket's count (tail of its 2D dispatch grid) load a clamped, valid entry and
+    // output nothing. Branch-free on purpose: the validator requires a single SetMeshOutputCounts
+    // call that dominates every output write, and without a barrier the compiler would otherwise
+    // duplicate it into an early-out path.
     uint drawIndex = MeshDrawIndex(groupId);
     bool inRange = drawIndex < meshDrawCount;
-    if (inRange)
-        LoadMeshletShared(groupThreadId.x, drawIndex);
-    GroupMemoryBarrierWithGroupSync();
-
-    SetMeshOutputCounts(inRange ? meshlet.vertexCount : 0, inRange ? meshlet.triangleCount : 0);
+    LoadMeshlet(min(drawIndex, meshDrawCount - 1));
     if (!inRange)
-        return;
+    {
+        meshlet.vertexCount = 0;
+        meshlet.triangleCount = 0;
+    }
+
+    SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
 
     StructuredBuffer<uint> meshletVertices = ResourceDescriptorHeap[commonResourcesIndices.meshletVerticesHeapIndex];
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
