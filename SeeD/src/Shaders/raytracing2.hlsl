@@ -134,6 +134,33 @@ float4 ResolveSampleData(inout AccumulatedSampleData accumulatedSampleData, uint
     //u_Output[DispatchRaysIndex().xy] = float4(accumulatedSampleData.radiance, 1.0f);
 }
 
+// Rebuilt per bounce instead of held across the loop: everything live over a TraceRay is spilled to
+// memory around it (and moved with the thread by SER's MaybeReorderThread), while these are all
+// constant-buffer values, descriptor indices and one camera load.
+SharcParameters GetSharcParameters()
+{
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+
+    SharcParameters sharcParameters;
+    sharcParameters.gridParameters.cameraPosition = cameras[0].worldPos.xyz;
+    sharcParameters.gridParameters.sceneScale = rtParameters.SHARCSceneScale;
+    sharcParameters.gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
+    sharcParameters.gridParameters.levelBias = SHARC_GRID_LEVEL_BIAS;
+
+    sharcParameters.hashMapData.capacity = rtParameters.SHARCEntriesNum;
+    sharcParameters.hashMapData.hashEntriesBuffer = ResourceDescriptorHeap[rtParameters.SHARCHashEntriesBufferIndex];
+
+#if !SHARC_ENABLE_64_BIT_ATOMICS
+    sharcParameters.hashMapData.lockBuffer = u_SharcLockBuffer;
+#endif // !SHARC_ENABLE_64_BIT_ATOMICS
+
+    sharcParameters.accumulationBuffer = ResourceDescriptorHeap[rtParameters.SHARCAccumulationBufferIndex];
+    sharcParameters.resolvedBuffer = ResourceDescriptorHeap[rtParameters.SHARCResolvedBufferIndex];
+    sharcParameters.radianceScale = rtParameters.SHARCRadianceScale;
+    sharcParameters.enableAntiFireflyFilter = rtParameters.SHARCEnableAntifirefly;
+    return sharcParameters;
+}
+
 void PathTraceRays()
 {
 #if (SHARC_UPDATE)
@@ -147,7 +174,7 @@ void PathTraceRays()
     uint rngState = InitRNG(launchIndex, launchDimensions, viewContext.frameTime);
 
     AccumulatedSampleData accumulatedSampleData = (AccumulatedSampleData) 0;
-    float3 debugColor = float3(0.0f, 0.0f, 0.0f);
+    int debugBounce = 0; // bounce heatmap: the colour is only built at output time
 
     // DLSS-RR specular hit distance guide: world-space distance from the primary surface to
     // the first indirect hit. RR reconstructs the virtual reflection point
@@ -159,46 +186,15 @@ void PathTraceRays()
     // diffuse-lobe distance is kept as a fallback because on rough surfaces the specular lobe
     // is wide and of the same scale (and RR weighs hitT less there anyway).
     float specularHitTSum = 0.0f;
-    uint specularHitTCount = 0;
     float anyHitTSum = 0.0f;
-    uint anyHitTCount = 0;
+    uint hitTCounts = 0; // specular count << 16 | any count (fewer values live across TraceRay)
 
     uint2 pixel = launchIndex;
 #if (SHARC_UPDATE)
     float2 rand2 = float2(RNG(rngState), RNG(rngState));
     pixel = pixel / (float2)launchDimensions * (float2)viewContext.renderResolution + (rand2 * rtParameters.probeDownsampling);
 #endif
-    GBufferCameraData cd = GetGBufferCameraData(pixel);
     RaytracingAccelerationStructure AccelerationStructure = ResourceDescriptorHeap[rtParameters.BVH];
-    
-    // Initialize SHARC parameters
-    SharcParameters sharcParameters;
-    {
-        sharcParameters.gridParameters.cameraPosition = cd.camera.worldPos.xyz;
-        sharcParameters.gridParameters.sceneScale = rtParameters.SHARCSceneScale;
-        sharcParameters.gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
-        sharcParameters.gridParameters.levelBias = SHARC_GRID_LEVEL_BIAS;
-
-        sharcParameters.hashMapData.capacity = rtParameters.SHARCEntriesNum;
-        sharcParameters.hashMapData.hashEntriesBuffer = ResourceDescriptorHeap[rtParameters.SHARCHashEntriesBufferIndex];
-
-#if !SHARC_ENABLE_64_BIT_ATOMICS
-        sharcParameters.hashMapData.lockBuffer = u_SharcLockBuffer;
-#endif // !SHARC_ENABLE_64_BIT_ATOMICS
-
-        sharcParameters.accumulationBuffer = ResourceDescriptorHeap[rtParameters.SHARCAccumulationBufferIndex];
-        sharcParameters.resolvedBuffer = ResourceDescriptorHeap[rtParameters.SHARCResolvedBufferIndex];
-        sharcParameters.radianceScale = rtParameters.SHARCRadianceScale;
-        sharcParameters.enableAntiFireflyFilter = rtParameters.SHARCEnableAntifirefly;
-    }
-
-    RESTIRRay indirectRay;
-    indirectRay.Origin = 0;
-    indirectRay.Direction = 0;
-    indirectRay.HitPosition = 0;
-    indirectRay.HitNormal = 0;
-    indirectRay.HitRadiance = 0;
-    indirectRay.proba = 1;
     /*
     if (!isUpdatePass)
         lighted[launchIndex] = float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -211,10 +207,14 @@ void PathTraceRays()
         // Initialize SHARC state
         SharcState sharcState;
         SharcInit(sharcState);
-    
-    float3 directLight = 0;
-    float3 indirectLight = 0;
+
     float primaryRoughtness = 1;
+
+    // First indirect segment, kept for temporal ReSTIR after the path loop. Only what RESTIR()
+    // reads, not a full RESTIRRay (origin + hit position collapse to a distance, proba is 1).
+    float3 restirDirection = 0;
+    float3 restirHitNormal = 0;
+    float restirHitDistance = 0;
 
         /*
         float2 pixel = float2(launchIndex);
@@ -223,11 +223,23 @@ void PathTraceRays()
             isUpdatePass ? g_Lighting.updatePassView.matViewToWorld : g_Lighting.view.matViewToWorld,
             isUpdatePass ? g_Lighting.updatePassView.matViewToClip : g_Lighting.view.matViewToClip);
         */
+        // Camera data is used here and recomputed after the path loop, NOT held across it: bounce 0
+        // reads its hit distance from ray.TMax and rebuilds its offset hit position from the ray.
+        // Temporal ReSTIR's reprojection inputs are evaluated here too (they don't depend on the path)
+        // and carried as 2 dwords, rather than recomputing the camera data after the loop, where its
+        // motion / previous-depth loads had nothing left to overlap with.
         RayDesc ray;
-        ray.Origin = cd.camera.worldPos.xyz;
-        ray.Direction = cd.viewDir;
-        ray.TMin = 0.01f;
-        ray.TMax = TRACING_DISTANCE;
+        uint restirPrevPixel;
+        float restirReprojectionConfidence;
+        {
+            GBufferCameraData cd = GetGBufferCameraData(pixel);
+            ray.Origin = cd.camera.worldPos.xyz;
+            ray.Direction = cd.viewDir;
+            ray.TMin = 0.01f;
+            ray.TMax = cd.viewDist; // reset to TRACING_DISTANCE once bounce 0 has read it
+            restirPrevPixel = PackPixel(uint2(cd.previousPixel));
+            restirReprojectionConfidence = ReprojectionConfidence(cd);
+        }
 
         float3 sampleRadiance = float3(0.0f, 0.0f, 0.0f);
         float3 throughput = float3(1.0f, 1.0f, 1.0f);
@@ -254,14 +266,18 @@ void PathTraceRays()
             
             if (bounce == 0) // Primary ray use GBuffer surface attributes
             {
-                payload.hitDistance = cd.viewDist;
+                payload.hitDistance = ray.TMax;
                 payload.instanceID = ~0U;
                 payload.primitiveIndex = ~0U;
                 payload.geometryIndex = ~0U;
                 payload.barycentrics = 0;
-                hitPos = cd.offsetedWorldPos.xyz;
-                
+
                 s = GetSurfaceData(pixel);
+
+                // == GBufferCameraData::offsetedWorldPos (s.normal is the same gbuffer normal as cd.worldNorm)
+                float viewDist = ray.TMax;
+                hitPos = ray.Origin + ray.Direction * viewDist - ray.Direction * 0.002 * viewDist + s.normal * 0.002 * viewDist;
+                ray.TMax = TRACING_DISTANCE;
                 
                 primaryRoughtness = s.roughness;
             }
@@ -309,12 +325,9 @@ void PathTraceRays()
             
             if(bounce == 1)
             {
-                indirectRay.Origin = ray.Origin;
-                indirectRay.Direction = ray.Direction;
-                indirectRay.HitPosition = hitPos;
-                indirectRay.HitNormal = s.normal;
-                indirectRay.proba = 1;
-                indirectRay.HitRadiance = sampleRadiance;
+                restirDirection = ray.Direction;
+                restirHitNormal = s.normal;
+                restirHitDistance = length(hitPos - ray.Origin);
             }
             
             hitDistance = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE * 100;
@@ -326,13 +339,15 @@ void PathTraceRays()
             {
                 float firstBounceHitT = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE;
                 anyHitTSum += firstBounceHitT;
-                anyHitTCount++;
+                hitTCounts += 1;
                 if (!isDiffusePath)
                 {
                     specularHitTSum += firstBounceHitT;
-                    specularHitTCount++;
+                    hitTCounts += 1u << 16;
                 }
             }
+
+            SharcParameters sharcParameters = GetSharcParameters();
 
             // On a miss, load the sky value and break out of the ray tracing loop
             if (!payload.Hit())
@@ -450,7 +465,7 @@ void PathTraceRays()
                         
 #ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
                         if (bounce == 0)
-                            directLight += lightContribution;
+                            accumulatedSampleData.radiance += lightContribution; // direct light (UpdateSampleData is a plain +=)
                         else
 #endif // !(SHARC_UPDATE)
                             sampleRadiance += lightContribution * throughput;
@@ -563,20 +578,27 @@ void PathTraceRays()
                 break;
         }
         
-        indirectRay.HitRadiance = sampleRadiance;
         if (!isUpdatePass)
         {
+            RESTIRRay indirectRay;
+            indirectRay.Origin = 0;
+            indirectRay.Direction = restirDirection;
+            indirectRay.HitPosition = restirDirection * restirHitDistance; // RESTIR only uses |HitPosition - Origin|
+            indirectRay.HitNormal = restirHitNormal;
+            indirectRay.HitRadiance = sampleRadiance;
+            indirectRay.proba = 1;
+
             // Always run temporal ReSTIR so the reservoir is populated for the spatial
             // reuse pass (lighting.hlsl), even when temporal filtering is disabled
             // (maxFrameFilteringCount == 1 -> the reservoir just holds this frame's sample).
-            RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, cd, rngState, 1-primaryRoughtness);
+            RESTIR(rtParameters, indirectRay, rtParameters.previousgiReservoirIndex, rtParameters.giReservoirIndex, pixel, UnpackPixel(restirPrevPixel), restirReprojectionConfidence, rngState, 1-primaryRoughtness);
 
-            // Pass 1 composites DIRECT light only. The indirect radiance is resolved from
-            // the reservoir AFTER spatial reuse in lighting.hlsl, which does lighted += indirect.
-            UpdateSampleData(accumulatedSampleData, directLight, isDiffusePath, hitDistance);
-            
+            // Pass 1 composites DIRECT light only (added into accumulatedSampleData at bounce 0).
+            // The indirect radiance is resolved from the reservoir AFTER spatial reuse in
+            // lighting.hlsl, which does lighted += indirect.
+
             if (editorContext.debugFlags & HLSL::EditorDebugGIBounces)// Bounce Heatmap
-                debugColor = BounceHeatmap(bounce);
+                debugBounce = bounce;
         }
     }
 
@@ -590,9 +612,10 @@ void PathTraceRays()
     
     
     if (editorContext.debugFlags & HLSL::EditorDebugGIBounces)// Bounce Heatmap
-        color = float4(debugColor, 1);
+        color = float4(BounceHeatmap(debugBounce), 1);
     if (editorContext.debugFlags & (HLSL::EditorDebugGIAlbedo | HLSL::EditorDebugGINormals))
     {
+        GBufferCameraData cd = GetGBufferCameraData(pixel);
         RayDesc ray;
         ray.Origin = cd.camera.worldPos.xyz;
         ray.Direction = cd.viewDir;
@@ -639,6 +662,8 @@ void PathTraceRays()
     // Prefer the specular-lobe samples, fall back to the diffuse-lobe first-bounce distance,
     // and only write 0 ("reflection sits on the surface") when the path never left the primary
     // hit. lighting.hlsl overwrites this for sky pixels and must not clear it for the rest.
+    uint specularHitTCount = hitTCounts >> 16;
+    uint anyHitTCount = hitTCounts & 0xFFFF;
     float outSpecularHitT = specularHitTCount > 0 ? specularHitTSum / specularHitTCount
                           : (anyHitTCount > 0 ? anyHitTSum / anyHitTCount : 0.0f);
     specularHitDistance[pixel] = min(outSpecularHitT, SPECULAR_HITT_MAX);

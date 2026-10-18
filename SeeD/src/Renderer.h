@@ -1700,7 +1700,10 @@ public:
         drd.Width = (uint)((float)view->renderResolution.x / view->raytracingContext.rtParameters.probeDownsampling);
         drd.Height = (uint)((float)view->renderResolution.y / view->raytracingContext.rtParameters.probeDownsampling);
 
-        commandBuffer->cmd->DispatchRays(&drd);
+        {
+            GPUMarker marker(commandBuffer.Get(), "probesTrace");
+            commandBuffer->cmd->DispatchRays(&drd);
+        }
 
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
 
@@ -1717,7 +1720,10 @@ public:
         commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
         commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, raytracingContextAddress);
 
-        commandBuffer->cmd->Dispatch(resolve.DispatchX(view->raytracingContext.rtParameters.SHARCEntriesNum), 1, 1);
+        {
+            GPUMarker marker(commandBuffer.Get(), "sharcResolve");
+            commandBuffer->cmd->Dispatch(resolve.DispatchX(view->raytracingContext.rtParameters.SHARCEntriesNum), 1, 1);
+        }
 
         Close();
     }
@@ -1788,7 +1794,10 @@ public:
         D3D12_DISPATCH_RAYS_DESC drd = rayDispatch.GetRTDesc();
         drd.Width = view->renderResolution.x;
         drd.Height = view->renderResolution.y;
-        commandBuffer->cmd->DispatchRays(&drd);
+        {
+            GPUMarker marker(commandBuffer.Get(), "lightingTrace"); // trace + temporal ReSTIR
+            commandBuffer->cmd->DispatchRays(&drd);
+        }
 
         view->raytracingContext.giReservoir.Get().Barrier(commandBuffer.Get());
         lighted.Get().Barrier(commandBuffer.Get());
@@ -1813,7 +1822,10 @@ public:
         drd = applyLighting.GetRTDesc();
         drd.Width = view->renderResolution.x;
         drd.Height = view->renderResolution.y;
-        commandBuffer->cmd->DispatchRays(&drd);
+        {
+            GPUMarker marker(commandBuffer.Get(), "lightingApply"); // shading + spatial ReSTIR
+            commandBuffer->cmd->DispatchRays(&drd);
+        }
 
         lighted.Get().Barrier(commandBuffer.Get());
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);

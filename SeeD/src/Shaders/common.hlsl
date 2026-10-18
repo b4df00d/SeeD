@@ -1497,23 +1497,31 @@ void ScaleGIReservoir(inout HLSL::GIReservoir r, uint frameFilteringCount)
 //   [ ] Unbiased spatial combine (pairwise-MIS / 1/Z) - the current combine is the
 //       biased estimator, kept small by the validity gates + visibility ray.
 // ============================================================================
-bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, in GBufferCameraData cd, uint seed, float bias)
+// ---- Temporal reprojection validity ------------------------------------
+// Reject history that reprojected off-screen (disocclusion at frame edges,
+// where previousUV gets saturate-clamped onto an unrelated border pixel) or
+// onto a geometrically inconsistent surface. Use a *relative* depth test so
+// the rejection threshold is scale independent instead of the old absolute
+// (viewDistDiff - 0.001) * 10 form.
+// Split out of RESTIR() so the path tracer can evaluate it before its path loop and carry only
+// this + the packed previous pixel across the TraceRays, instead of recomputing GBufferCameraData.
+float ReprojectionConfidence(in GBufferCameraData cd)
 {
-    // ---- Temporal reprojection validity ------------------------------------
-    // Reject history that reprojected off-screen (disocclusion at frame edges,
-    // where previousUV gets saturate-clamped onto an unrelated border pixel) or
-    // onto a geometrically inconsistent surface. Use a *relative* depth test so
-    // the rejection threshold is scale independent instead of the old absolute
-    // (viewDistDiff - 0.001) * 10 form.
     bool  onScreen     = all(cd.previousUV > 0.0f) && all(cd.previousUV < 1.0f);
     float relDepthDiff = cd.viewDistDiff / max(cd.viewDist, 1e-4f);
-    float confidence   = onScreen ? saturate(1.0f - relDepthDiff * 8.0f) : 0.0f;
-    confidence         = saturate(confidence - bias); // glossy / secondary-bounce bias
+    return onScreen ? saturate(1.0f - relDepthDiff * 8.0f) : 0.0f;
+}
+
+uint PackPixel(uint2 pixel) { return (pixel.y << 16) | (pixel.x & 0xFFFF); }
+uint2 UnpackPixel(uint packed) { return uint2(packed & 0xFFFF, packed >> 16); }
+
+bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint previousReservoirIndex, uint currentReservoirIndex, uint2 pixel, uint2 prevPixel, float reprojectionConfidence, uint seed, float bias)
+{
+    float confidence   = saturate(reprojectionConfidence - bias); // glossy / secondary-bounce bias
 
     // History length clamp (M-cap): fewer frames of reuse when confidence is low.
     uint frameFilteringCount = (uint) max(0.0f, confidence * rtParameters.maxFrameFilteringCount);
 
-    uint2 prevPixel = uint2(cd.previousPixel);
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[previousReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[prevPixel.x + prevPixel.y * viewContext.renderResolution.x]);
 
@@ -1548,7 +1556,7 @@ bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint pre
     restirRay.HitPosition = restirRay.Origin + r.dir * r.dist;
 
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];
-    giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x] = PackGIReservoir(r);
+    giReservoir[pixel.x + pixel.y * viewContext.renderResolution.x] = PackGIReservoir(r);
 
     return accept;
 }
