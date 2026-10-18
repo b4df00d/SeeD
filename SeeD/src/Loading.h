@@ -817,7 +817,7 @@ public:
 	}
 
     static const uint32_t MeshFileMagic = 0x4853454D;   // 'MESH'
-    static const uint32_t MeshFileVersion = 2;          // 2 : AABB + GPU-packed vertices
+    static const uint32_t MeshFileVersion = 3;          // 2 : AABB + GPU-packed vertices, 3 : meshlet normal cone
 
     MeshData Read(String path)
     {
@@ -980,7 +980,10 @@ public:
 
             float threshold = lodindex == 0 ? 1.0f : (float)pow(0.25f, lodindex);
             size_t target_index_count = size_t(originalMesh.indices.size() * threshold);
-            float target_error = 1e-2f;
+            // meshopt stops at whichever of target_index_count / target_error it hits first, and a flat
+            // 1% error cap kept the coarse LODs from getting anywhere near their index targets: let the
+            // allowed error (relative to the mesh extent) grow per LOD -- 1%, 2%, 5%, 12.5%
+            float target_error = lodindex == 0 ? 1e-2f : 0.02f * (float)pow(2.5f, lodindex - 1);
 
             lod.indices.resize(originalMesh.indices.size());
             float lod_error = 0.f;
@@ -1012,6 +1015,7 @@ public:
                 meshlets[i].vertexCount = m.vertex_count;
                 meshlets[i].vertexOffset = m.vertex_offset;
                 meshlets[i].boundingSphere = float4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
+                meshlets[i].cone = float4(bounds.cone_axis[0], bounds.cone_axis[1], bounds.cone_axis[2], bounds.cone_cutoff);
             }
 
             const meshopt_Meshlet& last = meshopt_meshlets[meshlet_count - 1];
@@ -1038,7 +1042,6 @@ public:
 
         return optimizedMesh;
 
-        //use if (dot(normalize(cone_apex - camera_position), cone_axis) >= cone_cutoff) reject(); in mesh shader for cone culling
     }
 
     // Milestone 1 terrain (plan step 2): generates a flat XZ-plane grid (Y=0), spacing meters/vertex,
@@ -1919,6 +1922,13 @@ public:
             // multi-shader GBuffer draw) picks up the alpha-test PSO; parameters[6] keeps its
             // shading-threshold role in the cutout pixel shader regardless.
             newMat.shader = (newMat.parameters[6] != 0.0f) ? Components::Handle<Components::Shader>{ shaderCutout } : Components::Handle<Components::Shader>{ shader };
+
+            // Double-sided when the source says so, and for cutout materials (foliage cards are
+            // usually single planes seen from both sides). Everything else is single-sided:
+            // back-face culled and meshlet cone culled (culling.hlsl).
+            int twoSided = 0;
+            m->Get(AI_MATKEY_TWOSIDED, twoSided);
+            newMat.parameters[HLSL::MaterialDoubleSidedParam] = (twoSided != 0 || newMat.parameters[6] != 0.0f) ? 1.0f : 0.0f;
 
             matIndexToEntity.push_back(ent);
         }
@@ -3374,7 +3384,18 @@ public :
                             */
 
                             shader.pso = CreatePSO(stream);
-                            compiled = shader.pso != nullptr;
+
+                            // single-sided material buckets draw with back-face culling (GBuffers::Render);
+                            // pso keeps the CULL_NONE default for double-sided ones
+                            D3D12_RASTERIZER_DESC& raster = stream.Rasterizer;
+                            raster.CullMode = D3D12_CULL_MODE_BACK;
+                            // the import (aiProcess_MakeLeftHanded | aiProcess_FlipWindingOrder) produces the D3D
+                            // convention: left-handed, CLOCKWISE front faces -- the stream default (TRUE) only never
+                            // mattered because everything else draws with CULL_NONE
+                            raster.FrontCounterClockwise = FALSE;
+                            shader.psoCullBack = CreatePSO(stream);
+
+                            compiled = shader.pso != nullptr && shader.psoCullBack != nullptr;
                         }
                         else if (variation.stage == "zPrepass")
                         {

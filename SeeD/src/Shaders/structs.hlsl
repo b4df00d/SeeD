@@ -236,6 +236,10 @@ namespace HLSL
         uint vertexCount;
         uint triangleCount;
         float4 boundingSphere;
+        // meshopt normal cone (backface cluster culling, culling.hlsl): xyz = axis, w = cutoff.
+        // float4 rather than a packed uint so the C++ (hlslpp, 16-byte aligned float4) and HLSL
+        // strides both stay 48 bytes.
+        float4 cone;
     };
 
     struct Mesh
@@ -271,6 +275,7 @@ namespace HLSL
     
     static const uint MaterialTextureCount = 7;
     static const uint MaterialParametersCount = 24;
+    static const uint MaterialDoubleSidedParam = 10; // parameters[10] != 0 : double-sided (CULL_NONE, no meshlet cone culling)
     struct Material
     {
         float parameters[MaterialParametersCount];

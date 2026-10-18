@@ -302,7 +302,25 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
 
     bool culled = FrustumCulling(camera, boundingSphere);
     if (!culled)  culled = OcclusionCulling(camera, boundingSphere);
-    
+
+    // Backface cluster culling with the meshopt normal cone, for single-sided materials only (they
+    // also draw with CULL_BACK, see GBuffers::Render). Skipped for override instances (terrain is
+    // displaced in the mesh shader, so the flat grid's cones don't apply) and mirrored instances
+    // (a negative determinant flips the winding the cone was built for). A cone too wide to ever
+    // cull has cutoff 1, for which the test below can never pass.
+    if (!culled && instance.boundingSphereOverride.w <= 0)
+    {
+        StructuredBuffer<HLSL::Material> coneMaterials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
+        bool doubleSided = coneMaterials[instance.materialIndex].parameters[HLSL::MaterialDoubleSidedParam] != 0;
+        float3x3 rotation = (float3x3)worldMatrix;
+        if (!doubleSided && determinant(rotation) > 0)
+        {
+            float3 coneAxis = normalize(mul(rotation, meshlet.cone.xyz)); // assume uniform scaling
+            float3 toCenter = meshletCenter - camera.worldPos.xyz;
+            culled = dot(toCenter, coneAxis) >= meshlet.cone.w * length(toCenter) + meshletRadius;
+        }
+    }
+
     if (!culled)
     {
         RWStructuredBuffer<uint> meshletCounter = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
@@ -327,6 +345,10 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
 
         StructuredBuffer<uint> shaderBucketOffsets = ResourceDescriptorHeap[viewContext.shaderBucketOffsetsIndex];
         uint bucketBase = shaderBucketOffsets[shaderBucket];
+        // Region size is the CPU's per-bucket meshlet total. A material re-routed at runtime (shader or
+        // sidedness edited) sends meshlets to a bucket that wasn't sized for them: drop those rather
+        // than overflow into the next bucket's region (BuildMeshDispatchArgs clamps the count too).
+        uint bucketCapacity = shaderBucketOffsets[shaderBucket + 1] - bucketBase;
 
         RWStructuredBuffer<HLSL::MeshletDraw> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
         // Each active lane writes one draw call. A single wave can hold lanes belonging to DIFFERENT
@@ -342,6 +364,8 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
         if (WaveGetLaneIndex() == repLane)
             InterlockedAdd(meshletCounter[shaderBucket], bucketLanes, waveBase);
         waveBase = WaveReadLaneAt(waveBase, repLane);
+        if (waveBase + rank >= bucketCapacity)
+            return;
         uint index = bucketBase + waveBase + rank;
         meshletsCulledArgs[index] = mdc;
 
@@ -400,7 +424,8 @@ void DrawSortPrefix(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThrea
 void DrawSortScatter(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
     RWStructuredBuffer<uint> meshletCounter = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
-    if (dtid.x >= meshletCounter[0])
+    StructuredBuffer<uint> shaderBucketOffsets = ResourceDescriptorHeap[viewContext.shaderBucketOffsetsIndex];
+    if (dtid.x >= min(meshletCounter[0], shaderBucketOffsets[1])) // bucket 0 starts at 0, so offsets[1] is its capacity
         return;
 
     RWStructuredBuffer<HLSL::MeshletDraw> meshletsCulledArgs = ResourceDescriptorHeap[viewContext.meshletsCulledArgsIndex];
@@ -441,7 +466,9 @@ void BuildMeshDispatchArgs(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_Dispat
     RWStructuredBuffer<uint> meshletCounter = ResourceDescriptorHeap[viewContext.meshletsCounterIndex];
     RWStructuredBuffer<HLSL::MeshDispatchArgs> meshDispatchArgs = ResourceDescriptorHeap[viewContext.meshDispatchArgsIndex];
 
-    uint count = min(meshletCounter[bucket], HLSL::meshDispatchMaxGroups);
+    StructuredBuffer<uint> shaderBucketOffsets = ResourceDescriptorHeap[viewContext.shaderBucketOffsetsIndex];
+    uint capacity = shaderBucketOffsets[bucket + 1] - shaderBucketOffsets[bucket];
+    uint count = min(min(meshletCounter[bucket], capacity), HLSL::meshDispatchMaxGroups);
 
     HLSL::MeshDispatchArgs args;
     args.meshletCount = count;

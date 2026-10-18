@@ -199,9 +199,16 @@ UI* UI::instance;
 struct ShaderBucketInfo
 {
     assetID shaderAssetId;
+    bool doubleSided; // CULL_NONE + no meshlet cone culling; single-sided buckets draw with the shader's CULL_BACK PSO
     uint baseOffset;
     uint meshletCount;
 };
+
+// Materials flag double-sidedness in parameters[HLSL::MaterialDoubleSidedParam] (0 = single-sided).
+static bool IsDoubleSided(const Components::Material& material)
+{
+    return material.parameters[HLSL::MaterialDoubleSidedParam] != 0.0f;
+}
 
 // Debug-UI snapshot of one bucket's state; see ShaderBucketRegistry::GetDebugStats.
 struct ShaderBucketDebugEntry
@@ -233,6 +240,7 @@ class ShaderBucketRegistry
     std::mutex lock;
     std::unordered_map<assetID, uint> bucketIndex;         // assetID -> stable bucket index
     std::vector<assetID> bucketShaderAssetId;               // index -> assetID
+    std::vector<bool> bucketDoubleSided;                    // index -> sidedness (same shader can back two buckets)
     // std::deque, not std::vector: std::atomic is non-movable/non-copyable so a vector could never
     // grow past its first allocation, and deque additionally guarantees push/emplace_back at the
     // end never invalidates references to existing elements -- required here since callers look up
@@ -244,14 +252,20 @@ class ShaderBucketRegistry
 
     // Caller must hold lock. Shared by GetOrRegister and AddInstanceContribution so lookup-or-register
     // and any follow-up counter mutation happen under a single critical section.
-    uint GetOrRegister_NoLock(assetID shaderId)
+    // A bucket is one (shader, sidedness) pair: the sidedness picks the PSO cull mode and whether
+    // culling.hlsl may cone-cull its meshlets, so the two can't share a draw.
+    uint GetOrRegister_NoLock(assetID shaderId, bool doubleSided)
     {
-        auto it = bucketIndex.find(shaderId);
+        assetID key = shaderId;
+        if (doubleSided)
+            key.hash ^= 0x9E3779B97F4A7C15ull;
+        auto it = bucketIndex.find(key);
         if (it != bucketIndex.end())
             return it->second;
         uint index = (uint)bucketShaderAssetId.size();
-        bucketIndex[shaderId] = index;
+        bucketIndex[key] = index;
         bucketShaderAssetId.push_back(shaderId);
+        bucketDoubleSided.push_back(doubleSided);
         bucketMeshletCounts.emplace_back(0u);
         return index;
     }
@@ -259,20 +273,20 @@ class ShaderBucketRegistry
 public:
     // Look up (or, if never seen before, register) the stable bucket index for a Shader asset.
     // Thread-safe; called from UpdateMaterials for every material processed this frame.
-    uint GetOrRegister(assetID shaderId)
+    uint GetOrRegister(assetID shaderId, bool doubleSided)
     {
         std::lock_guard<std::mutex> lk(lock);
-        return GetOrRegister_NoLock(shaderId);
+        return GetOrRegister_NoLock(shaderId, doubleSided);
     }
 
     // Registers (first-load only) this instance's meshlet-count contribution to its shader's
     // bucket, and records exactly what was added so ReleaseInstanceContribution can undo it
     // precisely. Everything happens under one lock so the bucket lookup/registration and the
     // counter increment are atomic with respect to each other and to concurrent releases.
-    void AddInstanceContribution(World::Entity entity, assetID shaderId, uint meshletCount)
+    void AddInstanceContribution(World::Entity entity, assetID shaderId, bool doubleSided, uint meshletCount)
     {
         std::lock_guard<std::mutex> lk(lock);
-        uint bucket = GetOrRegister_NoLock(shaderId);
+        uint bucket = GetOrRegister_NoLock(shaderId, doubleSided);
         bucketMeshletCounts[bucket].fetch_add(meshletCount, std::memory_order_relaxed);
         instanceContribution[entity] = { bucket, meshletCount };
     }
@@ -312,11 +326,14 @@ public:
             offsets.Add(totalMeshlets); // exclusive prefix sum
             ShaderBucketInfo info;
             info.shaderAssetId = bucketShaderAssetId[b];
+            info.doubleSided = bucketDoubleSided[b];
             info.baseOffset = totalMeshlets;
             info.meshletCount = count;
             buckets.push_back(info);
             totalMeshlets += count;
         }
+        // one extra entry so the GPU can read every bucket's capacity as offsets[b+1] - offsets[b]
+        offsets.Add(totalMeshlets);
         offsets.Upload();
         return totalMeshlets;
     }
@@ -1600,6 +1617,8 @@ public:
             GPUMarker marker(commandBuffer.Get(), bucketName.c_str());
 
             commandBuffer->SetGraphic(*shader);
+            if (!bucket.doubleSided && shader->psoCullBack)
+                commandBuffer->cmd->SetPipelineState(shader->psoCullBack);
             commandBuffer->cmd->SetGraphicsRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
             commandBuffer->cmd->SetGraphicsRootConstantBufferView(ViewContextRegister, viewContextAddress);
             commandBuffer->cmd->SetGraphicsRootConstantBufferView(EditorContextRegister, editorContextAddress);
@@ -3451,7 +3470,7 @@ public:
                         // later dirty-refresh frames, so in-place mesh/material mutation of an
                         // already-loaded instance is a known, documented limitation (doesn't happen
                         // anywhere in the codebase today).
-                        viewWorld.shaderBucketRegistry.AddInstanceContribution(ent, shaderCmp.id, effectiveMesh->LODs[0].meshletCount);
+                        viewWorld.shaderBucketRegistry.AddInstanceContribution(ent, shaderCmp.id, IsDoubleSided(materialCmp), effectiveMesh->LODs[0].meshletCount);
                     }
 
                     // instanceDirty is consumed exactly here (this is its only reader): clear it so
@@ -3529,7 +3548,7 @@ public:
                             Components::Shader& shaderCmp = materialCmp.shader.Get();
                             if (shaderCmp.path[0] != 0)
                                 AssetLibrary::instance->Add(shaderCmp.path, shaderCmp.path, shaderCmp.id);
-                            material.shaderIndex = frameWorld.shaderBucketRegistry.GetOrRegister(shaderCmp.id);
+                            material.shaderIndex = frameWorld.shaderBucketRegistry.GetOrRegister(shaderCmp.id, IsDoubleSided(materialCmp));
                         }
                         for (uint paramIndex = 0; paramIndex < HLSL::MaterialParametersCount; paramIndex++)
                         {

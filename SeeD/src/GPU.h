@@ -250,6 +250,7 @@ struct Shader
     ID3D12CommandSignature* commandSignature = 0;
     ID3D12RootSignature* rootSignature = 0;
     ID3D12PipelineState* pso = 0;
+    ID3D12PipelineState* psoCullBack = 0; // gBuffer shaders only: same PSO with CULL_BACK, for single-sided material buckets
     D3D12_PRIMITIVE_TOPOLOGY primitiveTopology = D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
 
     // read those from shader reflection
@@ -273,6 +274,7 @@ struct Shader
         if (commandSignature) commandSignature->Release();
         if (rootSignature) rootSignature->Release();
         if (pso) pso->Release();
+        if (psoCullBack) psoCullBack->Release();
         if (rtStateObject) rtStateObject->Release();
         if (rtStateObjectProps) rtStateObjectProps->Release();
         shaderBindingTable.Release();
@@ -2974,6 +2976,8 @@ inline uint32_t OctEncode32(float x, float y, float z)
 struct Meshlet : HLSL::Meshlet
 {
 };
+// must match the HLSL StructuredBuffer<HLSL::Meshlet> stride (4 uints + boundingSphere + cone)
+static_assert(sizeof(HLSL::Meshlet) == 48, "HLSL::Meshlet layout differs between C++ and HLSL");
 
 struct OMMData
 {

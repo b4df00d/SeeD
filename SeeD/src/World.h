@@ -226,6 +226,13 @@ namespace Components
         ImGui::PopID();
         ImGui::ColorEdit3("emissive", &material->parameters[7], ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_Float);
         ImGui::Spacing();
+
+        // Re-buckets the material's meshlets (sidedness picks the PSO cull mode): instances already
+        // loaded keep their old bucket's capacity, so they only draw correctly after a reload.
+        bool doubleSided = material->parameters[HLSL::MaterialDoubleSidedParam] != 0.0f;
+        if (ImGui::Checkbox("double sided", &doubleSided))
+            material->parameters[HLSL::MaterialDoubleSidedParam] = doubleSided ? 1.0f : 0.0f;
+        ImGui::Spacing();
     }
 
     struct Transform : ComponentBase<Transform>

@@ -127,5 +127,7 @@ uint3 DecodeMeshletTriangle(uint groupThreadId)
 
     // Funnel-shift the 3 index bytes down to bit 0 (HLSL shifts are mod-32: guard shift==0).
     uint tri3 = (packedData.x >> shift) | (shift == 0 ? 0 : packedData.y << (32 - shift));
-    return uint3(tri3 & 0xff, (tri3 >> 8) & 0xff, (tri3 >> 16) & 0xff);
+    uint3 tri = uint3(tri3 & 0xff, (tri3 >> 8) & 0xff, (tri3 >> 16) & 0xff);
+    // a mirrored instance flips the screen-space winding: swap back so CULL_BACK keeps its front faces
+    return worldDetSign < 0.0f ? tri.xzy : tri;
 }
