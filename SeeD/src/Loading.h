@@ -1428,7 +1428,12 @@ public:
             //| aiProcess_GenSmoothNormals
             //| aiProcess_GenNormals
             | aiProcess_Triangulate
-            //| aiProcess_JoinIdenticalVertices
+            // Without it every triangle owns 3 unique vertices (triangle soup): a meshlet then fits only
+            // max_vertices / 3 = 21 triangles instead of max_triangles, and meshopt_simplify can't
+            // collapse anything (every edge is a border), so all LODs came out ~identical to LOD0.
+            // Vertices differing in any attribute stay separate; meshopt_simplify handles those
+            // position-coincident seams itself.
+            | aiProcess_JoinIdenticalVertices
             //| aiProcess_SortByPType
             //| aiProcess_FindInvalidData
             | aiProcess_FindInstances
@@ -1648,7 +1653,7 @@ public:
                     id = MeshLoader::instance->Write(mesh, std::format("{}{}", m->mName.C_Str(), i));
 
                     MeshData meshRT = MeshLoader::instance->Process(originalMesh, 2, 2);
-                    idRT = MeshLoader::instance->Write(mesh, std::format("{}{}_RTMesh", m->mName.C_Str(), i));
+                    idRT = MeshLoader::instance->Write(meshRT, std::format("{}{}_RTMesh", m->mName.C_Str(), i));
 
                     BakeOMM(_scene, m, mesh, id);
                 }
