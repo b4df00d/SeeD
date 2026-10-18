@@ -2978,6 +2978,8 @@ struct Meshlet : HLSL::Meshlet
 };
 // must match the HLSL StructuredBuffer<HLSL::Meshlet> stride (4 uints + boundingSphere + cone)
 static_assert(sizeof(HLSL::Meshlet) == 48, "HLSL::Meshlet layout differs between C++ and HLSL");
+// same for StructuredBuffer<HLSL::Mesh>: 2 float4 + 4 uints + 4 LODs (16 B each) + rtHighLod/pads
+static_assert(sizeof(HLSL::Mesh) == 128, "HLSL::Mesh layout differs between C++ and HLSL");
 
 struct OMMData
 {
@@ -3354,6 +3356,12 @@ struct MeshStorage
 
         for (int i = 0; i < 4; i++) newMesh.LODs[i] = {}; // unused LODs -> meshletCount 0 (culling fallback relies on this)
 
+        // High RT BLAS from LOD1 unless an OMM gets linked (same condition as LoadBLAS: the micromap
+        // is indexed by LOD0 triangles). Uploaded with the mesh so GetRTSurfaceData can match it.
+        bool linksOMM = omm != nullptr && omm->IsValid() && GPU::instance->features.raytracingTier12;
+        newMesh.rtHighLod = (newMesh.lodCount > 1 && !linksOMM) ? 1 : 0;
+        newMesh.rtPad0 = newMesh.rtPad1 = newMesh.rtPad2 = 0;
+
         for (int i = 0; i < min((int)meshData.LODs.size(), 4); i++)
         {
             ZoneScopedN("Load LOD");
@@ -3447,7 +3455,7 @@ struct MeshStorage
         }
 
         UINT64 scratchOffset = 0;
-        BuildBLAS(mesh, 0, mesh.BLAS, scratchOffset, commandBuffer);
+        BuildBLAS(mesh, mesh.rtHighLod, mesh.BLAS, scratchOffset, commandBuffer);
         if (mesh.lodCount > 1)
             BuildBLAS(mesh, mesh.lodCount - 1, mesh.BLASLow, scratchOffset, commandBuffer);
 

@@ -264,6 +264,15 @@ namespace HLSL
         };
         LOD LODs[4];
 
+        // LOD the high-detail ray-tracing BLAS is built from (MeshStorage::LoadBLAS): 1 for opaque
+        // multi-LOD meshes (fewer triangles to traverse; primary visibility is rasterised from LOD0),
+        // 0 when an OMM is linked (the micromap is indexed by LOD0 triangles). GetRTSurfaceData
+        // fetches hit triangles from this LOD. The pads keep the struct a 16-byte multiple.
+        uint rtHighLod;
+        uint rtPad0;
+        uint rtPad1;
+        uint rtPad2;
+
         // Bounding sphere derived from the AABB (object space): xyz = center, w = radius.
         // Matches the previously stored value (center = (min+max)/2, radius = length(max-min)/2).
         float4 GetBoundingSphere()

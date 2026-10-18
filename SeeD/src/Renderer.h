@@ -2372,7 +2372,7 @@ public:
             UINT64 scratchOffset = 0;
             for (Mesh* m : justBaked)
             {
-                MeshStorage::instance->BuildBLAS(*m, 0, m->BLAS, scratchOffset, commandBuffer.Get(), true);
+                MeshStorage::instance->BuildBLAS(*m, m->rtHighLod, m->BLAS, scratchOffset, commandBuffer.Get(), true);
                 if (m->lodCount > 1) // terrain grids are single-LOD today, but stay correct if that changes
                     MeshStorage::instance->BuildBLAS(*m, m->lodCount - 1, m->BLASLow, scratchOffset, commandBuffer.Get(), true);
             }
