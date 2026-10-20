@@ -152,7 +152,29 @@ namespace HLSL
         dlss,
         dlssd
     };
-    
+
+    // Sky atmosphere (Hillaire 2020, "A Scalable and Production Ready Sky and Atmosphere Rendering
+    // Technique"). Lengths in km, coefficients in 1/km; the planet surface is world y = 0.
+    // float4 only: hlsl++ reserves 16 bytes per float3 on the CPU, scalars ride in .w.
+    struct Atmosphere
+    {
+        float4 rayleighScattering; // xyz: scattering at ground, w: scale height
+        float4 mieScattering;      // xyz: scattering at ground, w: scale height
+        float4 mieAbsorption;      // xyz: absorption at ground, w: Henyey-Greenstein g
+        float4 ozoneAbsorption;    // xyz: absorption at the tent peak (25 km, 30 km wide), w: unused
+        float4 groundAlbedo;       // xyz, w: unused
+        float4 sunDirection;       // xyz: unit vector toward the sun, w: angular radius in radians
+        float4 sunIlluminance;     // xyz: W/m^2 at the top of the atmosphere (the sun light's color * intensity), w: 1 if the scene has a sun
+        float bottomRadius;
+        float topRadius;
+        uint transmittanceLUT;     // SRV heap slots, invalidUINT until SkyAtmosphere::On ran
+        uint multiScatteringLUT;
+        uint skyViewLUT;
+        uint aerialPerspectiveLUT; // camera froxels (screen uv, squared depth over 128 km): rgb in-scatter with the sun applied, a = 1 - mean transmittance
+        uint pad1;
+        uint pad2;
+    };
+
     struct ViewContext
     {
         float4 renderResolution; //x, y, 1/x, 1/y
@@ -194,6 +216,7 @@ namespace HLSL
         uint meshletsCulledArgsSRVIndex; // read-only views of the culled lists, for the GBuffer mesh shaders
         uint meshletsCulledArgsSortedSRVIndex;
         uint meshDispatchArgsIndex; // one MeshDispatchArgs per shader bucket (UAV, written by BuildMeshDispatchArgs)
+        Atmosphere atmosphere; // last: 16-byte aligned on both sides
     };
     
     struct Shader
@@ -537,21 +560,33 @@ namespace HLSL
 #endif
     };
     
+    // Local fog in the froxels (the planet atmosphere is the aerial perspective volume, see Atmosphere)
     struct AtmosphericScatteringParameters
     {
         uint froxelsIndex;
         uint currentFroxelIndex;
         uint historyFroxelIndex;
-        float density;
-        float luminosity;
-        float specialNear;
-        float heightFalloff;
+        float specialNear;         // view distance (m) of froxel slice 1, slices are exponential from there to the far clip
+        float4 fogScattering;      // xyz: 1/m at density 1, w: Henyey-Greenstein g
+        float4 fogAbsorption;      // xyz: 1/m at density 1, w: fog height (world y, m) below which the height term is 1
+        float heightFalloff;       // 1/m, density = exp(-(y - fogHeight) * heightFalloff) above fogHeight
         float noiseFrequency;
         float noiseThresholdLow;
         float noiseThresholdHigh;
         float animationSpeed;
+        float fogDensity;          // global density multiplier
+        float pad1;
+        float pad2;
     };
     
+    struct SkyAtmosphereParameters
+    {
+        uint transmittanceLUTUAV;
+        uint multiScatteringLUTUAV;
+        uint skyViewLUTUAV;
+        uint aerialPerspectiveLUTUAV;
+    };
+
     struct PostProcessHalfResParameters
     {
         uint froxelsIndex;

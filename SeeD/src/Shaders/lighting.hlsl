@@ -115,7 +115,9 @@ void RayGen()
     GBufferCameraData cd = GetGBufferCameraData(dtid);
     if(cd.reverseZ <= 0.0)
     {
-        lighted[dtid.xy] = float4(Sky(cd.viewDir), 1);
+        // The sun disk's true radiance (~1.5e7 for a 1000 W/m^2 sun) overflows the R16F target: clamped
+        float3 sunDisk = min(SunDiskLuminance(viewContext.atmosphere, cd.camera.worldPos.xyz, cd.viewDir), 32000.0f);
+        lighted[dtid.xy] = float4(Sky(cd.viewDir) + sunDisk, 1);
         specularHitDistance[dtid.xy] = SPECULAR_HITT_MAX; // "infinitely far"; 10000*100 overflowed R16_FLOAT to +Inf
         return;
     }

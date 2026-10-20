@@ -2,6 +2,7 @@
 
 #include "binding.hlsl"
 #include "structs.hlsl"
+#include "atmosphere.hlsl"
 
 #define PI 3.14159265358979323846f
 
@@ -460,39 +461,51 @@ float absolutZ(float z, float n, float f)
 }
 
 // ----------------- FROXEL ---------------------------------------------
+// Froxel depth coordinate <-> view distance along the froxel's ray. Coordinate 1 is froxelsNear and
+// the last one the far clip, exponential in between; below 1 it is linear down to the camera
+// (continuous, slice 1 covers (0, froxelsNear]). linearZ is the distance / farClip.
 float ZToFroxel(float linearZ, float froxelsZSize, float froxelsNear, float farClip)
 {
+    float distance = linearZ * farClip;
+    if (distance < froxelsNear)
+        return distance / froxelsNear;
     float B = -log2(linearZ);
-    float C = B * ((froxelsZSize - 1) / log2(froxelsNear / farClip)) + froxelsZSize;
-    return max(0.0, C);
+    return B * ((froxelsZSize - 1) / log2(froxelsNear / farClip)) + froxelsZSize;
 }
 
 float FroxelToZ(float froxelZ, float froxelsZSize, float froxelsNear, float farClip)
 {
-    if (froxelZ < 1) return 0;
+    if (froxelZ < 1)
+        return max(froxelZ, 0.0f) * froxelsNear;
     return exp2((froxelZ - froxelsZSize) * (-log2(froxelsNear / farClip) / (froxelsZSize - 1))) * farClip;
+}
+
+// World direction of a froxel column's ray, from its xy only: valid at distance 0 too, where
+// normalize(FroxelToWorld - cameraPos) is normalize(0) = NaN
+float3 FroxelViewDir(float2 froxelXY, float2 froxelsSizeXY, HLSL::Camera camera)
+{
+    float2 ndc = (froxelXY + 0.5) / froxelsSizeXY * 2 - 1;
+    float4 viewPos = mul(camera.proj_inv, float4(ndc.x, -ndc.y, 1, 1));
+    viewPos.xyz /= viewPos.w;
+    return normalize(mul(camera.view_inv, float4(viewPos.xyz, 0)).xyz);
 }
 
 float3 FroxelToWorld(float3 froxel, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
 {
-    // Careful of precision issue with large viewPos values
-    float2 ndc = (froxel.xy + 0.5) / froxelsSize.xy * 2 - 1;
-    float4 viewPos = mul(camera.proj_inv, float4(ndc.x, -ndc.y, 1, 1));
-    viewPos.xyz /= viewPos.w;
-    float3 viewDir = normalize(mul(camera.view_inv, float4(viewPos.xyz, 0)).xyz);
-
+    float3 viewDir = FroxelViewDir(froxel.xy, froxelsSize.xy, camera);
     float viewDist = FroxelToZ(froxel.z, froxelsSize.z, froxelsNear, camera.farClip);
-
     return camera.worldPos.xyz + viewDir * viewDist;
 }
 
+// Slice k holds the value at froxel coordinate k (FroxelToWorld(k)), and its texel center is at
+// (k + 0.5) / size: the +0.5 keeps linear sampling from reading half a slice short.
 float3 WorldToFroxelUVW(float3 pixelWorldPos, float3 froxelsSize, float froxelsNear, HLSL::Camera camera)
 {
     float4 uvw = mul(camera.viewProj, float4(pixelWorldPos, 1));
     uvw.xyz = uvw.xyz / uvw.w;
     uvw.xy = uvw.xy * 0.5 + 0.5;
     float linearDepth = length(pixelWorldPos - camera.worldPos.xyz) / camera.farClip;
-    uvw.z = ZToFroxel(linearDepth, froxelsSize.z, froxelsNear, camera.farClip) / froxelsSize.z;
+    uvw.z = (ZToFroxel(linearDepth, froxelsSize.z, froxelsNear, camera.farClip) + 0.5) / froxelsSize.z;
     uvw.y = 1-uvw.y;
     return uvw.xyz;
 }
@@ -503,7 +516,7 @@ float3 WorldTohistoryFroxelUVW(float3 pixelWorldPos, float3 froxelsSize, float f
     uvw.xyz = uvw.xyz / uvw.w;
     uvw.xy = uvw.xy * 0.5 + 0.5;
     float linearDepth = length(pixelWorldPos - camera.previousWorldPos.xyz) / camera.farClip;
-    uvw.z = ZToFroxel(linearDepth, froxelsSize.z, froxelsNear, camera.farClip) / froxelsSize.z;
+    uvw.z = (ZToFroxel(linearDepth, froxelsSize.z, froxelsNear, camera.farClip) + 0.5) / froxelsSize.z; // see WorldToFroxelUVW
     uvw.y = 1-uvw.y;
     return uvw.xyz;
 }
@@ -1329,13 +1342,13 @@ SurfaceData GetSurfaceData(uint2 pixel)
 // copy past from https://discussions.unity.com/t/disney-principled-brdf-shader/742743
 
 
+// Sky luminance along direction, from the camera's sky-view LUT (see atmosphere.hlsl). The sun disk
+// is NOT included: path tracer misses get the sun through next event estimation on the directional
+// light, primary sky pixels add SunDiskLuminance themselves.
 float3 Sky(float3 direction)
 {
-    float dotUp = saturate(pow(saturate(dot(direction, float3(0, 1, 0))), 0.5));
-    float dotDown = saturate(pow(saturate(dot(direction, float3(0, -1, 0)) * 20), 1));
-    float3 sky = normalize(lerp(float3(1, 0.66, 0.66), float3(0.33, 0.5, 1), dotUp));
-    sky = lerp(sky, float3(0, 0, 0), dotDown) * 5;
-    return sky;
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    return SkyViewLuminance(viewContext.atmosphere, cameras[viewContext.cameraIndex].worldPos.xyz, direction);
 }
 
 SurfaceData GetRTSurfaceData(

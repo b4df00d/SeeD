@@ -368,8 +368,8 @@ namespace Components
 
     enum RenderSettingsOverride : uint
     {
-        RSO_density            = 1u << 0,
-        RSO_luminosity         = 1u << 1,
+        RSO_fogScattering      = 1u << 0,
+        RSO_fogAbsorption      = 1u << 1,
         RSO_specialNear        = 1u << 2,
         RSO_heightFalloff      = 1u << 3,
         RSO_noiseFrequency     = 1u << 4,
@@ -385,6 +385,19 @@ namespace Components
         RSO_c                  = 1u << 14,
         RSO_b                  = 1u << 15,
         RSO_tonemapper         = 1u << 16,
+        RSO_planetRadius        = 1u << 17,
+        RSO_atmosphereHeight    = 1u << 18,
+        RSO_rayleighScattering  = 1u << 19,
+        RSO_rayleighScaleHeight = 1u << 20,
+        RSO_mieScattering       = 1u << 21,
+        RSO_mieAbsorption       = 1u << 22,
+        RSO_mieScaleHeight      = 1u << 23,
+        RSO_mieAnisotropy       = 1u << 24,
+        RSO_ozoneAbsorption     = 1u << 25,
+        RSO_groundAlbedo        = 1u << 26,
+        RSO_fogAnisotropy       = 1u << 27,
+        RSO_fogHeight           = 1u << 28,
+        RSO_fogDensity          = 1u << 29,
     };
 
     struct RenderSettingsVolume : ComponentBase<RenderSettingsVolume>
@@ -394,11 +407,14 @@ namespace Components
         float blendDistance = 5.0f;  // outward falloff band in world units (Box/Sphere)
         float priority = 0.0f;       // higher = applied last = wins on overlap
         uint  overrides = 0;         // RenderSettingsOverride bitmask
-        // atmospheric scattering
-        float density = 0.001f;
-        float luminosity = 0.1f;
-        float specialNear = 0.25f;
-        float heightFalloff = 0.02f;
+        // local fog (froxels), coefficients in 1/m at density 1
+        float fogDensity = 1.0f;     // multiplies the height/noise density
+        float3 fogScattering = float3(0.002f, 0.002f, 0.002f);
+        float3 fogAbsorption = float3(0.0f, 0.0f, 0.0f);
+        float fogAnisotropy = 0.6f;  // Henyey-Greenstein g
+        float fogHeight = 0.0f;      // world y (m) below which the density is full
+        float specialNear = 0.25f;   // view distance (m) of the first froxel slice
+        float heightFalloff = 0.02f; // 1/m above fogHeight
         float noiseFrequency = 0.2f;
         float noiseThresholdLow = 0.5f;
         float noiseThresholdHigh = 0.6f;
@@ -413,6 +429,17 @@ namespace Components
         float c = 1.33f;
         float b = 0.0f;
         uint  tonemapper = 3;        // HLSL::Tonemapper* (0=None 1=GT 2=ACES 3=AgX 4=AgX Punchy 5=PBR Neutral); not blended, the strongest-weighted volume wins
+        // sky atmosphere (Hillaire 2020), Earth defaults; lengths in km, coefficients in 1/km
+        float  planetRadius = 6360.0f;
+        float  atmosphereHeight = 100.0f;
+        float3 rayleighScattering = float3(0.005802f, 0.013558f, 0.0331f);
+        float  rayleighScaleHeight = 8.0f;
+        float3 mieScattering = float3(0.003996f, 0.003996f, 0.003996f);
+        float3 mieAbsorption = float3(0.000444f, 0.000444f, 0.000444f);
+        float  mieScaleHeight = 1.2f;
+        float  mieAnisotropy = 0.8f;
+        float3 ozoneAbsorption = float3(0.00065f, 0.001881f, 0.000085f);
+        float3 groundAlbedo = float3(0.3f, 0.3f, 0.3f);
     };
     static void RenderSettingsVolumePropertyDraw(char* p)
     {
@@ -437,11 +464,42 @@ namespace Components
             ImGui::EndDisabled();
             ImGui::PopID();
         };
-
-        if (ImGui::CollapsingHeader("Atmospheric Scattering", ImGuiTreeNodeFlags_DefaultOpen))
+        auto row3 = [&](uint bit, const char* label, float3* val, float speed, float lo, float hi)
         {
-            row(RSO_density,            "density",            &v->density,            0,      1,      0);
-            row(RSO_luminosity,         "luminosity",         &v->luminosity,         0,      1,      ImGuiSliderFlags_Logarithmic);
+            bool on = (v->overrides & bit) != 0;
+            ImGui::PushID(label);
+            if (ImGui::Checkbox("##override", &on))
+                v->overrides = on ? (v->overrides | bit) : (v->overrides & ~bit);
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!on);
+            float f[3];
+            store(*val, f);
+            if (ImGui::DragFloat3(label, f, speed, lo, hi, "%.6f"))
+                *val = float3(f[0], f[1], f[2]);
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        };
+
+        if (ImGui::CollapsingHeader("Sky Atmosphere", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            row(RSO_planetRadius,         "planetRadius (km)",         &v->planetRadius,        100,    100000, ImGuiSliderFlags_Logarithmic);
+            row(RSO_atmosphereHeight,     "atmosphereHeight (km)",     &v->atmosphereHeight,    1,      1000,   ImGuiSliderFlags_Logarithmic);
+            row3(RSO_rayleighScattering,  "rayleighScattering (1/km)", &v->rayleighScattering,  0.0001f, 0,     1);
+            row(RSO_rayleighScaleHeight,  "rayleighScaleHeight (km)",  &v->rayleighScaleHeight, 0.1f,   100,    ImGuiSliderFlags_Logarithmic);
+            row3(RSO_mieScattering,       "mieScattering (1/km)",      &v->mieScattering,       0.0001f, 0,     1);
+            row3(RSO_mieAbsorption,       "mieAbsorption (1/km)",      &v->mieAbsorption,       0.0001f, 0,     1);
+            row(RSO_mieScaleHeight,       "mieScaleHeight (km)",       &v->mieScaleHeight,      0.1f,   100,    ImGuiSliderFlags_Logarithmic);
+            row(RSO_mieAnisotropy,        "mieAnisotropy",             &v->mieAnisotropy,       -0.99f, 0.99f,  0);
+            row3(RSO_ozoneAbsorption,     "ozoneAbsorption (1/km)",    &v->ozoneAbsorption,     0.0001f, 0,     1);
+            row3(RSO_groundAlbedo,        "groundAlbedo",              &v->groundAlbedo,        0.01f,  0,      1);
+        }
+        if (ImGui::CollapsingHeader("Fog", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            row(RSO_fogDensity,         "fogDensity",         &v->fogDensity,         0.05f,  1000,   ImGuiSliderFlags_Logarithmic);
+            row3(RSO_fogScattering,     "fogScattering (1/m)", &v->fogScattering,     0.0001f, 0,     1);
+            row3(RSO_fogAbsorption,     "fogAbsorption (1/m)", &v->fogAbsorption,     0.0001f, 0,     1);
+            row(RSO_fogAnisotropy,      "fogAnisotropy",      &v->fogAnisotropy,      -0.99f, 0.99f,  0);
+            row(RSO_fogHeight,          "fogHeight (m)",      &v->fogHeight,          -1000,  10000,  0);
             row(RSO_specialNear,        "specialNear",        &v->specialNear,        0.1f,   1,      ImGuiSliderFlags_Logarithmic);
             row(RSO_heightFalloff,      "heightFalloff",      &v->heightFalloff,      0,      0.2f,   ImGuiSliderFlags_Logarithmic);
             row(RSO_noiseFrequency,     "noiseFrequency",     &v->noiseFrequency,     0.001f, 2,      ImGuiSliderFlags_Logarithmic);

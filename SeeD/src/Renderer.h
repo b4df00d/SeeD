@@ -587,12 +587,19 @@ public:
     EditorContext editorContext;
     std::map<UINT64, Resource> resources;
     SubmissionList* submissions = nullptr; // owned by Renderer, shared by every view so passes on the same queue stay strictly ordered
+    // Copied into ViewContext every frame. Planet/medium from MainView::UpdateRenderSettings, sun from
+    // MainView::UpdateLights, LUT slots from SkyAtmosphere::On (invalid in views without that pass).
+    HLSL::Atmosphere atmosphere = {};
 
     virtual void On(uint2 _displayResolution, uint2 _renderResolution)
     {
         displayResolution = _displayResolution;
         renderResolution = _renderResolution;
         frame = 0;
+        atmosphere.transmittanceLUT = HLSL::invalidUINT;
+        atmosphere.multiScatteringLUT = HLSL::invalidUINT;
+        atmosphere.skyViewLUT = HLSL::invalidUINT;
+        atmosphere.aerialPerspectiveLUT = HLSL::invalidUINT;
         viewWorld.On();
         raytracingContext.On(renderResolution);
         viewContext.On();
@@ -704,7 +711,8 @@ public:
         viewContext.jitterPixel = float2(ViewContext::Halton(viewContext.jitterIndex + 1, 2), ViewContext::Halton(viewContext.jitterIndex + 1, 3)) - float2(0.5f, 0.5f);
         float2 jit = pixelToNDC(viewContext.jitterPixel);
         viewContextParams.jitter = float4(jit.x, jit.y, previousJit.x, previousJit.y);
-        
+        viewContextParams.atmosphere = atmosphere;
+
         return viewContextParams;
     }
 
@@ -2384,6 +2392,109 @@ public:
     }
 };
 
+// Hillaire 2020 sky LUTs (SkyAtmosphere.hlsl), rebuilt every frame from view->atmosphere. Submitted
+// on the compute queue before lightingProbes/atmosphericScattering, which (and Lighting, through
+// lightingProbes) read them via ViewContext::atmosphere.
+class SkyAtmosphere : public Pass
+{
+    Resource transmittanceLUT;
+    Resource multiScatteringLUT;
+    Resource skyViewLUT;
+    Resource aerialPerspectiveLUT;
+    Components::Handle<Components::Shader> transmittanceShader;
+    Components::Handle<Components::Shader> multiScatteringShader;
+    Components::Handle<Components::Shader> skyViewShader;
+    Components::Handle<Components::Shader> aerialPerspectiveShader;
+    HLSL::SkyAtmosphereParameters skyParams = {};
+
+public:
+    void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
+    {
+        Pass::On(view, queue, _name, _dependency, _dependency2);
+        ZoneScoped;
+        // sizes must match atmosphere.hlsl's *_LUT_SIZE
+        transmittanceLUT.CreateTexture(uint2(256, 64), DXGI_FORMAT_R16G16B16A16_FLOAT, false, "transmittanceLUT");
+        multiScatteringLUT.CreateTexture(uint2(32, 32), DXGI_FORMAT_R16G16B16A16_FLOAT, false, "multiScatteringLUT");
+        skyViewLUT.CreateTexture(uint2(192, 108), DXGI_FORMAT_R16G16B16A16_FLOAT, false, "skyViewLUT");
+        aerialPerspectiveLUT.CreateTexture(uint3(32, 32, 32), DXGI_FORMAT_R16G16B16A16_FLOAT, false, "aerialPerspectiveLUT");
+        transmittanceShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\SkyAtmosphere.hlsl|Transmittance");
+        multiScatteringShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\SkyAtmosphere.hlsl|MultiScattering");
+        skyViewShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\SkyAtmosphere.hlsl|SkyView");
+        aerialPerspectiveShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\SkyAtmosphere.hlsl|AerialPerspective");
+
+        skyParams.transmittanceLUTUAV = transmittanceLUT.uav.offset;
+        skyParams.multiScatteringLUTUAV = multiScatteringLUT.uav.offset;
+        skyParams.skyViewLUTUAV = skyViewLUT.uav.offset;
+        skyParams.aerialPerspectiveLUTUAV = aerialPerspectiveLUT.uav.offset;
+        view->atmosphere.transmittanceLUT = transmittanceLUT.srv.offset;
+        view->atmosphere.multiScatteringLUT = multiScatteringLUT.srv.offset;
+        view->atmosphere.skyViewLUT = skyViewLUT.srv.offset;
+        view->atmosphere.aerialPerspectiveLUT = aerialPerspectiveLUT.srv.offset;
+    }
+    void Off() override
+    {
+        Pass::Off();
+        ZoneScoped;
+        transmittanceLUT.Release();
+        multiScatteringLUT.Release();
+        skyViewLUT.Release();
+        aerialPerspectiveLUT.Release();
+    }
+    void Setup(View* view) override
+    {
+        ZoneScoped;
+    }
+    void Render(View* view) override
+    {
+        ZoneScoped;
+        Open();
+
+        auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
+        auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
+        auto skyParamsAddress = ConstantBuffer::instance->PushConstantBuffer(&skyParams);
+        auto bind = [&](Shader& shader)
+        {
+            commandBuffer->SetCompute(shader);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, skyParamsAddress);
+        };
+
+        // Each LUT: COMMON -> UAV for its write, then -> SRV for the next LUT's reads. All end in
+        // COMMON: the later passes only sample them, which implicit promotion from COMMON allows.
+        Shader& transmittance = *AssetLibrary::instance->Get<Shader>(transmittanceShader.Get().id, true);
+        bind(transmittance);
+        transmittanceLUT.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        commandBuffer->cmd->Dispatch(transmittance.DispatchX(256), transmittance.DispatchY(64), 1);
+        transmittanceLUT.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        // one group per texel ([numthreads(1, 1, 64)], one thread per sphere direction)
+        Shader& multiScattering = *AssetLibrary::instance->Get<Shader>(multiScatteringShader.Get().id, true);
+        bind(multiScattering);
+        multiScatteringLUT.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        commandBuffer->cmd->Dispatch(32, 32, 1);
+        multiScatteringLUT.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        Shader& skyView = *AssetLibrary::instance->Get<Shader>(skyViewShader.Get().id, true);
+        bind(skyView);
+        skyViewLUT.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        commandBuffer->cmd->Dispatch(skyView.DispatchX(192), skyView.DispatchY(108), 1);
+        skyViewLUT.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+
+        // [numthreads(4, 4, 4)] over 32^3
+        Shader& aerialPerspective = *AssetLibrary::instance->Get<Shader>(aerialPerspectiveShader.Get().id, true);
+        bind(aerialPerspective);
+        aerialPerspectiveLUT.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        commandBuffer->cmd->Dispatch(8, 8, 8);
+        aerialPerspectiveLUT.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+
+        transmittanceLUT.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+        multiScatteringLUT.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+
+        Close();
+    }
+};
+
 class AtmosphericScattering : public Pass
 {
     ViewResource froxelsBuffer;
@@ -2392,13 +2503,12 @@ class AtmosphericScattering : public Pass
     ViewResource depth;
     Components::Handle<Components::Shader> atmosphericScatteringShader;
     Components::Handle<Components::Shader> atmosphericScatteringReprojectionShader;
-    Components::Handle<Components::Shader> atmosphericScatteringBlurShader;
     Components::Handle<Components::Shader> atmosphericScatteringAccumulationShader;
 
     uint3 atmoSize = float3(160, 90, 256);
 
 public:
-    HLSL::AtmosphericScatteringParameters asparams;
+    HLSL::AtmosphericScatteringParameters asparams = {}; // artistic fields written every frame by MainView::UpdateRenderSettings
 
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
@@ -2413,17 +2523,7 @@ public:
         depth.Register("depth", view);
         atmosphericScatteringShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Update");
         atmosphericScatteringReprojectionShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Reprojection");
-        atmosphericScatteringBlurShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Blur");
         atmosphericScatteringAccumulationShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\AtmosphericScattering.hlsl|Accumulation");
-
-        asparams.density = 0.0;
-        asparams.luminosity = 0.1;
-        asparams.specialNear = 0.25;
-        asparams.heightFalloff = 0.02;
-        asparams.noiseFrequency = 0.2;
-        asparams.noiseThresholdLow = 0.5;
-        asparams.noiseThresholdHigh = 0.6;
-        asparams.animationSpeed = 0.00000002;
 
         Open();
         HLSL::Froxels froxelsData[2];
@@ -2494,7 +2594,7 @@ public:
         // UAV state) -- it does not perform this transition.
         atmosphericScatteringFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         // history: read-only (SRV) this frame in Reprojection below (last frame's blurred/accumulated
-        // result) before Blur/Accumulation overwrite it via UAV.
+        // result) before the copy/Accumulation overwrite it.
         atmosphericScatteringHistoryFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
         commandBuffer->cmd->DispatchRays(&drd);
@@ -2510,20 +2610,13 @@ public:
             atmosphericScatteringReprojection.DispatchY((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height),
             atmosphericScatteringReprojection.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize));
 
-        atmosphericScatteringFroxels.Get().Barrier(commandBuffer.Get());
-        // history goes from SRV (Reprojection's read, just above) to UAV (Blur's write, just below)
-        atmosphericScatteringHistoryFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-
-        // Blur atmospheric scattering froxels (XY box filter, ping-pong into history buffer)
-        Shader& atmosphericScatteringBlur = *AssetLibrary::instance->Get<Shader>(atmosphericScatteringBlurShader.Get().id, true);
-        commandBuffer->SetCompute(atmosphericScatteringBlur);
-        commandBuffer->cmd->Dispatch(
-            atmosphericScatteringBlur.DispatchX((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Width),
-            atmosphericScatteringBlur.DispatchY((uint)atmosphericScatteringFroxels.Get().GetResource()->GetDesc().Height),
-            atmosphericScatteringBlur.DispatchY(atmosphericScatteringFroxels.Get().GetResource()->GetDesc().DepthOrArraySize));
-
-        atmosphericScatteringHistoryFroxels.Get().Barrier(commandBuffer.Get());
+        // History = this frame's temporally accumulated injection, unfiltered: next frame reprojects it,
+        // and the integration below reads it. (It used to be blurred here, which compounded every frame.)
+        atmosphericScatteringFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        atmosphericScatteringHistoryFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+        commandBuffer->cmd->CopyResource(atmosphericScatteringHistoryFroxels.Get().GetResource(), atmosphericScatteringFroxels.Get().GetResource());
+        atmosphericScatteringHistoryFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        atmosphericScatteringFroxels.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
 
         // Accumulate atmospheric scattering froxels
@@ -2566,7 +2659,6 @@ public:
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
-        asparams.specialNear = 0.25f; // must match AtmosphericScattering::On until the first UpdateRenderSettings overwrites it
         transparencyLayer.Register("transparencyLayer", view);
         transparencyLayer.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "transparencyLayer"); // must be the same as Lighted input
         lighted.Register("lighted", view);
@@ -3079,7 +3171,6 @@ public:
                 dlss_eval_params.InReset = 0;
                 dlss_eval_params.InRenderSubrectDimensions = { view->renderResolution.x, view->renderResolution.y };
                 dlss_eval_params.pInColor = lighted.Get().GetResource();
-                dlss_eval_params.pInColorAfterFog = lighted.Get().GetResource();
                 dlss_eval_params.pInOutput = upscaled.Get().GetResource();
                 dlss_eval_params.pInNormals = normal.Get().GetResource(); // .w = roughness (packed mode)
                 dlss_eval_params.pInDiffuseAlbedo = albedo.Get().GetResource();
@@ -3175,6 +3266,7 @@ public:
     Culling culling;
     ZPrepass zPrepass;
     AccelerationStructure accelerationStructure;
+    SkyAtmosphere skyAtmosphere;
     AtmosphericScattering atmospehricScattering;
     GBuffers gBuffers;
     LightingProbes lightingProbes;
@@ -3211,6 +3303,7 @@ public:
         culling.On(this, GPU::instance->graphicQueue, "culling", &spawning.commandBuffer , &hzb.commandBuffer);
         zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer, nullptr);
         gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
+        skyAtmosphere.On(this, GPU::instance->computeQueue, "skyAtmosphere", nullptr, nullptr); // before lightingProbes/atmospehricScattering on the same queue, see SkyAtmosphere
         accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &culling.commandBuffer, nullptr);
         atmospehricScattering.On(this, GPU::instance->computeQueue, "atmospehricScattering", &accelerationStructure.commandBuffer, nullptr);
         lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &gBuffers.commandBuffer, &accelerationStructure.commandBuffer);
@@ -3237,6 +3330,7 @@ public:
         culling.Off();
         zPrepass.Off();
         accelerationStructure.Off();
+        skyAtmosphere.Off();
         atmospehricScattering.Off();
         gBuffers.Off();
         lightingProbes.Off();
@@ -3275,6 +3369,7 @@ public:
         SUBTASKVIEWPASS(culling);
         SUBTASKVIEWPASS(zPrepass);
         SUBTASKVIEWPASS(accelerationStructure);
+        SUBTASKVIEWPASS(skyAtmosphere);
         SUBTASKVIEWPASS(atmospehricScattering);
         SUBTASKVIEWPASS(gBuffers);
         SUBTASKVIEWPASS(lightingProbes);
@@ -3289,7 +3384,7 @@ public:
         reset.precede(updateInstances, updateMaterials, updateLights, updateCameras); // should precede all, user need to check that
         updateInstances.succeed(updateMaterials);
         structuredCommandBufferUpdateTask.succeed(updateInstances);
-        uploadAndSetup.succeed(structuredCommandBufferUpdateTask, updateLights, updateCameras);
+        uploadAndSetup.succeed(structuredCommandBufferUpdateTask, updateLights, updateCameras, updateRenderSettings); // ViewContext::atmosphere needs the blended settings
         updateRenderSettings.precede(atmospehricScatteringTask, postProcessHalfResTask, postProcessTask);
         // no need to put unnecessary dependencies on upload and setup (passes that do not use the view world data)
         // weeeelllll for all passes that use the camera need to wait for upload and setup to be sure the camera data is updated (just in case the buffers used are new because they are bigger)
@@ -3299,7 +3394,7 @@ public:
         // Taskflow was free to run them concurrently with (or before) uploadAndSetup's write, a genuine
         // data race on view->editorContext.editorContext etc. GBV caught it as debug.hlsl reading a
         // garbage descriptor heap index out of editorContext.debugVerticesCountHeapIndex.
-        uploadAndSetup.precede(skinningTask, terrainTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, atmospehricScatteringTask, postProcessHalfResTask, forwardTask, dlssTask, postProcessTask, gpuDebugInitTask, gpuDebugTask);
+        uploadAndSetup.precede(skinningTask, terrainTask, accelerationStructureTask, cullingTask, zPrepassTask, gBuffersTask, lightingProbesTask, lightingTask, skyAtmosphereTask, atmospehricScatteringTask, postProcessHalfResTask, forwardTask, dlssTask, postProcessTask, gpuDebugInitTask, gpuDebugTask);
 
         presentTask.succeed(uploadAndSetup,
             profileReadbackTask,
@@ -3316,6 +3411,7 @@ public:
             lightingProbesTask,
             lightingTask,
             forwardTask,
+            skyAtmosphereTask,
             atmospehricScatteringTask,
             postProcessHalfResTask,
             dlssTask,
@@ -3618,6 +3714,9 @@ public:
                 ViewWorld& frameWorld = viewWorld;
                 auto& queryResult = world.frameQueries[queryIndex];
 
+                // The first directional light is the sun: it drives the sky atmosphere (no sun = black sky)
+                this->atmosphere.sunIlluminance.w = 0.0f;
+
                 for (uint i = 0; i < entityCount; i++)
                 {
                     auto& light = queryResult[i].Get<Components::Light>();
@@ -3625,6 +3724,14 @@ public:
 
                     World::Entity ent = queryResult[i].Get<Components::Entity>();
                     float4x4 worldMatrix = ComputeWorldMatrix(ent);
+
+                    if (light.type == HLSL::LightType::Directional && this->atmosphere.sunIlluminance.w == 0.0f)
+                    {
+                        // dir is the direction the light travels, the atmosphere wants the one toward the sun
+                        float3 toSun = -normalize(worldMatrix[2].xyz);
+                        this->atmosphere.sunDirection = float4(toSun, light.size);
+                        this->atmosphere.sunIlluminance = float4(light.color.xyz * light.color.w, 1.0f);
+                    }
 
                     HLSL::Light hlsllight;
 
@@ -3785,16 +3892,9 @@ public:
                 HLSL::AtmosphericScatteringParameters& as = atmospehricScattering.asparams;
                 HLSL::PostProcessParameters& pp = postProcess.ppparams;
 
+                // Atmosphere and fog defaults are the component's own initializers
                 if (!baseSettingsCaptured)
                 {
-                    baseSettings.density = as.density;
-                    baseSettings.luminosity = as.luminosity;
-                    baseSettings.specialNear = as.specialNear;
-                    baseSettings.heightFalloff = as.heightFalloff;
-                    baseSettings.noiseFrequency = as.noiseFrequency;
-                    baseSettings.noiseThresholdLow = as.noiseThresholdLow;
-                    baseSettings.noiseThresholdHigh = as.noiseThresholdHigh;
-                    baseSettings.animationSpeed = as.animationSpeed;
                     baseSettings.expoMul = pp.expoMul;
                     baseSettings.expoAdd = pp.expoAdd;
                     baseSettings.P = pp.P;
@@ -3865,8 +3965,11 @@ public:
                         continue;
 
                     #define RSV_BLEND(bit, field) if (v.overrides & Components::bit) result.field += (v.field - result.field) * w;
-                    RSV_BLEND(RSO_density, density);
-                    RSV_BLEND(RSO_luminosity, luminosity);
+                    RSV_BLEND(RSO_fogDensity, fogDensity);
+                    RSV_BLEND(RSO_fogScattering, fogScattering);
+                    RSV_BLEND(RSO_fogAbsorption, fogAbsorption);
+                    RSV_BLEND(RSO_fogAnisotropy, fogAnisotropy);
+                    RSV_BLEND(RSO_fogHeight, fogHeight);
                     RSV_BLEND(RSO_specialNear, specialNear);
                     RSV_BLEND(RSO_heightFalloff, heightFalloff);
                     RSV_BLEND(RSO_noiseFrequency, noiseFrequency);
@@ -3881,6 +3984,16 @@ public:
                     RSV_BLEND(RSO_l, l);
                     RSV_BLEND(RSO_c, c);
                     RSV_BLEND(RSO_b, b);
+                    RSV_BLEND(RSO_planetRadius, planetRadius);
+                    RSV_BLEND(RSO_atmosphereHeight, atmosphereHeight);
+                    RSV_BLEND(RSO_rayleighScattering, rayleighScattering);
+                    RSV_BLEND(RSO_rayleighScaleHeight, rayleighScaleHeight);
+                    RSV_BLEND(RSO_mieScattering, mieScattering);
+                    RSV_BLEND(RSO_mieAbsorption, mieAbsorption);
+                    RSV_BLEND(RSO_mieScaleHeight, mieScaleHeight);
+                    RSV_BLEND(RSO_mieAnisotropy, mieAnisotropy);
+                    RSV_BLEND(RSO_ozoneAbsorption, ozoneAbsorption);
+                    RSV_BLEND(RSO_groundAlbedo, groundAlbedo);
                     #undef RSV_BLEND
                     // discrete choice: can't be interpolated, switches once the volume dominates
                     if ((v.overrides & Components::RSO_tonemapper) && w >= 0.5f)
@@ -3888,9 +4001,10 @@ public:
                 }
 
                 // Write the blended artistic fields back; leave the GPU-index fields to the passes.
-                as.density = result.density;
-                as.luminosity = result.luminosity;
-                as.specialNear = result.specialNear;
+                as.fogScattering = float4(max(result.fogScattering, float3(0.0f)), std::min(std::max(result.fogAnisotropy, -0.999f), 0.999f));
+                as.fogAbsorption = float4(max(result.fogAbsorption, float3(0.0f)), result.fogHeight);
+                as.fogDensity = std::max(result.fogDensity, 0.0f);
+                as.specialNear = std::max(result.specialNear, 0.01f);
                 as.heightFalloff = result.heightFalloff;
                 as.noiseFrequency = result.noiseFrequency;
                 as.noiseThresholdLow = result.noiseThresholdLow;
@@ -3900,6 +4014,16 @@ public:
                 // it was built with; copied here (single-threaded update phase) to avoid racing
                 // the AtmosphericScattering pass's writes to its own asparams during render.
                 postProcessHalfRes.asparams = as;
+
+                // Sky atmosphere: LUT slots and sun are owned by SkyAtmosphere::On / UpdateLights
+                HLSL::Atmosphere& atmo = this->atmosphere;
+                atmo.bottomRadius = std::max(result.planetRadius, 1.0f);
+                atmo.topRadius = atmo.bottomRadius + std::max(result.atmosphereHeight, 0.1f);
+                atmo.rayleighScattering = float4(result.rayleighScattering, std::max(result.rayleighScaleHeight, 0.01f));
+                atmo.mieScattering = float4(result.mieScattering, std::max(result.mieScaleHeight, 0.01f));
+                atmo.mieAbsorption = float4(result.mieAbsorption, std::min(std::max(result.mieAnisotropy, -0.999f), 0.999f));
+                atmo.ozoneAbsorption = float4(result.ozoneAbsorption, 0.0f);
+                atmo.groundAlbedo = float4(result.groundAlbedo, 0.0f);
 
                 pp.expoMul = result.expoMul;
                 pp.expoAdd = result.expoAdd;
