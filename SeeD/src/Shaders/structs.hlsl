@@ -143,6 +143,8 @@ namespace HLSL
         uint materialCount;
         uint instancesHeapIndex;
         uint instanceCount;
+        uint fogVolumesHeapIndex; // StructuredBuffer<FogVolume>, read only while fogVolumeCount > 0
+        uint fogVolumeCount;
     };
     
     enum class Upscaling
@@ -547,6 +549,13 @@ namespace HLSL
         uint pad3;
     };
     
+    // Components::FogVolume, uploaded every frame (MainView::UpdateFogVolumes)
+    struct FogVolume
+    {
+        float4 sphere;       // xyz: world center, w: radius (m)
+        float4 colorDensity; // xyz: single-scattering albedo, w: extinction at the center (1/m)
+    };
+
     struct Froxels
     {
 #ifdef __cplusplus

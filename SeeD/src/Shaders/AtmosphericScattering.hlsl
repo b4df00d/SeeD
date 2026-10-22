@@ -55,8 +55,8 @@ float3 SampleHenyeyGreenstein(float g, float3 axis, float2 u)
     return normalize(axis * cosTheta + (tangent * cos(phi) + bitangent * sin(phi)) * sinTheta);
 }
 
-// Fog density at a world position, multiplies fogScattering / fogAbsorption. The single place to add
-// density sources (particles, a painted fog map, ...)
+// Density of the global fog (RenderSettingsVolume) at a world position, multiplies fogScattering /
+// fogAbsorption
 float FogDensity(float3 worldPos)
 {
     float heightDensity = min(exp(-(worldPos.y - asParameters.fogAbsorption.w) * asParameters.heightFalloff), 1.0f);
@@ -69,6 +69,36 @@ float FogDensity(float3 worldPos)
 #endif
 
     return asParameters.fogDensity * heightDensity * noiseDensity;
+}
+
+// Fog medium at a world position: the global fog plus every local source. The single place to add
+// density sources (particles, a painted fog map, ...)
+void FogMedium(float3 worldPos, out float3 sigmaS, out float3 sigmaT)
+{
+    // Global fog. Its height falloff never reaches 0: below 1/1000 of the global density counts as
+    // none (~350 m above fogHeight at the default falloff), so empty froxels skip their rays
+    float density = FogDensity(worldPos);
+    if (density < 1e-3f * asParameters.fogDensity)
+        density = 0.0f;
+    sigmaS = asParameters.fogScattering.xyz * density;
+    sigmaT = sigmaS + asParameters.fogAbsorption.xyz * density;
+
+    // FogVolume spheres: extinction w * (1 - d^2/r^2)^2, scattering albedo color (absorbs 1 - color)
+    if (commonResourcesIndices.fogVolumeCount > 0)
+    {
+        StructuredBuffer<HLSL::FogVolume> volumes = ResourceDescriptorHeap[commonResourcesIndices.fogVolumesHeapIndex];
+        for (uint i = 0; i < commonResourcesIndices.fogVolumeCount; i++)
+        {
+            HLSL::FogVolume volume = volumes[i];
+            float3 offset = worldPos - volume.sphere.xyz;
+            float f = 1.0f - dot(offset, offset) / (volume.sphere.w * volume.sphere.w);
+            if (f <= 0.0f)
+                continue;
+            float extinction = volume.colorDensity.w * f * f;
+            sigmaS += volume.colorDensity.xyz * extinction;
+            sigmaT += extinction;
+        }
+    }
 }
 
 [shader("raygeneration")]
@@ -109,14 +139,12 @@ void RayGen()
     float3 viewDir = FroxelViewDir(froxelPos.xy, currentFroxel.resolution.xy, camera);
 
     // ---- medium ----
-    float density = FogDensity(worldPos);
-    float3 sigmaS = asParameters.fogScattering.xyz * density;
-    float3 sigmaT = sigmaS + asParameters.fogAbsorption.xyz * density;
+    float3 sigmaS, sigmaT;
+    FogMedium(worldPos, sigmaS, sigmaT);
     float g = asParameters.fogScattering.w;
 
-    // Empty froxel: no rays. The height falloff never reaches 0, below 1/1000 of the global density
-    // counts as empty (~350 m above fogHeight at the default falloff)
-    if (density < 1e-3f * asParameters.fogDensity || all(sigmaT <= 0.0f))
+    // Empty froxel: no rays
+    if (all(sigmaT <= 0.0f))
     {
         froxelData[DispatchRaysIndex().xyz] = 0.0f;
         return;

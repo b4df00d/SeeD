@@ -539,6 +539,25 @@ namespace Components
         }
     }
 
+    // Soft sphere of fog added to the froxel fog (FogMedium in AtmosphericScattering.hlsl), centered on
+    // the entity, radius scaled by its largest world axis. Density falls off as (1 - d^2/r^2)^2
+    struct FogVolume : ComponentBase<FogVolume>
+    {
+        float3 color = float3(1.0f, 1.0f, 1.0f); // single-scattering albedo: scatters color, absorbs 1 - color
+        float density = 0.05f;                   // extinction at the center, 1/m
+        float radius = 5.0f;                     // m
+    };
+    static void FogVolumePropertyDraw(char* p)
+    {
+        FogVolume* v = (FogVolume*)p;
+        float c[3];
+        store(v->color, c);
+        if (ImGui::ColorEdit3("color (albedo)", c))
+            v->color = float3(c[0], c[1], c[2]);
+        ImGui::DragFloat("density (1/m)", &v->density, 0.001f, 0.0f, 100.0f, "%.4f", ImGuiSliderFlags_Logarithmic);
+        ImGui::DragFloat("radius (m)", &v->radius, 0.1f, 0.0f, 100000.0f);
+    }
+
     struct MeshOverride : ComponentBase<MeshOverride>
     {
         uint overrideMeshIndex; // MeshStorage meshIndex namespace (shared with normal Mesh::storageIndex)

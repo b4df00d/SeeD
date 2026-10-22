@@ -370,6 +370,7 @@ struct ViewWorld
     HLSL::CommonResourcesIndices commonResourcesIndices;
     PerFrame<StructuredUploadBuffer<HLSL::Camera>> cameras;
     PerFrame<StructuredUploadBuffer<HLSL::Light>> lights;
+    PerFrame<StructuredUploadBuffer<HLSL::FogVolume>> fogVolumes;
     DirtyTrackingStructuredBuffer<World::Entity, HLSL::Material> materials;
     DirtyTrackingStructuredBuffer<World::Entity, HLSL::Instance> instances;
 
@@ -397,6 +398,7 @@ struct ViewWorld
         {
             cameras.Get(i).Release();
             lights.Get(i).Release();
+            fogVolumes.Get(i).Release();
             shaderBucketOffsets.Get(i).Release();
         }
         materials.Release();
@@ -646,6 +648,8 @@ public:
         commonResourcesIndices.cameraCount = viewWorld.cameras->Size();
         commonResourcesIndices.lightsHeapIndex = viewWorld.lights->gpuData.srv.offset;
         commonResourcesIndices.lightCount = viewWorld.lights->Size();
+        commonResourcesIndices.fogVolumesHeapIndex = viewWorld.fogVolumes->gpuData.srv.offset;
+        commonResourcesIndices.fogVolumeCount = viewWorld.fogVolumes->Size();
         commonResourcesIndices.materialsHeapIndex = viewWorld.materials.GetResource().srv.offset;
         commonResourcesIndices.materialCount = viewWorld.materials.Size();
         commonResourcesIndices.instancesHeapIndex = viewWorld.instances.GetResource().srv.offset; // read-only StructuredBuffer<HLSL::Instance> everywhere it's bound, never RW
@@ -2505,7 +2509,7 @@ class AtmosphericScattering : public Pass
     Components::Handle<Components::Shader> atmosphericScatteringReprojectionShader;
     Components::Handle<Components::Shader> atmosphericScatteringAccumulationShader;
 
-    uint3 atmoSize = float3(160, 90, 256);
+    uint3 atmoSize = float3(160, 90, 128) * 0.75f;
 
 public:
     HLSL::AtmosphericScatteringParameters asparams = {}; // artistic fields written every frame by MainView::UpdateRenderSettings
@@ -3353,6 +3357,7 @@ public:
         tf::Task updateMaterials = UpdateMaterials(world, subflow);
         tf::Task updateInstances = UpdateInstances(world, subflow);
         tf::Task updateLights = UpdateLights(world, subflow);
+        tf::Task updateFogVolumes = UpdateFogVolumes(world, subflow);
         tf::Task updateCameras = UpdateCameras(world, subflow);
         tf::Task updateRenderSettings = UpdateRenderSettings(world, subflow);
 
@@ -3381,10 +3386,10 @@ public:
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
-        reset.precede(updateInstances, updateMaterials, updateLights, updateCameras); // should precede all, user need to check that
+        reset.precede(updateInstances, updateMaterials, updateLights, updateFogVolumes, updateCameras); // should precede all, user need to check that
         updateInstances.succeed(updateMaterials);
         structuredCommandBufferUpdateTask.succeed(updateInstances);
-        uploadAndSetup.succeed(structuredCommandBufferUpdateTask, updateLights, updateCameras, updateRenderSettings); // ViewContext::atmosphere needs the blended settings
+        uploadAndSetup.succeed(structuredCommandBufferUpdateTask, updateLights, updateFogVolumes, updateCameras, updateRenderSettings); // ViewContext::atmosphere needs the blended settings
         updateRenderSettings.precede(atmospehricScatteringTask, postProcessHalfResTask, postProcessTask);
         // no need to put unnecessary dependencies on upload and setup (passes that do not use the view world data)
         // weeeelllll for all passes that use the camera need to wait for upload and setup to be sure the camera data is updated (just in case the buffers used are new because they are bigger)
@@ -3436,6 +3441,7 @@ public:
                 //viewWorld.instances->Clear();
                 //raytracingContext.instancesRayTracing->Clear();
                 viewWorld.lights->Clear();
+                viewWorld.fogVolumes->Clear();
                 viewWorld.cameras->Clear();
             }
         ).name("Reset");
@@ -3751,6 +3757,33 @@ public:
         return task;
     }
 
+    // FogVolume components -> viewWorld.fogVolumes (sampled by FogMedium in AtmosphericScattering.hlsl)
+    tf::Task UpdateFogVolumes(World& world, tf::Subflow& subflow)
+    {
+        ZoneScoped;
+        tf::Task task = subflow.emplace(
+            [this, &world]()
+            {
+                ZoneScoped;
+                uint queryIndex = world.Query(Components::FogVolume::mask, 0, true);
+                for (auto& e : world.frameQueries[queryIndex])
+                {
+                    auto& volume = e.Get<Components::FogVolume>();
+                    if (volume.density <= 0.0f || volume.radius <= 0.0f)
+                        continue;
+                    float4x4 worldMatrix = ComputeWorldMatrix(e.Get<Components::Entity>());
+                    float scale = std::max(std::max((float)length(worldMatrix[0].xyz), (float)length(worldMatrix[1].xyz)), (float)length(worldMatrix[2].xyz));
+
+                    HLSL::FogVolume gpuVolume;
+                    gpuVolume.sphere = float4(worldMatrix[3].xyz, volume.radius * scale);
+                    gpuVolume.colorDensity = float4(saturate(volume.color), volume.density);
+                    this->viewWorld.fogVolumes.Get().Add(gpuVolume);
+                }
+            }
+        ).name("Update fog volumes");
+        return task;
+    }
+
     tf::Task UpdateCameras(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
@@ -4048,6 +4081,7 @@ public:
                 ZoneScoped;
                 this->viewWorld.cameras.Get().Upload();
                 this->viewWorld.lights.Get().Upload();
+                this->viewWorld.fogVolumes.Get().Upload();
                 this->viewContext.instancesCulledArgs.Resize(this->viewWorld.instances.Size());
 
                 // See ShaderBucketRegistry::BuildFrameSnapshot: NOT viewWorld.meshletsCount, which

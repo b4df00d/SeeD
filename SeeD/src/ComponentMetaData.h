@@ -168,6 +168,15 @@ knownComponents.push_back(
  	}); 
 // World.h
 knownComponents.push_back(
+ 	{ "FogVolume", Components::FogVolume::mask, Components::FogVolumePropertyDraw, alignof(Components::FogVolume), 
+ 		{
+			{ "color", PropertyTypes::_float3, NULL, 1, offsetof(Components::FogVolume, color), sizeof(Components::FogVolume::color) },
+			{ "density", PropertyTypes::_float, NULL, 1, offsetof(Components::FogVolume, density), sizeof(Components::FogVolume::density) },
+			{ "radius", PropertyTypes::_float, NULL, 1, offsetof(Components::FogVolume, radius), sizeof(Components::FogVolume::radius) },
+		}
+ 	}); 
+// World.h
+knownComponents.push_back(
  	{ "MeshOverride", Components::MeshOverride::mask, nullptr, alignof(Components::MeshOverride), 
  		{
 			{ "overrideMeshIndex", PropertyTypes::_uint, NULL, 1, offsetof(Components::MeshOverride, overrideMeshIndex), sizeof(Components::MeshOverride::overrideMeshIndex) },

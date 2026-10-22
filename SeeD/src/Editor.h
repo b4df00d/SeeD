@@ -2939,20 +2939,12 @@ public:
 
     }
 
-    // Wireframe overlay of the selected RenderSettingsVolume's bounds + blend-falloff boundary.
-    // Always-on-top (ImGui), projected with the editor camera. Reads the same fields the blend uses
-    // (Renderer's UpdateRenderSettings) so the gizmo matches the actual influence region.
-    void DrawVolumeGizmo(World::Entity sel)
+    // World-space line drawn always-on-top (ImGui background list), projected with the editor camera;
+    // skipped when an end is behind the camera
+    void DrawWorldLine(float3 a, float3 b, ImU32 col)
     {
-        auto& v = sel.Get<Components::RenderSettingsVolume>();
-        if (v.shape == 2) // Global / unbound: nothing to draw
-            return;
-
-        float4x4 world = ComputeWorldMatrix(sel);
         float4x4 viewProj = mul(inverse(editorState.cameraView), editorState.cameraProj);
         ImVec2 disp = ImGui::GetIO().DisplaySize;
-
-        // world point -> screen; false if behind the camera (segment is then skipped)
         auto W2S = [&](float3 p, ImVec2& out) -> bool
             {
                 float4 cp = mul(float4(p, 1), viewProj); // row-vector convention (engine uses mul(vec, mat))
@@ -2963,42 +2955,61 @@ public:
                 out = ImVec2((nx * 0.5f + 0.5f) * disp.x, (1.0f - (ny * 0.5f + 0.5f)) * disp.y);
                 return true;
             };
-        ImDrawList* dl = ImGui::GetBackgroundDrawList();
-        auto Line = [&](float3 a, float3 b, ImU32 col)
+        ImVec2 sa, sb;
+        if (W2S(a, sa) && W2S(b, sb))
+            ImGui::GetBackgroundDrawList()->AddLine(sa, sb, col, 1.5f);
+    }
+
+    // Three axis-aligned great circles
+    void DrawWireSphere(float3 center, float r, ImU32 col)
+    {
+        const float twoPi = 6.28318530718f;
+        const int seg = 32;
+        float3 axes[3][2] = { { float3(1, 0, 0), float3(0, 1, 0) }, { float3(0, 1, 0), float3(0, 0, 1) }, { float3(0, 0, 1), float3(1, 0, 0) } };
+        for (auto& ab : axes)
+        {
+            float3 prev = center + ab[0] * r;
+            for (int i = 1; i <= seg; i++)
             {
-                ImVec2 sa, sb;
-                if (W2S(a, sa) && W2S(b, sb)) dl->AddLine(sa, sb, col, 1.5f);
-            };
+                float t = twoPi * (float)i / (float)seg;
+                float3 cur = center + (ab[0] * cosf(t) + ab[1] * sinf(t)) * r;
+                DrawWorldLine(prev, cur, col);
+                prev = cur;
+            }
+        }
+    }
+
+    // Selected FogVolume: its sphere, with the same radius scaling as MainView::UpdateFogVolumes
+    void DrawFogVolumeGizmo(World::Entity sel)
+    {
+        auto& v = sel.Get<Components::FogVolume>();
+        float4x4 world = ComputeWorldMatrix(sel);
+        float scale = std::max(std::max((float)length(world[0].xyz), (float)length(world[1].xyz)), (float)length(world[2].xyz));
+        DrawWireSphere(world[3].xyz, v.radius * scale, IM_COL32(120, 200, 255, 255));
+    }
+
+    // Wireframe overlay of the selected RenderSettingsVolume's bounds + blend-falloff boundary.
+    // Reads the same fields the blend uses (Renderer's UpdateRenderSettings) so the gizmo matches
+    // the actual influence region.
+    void DrawVolumeGizmo(World::Entity sel)
+    {
+        auto& v = sel.Get<Components::RenderSettingsVolume>();
+        if (v.shape == 2) // Global / unbound: nothing to draw
+            return;
+
+        float4x4 world = ComputeWorldMatrix(sel);
+        auto Line = [&](float3 a, float3 b, ImU32 col) { DrawWorldLine(a, b, col); };
 
         const ImU32 boundsCol = IM_COL32(255, 220, 40, 255);
         const ImU32 blendCol = IM_COL32(255, 220, 40, 90);
-        const float twoPi = 6.28318530718f;
 
         float3 center = world[3].xyz;
 
         if (v.shape == 1) // Sphere: center + radius, ignores rotation/scale (matches the blend)
         {
-            auto circle = [&](float r, ImU32 col, float3 a, float3 b)
-                {
-                    const int seg = 32;
-                    float3 prev = center + a * r;
-                    for (int i = 1; i <= seg; i++)
-                    {
-                        float t = twoPi * (float)i / (float)seg;
-                        float3 cur = center + (a * cosf(t) + b * sinf(t)) * r;
-                        Line(prev, cur, col);
-                        prev = cur;
-                    }
-                };
-            auto sphere = [&](float r, ImU32 col)
-                {
-                    circle(r, col, float3(1, 0, 0), float3(0, 1, 0));
-                    circle(r, col, float3(0, 1, 0), float3(0, 0, 1));
-                    circle(r, col, float3(0, 0, 1), float3(1, 0, 0));
-                };
-            sphere(v.radius, boundsCol);
+            DrawWireSphere(center, v.radius, boundsCol);
             if (v.blendDistance > 0.0f)
-                sphere(v.radius + v.blendDistance, blendCol);
+                DrawWireSphere(center, v.radius + v.blendDistance, blendCol);
         }
         else // Box (shape==0): OBB from the Transform (half along axis i = length(world[i])*0.5)
         {
@@ -3036,6 +3047,8 @@ public:
             EditTransform(editorState.cameraView, editorState.cameraProj, editorState.selectedObject);
         if (editorState.selectedObject.IsValid() && editorState.selectedObject.Has<Components::RenderSettingsVolume>())
             DrawVolumeGizmo(editorState.selectedObject);
+        if (editorState.selectedObject.IsValid() && editorState.selectedObject.Has<Components::FogVolume>())
+            DrawFogVolumeGizmo(editorState.selectedObject);
     }
 };
 Guizmo guizmo;
@@ -3308,6 +3321,20 @@ public:
                         light.type = HLSL::LightType::Directional;
                         light.size = 0.025f;
                         light.castShadow = true;
+                        editorState.dirtyHierarchy = true;
+                    }
+                    if (ImGui::MenuItem("Fog Volume"))
+                    {
+                        World::Entity ent;
+                        editorState.selectedObject = ent.Make(Components::FogVolume::mask | Components::Transform::mask, "Fog Volume");
+                        auto& trans = ent.Get<Components::Transform>();
+                        trans.position = float3(0);
+                        trans.rotation = quaternion::identity();
+                        trans.scale = float3(1);
+                        auto& volume = ent.Get<Components::FogVolume>();
+                        volume.color = float3(1, 1, 1);
+                        volume.density = 0.05f;
+                        volume.radius = 5.0f;
                         editorState.dirtyHierarchy = true;
                     }
                     if (ImGui::MenuItem("Prefab"))
