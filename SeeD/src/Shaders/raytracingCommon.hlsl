@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 //#include "common.hlsl"
 
 #define SHADOW_RAY_INDEX                1
@@ -234,10 +234,7 @@ void GetLightData(HLSL::Light light, float3 surfacePos, float2 rand2, bool enabl
         {
             float d2 = square(distance / light.range);
             attenuation *= square(saturate(1.0f - square(d2)));   // (1 - (d/range)^4)^2
-            //if (attenuation == 0)  return;
         }
-        
-            //if (attenuation < 0.01)  return;
 
         float spotlight = 1.0f;
         if (light.type == HLSL::LightType::Spot)
@@ -358,7 +355,11 @@ bool SampleLightRIS(inout uint rngState, float3 hitPosition, float3 surfaceNorma
             const float candidateRISWeight = candidatePdfG * candidateWeight;
 
             totalWeights += candidateRISWeight;
-            if (Rand(rngState) < (candidateRISWeight / totalWeights))
+            // RNG, not Rand: Rand(rngState) silently resolved to Rand(float), a sin() hash of a
+            // ~1e9 value that is nowhere near uniform. The selection then ignored the weights while
+            // lightSampleWeight still assumed them, so a point light came out at a flat brightness
+            // anywhere its falloff was non-zero (hard cut at range, infinite reach with range 0).
+            if (RNG(rngState) * totalWeights < candidateRISWeight)
             {
                 selectedSample = candidate;
                 samplePdfG = candidatePdfG;
