@@ -1,5 +1,9 @@
 #include "structs.hlsl"
 
+#define SHARC_ENABLE_64_BIT_ATOMICS     1
+#define SHARC_SEPARATE_EMISSIVE         1
+#include "SharcCommon.h"
+
 cbuffer CustomRT : register(b3)
 {
     HLSL::RTParameters rtParameters;
@@ -22,11 +26,12 @@ cbuffer CustomAS : register(b4)
 #define TEMPORAL_BLEND                  0.05f // weight of the new frame in the froxel history (~20 frames)
 #define SPATIAL_FILTER                  1 // 3x3 tent on the history when integrating it (not written back)
 #define DEPTH_AWARE_SLICES              1 // a slice holding the visible surface is sampled only in front of it (see RayGen)
-#define FOG_DEBUG_LIGHTS                0 // 0: analytic lights + sky, 1: analytic lights only (RIS + shadow ray), 2: sky only
+#define FOG_INDIRECT_SHARC              0 // 1: an indirect ray hitting a surface takes that surface's SHARC radiance, 0: it counts as black (sky only)
+#define FOG_DEBUG_LIGHTS                0 // 0: analytic lights + indirect, 1: analytic lights only (RIS + shadow ray), 2: indirect only (sky + SHARC)
 #define BOUNCES_MIN                     1
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
 #define SHADOW_RAY_IN_RIS               0 // Enable this to cast shadow rays for each candidate during resampling. This is expensive but increases quality
-#define ENABLE_SPECULAR_LOBE            1 // Enable to use the specular lobe for splitting between diffuse and specular BRDFs
+#define ENABLE_SPECULAR_LOBE            0 // Enable to use the specular lobe for splitting between diffuse and specular BRDFs
 
 #include "raytracingCommon.hlsl"
 
@@ -54,6 +59,26 @@ float3 SampleHenyeyGreenstein(float g, float3 axis, float2 u)
     float3 bitangent = normalize(GetPerpendicularVector(axis));
     float3 tangent = cross(bitangent, axis);
     return normalize(axis * cosTheta + (tangent * cos(phi) + bitangent * sin(phi)) * sinTheta);
+}
+
+// Read-only view of the SHARC radiance cache, built exactly as raytracing2.hlsl does (same camera
+// for the grid levels, or the lookups miss its entries)
+SharcParameters GetSharcParameters()
+{
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+
+    SharcParameters sharcParameters;
+    sharcParameters.gridParameters.cameraPosition = cameras[0].worldPos.xyz;
+    sharcParameters.gridParameters.sceneScale = rtParameters.SHARCSceneScale;
+    sharcParameters.gridParameters.logarithmBase = SHARC_GRID_LOGARITHM_BASE;
+    sharcParameters.gridParameters.levelBias = SHARC_GRID_LEVEL_BIAS;
+    sharcParameters.hashMapData.capacity = rtParameters.SHARCEntriesNum;
+    sharcParameters.hashMapData.hashEntriesBuffer = ResourceDescriptorHeap[rtParameters.SHARCHashEntriesBufferIndex];
+    sharcParameters.accumulationBuffer = ResourceDescriptorHeap[rtParameters.SHARCAccumulationBufferIndex];
+    sharcParameters.resolvedBuffer = ResourceDescriptorHeap[rtParameters.SHARCResolvedBufferIndex];
+    sharcParameters.radianceScale = rtParameters.SHARCRadianceScale;
+    sharcParameters.enableAntiFireflyFilter = rtParameters.SHARCEnableAntifirefly;
+    return sharcParameters;
 }
 
 // Density of the global fog (RenderSettingsVolume) at a world position, multiplies fogScattering /
@@ -266,6 +291,22 @@ void RayGen()
     float g;
     FogMedium(worldPos, sigmaS, sigmaT, g);
 
+#if AERIAL_PERSPECTIVE_START > 0
+    // The planet atmosphere in front of AERIAL_PERSPECTIVE_START is carried by the froxels, which
+    // trace shadows (the aerial perspective volume does not: it lit building interiors with the sun).
+    // Rayleigh as isotropic, Mie with its g, mixed into one Henyey-Greenstein lobe like the haze layers
+    if (viewContext.atmosphere.transmittanceLUT != HLSL::invalidUINT && length(worldPos - camera.worldPos.xyz) < AERIAL_PERSPECTIVE_START)
+    {
+        HLSL::Atmosphere atmoMedium = viewContext.atmosphere;
+        MediumSample medium = SampleMedium(atmoMedium, AtmospherePosition(atmoMedium, worldPos));
+        float gWeighted = g * dot(sigmaS, 1.0f / 3.0f) + atmoMedium.mieAbsorption.w * dot(medium.scatteringMie, 0.001f / 3.0f);
+        sigmaS += medium.scattering * 0.001f; // 1/km -> 1/m
+        sigmaT += medium.extinction * 0.001f;
+        float scatteringMean = dot(sigmaS, 1.0f / 3.0f);
+        g = scatteringMean > 0.0f ? clamp(gWeighted / scatteringMean, -0.999f, 0.999f) : g;
+    }
+#endif
+
     // Empty froxel: no rays
     if (all(sigmaT <= 0.0f))
     {
@@ -307,13 +348,39 @@ void RayGen()
 #endif
 
 #if FOG_DEBUG_LIGHTS != 1
-    // Sky light: one occlusion-traced direction importance sampled from the phase function, so
-    // phase / pdf = 1 and the estimate is just the visible sky radiance
+    // Indirect light: one direction importance sampled from the phase function, so phase / pdf = 1
+    // and the estimate is just the radiance arriving along it: the sky on a miss and, with
+    // FOG_INDIRECT_SHARC, the SHARC cache on a hit (radiance leaving the hit surface toward the froxel,
+    // updated by lightingProbes; approximate: averaged over a hash grid voxel, view independent, one
+    // frame late). Without it a hit counts as black, through the cheaper shadow ray
     {
         float3 dir = SampleHenyeyGreenstein(g, viewDir, float2(RNG(rngState), RNG(rngState)));
+#if !FOG_INDIRECT_SHARC
         float3 visibility = CastShadowRay(AccelerationStructure, worldPos, 0, dir, TRACING_DISTANCE);
         if (any(visibility > 0.0f))
             inScattered += Sky(dir) * visibility;
+#else
+        RayDesc ray;
+        ray.Origin = worldPos;
+        ray.Direction = dir;
+        ray.TMin = 0.01f;
+        ray.TMax = TRACING_DISTANCE;
+        RayPayload payload; // filled by Miss / ClosestHit
+        TraceRay(AccelerationStructure, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
+        if (payload.hitDistance <= 0.0f) // not payload.Hit(): calling it here crashes dxc (internal compiler error)
+            inScattered += Sky(dir);
+        else
+        {
+            SurfaceData s = GetRTSurfaceData(payload.instanceID, payload.primitiveIndex, payload.geometryIndex, payload.barycentrics);
+            SharcHitData sharcHitData;
+            sharcHitData.positionWorld = worldPos + dir * payload.hitDistance;
+            sharcHitData.normalWorld = dot(s.objectNormal, dir) > 0.0f ? -s.objectNormal : s.objectNormal; // same key as raytracing2.hlsl
+            sharcHitData.emissive = s.emissiveColor;
+            float3 sharcRadiance;
+            if (SharcGetCachedRadiance(GetSharcParameters(), sharcHitData, sharcRadiance, false))
+                inScattered += sharcRadiance;
+        }
+#endif
     }
 #endif
 

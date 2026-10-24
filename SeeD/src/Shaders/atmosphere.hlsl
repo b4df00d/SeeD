@@ -14,6 +14,10 @@ static const uint MULTISCATTERING_LUT_SIZE = 32;
 static const uint2 SKYVIEW_LUT_SIZE = uint2(192, 108);
 static const uint AERIAL_PERSPECTIVE_SIZE = 32;
 static const float AERIAL_PERSPECTIVE_KM_PER_SLICE = 4.0f; // 128 km in total, slices squared toward the camera
+// Meters, integer (tested by #if). The aerial perspective volume has no shadowing, so in front of this distance the atmosphere
+// is injected in the froxels instead (AtmosphericScattering.hlsl RayGen), which trace shadow rays.
+// 0: the aerial perspective from the camera and no atmosphere in the froxels
+#define AERIAL_PERSPECTIVE_START        500
 
 // Keeps the view point strictly above the ground sphere, so ground intersections stay stable
 // at y = 0 (and for cameras below it, caves etc.)
@@ -145,12 +149,15 @@ bool MoveToTopAtmosphere(HLSL::Atmosphere atmo, inout float3 pos, float3 dir)
 
 // isotropicPhase: true for the multiple scattering LUT (paper section 5.5.2), false for the sky
 // multipleScattering: add Psi_ms from the LUT (needs it built), ground: add the lit ground at the ray's end
+// planetOccludes: the ground sphere ends the ray. false for the aerial perspective: there the scene
+// depth ends it, and the sphere is a stand-in for terrain that is not where the geometry is (an interior
+// at y ~ 0 has its "ground" a few meters under the camera, every downward ray would end on it)
 ScatteringResult IntegrateScatteredLuminance(HLSL::Atmosphere atmo, float3 pos, float3 dir, float3 sunDir,
-    uint sampleCount, bool isotropicPhase, bool multipleScattering, bool ground, float tMaxMax)
+    uint sampleCount, bool isotropicPhase, bool multipleScattering, bool ground, float tMaxMax, bool planetOccludes = true)
 {
     ScatteringResult result = (ScatteringResult)0;
 
-    float tBottom = RaySphereNearest(pos, dir, atmo.bottomRadius);
+    float tBottom = planetOccludes ? RaySphereNearest(pos, dir, atmo.bottomRadius) : -1.0f;
     float tTop = RaySphereNearest(pos, dir, atmo.topRadius);
     float tMax;
     if (tBottom < 0.0f)
@@ -174,6 +181,11 @@ ScatteringResult IntegrateScatteredLuminance(HLSL::Atmosphere atmo, float3 pos, 
         // mid-point of each segment
         float t = dt * (i + 0.5f);
         float3 p = pos + t * dir;
+        // under the ground sphere (planetOccludes false only): lit as at ground level (SampleMedium
+        // already clamps the altitude), not shadowed by the sphere it is inside of
+        float minHeight = atmo.bottomRadius + PLANET_RADIUS_OFFSET;
+        if (dot(p, p) < minHeight * minHeight)
+            p = normalize(p) * minHeight;
 
         MediumSample medium = SampleMedium(atmo, p);
         float3 sampleOpticalDepth = medium.extinction * dt;
@@ -301,24 +313,41 @@ float AerialPerspectiveSliceToKm(float slice) { return slice * AERIAL_PERSPECTIV
 
 // xyz: atmosphere in-scatter between the camera and the point (sun applied), w: transmittance
 // screenUV: the pixel's [0, 1] uv in the camera frustum, viewDistance: meters along the view ray
-float4 SampleAerialPerspective(HLSL::Atmosphere atmo, float2 screenUV, float viewDistance)
+float4 SampleAerialPerspectiveFromCamera(HLSL::Atmosphere atmo, float2 screenUV, float viewDistance)
 {
-    if (atmo.aerialPerspectiveLUT == HLSL::invalidUINT || atmo.sunIlluminance.w == 0.0f)
-        return float4(0, 0, 0, 1);
 
     float slice = viewDistance * 0.001f / AERIAL_PERSPECTIVE_KM_PER_SLICE;
-    // the first slice center is not at the camera: fade the first half-slice to nothing
+    // the first slice center is not at the camera: fade to nothing in front of it. Slices are squared,
+    // so that center is at 0.5^2 / size slices (~31 m), not 0.5 (2 km): fading over 2 km scaled the 2 km
+    // in-scatter down linearly, wrong wherever that 2 km ray was cut short
+    const float firstSlice = 0.25f / AERIAL_PERSPECTIVE_SIZE;
     float weight = 1.0f;
-    if (slice < 0.5f)
+    if (slice < firstSlice)
     {
-        weight = saturate(slice * 2.0f);
-        slice = 0.5f;
+        weight = saturate(slice / firstSlice);
+        slice = firstSlice;
     }
     float w = sqrt(slice / AERIAL_PERSPECTIVE_SIZE);
 
     Texture3D<float4> lut = ResourceDescriptorHeap[atmo.aerialPerspectiveLUT];
     float4 ap = lut.SampleLevel(samplerLinearClamp, float3(screenUV, w), 0) * weight;
     return float4(ap.rgb, 1.0f - ap.a);
+}
+
+// Same, from AERIAL_PERSPECTIVE_START to the point only (the froxels hold the atmosphere in front of
+// it): S(0, d) = S(0, start) + T(0, start) * S(start, d), T(0, d) = T(0, start) * T(start, d)
+float4 SampleAerialPerspective(HLSL::Atmosphere atmo, float2 screenUV, float viewDistance)
+{
+    if (atmo.aerialPerspectiveLUT == HLSL::invalidUINT || atmo.sunIlluminance.w == 0.0f || viewDistance <= AERIAL_PERSPECTIVE_START)
+        return float4(0, 0, 0, 1);
+
+    float4 toPoint = SampleAerialPerspectiveFromCamera(atmo, screenUV, viewDistance);
+#if AERIAL_PERSPECTIVE_START > 0
+    float4 toStart = SampleAerialPerspectiveFromCamera(atmo, screenUV, AERIAL_PERSPECTIVE_START);
+    float invStartT = 1.0f / max(toStart.w, 1e-4f);
+    toPoint = float4(max(toPoint.rgb - toStart.rgb, 0.0f) * invStartT, saturate(toPoint.w * invStartT));
+#endif
+    return toPoint;
 }
 
 // Radiance of the sun disk seen from pos along dir, attenuated by the atmosphere; 0 outside the disk

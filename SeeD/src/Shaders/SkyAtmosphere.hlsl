@@ -162,7 +162,7 @@ void AerialPerspectiveLUT(uint3 dtid : SV_DispatchThreadID)
     {
         // farther slices integrate longer paths: more samples
         uint sampleCount = max(1u, (dtid.z + 1) * 2);
-        ScatteringResult r = IntegrateScatteredLuminance(atmo, pos, dir, atmo.sunDirection.xyz, sampleCount, false, true, false, tMax);
+        ScatteringResult r = IntegrateScatteredLuminance(atmo, pos, dir, atmo.sunDirection.xyz, sampleCount, false, true, false, tMax, false);
         float meanTransmittance = dot(exp(-r.opticalDepth), 1.0f / 3.0f);
         result = float4(r.L * atmo.sunIlluminance.xyz, 1.0f - meanTransmittance);
     }

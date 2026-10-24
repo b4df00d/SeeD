@@ -508,7 +508,7 @@ namespace Components
         }
         if (ImGui::CollapsingHeader("Fog", ImGuiTreeNodeFlags_DefaultOpen))
         {
-            row(RSO_fogDensity,         "fogDensity",         &v->fogDensity,         0.05f,  1000,   ImGuiSliderFlags_Logarithmic);
+            row(RSO_fogDensity,         "fogDensity",         &v->fogDensity,         0.0f,  1000.0f, ImGuiSliderFlags_None);
             row3(RSO_fogScattering,     "fogScattering (1/m)", &v->fogScattering,     0.0001f, 0,     1);
             row3(RSO_fogAbsorption,     "fogAbsorption (1/m)", &v->fogAbsorption,     0.0001f, 0,     1);
             row(RSO_fogAnisotropy,      "fogAnisotropy",      &v->fogAnisotropy,      -0.99f, 0.99f,  0);
