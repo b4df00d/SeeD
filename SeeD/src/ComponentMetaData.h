@@ -36,6 +36,7 @@ knownComponents.push_back(
  	{ "Mesh", Components::Mesh::mask, nullptr, alignof(Components::Mesh), 
  		{
 			{ "id", PropertyTypes::_assetID, NULL, 1, offsetof(Components::Mesh, id), sizeof(Components::Mesh::id) },
+			{ "noRayTracing", PropertyTypes::_bool, NULL, 1, offsetof(Components::Mesh, noRayTracing), sizeof(Components::Mesh::noRayTracing) },
 		}
  	}); 
 // World.h

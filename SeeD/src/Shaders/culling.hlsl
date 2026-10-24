@@ -102,7 +102,9 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
         instanceDesc.InstanceMask = 0xFF;
         
     
-        bool culled = rawLod > viewContext.distanceCullingValueRT;
+        // mesh or material opted out of ray tracing: only in the TLAS when neither did
+        bool noRayTracing = (instance.rtFlags & HLSL::RTInstanceFlagNoRayTracing) || material.parameters[HLSL::MaterialNoRayTracingParam] != 0;
+        bool culled = noRayTracing || rawLod > viewContext.distanceCullingValueRT;
         if(culled)
             instanceDesc.AccelerationStructure = 0;
         else

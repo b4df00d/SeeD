@@ -3741,6 +3741,8 @@ public:
                     if (effectiveMesh->omm.textureHash != 0
                         && (!materialCmp.textures[0].IsValid() || materialCmp.textures[0].Get().id.hash != effectiveMesh->omm.textureHash))
                         instance.rtFlags |= HLSL::RTInstanceFlagDisableOMMs;
+                    if (meshCmp.noRayTracing)
+                        instance.rtFlags |= HLSL::RTInstanceFlagNoRayTracing;
                     instance.rayTracingBLAS = effectiveMesh->BLAS.GetResource()->GetGPUVirtualAddress();
                     // single-LOD meshes have no low BLAS: alias the high one so culling.hlsl can select blindly
                     instance.rayTracingBLASLow = effectiveMesh->BLASLow.GetResource() ? effectiveMesh->BLASLow.GetResource()->GetGPUVirtualAddress() : instance.rayTracingBLAS;

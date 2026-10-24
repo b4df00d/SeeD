@@ -170,6 +170,7 @@ namespace Components
     struct Mesh : ComponentBase<Mesh>
     {
         assetID id;
+        bool noRayTracing; // instances of this mesh are left out of the TLAS (see also MaterialNoRayTracingParam)
     };
 
     struct Texture : ComponentBase<Texture>
@@ -238,6 +239,12 @@ namespace Components
         int hazeLayer = (int)material->parameters[HLSL::MaterialHazeLayerParam];
         if (ImGui::SliderInt("haze layer", &hazeLayer, 0, HLSL::HazeLayerCount - 1))
             material->parameters[HLSL::MaterialHazeLayerParam] = (float)hazeLayer;
+        ImGui::Spacing();
+
+        // Read by culling.hlsl every frame: instances using this material get a null BLAS
+        bool noRayTracing = material->parameters[HLSL::MaterialNoRayTracingParam] != 0.0f;
+        if (ImGui::Checkbox("no ray tracing", &noRayTracing))
+            material->parameters[HLSL::MaterialNoRayTracingParam] = noRayTracing ? 1.0f : 0.0f;
         ImGui::Spacing();
     }
 

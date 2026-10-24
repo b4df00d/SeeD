@@ -2808,6 +2808,19 @@ public:
                             state.flags |= Components::State::Flags::physicsDirty;
                             state.flags |= Components::State::Flags::constraintDirty;
                             state.flags |= Components::State::Flags::vehicleDirty;
+
+                            // Mesh data (noRayTracing) is baked into each referencing instance's
+                            // rtFlags by UpdateInstances, which only revisits dirty instances
+                            if (metaData.mask == Components::Mesh::mask)
+                            {
+                                uint queryIndex = World::instance->Query(Components::Instance::mask, 0, false);
+                                auto& result = World::instance->frameQueries[queryIndex];
+                                for (uint r = 0; r < result.size(); r++)
+                                {
+                                    if (World::Entity(result[r].Get<Components::Instance>().mesh) == editorState.selectedObject)
+                                        result[r].Get<Components::State>().flags |= Components::State::Flags::instanceDirty;
+                                }
+                            }
                         }
 
                         ImGui::PopID();

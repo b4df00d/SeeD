@@ -356,6 +356,7 @@ namespace HLSL
     static const uint MaterialParametersCount = 24;
     static const uint MaterialDoubleSidedParam = 10; // parameters[10] != 0 : double-sided (CULL_NONE, no meshlet cone culling)
     static const uint MaterialHazeLayerParam = 11;   // parameters[11] : haze layer splatted into the haze map (HazeLayer index, 0 = none)
+    static const uint MaterialNoRayTracingParam = 12; // parameters[12] != 0 : instances using this material are left out of the TLAS (culling.hlsl)
     struct Material
     {
         float parameters[MaterialParametersCount];
@@ -429,6 +430,9 @@ namespace HLSL
     // set when the instance's material differs from the one the mesh's OMM was baked against:
     // culling.hlsl then adds D3D12_RAYTRACING_INSTANCE_FLAG_DISABLE_OMMS for that instance
     static const uint RTInstanceFlagDisableOMMs = 1u << 0;
+    // set when the instance's Components::Mesh has noRayTracing: culling.hlsl writes a null BLAS
+    // (inactive TLAS instance). The material's own opt-out is read on the GPU (MaterialNoRayTracingParam)
+    static const uint RTInstanceFlagNoRayTracing = 1u << 1;
 
     struct Instance
     {
