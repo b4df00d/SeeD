@@ -21,6 +21,7 @@ cbuffer CustomAS : register(b4)
 #define FOG_NOISE                       1 // 0: uniform fog (height falloff only), the noise parameters are ignored
 #define TEMPORAL_BLEND                  0.05f // weight of the new frame in the froxel history (~20 frames)
 #define SPATIAL_FILTER                  1 // 3x3 tent on the history when integrating it (not written back)
+#define DEPTH_AWARE_SLICES              1 // a slice holding the visible surface is sampled only in front of it (see RayGen)
 #define FOG_DEBUG_LIGHTS                0 // 0: analytic lights + sky, 1: analytic lights only (RIS + shadow ray), 2: sky only
 #define BOUNCES_MIN                     1
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
@@ -71,9 +72,97 @@ float FogDensity(float3 worldPos)
     return asParameters.fogDensity * heightDensity * noiseDensity;
 }
 
+#define HAZE_FADE_START         600     // frames without a splat before a haze map texel starts fading out
+#define HAZE_FADE_FRAMES        300
+#define HAZE_EDGE_FADE          16.0f   // texels: the coarsest level fades out toward its window border
+#define HAZE_LEVEL_BLEND        16.0f   // texels: a level blends into the next coarser one over its window border
+
+// One level of a haze layer's map at a world position: the density profile (0..1, before noise) above
+// the highest surface splatted in this texel; inWindow: the position is inside this level's window,
+// edge: its distance in texels to the window border
+float SurfaceHazeLevel(HLSL::HazeLayer layer, Texture2D<uint2> map, uint level, float3 worldPos, out bool inWindow, out float edge)
+{
+    // the read map was resolved last frame, with last frame's windows
+    float texelSize = HazeTexelSize(layer, level);
+    int2 origin = HazeOrigin(layer.previousOrigin, level);
+    int2 cell = HazeCell(worldPos.xz, texelSize);
+    int2 local = cell - origin;
+    int2 edges = min(local, int(layer.resolution) - 1 - local);
+    edge = float(min(edges.x, edges.y));
+    uint2 texel;
+    inWindow = HazeTexel(cell, origin, level, layer.resolution, texel);
+    if (!inWindow)
+        return 0.0f;
+    uint2 value = map[texel];
+    if (value.x == 0)
+        return 0.0f;
+
+    float coverage = saturate(1.0f - (float(value.y) - HAZE_FADE_START) / HAZE_FADE_FRAMES) * layer.coverage;
+
+    // exponential above the surface; full inside the slab, plus one texel of margin since the
+    // texel stores the highest point of its footprint (slopes); nothing further below (under water)
+    float h = worldPos.y - HazeHeight(value.x);
+    float profile = h >= 0.0f ? exp(-h / max(layer.height, 1e-3f)) : (h > -(layer.slab + texelSize) ? 1.0f : 0.0f);
+    return profile * coverage;
+}
+
+// One haze layer at a world position: its medium above the highest surface splatted in its map at
+// this xz. The map's levels are the same surfaces at two resolutions (a fine 128 m window inside a
+// coarse 1 km one), not separate media: inside the fine window only the fine level counts, an empty
+// fine texel means this layer has no surface there (falling back to the coarse level would smear
+// haze from the coarse texel's highest neighbour around it). The coarse level takes over outside,
+// blended over the fine window's border. The layers themselves add up in SurfaceHaze
+void SurfaceHazeLayer(HLSL::HazeLayer layer, float3 worldPos, float time, inout float3 sigmaS, inout float3 sigmaT, inout float gWeighted)
+{
+    Texture2D<uint2> map = ResourceDescriptorHeap[layer.readIndex];
+    bool fineInWindow, coarseInWindow;
+    float fineEdge, coarseEdge;
+    float fine = SurfaceHazeLevel(layer, map, 0, worldPos, fineInWindow, fineEdge);
+    float fineWeight = fineInWindow ? saturate(fineEdge / HAZE_LEVEL_BLEND) : 0.0f;
+    float density = fine;
+    if (fineWeight < 1.0f)
+    {
+        float coarse = SurfaceHazeLevel(layer, map, 1, worldPos, coarseInWindow, coarseEdge);
+        coarse *= saturate(coarseEdge / HAZE_EDGE_FADE);
+        density = lerp(coarse, fine, fineWeight);
+    }
+    if (density <= 0.0f)
+        return;
+
+    float3 p = (worldPos - layer.windG.xyz * time) * layer.noiseFrequency;
+    float noise = saturate((PerlinNoise3_Normalized(p) - layer.noiseThresholdLow) / max(layer.noiseThresholdHigh - layer.noiseThresholdLow, 1e-4f));
+    noise = noise * noise * (3.0f - 2.0f * noise);
+
+    float extinction = layer.albedoDensity.w * density * noise;
+    float3 scattering = layer.albedoDensity.xyz * extinction;
+    sigmaS += scattering;
+    sigmaT += extinction;
+    gWeighted += layer.windG.w * dot(scattering, 1.0f / 3.0f);
+}
+
+// Surface haze (structs.hlsl HazeMap / HazeLayer): every active layer, they stack (dust on the
+// ground under pollen in the canopy). gWeighted accumulates g * mean scattering, FogMedium divides it back
+void SurfaceHaze(float3 worldPos, inout float3 sigmaS, inout float3 sigmaT, inout float gWeighted)
+{
+    HLSL::HazeMap hazeMap = viewContext.hazeMap;
+    if (hazeMap.layersIndex == HLSL::invalidUINT)
+        return;
+    StructuredBuffer<HLSL::HazeLayer> layers = ResourceDescriptorHeap[hazeMap.layersIndex];
+    uint mask = hazeMap.activeMask;
+    while (mask != 0)
+    {
+        uint layerIndex = firstbitlow(mask);
+        mask &= mask - 1;
+        HLSL::HazeLayer layer = layers[layerIndex];
+        if (layer.readable != 0)
+            SurfaceHazeLayer(layer, worldPos, hazeMap.time, sigmaS, sigmaT, gWeighted);
+    }
+}
+
 // Fog medium at a world position: the global fog plus every local source. The single place to add
-// density sources (particles, a painted fog map, ...)
-void FogMedium(float3 worldPos, out float3 sigmaS, out float3 sigmaT)
+// density sources (particles, a painted fog map, ...). g: the Henyey-Greenstein anisotropy of the
+// mix, each source's g weighted by its scattering
+void FogMedium(float3 worldPos, out float3 sigmaS, out float3 sigmaT, out float g)
 {
     // Global fog. Its height falloff never reaches 0: below 1/1000 of the global density counts as
     // none (~350 m above fogHeight at the default falloff), so empty froxels skip their rays
@@ -99,6 +188,13 @@ void FogMedium(float3 worldPos, out float3 sigmaS, out float3 sigmaT)
             sigmaT += extinction;
         }
     }
+
+    // the global fog and the fog volumes share the global g
+    float globalG = asParameters.fogScattering.w;
+    float gWeighted = globalG * dot(sigmaS, 1.0f / 3.0f);
+    SurfaceHaze(worldPos, sigmaS, sigmaT, gWeighted);
+    float scatteringMean = dot(sigmaS, 1.0f / 3.0f);
+    g = scatteringMean > 0.0f ? clamp(gWeighted / scatteringMean, -0.999f, 0.999f) : globalG;
 }
 
 [shader("raygeneration")]
@@ -138,10 +234,37 @@ void RayGen()
     float3 worldPos = FroxelToWorld(froxelPos, currentFroxel.resolution.xyz, asParameters.specialNear, camera);
     float3 viewDir = FroxelViewDir(froxelPos.xy, currentFroxel.resolution.xy, camera);
 
+#if DEPTH_AWARE_SLICES
+    // The composite reads each pixel at its own depth, interpolating inside the slice that holds its
+    // surface. If the slice is sampled over its whole depth, a medium hugging the surface (surface
+    // haze) is averaged with the empty or occluded part behind it, and how much of it a pixel gets
+    // depends on where its surface falls in the slice: rings on flat ground or water. So a slice
+    // holding the visible surface is sampled only in front of it. Last frame's depth (HZB mip 0, ready
+    // since the HZB pass, which culling, and so this pass, waits for), reprojected along this ray
+    {
+        float sliceStart = FroxelToZ(DispatchRaysIndex().z - 1.0f, currentFroxel.resolution.z, asParameters.specialNear, camera.farClip);
+        float sliceEnd = FroxelToZ(DispatchRaysIndex().z, currentFroxel.resolution.z, asParameters.specialNear, camera.farClip);
+        float4 previousClip = mul(camera.previousViewProj, float4(camera.worldPos.xyz + viewDir * sliceEnd, 1.0f));
+        float2 previousUV = float2(previousClip.x, -previousClip.y) / previousClip.w * 0.5f + 0.5f;
+        if (previousClip.w > 0.0f && all(previousUV >= 0.0f) && all(previousUV < 1.0f))
+        {
+            Texture2D<float> previousDepth = ResourceDescriptorHeap[viewContext.HZB];
+            float depth = previousDepth.Load(int3(previousUV * viewContext.renderResolution.xy, 0));
+            if (depth > 0.0f) // reverse Z: 0 is the sky
+            {
+                float4 surface = mul(camera.previousViewProj_inv, float4(previousUV.x * 2.0f - 1.0f, 1.0f - previousUV.y * 2.0f, depth, 1.0f));
+                float surfaceDistance = dot(surface.xyz / surface.w - camera.worldPos.xyz, viewDir);
+                if (surfaceDistance > sliceStart && surfaceDistance < sliceEnd)
+                    worldPos = camera.worldPos.xyz + viewDir * lerp(sliceStart, surfaceDistance, 1.0f - jitterZ);
+            }
+        }
+    }
+#endif
+
     // ---- medium ----
     float3 sigmaS, sigmaT;
-    FogMedium(worldPos, sigmaS, sigmaT);
-    float g = asParameters.fogScattering.w;
+    float g;
+    FogMedium(worldPos, sigmaS, sigmaT, g);
 
     // Empty froxel: no rays
     if (all(sigmaT <= 0.0f))

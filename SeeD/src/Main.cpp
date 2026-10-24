@@ -281,8 +281,10 @@ struct Options
         GIAlbedo,
         GINormals,
         overdraw,
+        hazeMap,
     };
     DebugDraw debugDraw = DebugDraw::none;
+    int debugHazeLayer = 1; // haze layer shown by DebugDraw::hazeMap
 } options;
 
 

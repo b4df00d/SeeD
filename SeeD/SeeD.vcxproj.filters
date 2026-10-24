@@ -104,6 +104,12 @@
     <ClInclude Include="src\Physic.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\Calibration.h">
+      <Filter>Third Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ImageWriter.h">
+      <Filter>Third Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Main.cpp">
@@ -139,9 +145,15 @@
     <ClCompile Include="..\Third\ImGuizmo-master\ImGuizmo.cpp">
       <Filter>Third Files\imgui</Filter>
     </ClCompile>
+    <ClCompile Include="..\Third\DirectXTex-main\DirectXTex\DirectXTexD3D12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
+    <None Include="src\Shaders\meshCommon.hlsli">
+      <Filter>Source Files\Shaders</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="src\Shaders\mesh.hlsl">
@@ -208,6 +220,9 @@
       <Filter>Source Files\Shaders</Filter>
     </FxCompile>
     <FxCompile Include="src\Shaders\terrainMeshBake.hlsl">
+      <Filter>Source Files\Shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="src\Shaders\hazeMap.hlsl">
       <Filter>Source Files\Shaders</Filter>
     </FxCompile>
   </ItemGroup>

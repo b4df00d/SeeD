@@ -371,6 +371,7 @@ struct ViewWorld
     PerFrame<StructuredUploadBuffer<HLSL::Camera>> cameras;
     PerFrame<StructuredUploadBuffer<HLSL::Light>> lights;
     PerFrame<StructuredUploadBuffer<HLSL::FogVolume>> fogVolumes;
+    PerFrame<StructuredUploadBuffer<HLSL::HazeLayer>> hazeLayers; // always HLSL::HazeLayerCount entries, indexed by layer
     DirtyTrackingStructuredBuffer<World::Entity, HLSL::Material> materials;
     DirtyTrackingStructuredBuffer<World::Entity, HLSL::Instance> instances;
 
@@ -399,12 +400,16 @@ struct ViewWorld
             cameras.Get(i).Release();
             lights.Get(i).Release();
             fogVolumes.Get(i).Release();
+            hazeLayers.Get(i).Release();
             shaderBucketOffsets.Get(i).Release();
         }
         materials.Release();
         instances.Release();
     }
 };
+
+// ConstantBuffer::PushConstantBuffer copies a fixed 512-byte stride
+static_assert(sizeof(HLSL::ViewContext) <= 512, "HLSL::ViewContext outgrew the constant buffer stride");
 
 // life time : view (only updated on GPU)
 struct ViewContext
@@ -716,6 +721,9 @@ public:
         float2 jit = pixelToNDC(viewContext.jitterPixel);
         viewContextParams.jitter = float4(jit.x, jit.y, previousJit.x, previousJit.y);
         viewContextParams.atmosphere = atmosphere;
+        // no haze maps unless the view's GBuffers pass fills them in (MainView::UploadAndSetup)
+        viewContextParams.hazeMap = {};
+        viewContextParams.hazeMap.layersIndex = HLSL::invalidUINT;
 
         return viewContextParams;
     }
@@ -751,13 +759,15 @@ public:
             | (options.debugDraw == Options::DebugDraw::GIBounces ? HLSL::EditorDebugGIBounces : 0)
             | (options.debugDraw == Options::DebugDraw::GIAlbedo ? HLSL::EditorDebugGIAlbedo : 0)
             | (options.debugDraw == Options::DebugDraw::GINormals ? HLSL::EditorDebugGINormals : 0)
-            | (options.debugDraw == Options::DebugDraw::overdraw ? HLSL::EditorDebugOverdraw : 0);
+            | (options.debugDraw == Options::DebugDraw::overdraw ? HLSL::EditorDebugOverdraw : 0)
+            | (options.debugDraw == Options::DebugDraw::hazeMap ? HLSL::EditorDebugHazeMap : 0);
         editorContextParams.debugBufferHeapIndex = editorContext.indirectDebugBuffer.GetResource().uav.offset;
         editorContextParams.debugVerticesHeapIndex = editorContext.indirectDebugVertices.GetResource().uav.offset;
         editorContextParams.debugVerticesCountHeapIndex = editorContext.indirectDebugVerticesCount.GetResource().uav.offset;
         editorContextParams.cpuDebugVerticesHeapIndex = editorContext.cpuDebugVertices.GetResource().GetResource() != nullptr
             ? editorContext.cpuDebugVertices.GetResource().srv.offset : 0;
         editorContextParams.selectionResultIndex = editorContext.selectionResult.GetResource().uav.offset;
+        editorContextParams.debugHazeLayer = (uint)std::min(std::max(options.debugHazeLayer, 1), (int)HLSL::HazeLayerCount - 1);
 
         return editorContextParams;
     }
@@ -1517,12 +1527,108 @@ class GBuffers : public Pass
     ViewResource motion;
     ViewResource instanceID;
     ViewResource overdraw;
+
+    // Surface haze maps (structs.hlsl HazeLayer, hazeMap.hlsl), one set per active haze layer: the
+    // GBuffer pixel shaders splat into splat, Render resolves it into maps[frame % 2] after the draws,
+    // and FogMedium (compute queue, which never waits for this pass) reads the other one, last
+    // frame's: the graphics queue only reaches the next frame's resolve after Forward, which waits
+    // for AtmosphericScattering.
+    struct HazeLayerMaps
+    {
+        Resource splat;       // R32_UINT, the levels side by side
+        Resource maps[2];     // R32G32_UINT
+        uint resolution = 0;  // 0: no maps
+        int4 origin = int4(0, 0, 0, 0);
+        bool hasOrigin = false;
+        bool cleared = false;
+    };
+    static constexpr float hazeCoverage[HLSL::HazeMapLevels] = { 128.0f, 1024.0f }; // m, window side per level
+    HazeLayerMaps hazeLayerMaps[HLSL::HazeLayerCount];
+    uint hazeActiveMask = 0;
+    Components::Handle<Components::Shader> hazeResolveShader;
+    Components::Handle<Components::Shader> hazeClearSplatShader;
+    Components::Handle<Components::Shader> hazeClearShader;
+
+    void ReleaseHazeMaps(HazeLayerMaps& maps, bool deferred)
+    {
+        maps.splat.Release(deferred);
+        maps.maps[0].Release(deferred);
+        maps.maps[1].Release(deferred);
+        maps.resolution = 0;
+    }
+
+    // PushConstantBuffer copies its full 512-byte stride
+    D3D12_GPU_VIRTUAL_ADDRESS PushHazeParams(uint layerIndex, uint y = 0, uint z = 0)
+    {
+        uint params[512 / sizeof(uint)] = { layerIndex, y, z };
+        return ConstantBuffer::instance->PushConstantBuffer(params);
+    }
 public:
+
+    // Called once per frame after View::frame advanced (MainView::UploadAndSetup). layers: the
+    // artistic fields per layer index, resolution 0 for a slot without a HazeLayer; fills the map
+    // fields, (re)creates the maps of layers that appeared or changed resolution. Returns the active mask
+    uint SetupHazeMaps(View* view, float3 cameraPos, HLSL::HazeLayer* layers)
+    {
+        uint activeMask = 0;
+        for (uint i = 1; i < HLSL::HazeLayerCount; i++)
+        {
+            HLSL::HazeLayer& layer = layers[i];
+            HazeLayerMaps& maps = hazeLayerMaps[i];
+            layer.splatIndex = HLSL::invalidUINT;
+            layer.writeIndex = HLSL::invalidUINT;
+            layer.readIndex = HLSL::invalidUINT;
+            layer.readable = 0;
+            if (layer.resolution == 0)
+            {
+                if (maps.resolution != 0)
+                    ReleaseHazeMaps(maps, true);
+                continue;
+            }
+            if (maps.resolution != layer.resolution)
+            {
+                // CreateTexture defers the release of the previous texture
+                uint2 size = uint2(layer.resolution * HLSL::HazeMapLevels, layer.resolution);
+                maps.splat.CreateTexture(size, DXGI_FORMAT_R32_UINT, false, "hazeSplat");
+                maps.maps[0].CreateTexture(size, DXGI_FORMAT_R32G32_UINT, false, "hazeMap0");
+                maps.maps[1].CreateTexture(size, DXGI_FORMAT_R32G32_UINT, false, "hazeMap1");
+                maps.resolution = layer.resolution;
+                maps.hasOrigin = false;
+                maps.cleared = false;
+            }
+
+            float texelSize[HLSL::HazeMapLevels];
+            int origin[HLSL::HazeMapLevels * 2];
+            for (uint level = 0; level < HLSL::HazeMapLevels; level++)
+            {
+                texelSize[level] = hazeCoverage[level] / (float)layer.resolution;
+                origin[level * 2 + 0] = (int)floorf((float)cameraPos.x / texelSize[level]) - (int)layer.resolution / 2;
+                origin[level * 2 + 1] = (int)floorf((float)cameraPos.z / texelSize[level]) - (int)layer.resolution / 2;
+            }
+            int4 currentOrigin = int4(origin[0], origin[1], origin[2], origin[3]);
+            layer.origin = currentOrigin;
+            layer.previousOrigin = maps.hasOrigin ? maps.origin : currentOrigin;
+            layer.texelSize = float4(texelSize[0], texelSize[1], 0.0f, 0.0f);
+            layer.splatIndex = maps.splat.uav.offset;
+            layer.writeIndex = maps.maps[view->frame % 2].uav.offset;
+            layer.readIndex = maps.maps[(view->frame + 1) % 2].srv.offset;
+            layer.readable = maps.cleared ? 1 : 0;
+            maps.origin = currentOrigin;
+            maps.hasOrigin = true;
+            activeMask |= 1u << i;
+        }
+        hazeActiveMask = activeMask;
+        return activeMask;
+    }
 
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
         Pass::On(view, queue, _name, _dependency, _dependency2);
         ZoneScoped;
+        hazeResolveShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\hazeMap.hlsl|Resolve");
+        hazeClearSplatShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\hazeMap.hlsl|ClearSplat");
+        hazeClearShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\hazeMap.hlsl|Clear");
+        hazeActiveMask = 0;
         albedo.Register("albedo", view);
         albedo.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "albedo");
         specularAlbedo.Register("specularAlbedo", view);
@@ -1575,6 +1681,9 @@ public:
         motion.Unregister();
         instanceID.Unregister();
         overdraw.Unregister();
+        for (HazeLayerMaps& maps : hazeLayerMaps)
+            if (maps.resolution != 0)
+                ReleaseHazeMaps(maps, false);
     }
     void Setup(View* view) override
     {
@@ -1601,12 +1710,40 @@ public:
             overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
-        Resource rts[] = { albedo.Get(), specularAlbedo.Get(), normal.Get(), metalness.Get(), motion.Get(), instanceID.Get()};
-        SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true, false);
-
         auto commonResourcesIndicesAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewWorld.commonResourcesIndices);
         auto viewContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->viewContext.viewContext);
         auto editorContextAddress = ConstantBuffer::instance->PushConstantBuffer(&view->editorContext.editorContext);
+
+        // Haze maps: new maps are uninitialized, clear them first; then the splats go UAV for the draws
+        auto bindHaze = [&](Components::Handle<Components::Shader>& shaderHandle)
+        {
+            Shader& shader = *AssetLibrary::instance->Get<Shader>(shaderHandle.Get().id, true);
+            commandBuffer->SetCompute(shader);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+        };
+        for (uint i = 1; i < HLSL::HazeLayerCount; i++)
+        {
+            if (!(hazeActiveMask & (1u << i)))
+                continue;
+            HazeLayerMaps& maps = hazeLayerMaps[i];
+            maps.splat.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            if (!maps.cleared)
+            {
+                bindHaze(hazeClearShader);
+                commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, PushHazeParams(i, maps.maps[0].uav.offset, maps.maps[1].uav.offset));
+                maps.maps[0].Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                maps.maps[1].Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                commandBuffer->cmd->Dispatch((maps.resolution * HLSL::HazeMapLevels + 7) / 8, (maps.resolution + 7) / 8, 1);
+                maps.maps[0].Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+                maps.maps[1].Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+                maps.splat.Barrier(commandBuffer.Get());
+                maps.cleared = true;
+            }
+        }
+
+        Resource rts[] = { albedo.Get(), specularAlbedo.Get(), normal.Get(), metalness.Get(), motion.Get(), instanceID.Get()};
+        SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true, false);
 
         for (uint bucketIndex = 0; bucketIndex < view->viewWorld.shaderBuckets.size(); bucketIndex++)
         {
@@ -1654,6 +1791,39 @@ public:
             overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
 
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
+
+        // Haze map resolve per layer: this frame's splats (blurred) + last frame's map -> this frame's
+        // map, then the splats are cleared (after a barrier: the blur reads neighbouring splats)
+        if (hazeActiveMask != 0)
+        {
+            GPUMarker marker(commandBuffer.Get(), "hazeMapResolve");
+            for (uint i = 1; i < HLSL::HazeLayerCount; i++)
+            {
+                if (!(hazeActiveMask & (1u << i)))
+                    continue;
+                HazeLayerMaps& maps = hazeLayerMaps[i];
+                Resource& hazeWrite = maps.maps[view->frame % 2];
+                Resource& hazeRead = maps.maps[(view->frame + 1) % 2];
+                uint dispatchX = (maps.resolution * HLSL::HazeMapLevels + 7) / 8;
+                uint dispatchY = (maps.resolution + 7) / 8;
+                auto hazeParamsAddress = PushHazeParams(i);
+
+                maps.splat.Barrier(commandBuffer.Get());
+                hazeRead.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                hazeWrite.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                bindHaze(hazeResolveShader);
+                commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, hazeParamsAddress);
+                commandBuffer->cmd->Dispatch(dispatchX, dispatchY, 1);
+                hazeWrite.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+                hazeRead.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+
+                maps.splat.Barrier(commandBuffer.Get());
+                bindHaze(hazeClearSplatShader);
+                commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, hazeParamsAddress);
+                commandBuffer->cmd->Dispatch(dispatchX, dispatchY, 1);
+                maps.splat.Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+            }
+        }
 
         Close();
     }
@@ -2509,7 +2679,7 @@ class AtmosphericScattering : public Pass
     Components::Handle<Components::Shader> atmosphericScatteringReprojectionShader;
     Components::Handle<Components::Shader> atmosphericScatteringAccumulationShader;
 
-    uint3 atmoSize = float3(160, 90, 128) * 0.75f;
+    uint3 atmoSize = float3(160, 90, 192) * 0.75f;
 
 public:
     HLSL::AtmosphericScatteringParameters asparams = {}; // artistic fields written every frame by MainView::UpdateRenderSettings
@@ -3287,6 +3457,7 @@ public:
     bool baseSettingsCaptured = false;
 
     HLSL::Camera mainCamera = {}; // last-computed main (camera index 0) camera; read directly by Systems::TerrainStreaming via Renderer::instance->mainView
+    HLSL::HazeLayer hazeLayerData[HLSL::HazeLayerCount] = {}; // UpdateHazeLayers -> UploadAndSetup
 
     void On(uint2 _displayResolution, uint2 _renderResolution) override
     {
@@ -3358,6 +3529,7 @@ public:
         tf::Task updateInstances = UpdateInstances(world, subflow);
         tf::Task updateLights = UpdateLights(world, subflow);
         tf::Task updateFogVolumes = UpdateFogVolumes(world, subflow);
+        tf::Task updateHazeLayers = UpdateHazeLayers(world, subflow);
         tf::Task updateCameras = UpdateCameras(world, subflow);
         tf::Task updateRenderSettings = UpdateRenderSettings(world, subflow);
 
@@ -3386,10 +3558,10 @@ public:
         SUBTASKVIEWPASS(postProcess);
         SUBTASKVIEWPASS(present);
 
-        reset.precede(updateInstances, updateMaterials, updateLights, updateFogVolumes, updateCameras); // should precede all, user need to check that
+        reset.precede(updateInstances, updateMaterials, updateLights, updateFogVolumes, updateHazeLayers, updateCameras); // should precede all, user need to check that
         updateInstances.succeed(updateMaterials);
         structuredCommandBufferUpdateTask.succeed(updateInstances);
-        uploadAndSetup.succeed(structuredCommandBufferUpdateTask, updateLights, updateFogVolumes, updateCameras, updateRenderSettings); // ViewContext::atmosphere needs the blended settings
+        uploadAndSetup.succeed(structuredCommandBufferUpdateTask, updateLights, updateFogVolumes, updateHazeLayers, updateCameras, updateRenderSettings); // ViewContext::atmosphere needs the blended settings
         updateRenderSettings.precede(atmospehricScatteringTask, postProcessHalfResTask, postProcessTask);
         // no need to put unnecessary dependencies on upload and setup (passes that do not use the view world data)
         // weeeelllll for all passes that use the camera need to wait for upload and setup to be sure the camera data is updated (just in case the buffers used are new because they are bigger)
@@ -3442,6 +3614,7 @@ public:
                 //raytracingContext.instancesRayTracing->Clear();
                 viewWorld.lights->Clear();
                 viewWorld.fogVolumes->Clear();
+                viewWorld.hazeLayers->Clear();
                 viewWorld.cameras->Clear();
             }
         ).name("Reset");
@@ -3784,6 +3957,53 @@ public:
         return task;
     }
 
+    // HazeLayer components -> hazeLayerData, one slot per layer index; UploadAndSetup adds the map
+    // fields (GBuffers::SetupHazeMaps) and uploads it to viewWorld.hazeLayers (sampled by SurfaceHaze in
+    // AtmosphericScattering.hlsl). Unused slots keep resolution 0 (no maps); layer 0 is "no haze"
+    tf::Task UpdateHazeLayers(World& world, tf::Subflow& subflow)
+    {
+        ZoneScoped;
+        tf::Task task = subflow.emplace(
+            [this, &world]()
+            {
+                ZoneScoped;
+                HLSL::HazeLayer* layers = this->hazeLayerData;
+                for (uint i = 0; i < HLSL::HazeLayerCount; i++)
+                    layers[i] = {};
+                uint queryIndex = world.Query(Components::HazeLayer::mask, 0, true);
+                for (auto& e : world.frameQueries[queryIndex])
+                {
+                    auto& haze = e.Get<Components::HazeLayer>();
+                    if (haze.layer == 0 || haze.layer >= HLSL::HazeLayerCount)
+                        continue;
+                    // a component created over uninitialized memory can hold NaN or absurd values:
+                    // NaN becomes a white 65000 froxel, a huge height or slab puts haze in the sky
+                    float values[] = { (float)haze.color.x, (float)haze.color.y, (float)haze.color.z, haze.density, haze.height, haze.slab, haze.anisotropy,
+                                       (float)haze.wind.x, (float)haze.wind.y, (float)haze.wind.z, haze.noiseFrequency, haze.noiseThresholdLow, haze.noiseThresholdHigh, haze.upThreshold, haze.coverage };
+                    bool finite = true;
+                    for (float v : values)
+                        finite &= std::isfinite(v);
+                    if (!finite)
+                        continue;
+                    auto clampf = [](float v, float lo, float hi) { return std::min(std::max(v, lo), hi); };
+                    HLSL::HazeLayer& layer = layers[haze.layer];
+                    layer.albedoDensity = float4(saturate(haze.color), clampf(haze.density, 0.0f, 100.0f));
+                    layer.windG = float4(haze.wind, clampf(haze.anisotropy, -0.999f, 0.999f));
+                    layer.height = clampf(haze.height, 0.001f, 100.0f);
+                    layer.slab = clampf(haze.slab, 0.0f, 100.0f);
+                    layer.noiseFrequency = clampf(haze.noiseFrequency, 0.0f, 100.0f);
+                    layer.noiseThresholdLow = clampf(haze.noiseThresholdLow, 0.0f, 1.0f);
+                    layer.noiseThresholdHigh = clampf(haze.noiseThresholdHigh, 0.0f, 1.0f);
+                    layer.upThreshold = clampf(haze.upThreshold, 0.0f, 1.0f);
+                    layer.coverage = clampf(haze.coverage, 0.0f, 1.0f);
+                    layer.blurRadius = std::min(haze.blurRadius, 8u);
+                    layer.resolution = std::min(std::max(haze.resolution, 16u), 2048u);
+                }
+            }
+        ).name("Update haze layers");
+        return task;
+    }
+
     tf::Task UpdateCameras(World& world, tf::Subflow& subflow)
     {
         ZoneScoped;
@@ -4111,6 +4331,17 @@ public:
 
                 this->viewWorld.commonResourcesIndices = SetupCommonResourcesParams();
                 this->viewContext.viewContext = SetupViewContextParams();
+                // after SetupViewContextParams: the haze maps alternate on View::frame
+                HLSL::HazeLayer hazeLayers[HLSL::HazeLayerCount];
+                for (uint i = 0; i < HLSL::HazeLayerCount; i++)
+                    hazeLayers[i] = this->hazeLayerData[i];
+                uint hazeActiveMask = gBuffers.SetupHazeMaps(this, mainCamera.worldPos.xyz, hazeLayers);
+                this->viewWorld.hazeLayers->AddRange(hazeLayers, HLSL::HazeLayerCount);
+                this->viewWorld.hazeLayers->Upload();
+                HLSL::HazeMap& hazeMap = this->viewContext.viewContext.hazeMap;
+                hazeMap.layersIndex = this->viewWorld.hazeLayers->gpuData.srv.offset;
+                hazeMap.activeMask = hazeActiveMask;
+                hazeMap.time = Time::instance->seconds;
                 this->raytracingContext.rtParameters = SetupRayTracingContextParams();
                 this->editorContext.editorContext = SetupEditorParams();
             }

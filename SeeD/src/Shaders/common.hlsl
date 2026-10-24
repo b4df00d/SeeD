@@ -338,6 +338,44 @@ uint JenkinsHash(uint x)
     return x;
 }
 
+// ---- Surface haze maps (structs.hlsl HazeMap / HazeLayer) ----
+// A texel holds the highest splatted surface of its layer as a 24-bit quantized world y, so a single
+// InterlockedMax keeps the top surface. 0 = none.
+
+float HazeTexelSize(HLSL::HazeLayer layer, uint level)
+{
+    return level == 0 ? layer.texelSize.x : layer.texelSize.y;
+}
+
+int2 HazeOrigin(int4 origins, uint level)
+{
+    return level == 0 ? origins.xy : origins.zw;
+}
+
+int2 HazeCell(float2 worldXZ, float texelSize)
+{
+    return int2(floor(worldXZ / texelSize));
+}
+
+// Toroidal addressing: the window [origin, origin + resolution) maps cell c to texel c mod resolution
+bool HazeTexel(int2 cell, int2 origin, uint level, uint resolution, out uint2 texel)
+{
+    int2 local = cell - origin;
+    int res = int(resolution);
+    texel = uint2(((cell % res) + res) % res) + uint2(level * resolution, 0);
+    return all(local >= 0) && all(local < res);
+}
+
+uint HazeQuantize(float worldY)
+{
+    return max(uint(saturate(worldY / HLSL::HazeHeightRange + 0.5f) * 16777215.0f), 1u);
+}
+
+float HazeHeight(uint quantized)
+{
+    return (float(quantized) / 16777215.0f - 0.5f) * HLSL::HazeHeightRange;
+}
+
 // Maps integers to colors using the hash function (generates pseudo-random colors)
 float3 HashAndColor(int i)
 {

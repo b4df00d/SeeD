@@ -182,7 +182,7 @@ namespace Components
         Handle<Shader> shader;
         Handle<Texture> textures[HLSL::MaterialTextureCount]; //name:[albedo, roughness, metalness, normal, occlusion, emissive]
         // 0,1,2 albedo RGB | 3 roughness | 4 metalness | 5 normal scale |
-        // 6 cutout threshold (0 = opaque) | 7,8,9 emissive RGB
+        // 6 cutout threshold (0 = opaque) | 7,8,9 emissive RGB | 10 double sided | 11 haze layer
         float parameters[HLSL::MaterialParametersCount];
     };
     static void MaterialPropertyDraw(char* mat)
@@ -232,6 +232,12 @@ namespace Components
         bool doubleSided = material->parameters[HLSL::MaterialDoubleSidedParam] != 0.0f;
         if (ImGui::Checkbox("double sided", &doubleSided))
             material->parameters[HLSL::MaterialDoubleSidedParam] = doubleSided ? 1.0f : 0.0f;
+        ImGui::Spacing();
+
+        // HazeLayer component index this material's surfaces emit (0 = none)
+        int hazeLayer = (int)material->parameters[HLSL::MaterialHazeLayerParam];
+        if (ImGui::SliderInt("haze layer", &hazeLayer, 0, HLSL::HazeLayerCount - 1))
+            material->parameters[HLSL::MaterialHazeLayerParam] = (float)hazeLayer;
         ImGui::Spacing();
     }
 
@@ -556,6 +562,61 @@ namespace Components
             v->color = float3(c[0], c[1], c[2]);
         ImGui::DragFloat("density (1/m)", &v->density, 0.001f, 0.0f, 100.0f, "%.4f", ImGuiSliderFlags_Logarithmic);
         ImGui::DragFloat("radius (m)", &v->radius, 0.1f, 0.0f, 100000.0f);
+    }
+
+    // A surface haze type (water vapor, dust, pollen...): materials whose haze layer index matches
+    // `layer` splat their surfaces into the haze map, and FogMedium adds this medium above them
+    struct HazeLayer : ComponentBase<HazeLayer>
+    {
+        uint layer = 1;                                  // 1 .. HLSL::HazeLayerCount - 1, matched by the material's haze layer
+        float3 color = float3(0.9f, 0.9f, 0.9f);         // single-scattering albedo: scatters color, absorbs 1 - color
+        float density = 0.2f;                            // extinction at the surface, 1/m
+        float height = 0.5f;                             // m, falls off as exp(-h / height) above the surface
+        float slab = 0.0f;                               // m below the top surface still inside the medium (canopy depth)
+        float anisotropy = 0.7f;                         // Henyey-Greenstein g
+        float3 wind = float3(0.4f, 0.05f, 0.2f);         // noise scroll, m/s
+        float noiseFrequency = 0.5f;                     // 1/m
+        float noiseThresholdLow = 0.3f;
+        float noiseThresholdHigh = 0.8f;
+        uint resolution = 256;                           // haze map texels per side, per level (windows of 128 m and 1 km)
+        float upThreshold = 0.5f;                        // minimum surface normal y to splat; 0 for foliage
+        uint blurRadius = 1;                             // texels, averages the sparse splats when accumulated
+        float coverage = 1.0f;                           // 0..1, multiplies each map texel's coverage
+    };
+    static void HazeLayerPropertyDraw(char* p)
+    {
+        HazeLayer* v = (HazeLayer*)p;
+        int layer = (int)v->layer;
+        if (ImGui::SliderInt("layer", &layer, 1, HLSL::HazeLayerCount - 1))
+            v->layer = (uint)layer;
+        float c[3];
+        store(v->color, c);
+        if (ImGui::ColorEdit3("color (albedo)", c))
+            v->color = float3(c[0], c[1], c[2]);
+        ImGui::DragFloat("density (1/m)", &v->density, 0.001f, 0.0f, 100.0f, "%.4f", ImGuiSliderFlags_Logarithmic);
+        ImGui::DragFloat("height (m)", &v->height, 0.01f, 0.01f, 100.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        ImGui::DragFloat("slab (m)", &v->slab, 0.01f, 0.0f, 100.0f);
+        ImGui::SliderFloat("anisotropy", &v->anisotropy, -0.99f, 0.99f);
+        store(v->wind, c);
+        if (ImGui::DragFloat3("wind (m/s)", c, 0.01f))
+            v->wind = float3(c[0], c[1], c[2]);
+        ImGui::DragFloat("noise frequency", &v->noiseFrequency, 0.01f, 0.0f, 100.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("noise threshold low", &v->noiseThresholdLow, 0.0f, 1.0f);
+        ImGui::SliderFloat("noise threshold high", &v->noiseThresholdHigh, 0.0f, 1.0f);
+
+        const uint resolutions[] = { 64, 128, 256, 512, 1024 };
+        const char* resolutionNames[] = { "64", "128", "256", "512", "1024" };
+        int current = 2;
+        for (int i = 0; i < ARRAYSIZE(resolutions); i++)
+            if (resolutions[i] == v->resolution)
+                current = i;
+        if (ImGui::Combo("map resolution", &current, resolutionNames, ARRAYSIZE(resolutionNames)))
+            v->resolution = resolutions[current];
+        ImGui::SliderFloat("up threshold", &v->upThreshold, 0.0f, 1.0f);
+        int blur = (int)v->blurRadius;
+        if (ImGui::SliderInt("blur radius (texels)", &blur, 0, 4))
+            v->blurRadius = (uint)blur;
+        ImGui::SliderFloat("coverage", &v->coverage, 0.0f, 1.0f);
     }
 
     struct MeshOverride : ComponentBase<MeshOverride>

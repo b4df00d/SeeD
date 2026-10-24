@@ -177,6 +177,50 @@ namespace HLSL
         uint pad2;
     };
 
+    // Surface haze maps (hazeMap.hlsl): one per active haze layer, a top-down, camera-centered,
+    // toroidal world-space map of the highest upward-facing surface of that layer's materials per
+    // texel, splatted by the GBuffer pixel shaders and read by FogMedium. HazeMapLevels levels side by
+    // side in one texture (level L at x offset L * resolution), each covering HazeMapCoverage[L] m.
+    static const uint HazeMapLevels = 2;
+    static const uint HazeLayerCount = 16;  // Components::HazeLayer::layer and the material's haze layer index, 0 = no haze
+    static const float HazeHeightRange = 8192.0f; // world y in [-range/2, range/2) quantized on 24 bits
+    struct HazeMap
+    {
+        uint layersIndex;     // SRV StructuredBuffer<HazeLayer>[HazeLayerCount], invalidUINT when the view has no haze maps
+        uint activeMask;      // bit i: layer i has maps this frame
+        float time;           // s, the haze noise animation
+        uint pad0;
+    };
+
+    // Components::HazeLayer + its maps, uploaded every frame (MainView::UploadAndSetup), indexed by layer
+    struct HazeLayer
+    {
+        float4 albedoDensity; // xyz: single-scattering albedo, w: extinction at the surface (1/m)
+        float4 windG;         // xyz: noise scroll (m/s), w: Henyey-Greenstein g
+        float height;         // m, density falls off as exp(-h / height) above the surface
+        float slab;           // m below the top surface counted as inside the medium (vegetation canopy)
+        float noiseFrequency; // 1/m
+        float noiseThresholdLow;
+        float noiseThresholdHigh;
+        float upThreshold;    // minimum world normal y (|y| on double-sided materials) of a splatting surface
+        uint blurRadius;      // texels: the resolve averages this frame's splats over this radius
+        uint resolution;      // texels per level side
+
+        int4 origin;          // this frame's window origin cell (x, z) per level: xy level 0, zw level 1
+        int4 previousOrigin;  // last frame's, the windows the read map was resolved with
+        float4 texelSize;     // xy: m per texel for level 0 / 1
+
+        uint splatIndex;      // UAV RWTexture2D<uint>: this frame's InterlockedMax splats (quantized height), invalidUINT when inactive
+        uint writeIndex;      // UAV RWTexture2D<uint2>: resolved this frame (x: quantized height, 0 = none, y: age in frames)
+        uint readIndex;       // SRV Texture2D<uint2>: resolved last frame, the resolve history and what FogMedium samples
+        uint readable;        // 0 on the frame the maps were (re)created: FogMedium (compute queue) may run before GBuffers clears them
+
+        float coverage;       // 0..1, multiplies each texel's age coverage
+        float pad1;
+        float pad2;
+        float pad3;
+    };
+
     struct ViewContext
     {
         float4 renderResolution; //x, y, 1/x, 1/y
@@ -218,7 +262,8 @@ namespace HLSL
         uint meshletsCulledArgsSRVIndex; // read-only views of the culled lists, for the GBuffer mesh shaders
         uint meshletsCulledArgsSortedSRVIndex;
         uint meshDispatchArgsIndex; // one MeshDispatchArgs per shader bucket (UAV, written by BuildMeshDispatchArgs)
-        Atmosphere atmosphere; // last: 16-byte aligned on both sides
+        Atmosphere atmosphere; // 16-byte aligned on both sides
+        HazeMap hazeMap;       // after atmosphere: one 16-byte row
     };
     
     struct Shader
@@ -310,6 +355,7 @@ namespace HLSL
     static const uint MaterialTextureCount = 7;
     static const uint MaterialParametersCount = 24;
     static const uint MaterialDoubleSidedParam = 10; // parameters[10] != 0 : double-sided (CULL_NONE, no meshlet cone culling)
+    static const uint MaterialHazeLayerParam = 11;   // parameters[11] : haze layer splatted into the haze map (HazeLayer index, 0 = none)
     struct Material
     {
         float parameters[MaterialParametersCount];
@@ -718,6 +764,7 @@ namespace HLSL
     static const uint EditorDebugGIAlbedo        = 1u << 9;
     static const uint EditorDebugGINormals       = 1u << 10;
     static const uint EditorDebugOverdraw        = 1u << 11;
+    static const uint EditorDebugHazeMap         = 1u << 12;
 
     struct EditorContext
     {
@@ -727,6 +774,7 @@ namespace HLSL
         uint debugVerticesCountHeapIndex;
         uint cpuDebugVerticesHeapIndex; // CPU-authored lines (physics colliders), drawn directly
         uint selectionResultIndex;
+        uint debugHazeLayer; // layer shown by EditorDebugHazeMap
     };
     
     struct SelectionResult

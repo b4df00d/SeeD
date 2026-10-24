@@ -132,6 +132,8 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts, MSPrim inPrim)
     if((o.albedo.a+0.01) < material.parameters[6]) discard;
 #endif
 
+    HazeSplat(inVerts.pos.xy, inVerts.currentPos, inVerts.normal, material);
+
     if (editorContext.debugFlags & HLSL::EditorDebugOverdraw) // count shaded fragments per pixel for the overdraw heatmap
     {
         RWTexture2D<uint> overdraw = ResourceDescriptorHeap[viewContext.overdrawIndex];

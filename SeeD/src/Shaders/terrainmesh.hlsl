@@ -89,6 +89,8 @@ PS_OUTPUT PixelgBufferTerrain(MSVert inVerts, MSPrim inPrim)
         o.albedo.xyz = RandUINT(inPrim.meshletIndex * HLSL::max_triangles + inPrim.primitiveID); // unique seed per triangle
     }
 
+    HazeSplat(inVerts.pos.xy, inVerts.currentPos, inVerts.normal, material);
+
     if (editorContext.debugFlags & HLSL::EditorDebugOverdraw) // count shaded fragments per pixel for the overdraw heatmap
     {
         RWTexture2D<uint> overdraw = ResourceDescriptorHeap[viewContext.overdrawIndex];

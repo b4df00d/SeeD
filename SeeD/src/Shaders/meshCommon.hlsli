@@ -131,3 +131,51 @@ uint3 DecodeMeshletTriangle(uint groupThreadId)
     // a mirrored instance flips the screen-space winding: swap back so CULL_BACK keeps its front faces
     return worldDetSign < 0.0f ? tri.xzy : tri;
 }
+
+// Surface haze (structs.hlsl HazeMap / HazeLayer): splats this fragment's surface into its haze
+// layer's map, called by the GBuffer pixel shaders after any alpha discard. One pixel per 4x4 tile per
+// frame, in an order offset per tile so every pixel of the tile gets its turn over 16 frames, keeps the
+// atomics cheap and evenly spread.
+#define HAZE_SPLAT_EVERY_PIXEL 0 // debug: every GBuffer pixel splats, not one per 4x4 tile per frame
+static const uint hazeBayer4x4[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
+void HazeSplat(float2 pixel, float4 currentPos, float3 geometricNormal, HLSL::Material material)
+{
+    uint layerIndex = (uint)material.parameters[HLSL::MaterialHazeLayerParam];
+    if (layerIndex == 0 || layerIndex >= HLSL::HazeLayerCount || viewContext.hazeMap.layersIndex == HLSL::invalidUINT)
+        return;
+#if !HAZE_SPLAT_EVERY_PIXEL
+    uint2 p = uint2(pixel);
+    uint2 tile = p >> 2;
+    uint order = hazeBayer4x4[(p.y & 3) * 4 + (p.x & 3)] + JenkinsHash(tile.x ^ (tile.y << 16));
+    if ((order & 15u) != (viewContext.frameNumber & 15u))
+        return;
+#endif
+
+    StructuredBuffer<HLSL::HazeLayer> layers = ResourceDescriptorHeap[viewContext.hazeMap.layersIndex];
+    HLSL::HazeLayer layer = layers[layerIndex];
+    if (layer.splatIndex == HLSL::invalidUINT)
+        return;
+
+    // walls, trunks and the undersides of overhangs must not write heights (per layer: foliage lowers
+    // it); a double-sided surface is seen from either side
+    float up = normalize(geometricNormal).y;
+    if (material.parameters[HLSL::MaterialDoubleSidedParam] != 0.0f)
+        up = abs(up);
+    if (up < layer.upThreshold)
+        return;
+
+    // currentPos is the unjittered clip position, viewProj_inv the unjittered inverse
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    float4 world = mul(cameras[viewContext.cameraIndex].viewProj_inv, float4(currentPos.xyz / currentPos.w, 1.0f));
+    world.xyz /= world.w;
+
+    uint height = HazeQuantize(world.y);
+    RWTexture2D<uint> splat = ResourceDescriptorHeap[layer.splatIndex];
+    [unroll]
+    for (uint level = 0; level < HLSL::HazeMapLevels; level++)
+    {
+        uint2 texel;
+        if (HazeTexel(HazeCell(world.xz, HazeTexelSize(layer, level)), HazeOrigin(layer.origin, level), level, layer.resolution, texel))
+            InterlockedMax(splat[texel], height);
+    }
+}

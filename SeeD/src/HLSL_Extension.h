@@ -59,6 +59,8 @@ namespace hlslpp
 		return matrix;
 	}
 
+	// Use this, not hlslpp's quaternion(float3x3): that one builds its sign masks from -0.0f constants,
+	// which /fp:fast folds to +0.0f, so it returns ~(|w|,|w|,|w|,|w|) for almost any rotation
 	inline quaternion MatrixToQuaternion(float3x3 m)
 	{
 		quaternion q;

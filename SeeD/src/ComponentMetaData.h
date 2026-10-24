@@ -174,7 +174,27 @@ knownComponents.push_back(
 			{ "density", PropertyTypes::_float, NULL, 1, offsetof(Components::FogVolume, density), sizeof(Components::FogVolume::density) },
 			{ "radius", PropertyTypes::_float, NULL, 1, offsetof(Components::FogVolume, radius), sizeof(Components::FogVolume::radius) },
 		}
- 	}); 
+ 	});
+// World.h
+knownComponents.push_back(
+ 	{ "HazeLayer", Components::HazeLayer::mask, Components::HazeLayerPropertyDraw, alignof(Components::HazeLayer),
+ 		{
+			{ "layer", PropertyTypes::_uint, NULL, 1, offsetof(Components::HazeLayer, layer), sizeof(Components::HazeLayer::layer) },
+			{ "color", PropertyTypes::_float3, NULL, 1, offsetof(Components::HazeLayer, color), sizeof(Components::HazeLayer::color) },
+			{ "density", PropertyTypes::_float, NULL, 1, offsetof(Components::HazeLayer, density), sizeof(Components::HazeLayer::density) },
+			{ "height", PropertyTypes::_float, NULL, 1, offsetof(Components::HazeLayer, height), sizeof(Components::HazeLayer::height) },
+			{ "slab", PropertyTypes::_float, NULL, 1, offsetof(Components::HazeLayer, slab), sizeof(Components::HazeLayer::slab) },
+			{ "anisotropy", PropertyTypes::_float, NULL, 1, offsetof(Components::HazeLayer, anisotropy), sizeof(Components::HazeLayer::anisotropy) },
+			{ "wind", PropertyTypes::_float3, NULL, 1, offsetof(Components::HazeLayer, wind), sizeof(Components::HazeLayer::wind) },
+			{ "noiseFrequency", PropertyTypes::_float, NULL, 1, offsetof(Components::HazeLayer, noiseFrequency), sizeof(Components::HazeLayer::noiseFrequency) },
+			{ "noiseThresholdLow", PropertyTypes::_float, NULL, 1, offsetof(Components::HazeLayer, noiseThresholdLow), sizeof(Components::HazeLayer::noiseThresholdLow) },
+			{ "noiseThresholdHigh", PropertyTypes::_float, NULL, 1, offsetof(Components::HazeLayer, noiseThresholdHigh), sizeof(Components::HazeLayer::noiseThresholdHigh) },
+			{ "resolution", PropertyTypes::_uint, NULL, 1, offsetof(Components::HazeLayer, resolution), sizeof(Components::HazeLayer::resolution) },
+			{ "upThreshold", PropertyTypes::_float, NULL, 1, offsetof(Components::HazeLayer, upThreshold), sizeof(Components::HazeLayer::upThreshold) },
+			{ "blurRadius", PropertyTypes::_uint, NULL, 1, offsetof(Components::HazeLayer, blurRadius), sizeof(Components::HazeLayer::blurRadius) },
+			{ "coverage", PropertyTypes::_float, NULL, 1, offsetof(Components::HazeLayer, coverage), sizeof(Components::HazeLayer::coverage) },
+		}
+ 	});
 // World.h
 knownComponents.push_back(
  	{ "MeshOverride", Components::MeshOverride::mask, nullptr, alignof(Components::MeshOverride), 

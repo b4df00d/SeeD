@@ -303,6 +303,9 @@ public:
 };
 AssetLibraryWindow assetLibraryWindowWindow;
 
+void InitComponentData(World::Entity ent, const ComponentInfo& info);
+void InitNewEntityComponents(World::Entity ent);
+
 class HierarchyWindow : public EditorWindow
 {
     struct TreeNode
@@ -532,6 +535,7 @@ public:
         {
             World::Entity ent;
             ent.Make(knownComponents[componentFilterIndex].mask);
+            InitNewEntityComponents(ent);
             editorState.dirtyHierarchy |= true;
         }
 
@@ -1169,10 +1173,15 @@ public:
             options.debugMode = (Options::DebugMode)debugModeIndex;
 
             int debugDrawIndex = (int)options.debugDraw;
-            const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "triangles", "lighting", "GIprobes", "GIBounces", "GIAlbedo", "GINormals", "overdraw" };
+            const char* itemsDraw[] = { "none", "albedo", "normals", "clusters", "triangles", "lighting", "GIprobes", "GIBounces", "GIAlbedo", "GINormals", "overdraw", "hazeMap" };
             ImGui::Combo("debugDraw", &debugDrawIndex, itemsDraw, IM_ARRAYSIZE(itemsDraw));
             ImGui::SetItemTooltip("Replace the final image with a debug buffer visualization.");
             options.debugDraw = (Options::DebugDraw)debugDrawIndex;
+            if (options.debugDraw == Options::DebugDraw::hazeMap)
+            {
+                ImGui::SliderInt("haze layer", &options.debugHazeLayer, 1, HLSL::HazeLayerCount - 1);
+                ImGui::SetItemTooltip("Haze layer whose map is shown. Magenta: that layer has no maps (no HazeLayer component with this index).");
+            }
 
             ImGui::Checkbox("stopFrustumUpdate", &options.stopFrustumUpdate);
             ImGui::SetItemTooltip("Freeze the culling frustum to inspect culling from a fixed viewpoint.");
@@ -2064,8 +2073,8 @@ public:
                     Selected = file;
                     if (saveMode)
                         strncpy_s(saveName, file.c_str(), _TRUNCATE); // clicking a file fills the name to overwrite it
-                    else if (isDoubleClick)
-                        selectedByDoubleClick = true;
+                    if (isDoubleClick)
+                        selectedByDoubleClick = true; // validate: load it, or overwrite it in save mode
                     doubleClickTimer = 0;
                 }
             }
@@ -2140,20 +2149,43 @@ bool AddComponentIfMissing(World::Entity ent, Components::Mask mask)
         return false;
 
     ent.Add(mask);
+    InitComponentData(ent, *info);
+    return true;
+}
 
-    uint bucket = Components::MaskToBucket(mask);
+// A component's slot is not constructed (Entity::Make / Add reuse pool memory as is, possibly a freed
+// entity's bytes): zero it, invalidate its handles, and give the components that need it a valid default
+void InitComponentData(World::Entity ent, const ComponentInfo& info)
+{
+    uint bucket = Components::MaskToBucket(info.mask);
     char* data = ent.Get(bucket);
     memset(data, 0, Components::strides[bucket]);
-    for (uint m = 0; m < (uint)info->members.size(); m++)
+    for (uint m = 0; m < (uint)info.members.size(); m++)
     {
-        auto& member = info->members[m];
+        auto& member = info.members[m];
         if (member.dataType != PropertyTypes::_Handle)
             continue;
         int elementStride = (member.dataCount > 0) ? (member.size / member.dataCount) : member.size;
         for (int dc = 0; dc < member.dataCount; dc++)
             *(EntityBase*)(data + member.offset + dc * elementStride) = entityInvalid;
     }
-    return true;
+    if (info.mask == Components::Transform::mask)
+    {
+        auto& transform = ent.Get<Components::Transform>();
+        transform.rotation = quaternion::identity();
+        transform.scale = float3(1);
+    }
+    if (info.mask == Components::HazeLayer::mask)
+        ent.Get<Components::HazeLayer>() = Components::HazeLayer();
+}
+
+// "new Entity": every component of the new entity except the ones Make itself fills
+void InitNewEntityComponents(World::Entity ent)
+{
+    Components::Mask filled = Components::Entity::mask | Components::State::mask | Components::Name::mask;
+    for (auto& info : knownComponents)
+        if ((ent.GetMask() & info.mask) != 0 && (info.mask & filled) == 0)
+            InitComponentData(ent, info);
 }
 
 // The two collider presets on the property window's button row. "Static" is a static body with a
@@ -2835,7 +2867,7 @@ public:
             rotNormalized[0] = normalize(rotNormalized[0]);
             rotNormalized[1] = normalize(rotNormalized[1]);
             rotNormalized[2] = normalize(rotNormalized[2]);
-            rotation = quaternion(rotNormalized);
+            rotation = normalize(MatrixToQuaternion(rotNormalized));
 
             matrix = mul(matrix, invParentMat);
 
@@ -2843,7 +2875,7 @@ public:
             position = matrix[3].xyz;
         }
         t.position = position;
-        t.rotation = rotation;
+        t.rotation = normalize(rotation);
         t.scale = scale;
         t.version++;
 
@@ -2934,7 +2966,17 @@ public:
             worldMat[0] = normalize(worldMat[0]);
             worldMat[1] = normalize(worldMat[1]);
             worldMat[2] = normalize(worldMat[2]);
-            SetWorldPositionRotationScale(selectedObject, float3(matrixTranslation[0], matrixTranslation[1], matrixTranslation[2]), quaternion(float3x3(worldMat)), float3(matrixScale[0], matrixScale[1], matrixScale[2]));
+            // Only the channel the gizmo edits is taken from the decomposed matrix: reading the others back
+            // every drag frame feeds the matrix rounding error into them (scale drifting while moving/rotating)
+            Components::Transform before = selectedObject.Get<Components::Transform>();
+            SetWorldPositionRotationScale(selectedObject, float3(matrixTranslation[0], matrixTranslation[1], matrixTranslation[2]), MatrixToQuaternion(float3x3(worldMat)), float3(matrixScale[0], matrixScale[1], matrixScale[2]));
+            Components::Transform& t = selectedObject.Get<Components::Transform>();
+            if (mCurrentGizmoOperation != ImGuizmo::TRANSLATE)
+                t.position = before.position;
+            if (mCurrentGizmoOperation != ImGuizmo::ROTATE)
+                t.rotation = before.rotation;
+            if (mCurrentGizmoOperation != ImGuizmo::SCALE)
+                t.scale = before.scale;
         }
 
     }
@@ -3236,9 +3278,35 @@ class MainMenu : public EditorWindow
 {
 public:
     MainMenu() : EditorWindow("MainMenu") { isOpen = true; }
+
+    // Opens the Save World browser, pointed at the loaded world's folder/name; else the project folder + Save.seed.
+    static void OpenSaveWorldBrowser()
+    {
+        namespace fs = std::filesystem;
+        fs::path base = editorState.currentWorldPath.empty()
+            ? fs::path(Project::instance->projectDir.c_str()) / "Save.seed"
+            : fs::path(editorState.currentWorldPath.c_str());
+        fileBrowserWindow.OpenSave(base.parent_path().string(), base.filename().string(),
+            { ".seed" }, [](String path) // non-capturing -> converts to the callback fn ptr
+            {
+                if (path.empty()) return; // cancelled / blank name
+                World::instance->Save(path);
+                editorState.currentWorldPath = path; // remember for the next Save World
+            });
+    }
+
     void Update() override final
     {
         ZoneScoped;
+
+        // Ctrl+S: save straight to the loaded world's file; ask for a name if there is none yet.
+        if (ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_S) && !fileBrowserWindow.isOpen)
+        {
+            if (editorState.currentWorldPath.empty())
+                OpenSaveWorldBrowser();
+            else
+                World::instance->Save(editorState.currentWorldPath);
+        }
 
         if (ImGui::BeginMenuBar())
         {
@@ -3249,20 +3317,9 @@ public:
                 {
                     Project::instance->Save();       // write the single project file
                 }
-                if (ImGui::MenuItem("Save World"))
+                if (ImGui::MenuItem("Save World", "Ctrl+S"))
                 {
-                    // Point the browser at the loaded world's folder/name; else the project folder + Save.seed.
-                    namespace fs = std::filesystem;
-                    fs::path base = editorState.currentWorldPath.empty()
-                        ? fs::path(Project::instance->projectDir.c_str()) / "Save.seed"
-                        : fs::path(editorState.currentWorldPath.c_str());
-                    fileBrowserWindow.OpenSave(base.parent_path().string(), base.filename().string(),
-                        { ".seed" }, [](String path) // non-capturing -> converts to the callback fn ptr
-                        {
-                            if (path.empty()) return; // cancelled / blank name
-                            World::instance->Save(path);
-                            editorState.currentWorldPath = path; // remember for the next Save World
-                        });
+                    OpenSaveWorldBrowser();
                 }
                 if (ImGui::MenuItem("Load World"))
                 {
@@ -3335,6 +3392,17 @@ public:
                         volume.color = float3(1, 1, 1);
                         volume.density = 0.05f;
                         volume.radius = 5.0f;
+                        editorState.dirtyHierarchy = true;
+                    }
+                    if (ImGui::MenuItem("Haze Layer"))
+                    {
+                        World::Entity ent;
+                        editorState.selectedObject = ent.Make(Components::HazeLayer::mask | Components::Transform::mask, "Haze Layer");
+                        auto& trans = ent.Get<Components::Transform>();
+                        trans.position = float3(0);
+                        trans.rotation = quaternion::identity();
+                        trans.scale = float3(1);
+                        ent.Get<Components::HazeLayer>() = Components::HazeLayer();
                         editorState.dirtyHierarchy = true;
                     }
                     if (ImGui::MenuItem("Prefab"))

@@ -317,7 +317,7 @@ static void PhysicsGetWorldPose(World::Entity ent, float3& outPosition, quaterni
     rotation[0] = normalize(rotation[0]);   // drop scale, Jolt takes a pure rotation
     rotation[1] = normalize(rotation[1]);
     rotation[2] = normalize(rotation[2]);
-    outRotation = quaternion(rotation);
+    outRotation = MatrixToQuaternion(rotation);
     outPosition = worldMatrix[3].xyz;
 }
 

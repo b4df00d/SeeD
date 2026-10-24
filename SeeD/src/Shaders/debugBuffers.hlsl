@@ -53,6 +53,43 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         float3 color = count == 0 ? float3(0, 0, 0) : OverdrawColor(count / OVERDRAW_MAX);
         lighted[dtid.xy] = float4(color, 1);
     }
+    else if (editorContext.debugFlags & HLSL::EditorDebugHazeMap)
+    {
+        // What editorContext.debugHazeLayer's map holds under this pixel (the map FogMedium reads):
+        // black outside the windows, red no surface, green a surface within 0.5 m of this pixel's
+        // height, yellow a surface elsewhere in height; blue added on the coarse level, darker = older.
+        // Magenta: the layer has no maps
+        float3 color = float3(1, 0, 1);
+        HLSL::HazeMap hazeMap = viewContext.hazeMap;
+        uint debugLayer = editorContext.debugHazeLayer;
+        if (hazeMap.layersIndex != HLSL::invalidUINT && (hazeMap.activeMask & (1u << debugLayer)) != 0)
+        {
+            color = 0;
+            StructuredBuffer<HLSL::HazeLayer> layers = ResourceDescriptorHeap[hazeMap.layersIndex];
+            HLSL::HazeLayer layer = layers[debugLayer];
+            if (layer.readable != 0)
+            {
+                Texture2D<uint2> map = ResourceDescriptorHeap[layer.readIndex];
+                for (uint level = 0; level < HLSL::HazeMapLevels; level++)
+                {
+                    uint2 texel;
+                    if (!HazeTexel(HazeCell(cd.worldPos.xz, HazeTexelSize(layer, level)), HazeOrigin(layer.previousOrigin, level), level, layer.resolution, texel))
+                        continue;
+                    uint2 value = map[texel];
+                    if (value.x == 0) // no fallback to the coarse level inside the fine window, as SurfaceHazeLayer
+                    {
+                        color = float3(1, 0, 0);
+                        break;
+                    }
+                    float fresh = 1.0f - 0.75f * saturate(value.y / 600.0f);
+                    color = (abs(cd.worldPos.y - HazeHeight(value.x)) < 0.5f ? float3(0, 1, 0) : float3(1, 1, 0)) * fresh;
+                    color.b = level == 1 ? 0.6f : 0.0f;
+                    break;
+                }
+            }
+        }
+        lighted[dtid.xy] = float4(lerp(s.albedo.rgb * 0.2f, color, 0.8f), 1);
+    }
     else if (editorContext.debugFlags & HLSL::EditorDebugLighting)
     {
     }
