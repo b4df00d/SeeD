@@ -461,6 +461,9 @@ void PathTraceRays()
                         // If light is not in shadow, evaluate BRDF and accumulate its contribution into radiance
                         // This is an entry point for evaluation of all other BRDFs based on selected configuration (for direct light)
                         float3 lightContribution = light.color.xyz * irradiance * lightWeight * lightVisibility;
+                        // Directional lights are defined at the top of the atmosphere (as the sky is)
+                        if (light.type == HLSL::LightType::Directional && viewContext.atmosphere.transmittanceLUT != HLSL::invalidUINT)
+                            lightContribution *= SampleTransmittance(viewContext.atmosphere, AtmospherePosition(viewContext.atmosphere, hitPos), vectorToLight);
                         lightContribution *= evalCombinedBRDF(shadingNormal, vectorToLight, viewVector, s);
                         
 #ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed

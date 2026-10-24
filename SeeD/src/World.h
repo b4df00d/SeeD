@@ -411,6 +411,7 @@ namespace Components
         RSO_fogAnisotropy       = 1u << 27,
         RSO_fogHeight           = 1u << 28,
         RSO_fogDensity          = 1u << 29,
+        RSO_skyLuminanceFactor  = 1u << 30,
     };
 
     struct RenderSettingsVolume : ComponentBase<RenderSettingsVolume>
@@ -421,7 +422,7 @@ namespace Components
         float priority = 0.0f;       // higher = applied last = wins on overlap
         uint  overrides = 0;         // RenderSettingsOverride bitmask
         // local fog (froxels), coefficients in 1/m at density 1
-        float fogDensity = 1.0f;     // multiplies the height/noise density
+        float fogDensity = 0.0f;     // multiplies the height/noise density; 0: no local fog unless a volume asks for it
         float3 fogScattering = float3(0.002f, 0.002f, 0.002f);
         float3 fogAbsorption = float3(0.0f, 0.0f, 0.0f);
         float fogAnisotropy = 0.6f;  // Henyey-Greenstein g
@@ -442,17 +443,20 @@ namespace Components
         float c = 1.33f;
         float b = 0.0f;
         uint  tonemapper = 3;        // HLSL::Tonemapper* (0=None 1=GT 2=ACES 3=AgX 4=AgX Punchy 5=PBR Neutral); not blended, the strongest-weighted volume wins
-        // sky atmosphere (Hillaire 2020), Earth defaults; lengths in km, coefficients in 1/km
+        // sky atmosphere (Hillaire 2020); lengths in km, coefficients in 1/km. Fitted to Blender 5.2's
+        // default sky (Multiple Scattering, air/aerosol/ozone density 1): sun transmittance within 0.2%,
+        // sky shape within ~5%. Hillaire's Earth values had a much clearer atmosphere (Mie 0.004, grey)
         float  planetRadius = 6360.0f;
         float  atmosphereHeight = 100.0f;
-        float3 rayleighScattering = float3(0.005802f, 0.013558f, 0.0331f);
+        float3 rayleighScattering = float3(0.005802f, 0.013558f, 0.0309f);
         float  rayleighScaleHeight = 8.0f;
-        float3 mieScattering = float3(0.003996f, 0.003996f, 0.003996f);
-        float3 mieAbsorption = float3(0.000444f, 0.000444f, 0.000444f);
+        float3 mieScattering = float3(0.014f, 0.017f, 0.020f); // Angstrom-like: haze scatters more in blue
+        float3 mieAbsorption = float3(0.0f, 0.0f, 0.0f);
         float  mieScaleHeight = 1.2f;
         float  mieAnisotropy = 0.8f;
-        float3 ozoneAbsorption = float3(0.00065f, 0.001881f, 0.000085f);
+        float3 ozoneAbsorption = float3(0.00179f, 0.00117f, 0.000085f);
         float3 groundAlbedo = float3(0.3f, 0.3f, 0.3f);
+        float3 skyLuminanceFactor = float3(1.08f, 1.09f, 1.14f); // sky radiance gain; the defaults make up what 3 wavelengths miss against Blender's spectral sky
     };
     static void RenderSettingsVolumePropertyDraw(char* p)
     {
@@ -505,6 +509,7 @@ namespace Components
             row(RSO_mieAnisotropy,        "mieAnisotropy",             &v->mieAnisotropy,       -0.99f, 0.99f,  0);
             row3(RSO_ozoneAbsorption,     "ozoneAbsorption (1/km)",    &v->ozoneAbsorption,     0.0001f, 0,     1);
             row3(RSO_groundAlbedo,        "groundAlbedo",              &v->groundAlbedo,        0.01f,  0,      1);
+            row3(RSO_skyLuminanceFactor,  "skyLuminanceFactor",        &v->skyLuminanceFactor,  0.01f,  0,      10);
         }
         if (ImGui::CollapsingHeader("Fog", ImGuiTreeNodeFlags_DefaultOpen))
         {

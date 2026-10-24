@@ -303,7 +303,7 @@ float3 SkyViewLuminance(HLSL::Atmosphere atmo, float3 cameraWorldPos, float3 dir
     float2 uv = SkyViewParamsToUv(atmo, intersectGround, viewZenithCos, lightViewCos, viewHeight);
 
     Texture2D<float4> lut = ResourceDescriptorHeap[atmo.skyViewLUT];
-    return lut.SampleLevel(samplerLinearClamp, uv, 0).rgb * atmo.sunIlluminance.xyz;
+    return lut.SampleLevel(samplerLinearClamp, uv, 0).rgb * atmo.sunIlluminance.xyz * atmo.skyLuminanceFactor.xyz;
 }
 
 // ----------------- AERIAL PERSPECTIVE ------------------------------------------------------

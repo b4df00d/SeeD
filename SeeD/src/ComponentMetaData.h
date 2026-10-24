@@ -165,6 +165,7 @@ knownComponents.push_back(
 			{ "mieAnisotropy", PropertyTypes::_float, NULL, 1, offsetof(Components::RenderSettingsVolume, mieAnisotropy), sizeof(Components::RenderSettingsVolume::mieAnisotropy) },
 			{ "ozoneAbsorption", PropertyTypes::_float3, NULL, 1, offsetof(Components::RenderSettingsVolume, ozoneAbsorption), sizeof(Components::RenderSettingsVolume::ozoneAbsorption) },
 			{ "groundAlbedo", PropertyTypes::_float3, NULL, 1, offsetof(Components::RenderSettingsVolume, groundAlbedo), sizeof(Components::RenderSettingsVolume::groundAlbedo) },
+			{ "skyLuminanceFactor", PropertyTypes::_float3, NULL, 1, offsetof(Components::RenderSettingsVolume, skyLuminanceFactor), sizeof(Components::RenderSettingsVolume::skyLuminanceFactor) },
 		}
  	}); 
 // World.h

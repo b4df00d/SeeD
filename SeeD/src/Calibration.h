@@ -13,7 +13,9 @@
 //
 // The captured image is linear HDR from before tonemapping, which is the whole
 // point: it can be compared against a path tracer without a display transform in
-// the way. See SeeD/tools/calibration/ for the Blender side and the scoring.
+// the way. The tonemapped frame is written next to it (<output>_display.exr,
+// sRGB-encoded 0-1 values) so the display transform can be compared as well.
+// See SeeD/tools/calibration/ for the Blender side and the scoring.
 //
 // Everything this needs is handed over by Project::Setup, so at run time it reads
 // no globals of its own: the entries already carry absolute paths, and Update()
@@ -227,6 +229,21 @@ private:
 
         LogLights();
 
+        renderer.WaitFrame();
+
+        if (!WriteResource(view, name, resourceName, outPath))
+            return false;
+
+        // The tonemapped frame (PostProcess output, what gets copied to the backbuffer).
+        std::filesystem::path display((std::string)outPath);
+        display.replace_filename(display.stem().string() + "_display" + display.extension().string());
+        return WriteResource(view, name, "postProcessed", String(display.string().c_str()));
+    }
+
+    // Both resources sit in UNORDERED_ACCESS at rest. Anything that isn't float is converted, so
+    // an R8G8B8A8_UNORM target comes out as its encoded 0-1 values.
+    bool WriteResource(MainView& view, const String& name, const char* resourceName, const String& outPath)
+    {
         // GetRegisteredResource default-constructs on a miss, so check the D3D
         // resource rather than trusting the lookup.
         Resource& res = view.GetRegisteredResource(String(resourceName));
@@ -236,8 +253,6 @@ private:
             Log("[calibration] resource '{}' is not registered", resourceName);
             return false;
         }
-
-        renderer.WaitFrame();
 
         DirectX::ScratchImage captured;
         HRESULT hr = DirectX::CaptureTexture(GPU::instance->graphicQueue, source, false, captured,

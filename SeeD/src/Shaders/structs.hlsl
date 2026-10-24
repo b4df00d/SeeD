@@ -165,6 +165,7 @@ namespace HLSL
         float4 mieAbsorption;      // xyz: absorption at ground, w: Henyey-Greenstein g
         float4 ozoneAbsorption;    // xyz: absorption at the tent peak (25 km, 30 km wide), w: unused
         float4 groundAlbedo;       // xyz, w: unused
+        float4 skyLuminanceFactor; // xyz: gain on the sky-view radiance only (not transmittance, AP or froxels), w: unused
         float4 sunDirection;       // xyz: unit vector toward the sun, w: angular radius in radians
         float4 sunIlluminance;     // xyz: W/m^2 at the top of the atmosphere (the sun light's color * intensity), w: 1 if the scene has a sun
         float bottomRadius;

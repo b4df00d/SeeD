@@ -4249,6 +4249,7 @@ public:
                     RSV_BLEND(RSO_mieAnisotropy, mieAnisotropy);
                     RSV_BLEND(RSO_ozoneAbsorption, ozoneAbsorption);
                     RSV_BLEND(RSO_groundAlbedo, groundAlbedo);
+                    RSV_BLEND(RSO_skyLuminanceFactor, skyLuminanceFactor);
                     #undef RSV_BLEND
                     // discrete choice: can't be interpolated, switches once the volume dominates
                     if ((v.overrides & Components::RSO_tonemapper) && w >= 0.5f)
@@ -4279,6 +4280,7 @@ public:
                 atmo.mieAbsorption = float4(result.mieAbsorption, std::min(std::max(result.mieAnisotropy, -0.999f), 0.999f));
                 atmo.ozoneAbsorption = float4(result.ozoneAbsorption, 0.0f);
                 atmo.groundAlbedo = float4(result.groundAlbedo, 0.0f);
+                atmo.skyLuminanceFactor = float4(max(result.skyLuminanceFactor, float3(0.0f)), 0.0f);
 
                 pp.expoMul = result.expoMul;
                 pp.expoAdd = result.expoAdd;
