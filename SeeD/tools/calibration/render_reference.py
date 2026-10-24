@@ -5,12 +5,24 @@
 # Run by hand whenever the .blend changes. There is no freshness tracking --
 # re-running it IS the workflow.
 #
-# Produces, under the project directory:
-#   reference/direct.exr   sun + point, no bounces, black world
-#   reference/full.exr     sun + point, 10 bounces, a copy of SeeD's Sky()
-#   reference/ids.exr      object index per pixel, for per-object masks
-#   reference/objects.txt  index -> name, albedo
+# Produces, under the project directory (<scene> = the .blend's file name):
+#   reference/<scene>/direct.exr     lights only, no bounces, black world
+#   reference/<scene>/full.exr       lights, 10 bounces, Blender's default sky
+#   reference/<scene>/full_agx.exr   full through Blender's AgX view transform
+#                                    (display-referred sRGB 0-1 values), report-only
+#   reference/<scene>/ids.exr        object index per pixel, for per-object masks
+#   reference/<scene>/objects.txt    index -> name, albedo
 #   Source/<scene>/<scene>.gltf (+ .bin)
+#
+# A scene without a Sun lamp (the Cornell box) gets no sky: every render uses a
+# black world, matching SeeD, whose sky is black without a directional light.
+#
+# The sun is Blender's default sky's own sun (Sky Texture, Multiple Scattering,
+# every setting at its default except the direction, taken from the Sun lamp).
+# Its strength is measured here, not authored: the lamp is set to what the sky's
+# sun disc delivers at the ground for the renders (Blender lamps are never
+# attenuated), and to the top-of-atmosphere value in the glTF, because SeeD's
+# directional light is defined above the atmosphere and attenuated by it.
 import bpy, sys, os, json, math
 
 WATTS_TO_LUMENS = 683.0   # PBR_WATTS_TO_LUMENS, io_scene_gltf2/blender/com/conversion.py
@@ -18,12 +30,8 @@ SAMPLES = 2048
 ID_SAMPLES = 1
 FULL_BOUNCES = 10     # matches BOUNCES_MAX in raytracing2.hlsl
 
-# SeeD's Sky(), common.hlsl:1292. SeeD is Y-up and Blender is Z-up, so its
-# dot(direction, up) becomes the Blender direction's z.
-SKY_HORIZON = (1.0, 0.66, 0.66)
-SKY_ZENITH = (0.33, 0.5, 1.0)
-SKY_SCALE = 5.0
-SKY_DOWN_SHARPNESS = 20.0
+SUN_PROBE_SAMPLES = 1024
+SUN_PROBE_TOA_ALTITUDE = 60000.0   # m; the sky's sun at the top of the atmosphere
 
 BOUNCE_ATTRS = ('max_bounces', 'diffuse_bounces', 'glossy_bounces', 'transmission_bounces')
 
@@ -103,80 +111,154 @@ def black_world():
     return w
 
 
-def seed_sky_world():
-    """Rebuild SeeD's analytic Sky() as world nodes.
+def default_sky_world(sun_obj):
+    """Blender's default sky, with its sun turned to the Sun lamp's direction.
 
-      dotUp   = sqrt(saturate(dir.z))
-      dotDown = saturate(-dir.z * 20)
-      sky     = normalize(lerp(horizon, zenith, dotUp)) * (1 - dotDown) * 5
-
-    Texture Coordinate > Generated is the ray direction in a world shader;
-    Geometry > Incoming is its negative. Verified with a probe render, not
-    assumed. Vector sockets are indexed, not looked up by name, because
-    ShaderNodeVectorMath has three sockets all called "Vector" (Scale is 3).
+    The disc is off: the lamp is the sun (sampled as a light, so it converges
+    like SeeD's NEE does), the texture only provides the sky. sun_rotation is
+    the azimuth from +Y toward +X -- checked with a probe render, not assumed.
     """
-    w = bpy.data.worlds.new("CalibSky")
+    w = bpy.data.worlds.new("CalibDefaultSky")
     w.use_nodes = True
     nt = w.node_tree
-    bg = nt.nodes["Background"]
-    bg.inputs[1].default_value = 1.0
+    sky = nt.nodes.new("ShaderNodeTexSky")
+    to_sun = sun_obj.matrix_world.to_3x3().col[2].normalized()   # lamps shine down their -Z
+    sky.sun_elevation = math.asin(max(-1.0, min(1.0, to_sun.z)))
+    sky.sun_rotation = math.atan2(to_sun.x, to_sun.y)
+    sky.sun_disc = False
+    nt.links.new(sky.outputs["Color"], nt.nodes["Background"].inputs["Color"])
+    nt.nodes["Background"].inputs["Strength"].default_value = 1.0
+    return w, sky
 
-    coord = nt.nodes.new("ShaderNodeTexCoord")
-    sep = nt.nodes.new("ShaderNodeSeparateXYZ")
-    nt.links.new(coord.outputs["Generated"], sep.inputs["Vector"])
 
-    up = nt.nodes.new("ShaderNodeMath")          # max(z, 0)
-    up.operation = 'MAXIMUM'
-    up.inputs[1].default_value = 0.0
-    nt.links.new(sep.outputs["Z"], up.inputs[0])
+def measure_sky_sun(sc, sky):
+    """Irradiance (RGB, W/m^2 at normal incidence) of the sky's sun disc, at the
+    sky's altitude and at the top of the atmosphere.
 
-    dot_up = nt.nodes.new("ShaderNodeMath")      # pow(x, 0.5)
-    dot_up.operation = 'POWER'
-    dot_up.inputs[1].default_value = 0.5
-    nt.links.new(up.outputs[0], dot_up.inputs[0])
+    A white Lambertian plane under the world, disc on minus disc off, divided by
+    sin(elevation): exactly what the disc would put on the ground. Rendered in a
+    throwaway scene so nothing in the calibration scene shadows or bounces.
+    """
+    probe = bpy.data.scenes.new("CalibSunProbe")
+    probe.render.engine = 'CYCLES'
+    probe.cycles.device = sc.cycles.device
+    probe.cycles.samples = SUN_PROBE_SAMPLES
+    probe.cycles.use_denoising = False
+    probe.cycles.max_bounces = 0
+    probe.render.resolution_x = probe.render.resolution_y = 16
+    probe.view_settings.view_transform = 'Standard'
+    ims = probe.render.image_settings
+    ims.file_format = 'OPEN_EXR'
+    ims.color_depth = '32'
+    ims.exr_codec = 'NONE'
+    probe.world = sc.world
 
-    dot_down = nt.nodes.new("ShaderNodeMath")    # saturate(z * -20)
-    dot_down.operation = 'MULTIPLY'
-    dot_down.inputs[1].default_value = -SKY_DOWN_SHARPNESS
-    dot_down.use_clamp = True
-    nt.links.new(sep.outputs["Z"], dot_down.inputs[0])
+    mesh = bpy.data.meshes.new("CalibSunProbePlane")
+    h = 10000.0
+    mesh.from_pydata([(-h, -h, 0), (h, -h, 0), (h, h, 0), (-h, h, 0)], [], [(0, 1, 2, 3)])
+    plane = bpy.data.objects.new("CalibSunProbePlane", mesh)
+    mat = bpy.data.materials.new("CalibSunProbeWhite")
+    mat.use_nodes = True
+    mt = mat.node_tree
+    mt.nodes.clear()
+    d = mt.nodes.new("ShaderNodeBsdfDiffuse")
+    d.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+    o = mt.nodes.new("ShaderNodeOutputMaterial")
+    mt.links.new(d.outputs[0], o.inputs[0])
+    mesh.materials.append(mat)
+    probe.collection.objects.link(plane)
+    cam_data = bpy.data.cameras.new("CalibSunProbeCam")
+    cam_data.type = 'ORTHO'
+    cam_data.ortho_scale = 1.0
+    cam = bpy.data.objects.new("CalibSunProbeCam", cam_data)
+    cam.location = (0.0, 0.0, 1.0)
+    probe.collection.objects.link(cam)
+    probe.camera = cam
 
-    # lerp(horizon, zenith, dotUp) == horizon + (zenith - horizon) * dotUp
-    delta = nt.nodes.new("ShaderNodeVectorMath")
-    delta.operation = 'SUBTRACT'
-    delta.inputs[0].default_value = SKY_ZENITH
-    delta.inputs[1].default_value = SKY_HORIZON
+    tmp = os.path.join(bpy.app.tempdir, "calib_sun_probe.exr")
 
-    scaled = nt.nodes.new("ShaderNodeVectorMath")
-    scaled.operation = 'SCALE'
-    nt.links.new(delta.outputs["Vector"], scaled.inputs[0])
-    nt.links.new(dot_up.outputs[0], scaled.inputs[3])
+    def horizontal_irradiance():
+        probe.render.filepath = tmp
+        probe.render.use_file_extension = False
+        bpy.ops.render.render(write_still=True, scene=probe.name)
+        img = bpy.data.images.load(tmp)
+        px = [0.0] * (img.size[0] * img.size[1] * 4)
+        img.pixels.foreach_get(px)
+        bpy.data.images.remove(img)
+        n = len(px) // 4
+        return [math.pi * sum(px[c::4]) / n for c in range(3)]   # L = E / pi for albedo 1
 
-    base = nt.nodes.new("ShaderNodeVectorMath")
-    base.operation = 'ADD'
-    nt.links.new(scaled.outputs["Vector"], base.inputs[0])
-    base.inputs[1].default_value = SKY_HORIZON
+    altitude, disc = sky.altitude, sky.sun_disc
+    sin_elev = math.sin(sky.sun_elevation)
+    result = {}
+    for key, alt in (("ground", altitude), ("toa", SUN_PROBE_TOA_ALTITUDE)):
+        sky.altitude = alt
+        sky.sun_disc = True
+        lit = horizontal_irradiance()
+        sky.sun_disc = False
+        unlit = horizontal_irradiance()
+        result[key] = [(lit[c] - unlit[c]) / sin_elev for c in range(3)]
+    sky.altitude, sky.sun_disc = altitude, disc
 
-    norm = nt.nodes.new("ShaderNodeVectorMath")
-    norm.operation = 'NORMALIZE'
-    nt.links.new(base.outputs["Vector"], norm.inputs[0])
+    bpy.data.scenes.remove(probe)
+    bpy.data.objects.remove(plane)
+    bpy.data.objects.remove(cam)
+    bpy.data.meshes.remove(mesh)
+    bpy.data.materials.remove(mat)
+    bpy.data.cameras.remove(cam_data)
+    return result
 
-    keep = nt.nodes.new("ShaderNodeMath")        # 1 - dotDown
-    keep.operation = 'SUBTRACT'
-    keep.inputs[0].default_value = 1.0
-    nt.links.new(dot_down.outputs[0], keep.inputs[1])
 
-    gain = nt.nodes.new("ShaderNodeMath")        # * 5
-    gain.operation = 'MULTIPLY'
-    gain.inputs[1].default_value = SKY_SCALE
-    nt.links.new(keep.outputs[0], gain.inputs[0])
+def set_lamp(light, rgb):
+    """Energy = the brightest channel, colour = rgb normalised to it."""
+    peak = max(rgb)
+    light.energy = peak
+    light.color = tuple(c / peak for c in rgb)
 
-    final = nt.nodes.new("ShaderNodeVectorMath")
-    final.operation = 'SCALE'
-    nt.links.new(norm.outputs["Vector"], final.inputs[0])
-    nt.links.new(gain.outputs[0], final.inputs[3])
-    nt.links.new(final.outputs["Vector"], bg.inputs["Color"])
-    return w
+
+def agx_reference(sc, exr_path, out_path):
+    """exr_path through Blender's own AgX (sRGB display, look None, exposure 0),
+    written as an EXR of the display values (sRGB-encoded, 0-1).
+
+    save_render applies the view transform only to display formats, so the
+    image goes out as a 16-bit PNG and is read back as Non-Color data.
+    """
+    vs = sc.view_settings
+    saved = (vs.view_transform, vs.look, vs.exposure, vs.gamma, vs.use_curve_mapping)
+    ims = sc.render.image_settings
+    saved_ims = (ims.file_format, ims.color_mode, ims.color_depth, ims.exr_codec)
+    sc.display_settings.display_device = 'sRGB'
+    vs.view_transform = 'AgX'
+    vs.look = 'None'
+    vs.exposure, vs.gamma, vs.use_curve_mapping = 0.0, 1.0, False
+    ims.file_format, ims.color_mode, ims.color_depth = 'PNG', 'RGB', '16'
+
+    src = bpy.data.images.load(exr_path)
+    src.colorspace_settings.name = 'Linear Rec.709'
+    png = out_path[:-4] + "_tmp.png"
+    src.save_render(png, scene=sc)
+    back = bpy.data.images.load(png)
+    back.colorspace_settings.name = 'Non-Color'
+    w, h = back.size
+    px = [0.0] * (w * h * 4)
+    back.pixels.foreach_get(px)
+
+    disp = bpy.data.images.new("CalibAgX", w, h, alpha=True, float_buffer=True)
+    disp.colorspace_settings.name = 'Non-Color'
+    disp.pixels.foreach_set(px)
+    vs.view_transform = 'Standard'
+    vs.look = 'None'
+    ims.file_format, ims.color_mode, ims.color_depth, ims.exr_codec = 'OPEN_EXR', 'RGBA', '32', 'NONE'
+    disp.save_render(out_path, scene=sc)
+    for img in (src, back, disp):
+        bpy.data.images.remove(img)
+    os.remove(png)
+
+    vs.view_transform = saved[0]
+    vs.look = saved[1]
+    vs.exposure, vs.gamma, vs.use_curve_mapping = saved[2], saved[3], saved[4]
+    ims.file_format, ims.color_mode, ims.color_depth, ims.exr_codec = saved_ims
+    log("wrote", out_path)
 
 
 def id_material():
@@ -329,7 +411,7 @@ def main():
     argv = [a for a in argv if not a.startswith("--")]
     proj = project_dir(argv[0])
     scene_name = os.path.splitext(os.path.basename(bpy.data.filepath))[0] or "scene"
-    ref = os.path.join(proj, "reference")
+    ref = os.path.join(proj, "reference", scene_name)   # one folder per scene: a project can hold several
     src = os.path.join(proj, "Source", scene_name)
     os.makedirs(ref, exist_ok=True)
     os.makedirs(src, exist_ok=True)
@@ -339,6 +421,25 @@ def main():
     use_gpu(sc)
     log("project %s" % proj)
     log("resolution %dx%d" % (sc.render.resolution_x, sc.render.resolution_y))
+
+    # The sun: Blender's default sky's own, measured. TOA for the glTF, ground for the renders.
+    # Without a Sun lamp there is no sky either, on both sides (SeeD's sky is black without a
+    # directional light), so every render uses a black world.
+    original_world = sc.world
+    sun_obj = next((o for o in sc.objects if o.type == 'LIGHT' and o.data.type == 'SUN'), None)
+    if sun_obj:
+        sky_world, sky = default_sky_world(sun_obj)
+        sc.world = sky_world
+        sun = measure_sky_sun(sc, sky)
+        sun_obj.data.angle = sky.sun_size
+        log("sky sun: elevation %.2f deg rotation %.2f deg, size %.4f deg" % (
+            math.degrees(sky.sun_elevation), math.degrees(sky.sun_rotation), math.degrees(sky.sun_size)))
+        log("sky sun irradiance W/m^2: top of atmosphere %s, ground (altitude %.0f m) %s" % (
+            " ".join("%.3f" % v for v in sun["toa"]), sky.altitude, " ".join("%.3f" % v for v in sun["ground"])))
+        set_lamp(sun_obj.data, sun["toa"])
+    else:
+        sky_world, sky, sun = black_world(), None, None
+        log("no Sun lamp: no sky, black world for every render")
 
     lights = tag_lights(sc)
     for l in lights:
@@ -367,6 +468,12 @@ def main():
         f.write("# resolution %d %d\n" % (sc.render.resolution_x, sc.render.resolution_y))
         for l in lights:
             f.write("# light %s\n" % l)
+        if sun:
+            f.write("# sky Blender default (Multiple Scattering), sun disc off, altitude %.1f m\n" % sky.altitude)
+            f.write("# sun exported at the top of the atmosphere %s W/m^2, rendered at the ground %s W/m^2\n" % (
+                " ".join("%.4f" % v for v in sun["toa"]), " ".join("%.4f" % v for v in sun["ground"])))
+        else:
+            f.write("# no sun, black world\n")
         for o in sorted(meshes, key=lambda o: o.pass_index):
             c = base_color(o)
             f.write("%d %s %.6f %.6f %.6f\n" % (o.pass_index, o.name, c[0], c[1], c[2]))
@@ -376,7 +483,9 @@ def main():
         log("--skip-render given; glTF and objects.txt only")
         return
 
-    original_world = sc.world
+    # Blender lamps are never attenuated: render with what reaches the ground
+    if sun:
+        set_lamp(sun_obj.data, sun["ground"])
 
     # direct: no bounces, black world
     sc.world = black_world()
@@ -384,10 +493,13 @@ def main():
     sc.cycles.samples = SAMPLES
     render_to(sc, os.path.join(ref, "direct.exr"))
 
-    # full: bounces plus SeeD's sky
-    sc.world = seed_sky_world()
+    # full: bounces plus Blender's default sky (black without a sun)
+    sc.world = sky_world
     set_bounces(sc, FULL_BOUNCES)
     render_to(sc, os.path.join(ref, "full.exr"))
+
+    # full only: in direct the world is black here while SeeD still draws its sky
+    agx_reference(sc, os.path.join(ref, "full.exr"), os.path.join(ref, "full_agx.exr"))
 
     # ids: flat object index, centre-sampled so the values stay integral
     vl = bpy.context.view_layer

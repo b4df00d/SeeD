@@ -11,7 +11,7 @@
         blender -b <scene>.blend -P render_reference.py -- <project dir>
 
 .EXAMPLE
-    .\SeeD\tools\calibration\run.ps1 calibration\falloff.seedproj
+    .\SeeD\tools\calibration\run.ps1 calibration\calibration.seedproj
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Project,

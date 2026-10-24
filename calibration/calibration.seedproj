@@ -1,0 +1,20 @@
+SEEDPROJ 1
+[settings]
+sourceDir Source
+cacheDir Cache
+startupScene 
+windowWidth 1280
+windowHeight 720
+vsync 0
+fullscreen 0
+upscalingTechnique 3
+dlssQuality 1
+lodDistanceMultiplier 0
+spacialRadius 0
+shaderStatsCsv 0
+playerSystem 0
+[calibration]
+capture falloff_direct Source\falloff\falloff.gltf out\falloff_direct.exr 1 120
+capture falloff_full Source\falloff\falloff.gltf out\falloff_full.exr 0 120
+capture cornell_direct Source\cornell\cornell.gltf out\cornell_direct.exr 1 120
+capture cornell_full Source\cornell\cornell.gltf out\cornell_full.exr 0 120

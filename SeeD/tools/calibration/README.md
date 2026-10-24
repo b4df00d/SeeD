@@ -23,12 +23,24 @@ constants Blender's own importer uses: sun `lux/683`, point `cd/683·4π`.
 Score the current build against the existing reference:
 
 ```powershell
-.\SeeD\tools\calibration\run.ps1 calibration\falloff.seedproj
+.\SeeD\tools\calibration\run.ps1 calibration\calibration.seedproj
 ```
 
 That runs SeeD (the project's `[calibration]` section makes it render each entry
 and exit by itself), then `compare.py`. Add `-SkipCapture` to re-score images
 already in `out\` without re-rendering.
+
+The project holds two scenes, each with a `direct` and a `full` entry:
+
+- `falloff`: spheres on a ground plane under Blender's default sky and sun,
+  plus a point light. `full` is dominated by the sky.
+- `cornell`: a room-sized Cornell box lit only by a 1600 lm bulb (2.34 W),
+  black world. `full` is dominated by interreflection, at indoor light levels
+  about 1000x darker than the falloff scene.
+
+Each `full` entry also writes `out\<name>_display.exr` (SeeD's tonemapped
+frame), compared against `reference\<scene>\full_agx.exr` (Blender's AgX view).
+That comparison is reported in 8-bit codes and never fails the run.
 
 Needs `python` on PATH. numpy is used if present but is not required.
 
@@ -39,15 +51,18 @@ workflow (there is no freshness tracking):
 
 ```powershell
 blender -b calibration\falloff.blend -P SeeD\tools\calibration\render_reference.py -- calibration
+blender -b calibration\cornell.blend -P SeeD\tools\calibration\render_reference.py -- calibration
 ```
 
-That writes `reference\{direct,full,ids}.exr` and `objects.txt`, and re-exports
-`Source\falloff\falloff.gltf`. `--skip-render` redoes only the glTF export.
+Each writes `reference\<scene>\{direct,full,full_agx,ids}.exr` and
+`objects.txt` (`<scene>` is the `.blend`'s name), and re-exports
+`Source\<scene>\<scene>.gltf`. `--skip-render` redoes only the glTF export.
 
-To rebuild the scene itself from scratch (overwrites the `.blend`):
+To rebuild a scene from scratch (overwrites its `.blend`):
 
 ```powershell
 blender -b -P SeeD\tools\calibration\make_falloff_scene.py
+blender -b -P SeeD\tools\calibration\make_cornell_scene.py
 ```
 
 ## Reading the output
@@ -72,7 +87,10 @@ structure is not.
 2. Run `render_reference.py` against it.
 3. Add `capture` lines to the project's `[calibration]` section:
    `capture <name> <scene> <output> <directOnly> <warmupFrames>`.
-   The reference is paired by name: `reference\<name>.exr`.
+   The reference is found through the scene: `reference\<scene>\`, where
+   `<scene>` is the glTF's file name, then `direct.exr` for a directOnly entry
+   and `full.exr` otherwise. Names must be unique across the project
+   (`<scene>_direct`, `<scene>_full`).
 
 Keep the project's `windowWidth`/`windowHeight` equal to the `.blend`'s render
 resolution; `compare.py` refuses to score a size mismatch rather than

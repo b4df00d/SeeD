@@ -21,9 +21,9 @@ RES_X, RES_Y = 1280, 720
 SPHERE_RADIUS = 0.2
 ARC_RADIUS = 1.8            # horizontal distance from the light axis
 LIGHT_HEIGHT = 1.5
-SUN_WATTS = 5.0             # W/m^2. A physical clear noon is ~1000; this keeps the preview readable.
-POINT_WATTS = 100.0         # W
-SUN_ANGLE_DEG = 0.526       # the real sun's angular diameter
+SUN_WATTS = 5.0             # placeholder: render_reference.py sets the sun from Blender's default sky
+POINT_WATTS = 2600.0        # W; keeps the old 100 W : 5 W/m^2 point/sun balance against the sky's ~130 W/m^2 sun
+SUN_ANGLE_DEG = 0.545       # Blender's default sky sun size; render_reference.py copies it anyway
 
 # name, linear RGB albedo
 SPHERES = [
@@ -125,8 +125,8 @@ def main():
     cam.rotation_euler = (look_at - cam.location).to_track_quat('-Z', 'Y').to_euler()
     sc.camera = cam
 
-    # World is set per render by render_reference.py (black for direct, a copy
-    # of SeeD's Sky() for full GI), so it is left black here.
+    # World is set per render by render_reference.py (black for direct,
+    # Blender's default sky for full GI), so it is left black here.
     world = bpy.data.worlds.new("CalibWorld")
     world.use_nodes = True
     world.node_tree.nodes["Background"].inputs[0].default_value = (0, 0, 0, 1)

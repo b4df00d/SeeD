@@ -3,8 +3,12 @@
     python compare.py <project.seedproj>
 
 Reads the project's [calibration] section so the entry list is never duplicated,
-then for each entry pairs out/<name>.exr with reference/<name>.exr and scores
-them through the per-object masks in reference/ids.exr.
+then pairs each entry's output with its scene's reference and scores them
+through that scene's per-object masks. A project can hold several scenes: the
+reference lives in reference/<scene>/ (<scene> = the entry's glTF file name, as
+render_reference.py names it), which holds direct.exr, full.exr, ids.exr and
+objects.txt. directOnly entries are paired with direct.exr, the others with
+full.exr.
 
 Per object it reports the mean linear RGB from each renderer and their ratio.
 SeeD and Blender are meant to agree exactly once the unit work is done, so the
@@ -18,6 +22,11 @@ A large absolute score with a small shape score means one global factor is
 wrong (light units, a stray multiplier) and everything else agrees. Both being
 large means the disagreement varies per object, which is a BRDF or falloff
 problem rather than a gain one.
+
+When reference/<scene>/full_agx.exr (Blender's AgX view of the reference) and
+out/<name>_display.exr (SeeD's tonemapped frame) both exist, the display images
+are compared too, in 8-bit sRGB code values. That section is report-only: it
+never fails the run.
 
 Stdlib only; uses numpy if it happens to be installed, but does not need it.
 """
@@ -41,6 +50,7 @@ OBJECT_TOLERANCE = 0.15     # per-object ratio, fraction either side of the fitt
 SCORE_TOLERANCE = 0.15      # overall, in stops
 ERODE = 3                   # px, to drop silhouettes and DLSS edge bleed
 RATIO_RANGE = 0.5           # stops, full scale of the false-colour panel
+AGX_RANGE = 32.0            # 8-bit codes, full scale of the display false-colour panel
 
 
 def log(*a):
@@ -76,6 +86,12 @@ def read_project(path):
                 "directOnly": len(parts) > 4 and parts[4] != "0",
             })
     return project_dir, entries
+
+
+def reference_dir(project_dir, entry):
+    """reference/<scene>/, <scene> being the entry's scene file name without extension."""
+    scene = os.path.splitext(os.path.basename(entry["scene"].replace("\\", "/")))[0]
+    return os.path.join(project_dir, "reference", scene)
 
 
 def read_objects(path):
@@ -249,16 +265,94 @@ def comparison_image(out_path, width, height, seed, blender, ids, scale):
     pngio.write_rgb(out_path, panel, height, pixels)
 
 
+def display_comparison_image(out_path, width, height, seed, blender, ids):
+    """Blender AgX | SeeD AgX | display difference (red = SeeD brighter), both
+    already display-encoded, so shown as they are."""
+    sr, sg, sb = seed
+    br, bg, bb = blender
+    panel = width * 3
+    pixels = bytearray(panel * height * 3)
+    code = lambda v: 0 if v <= 0.0 else 255 if v >= 1.0 else int(v * 255.0 + 0.5)
+    for y in range(height):
+        row = y * panel * 3
+        for x in range(width):
+            i = y * width + x
+            j = row + x * 3
+            pixels[j], pixels[j + 1], pixels[j + 2] = code(br[i]), code(bg[i]), code(bb[i])
+            j = row + (width + x) * 3
+            pixels[j], pixels[j + 1], pixels[j + 2] = code(sr[i]), code(sg[i]), code(sb[i])
+            j = row + (2 * width + x) * 3
+            d = (luminance(sr, sg, sb, i) - luminance(br, bg, bb, i)) * 255.0
+            t = max(-1.0, min(1.0, d / AGX_RANGE))
+            if t >= 0:
+                pixels[j] = 255
+                pixels[j + 1] = pixels[j + 2] = int(255 * (1.0 - t))
+            else:
+                pixels[j + 2] = 255
+                pixels[j] = pixels[j + 1] = int(255 * (1.0 + t))
+    pngio.write_rgb(out_path, panel, height, pixels)
+
+
+def compare_display(project_dir, entry, objects, ids, width, height, masks):
+    """Report-only: SeeD's tonemapped frame vs Blender's AgX view, per object,
+    in 8-bit display codes. None when either image is missing."""
+    name = entry["name"]
+    stem, ext = os.path.splitext(os.path.join(project_dir, entry["output"]))
+    seed_path = stem + "_display" + ext
+    ref_path = os.path.join(reference_dir(project_dir, entry), "full_agx.exr")
+    if entry["directOnly"] or not (os.path.exists(seed_path) and os.path.exists(ref_path)):
+        return None
+    sw, sh, sr, sg, sb = exrio.rgb(seed_path)
+    rw, rh, br, bg, bb = exrio.rgb(ref_path)
+    if (sw, sh) != (width, height) or (rw, rh) != (width, height):
+        log("  %s display: size mismatch (%dx%d vs %dx%d)" % (name, sw, sh, rw, rh))
+        return None
+
+    rows = []
+    diffs = []
+    for idx in sorted(masks):
+        pixels = masks[idx]
+        if not pixels:
+            continue
+        obj_name = objects[idx][0] if idx in objects else "Sky"
+        s_mean = tuple(v * 255.0 for v in mean_rgb(sr, sg, sb, pixels))
+        b_mean = tuple(v * 255.0 for v in mean_rgb(br, bg, bb, pixels))
+        rows.append({"object": obj_name, "pixels": len(pixels), "seed": s_mean, "blender": b_mean,
+                     "delta": tuple(s_mean[c] - b_mean[c] for c in range(3))})
+        diffs += [abs(luminance(sr, sg, sb, i) - luminance(br, bg, bb, i)) * 255.0 for i in pixels]
+    diffs.sort()
+    mean_abs = sum(diffs) / len(diffs) if diffs else float("nan")
+    p99 = diffs[min(len(diffs) - 1, int(len(diffs) * 0.99))] if diffs else float("nan")
+
+    out_dir = os.path.dirname(seed_path)
+    display_comparison_image(os.path.join(out_dir, name + "_agx_compare.png"),
+                             width, height, (sr, sg, sb), (br, bg, bb), ids)
+    with open(os.path.join(out_dir, name + "_agx_report.csv"), "w", encoding="utf-8") as f:
+        f.write("object,pixels,seed_r,seed_g,seed_b,blender_r,blender_g,blender_b,"
+                "delta_r,delta_g,delta_b\n")
+        for r in rows:
+            f.write("%s,%d,%s,%s,%s\n" % (r["object"], r["pixels"],
+                    ",".join("%.2f" % v for v in r["seed"]),
+                    ",".join("%.2f" % v for v in r["blender"]),
+                    ",".join("%.2f" % v for v in r["delta"])))
+    return {"rows": rows, "mean_abs": mean_abs, "p99": p99}
+
+
 # --------------------------------------------------------------------------
 
-def compare_entry(project_dir, entry, objects, ids, width, height):
+def compare_entry(project_dir, entry):
     name = entry["name"]
+    ref_dir = reference_dir(project_dir, entry)
     seed_path = os.path.join(project_dir, entry["output"])
-    ref_path = os.path.join(project_dir, "reference", name + ".exr")
-    for p in (seed_path, ref_path):
+    ref_path = os.path.join(ref_dir, "direct.exr" if entry["directOnly"] else "full.exr")
+    ids_path = os.path.join(ref_dir, "ids.exr")
+    objects_path = os.path.join(ref_dir, "objects.txt")
+    for p in (seed_path, ref_path, ids_path, objects_path):
         if not os.path.exists(p):
             log("  %s: missing %s" % (name, p))
             return None
+    objects = read_objects(objects_path)
+    width, height, ids, _, _ = exrio.rgb(ids_path)
 
     sw, sh, sr, sg, sb = exrio.rgb(seed_path)
     rw, rh, br, bg, bb = exrio.rgb(ref_path)
@@ -314,8 +408,13 @@ def compare_entry(project_dir, entry, objects, ids, width, height):
                 ",".join("%.6f" % v for v in r["ratio"]),
                 r["rel"]))
 
+    # the sky (id 0) only matters for the display comparison: in linear it has no albedo to divide by
+    display_masks = dict(masks)
+    display_masks.update(object_masks(ids, width, height, [0]))
+    display = compare_display(project_dir, entry, objects, ids, width, height, display_masks)
+
     return {"name": name, "rows": rows, "scale": scale,
-            "absolute": absolute, "shape": shape, "worst": worst}
+            "absolute": absolute, "shape": shape, "worst": worst, "display": display}
 
 
 def report(result):
@@ -339,6 +438,19 @@ def report(result):
         (result["shape"], (2.0 ** result["shape"] - 1.0) * 100.0))
     log("  worst object   %.1f%% from the fitted scale" % (result["worst"] * 100.0))
 
+    d = result.get("display")
+    if d:
+        log("")
+        log("  --- %s display: SeeD tonemapped vs Blender AgX, 8-bit sRGB codes (report only) ---" % result["name"])
+        log("  %-16s %6s  %-20s %-20s %s" % ("object", "px", "SeeD", "Blender", "delta"))
+        for r in d["rows"]:
+            log("  %-16s %6d  %-20s %-20s %s" % (
+                r["object"], r["pixels"],
+                " ".join("%6.1f" % v for v in r["seed"]),
+                " ".join("%6.1f" % v for v in r["blender"]),
+                " ".join("%+6.1f" % v for v in r["delta"])))
+        log("  mean |delta| %.1f codes, p99 %.1f codes (luminance, all masked pixels)" % (d["mean_abs"], d["p99"]))
+
 
 def main():
     if len(sys.argv) < 2:
@@ -347,12 +459,7 @@ def main():
     if not entries:
         raise SystemExit("no [calibration] capture entries in %s" % sys.argv[1])
 
-    ref_dir = os.path.join(project_dir, "reference")
-    objects = read_objects(os.path.join(ref_dir, "objects.txt"))
-    width, height, ids, _, _ = exrio.rgb(os.path.join(ref_dir, "ids.exr"))
-
-    results = [r for r in (compare_entry(project_dir, e, objects, ids, width, height)
-                           for e in entries) if r]
+    results = [r for r in (compare_entry(project_dir, e) for e in entries) if r]
     if not results:
         raise SystemExit("nothing could be compared")
 
@@ -365,11 +472,14 @@ def main():
         bad = [x["object"] for x in r["rows"] if not (x["rel"] <= OBJECT_TOLERANCE)]
         if r["absolute"] > SCORE_TOLERANCE or bad:
             failed.append(r["name"])
-            log("FAIL %-8s absolute %.3f stops (limit %.2f)%s" % (
+            log("FAIL %-14s absolute %.3f stops (limit %.2f)%s" % (
                 r["name"], r["absolute"], SCORE_TOLERANCE,
                 "" if not bad else ", off-trend objects: " + ", ".join(bad)))
         else:
-            log("PASS %-8s absolute %.3f stops" % (r["name"], r["absolute"]))
+            log("PASS %-14s absolute %.3f stops" % (r["name"], r["absolute"]))
+    for r in results:
+        if r.get("display"):
+            log("INFO %-14s display mean |delta| %.1f codes (AgX, not scored)" % (r["name"], r["display"]["mean_abs"]))
 
     return 1 if failed else 0
 
