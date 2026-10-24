@@ -1576,8 +1576,8 @@ bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint pre
     RWStructuredBuffer<HLSL::GIReservoirCompressed> previousgiReservoir = ResourceDescriptorHeap[previousReservoirIndex];
     HLSL::GIReservoir r = UnpackGIReservoir(previousgiReservoir[prevPixel.x + prevPixel.y * viewContext.renderResolution.x]);
 
-    // Drop the history on the first frame or whenever it failed validation.
-    if (viewContext.frameNumber == 0 || frameFilteringCount == 0)
+    // Drop the history on the first frame, after the world was cleared, or whenever it failed validation.
+    if (viewContext.frameNumber == 0 || rtParameters.resetHistory || frameFilteringCount == 0)
         r = (HLSL::GIReservoir) 0;
     else
         ScaleGIReservoir(r, frameFilteringCount);

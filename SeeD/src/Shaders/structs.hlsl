@@ -728,6 +728,7 @@ namespace HLSL
         hbool enableRussianRoulette;
         hbool enableSoftShadows;
         hbool directOnly;   // drop the ReSTIR indirect term; matches Cycles at max_bounces 0
+        hbool resetHistory; // the world was cleared: SHARC entries and ReSTIR history belong to the old scene
     };
     
     struct GIReservoir

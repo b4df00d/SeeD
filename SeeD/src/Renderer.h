@@ -520,6 +520,9 @@ struct RayTracingContext
     Resource SHARCAccumulation;
     Resource SHARCResolved;
 
+    uint seenClearCount = 0;      // World::clearCount last acted on
+    uint resetHistoryFrames = 0;  // frames left with rtParameters.resetHistory set
+
     void On(uint2 resolution)
     {
         instancesRayTracingCount.CreateBuffer(1, D3D12_RESOURCE_STATE_COMMON);
@@ -739,6 +742,17 @@ public:
         rayTracingContextParams.specularHitDistanceIndex = GetRegisteredResource("specularHitDistance").uav.offset;
         rayTracingContextParams.instancesRaytracingHeapIndex = raytracingContext.instancesRayTracing.GetResource().uav.offset;
         rayTracingContextParams.instancesRaytracingCountHeapIndex = raytracingContext.instancesRayTracingCount.GetResource().uav.offset;
+
+        // A cleared world invalidates the GI caches (SHARC grid keyed by position, ReSTIR reservoirs by
+        // pixel). Reset for a few frames: the old scene can still be in the TLAS and in frames in flight
+        if (World::instance && World::instance->clearCount != raytracingContext.seenClearCount)
+        {
+            raytracingContext.seenClearCount = World::instance->clearCount;
+            raytracingContext.resetHistoryFrames = FRAMEBUFFERING + 2;
+        }
+        rayTracingContextParams.resetHistory = raytracingContext.resetHistoryFrames > 0;
+        if (raytracingContext.resetHistoryFrames > 0)
+            raytracingContext.resetHistoryFrames--;
 
         return rayTracingContextParams;
     }

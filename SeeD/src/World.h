@@ -1487,8 +1487,12 @@ public:
         SaveEntities(name, CollectClosure(root), root);
     }
 
+    // Bumped by Clear(): the renderer drops what it cached about the old scene (GI history)
+    uint clearCount = 0;
+
     void Clear()
     {
+        clearCount++;
         // Snapshot first: SystemBase::Off() erases the system from `systems`, so
         // walking the live vector by index skips every other entry -- half the
         // systems would keep running against a world whose entities just died.
