@@ -2679,7 +2679,7 @@ class AtmosphericScattering : public Pass
     Components::Handle<Components::Shader> atmosphericScatteringReprojectionShader;
     Components::Handle<Components::Shader> atmosphericScatteringAccumulationShader;
 
-    uint3 atmoSize = float3(160, 90, 192) * 0.75f;
+    uint3 atmoSize = float3(160, 90, 128) * 1.0f;
 
 public:
     HLSL::AtmosphericScatteringParameters asparams = {}; // artistic fields written every frame by MainView::UpdateRenderSettings

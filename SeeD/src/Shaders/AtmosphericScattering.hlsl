@@ -26,6 +26,7 @@ cbuffer CustomAS : register(b4)
 #define TEMPORAL_BLEND                  0.05f // weight of the new frame in the froxel history (~20 frames)
 #define SPATIAL_FILTER                  1 // 3x3 tent on the history when integrating it (not written back)
 #define DEPTH_AWARE_SLICES              1 // a slice holding the visible surface is sampled only in front of it (see RayGen)
+#define DEPTH_CLAMP_BEHIND              1 // with DEPTH_AWARE_SLICES: this many slices right behind the one holding the visible surface are sampled just in front of it (no light from beyond walls), 0: none
 #define FOG_INDIRECT_SHARC              0 // 1: an indirect ray hitting a surface takes that surface's SHARC radiance, 0: it counts as black (sky only)
 #define FOG_DEBUG_LIGHTS                0 // 0: analytic lights + indirect, 1: analytic lights only (RIS + shadow ray), 2: indirect only (sky + SHARC)
 #define BOUNCES_MIN                     1
@@ -281,6 +282,16 @@ void RayGen()
                 float surfaceDistance = dot(surface.xyz / surface.w - camera.worldPos.xyz, viewDir);
                 if (surfaceDistance > sliceStart && surfaceDistance < sliceEnd)
                     worldPos = camera.worldPos.xyz + viewDir * lerp(sliceStart, surfaceDistance, 1.0f - jitterZ);
+#if DEPTH_CLAMP_BEHIND
+                // Slice entirely behind the surface seen along this (jittered) ray: sampled just in
+                // front of that surface instead. Otherwise it holds the medium on the far side of the
+                // wall/ceiling (sunlit outside), and the column's other rays, the ones that reach farther
+                // (a ceiling at grazing angle, a window edge), read it as being in front of them
+                // Only the DEPTH_CLAMP_BEHIND slices right behind the surface's: the ones the composite
+                // and the column's neighbours read; farther ones keep their own position
+                else if (surfaceDistance <= sliceStart && surfaceDistance > FroxelToZ(DispatchRaysIndex().z - 1.0f - DEPTH_CLAMP_BEHIND, currentFroxel.resolution.z, asParameters.specialNear, camera.farClip))
+                    worldPos = camera.worldPos.xyz + viewDir * surfaceDistance * (1.0f - 0.01f * (1.0f - jitterZ));
+#endif
             }
         }
     }

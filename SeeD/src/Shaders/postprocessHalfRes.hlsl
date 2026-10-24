@@ -21,6 +21,20 @@ cbuffer CustomAS : register(b4)
 // 3: false color (R lookup depth, G fog opacity, B distance), 4: fog radiance / sun illuminance (x10, red above 1)
 #define ATMO_DEBUG 0
 
+// Froxel slices (log spaced, so a constant fraction of the depth, ~6-7% each) the fog lookup is pulled
+// toward the camera. A froxel is ~16 pixels wide and is read bilinearly (plus the 3x3 tent of the
+// accumulation): a wall pixel next to a window also reads columns whose rays went through it, and at the
+// wall's depth those rays are already outside, in the sunlit exterior fog. A little in front of the wall
+// they are still inside the room. Costs that much fog in front of every surface; 0: unbiased lookup
+#define FOG_COMPOSITE_DEPTH_BIAS 0.0f
+
+// The slice holding the surface: its segment can hold medium from behind the surface (a jittered
+// sample whose ray missed the surface, outside the building), and trilinear filtering reads it.
+// 1: never read that slice: the integral stops at the last slice boundary in front of the surface and
+// the remaining fraction of a slice is extrapolated from the segment in front (slices are log spaced,
+// consecutive segments differ by ~7% in length). 0: plain trilinear
+#define FOG_COMPOSITE_REJECT_BEHIND 0
+
 [RootSignature(SeeDRootSignature)]
 [numthreads(16, 16, 1)]
 void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
@@ -49,7 +63,27 @@ void PostProcessHalfRes(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchT
     // nature), w = optical depth. Sky pixels see the whole froxel range
     if (sky)
         froUV.z = 1;
+    else // coordinate 0 (texel center 0.5 / size) is the camera itself
+        froUV.z = max(froUV.z - FOG_COMPOSITE_DEPTH_BIAS / currentFroxel.resolution.z, 0.5f / currentFroxel.resolution.z);
+#if FOG_COMPOSITE_REJECT_BEHIND
+    float4 fogData;
+    if (sky)
+        fogData = atmosphericScattering.Sample(samplerLinearClamp, froUV);
+    else
+    {
+        // texel z holds the integral from the camera to coordinate z (slice 0: the camera, 0)
+        float coordinate = froUV.z * currentFroxel.resolution.z - 0.5f;
+        float front = floor(coordinate);
+        float fraction = coordinate - front;
+        float invSize = 1.0f / currentFroxel.resolution.z;
+        float4 atFront = atmosphericScattering.Sample(samplerLinearClamp, float3(froUV.xy, (front + 0.5f) * invSize));
+        float4 beforeFront = front >= 1.0f ? atmosphericScattering.Sample(samplerLinearClamp, float3(froUV.xy, (front - 0.5f) * invSize)) : 0.0f;
+        // both are integrals from the camera: the difference is the last whole segment, never negative
+        fogData = atFront + fraction * max(atFront - beforeFront, 0.0f);
+    }
+#else
     float4 fogData = atmosphericScattering.Sample(samplerLinearClamp, froUV);
+#endif
     float fogTransmittance = exp(-fogData.w);
 
     // Planet atmosphere between the camera and the surface. Not for sky pixels: the sky-view LUT
