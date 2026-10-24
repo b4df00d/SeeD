@@ -610,7 +610,8 @@ void PathTraceRays()
         return;
 
     // Write radiance to output buffer
-    float4 color = ResolveSampleData(accumulatedSampleData, rtParameters.SHARCSamplesPerPixel, rtParameters.SHARCRadianceScale);
+    // No intensity scale: SHARCRadianceScale is SHARC's fixed-point factor (SharcCommon.h), not an output gain
+    float4 color = ResolveSampleData(accumulatedSampleData, rtParameters.SHARCSamplesPerPixel, 1.0f);
     
     
     

@@ -36,7 +36,7 @@ public:
     float reservoirRandBias = 0.0f;
     float reservoirSpacialRandBias = 0.2f;
     float SHARCSceneScale = 20.0f;
-    float SHARCRadianceScale = 1.0f;
+    float SHARCRadianceScale = 1000.0f; // SHARC's fixed-point accumulation factor (NVIDIA's suggested start): at 1, cached radiance below 1 truncated to 0
     float SHARCRoughnessThreshold = 0.33f;
     uint SHARCSamplesPerPixel = 1;
     uint SHARCAccumulationFrameNum = 128;

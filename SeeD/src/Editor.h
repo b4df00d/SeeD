@@ -1239,7 +1239,7 @@ public:
                 ImGui::SliderFloat("randBias", &rt.reservoirRandBias, -1, 1);
                 ImGui::SliderFloat("spacialRandBias", &rt.reservoirSpacialRandBias, 0, 1);
                 ImGui::SliderFloat("SHARCSceneScale", &rt.SHARCSceneScale, 1, 64, "%f", ImGuiSliderFlags_Logarithmic);
-                ImGui::SliderFloat("SHARCRadianceScale", &rt.SHARCRadianceScale, 0.1, 10);
+                ImGui::SliderFloat("SHARCRadianceScale", &rt.SHARCRadianceScale, 1, 100000, "%.0f", ImGuiSliderFlags_Logarithmic);
                 ImGui::SliderFloat("SHARCRoughnessThreshold", &rt.SHARCRoughnessThreshold, 0, 1);
                 ImGui::SliderInt("SHARCSamplesPerPixel", (int*)&rt.SHARCSamplesPerPixel, 1, 8);
                 ImGui::SliderInt("SHARCAccumulationFrameNum", (int*)&rt.SHARCAccumulationFrameNum, 1, 512, "%d", ImGuiSliderFlags_Logarithmic);

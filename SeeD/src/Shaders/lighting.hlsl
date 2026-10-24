@@ -275,10 +275,10 @@ void RayGen()
     // UCW = Wsum / (M * pHat_selected); indirect radiance estimate = color * UCW.
     // For the temporal-only path M = r.Wcount; for the spatial pairwise-MIS path the
     // MIS weights already sum to 1 (no 1/M), so it pinned r.Wcount = 1 above to reuse
-    // this same expression. The reservoir stores UNSCALED path radiance, so apply
-    // SHARCRadianceScale here to match the direct light Pass 1 scaled in ResolveSampleData.
+    // this same expression. The reservoir holds path radiance unscaled, like the direct light
+    // (SHARCRadianceScale is only SHARC's own fixed-point factor).
     float ucw = r.Wsum / max(r.Wcount * r.W, 1e-5f);
-    float3 indirect = r.color * ucw * rtParameters.SHARCRadianceScale;
+    float3 indirect = r.color * ucw;
     
     if ((editorContext.debugFlags & (HLSL::EditorDebugGIBounces | HLSL::EditorDebugGIAlbedo | HLSL::EditorDebugGINormals)) == 0 && !rtParameters.directOnly)
         lighted[dtid.xy] += float4(indirect, 0.0f);
