@@ -1329,31 +1329,64 @@ RenderingWindow renderingWindow;
 
 class MeshStorageWindow : public EditorWindow
 {
+    struct Row
+    {
+        char name[96];
+        const char* kind;
+        uint primitives;
+        uint scratchBytes;
+        uint scratchEnd;
+        uint resultBytes;
+        uint builds;
+        uint lastFrame;
+        uint meshIndex;
+        bool isOverride;
+    };
+    // kept across frames so the per-frame refill reuses their storage instead of reallocating
+    std::vector<Row> rows;
+    std::unordered_map<uint, std::string> namesByStorageIndex;
+    size_t namesAssetCount = ~0ull;
+    size_t namesMeshCount = ~0ull;
+    uint namesFrame = 0;
+
+    // storageIndex -> asset file name, rebuilt only when the library or the storage changed size
+    // (plus a slow periodic refresh to catch assets loaded into an already counted slot)
+    void RefreshNames(MeshStorage* ms)
+    {
+        if (AssetLibrary::instance == nullptr)
+            return;
+        uint frame = GPU::instance != nullptr ? GPU::instance->frameNumber : 0;
+        size_t assetCount = AssetLibrary::instance->map.size();
+        size_t meshCount = ms->allMeshes.size();
+        if (assetCount == namesAssetCount && meshCount == namesMeshCount && frame - namesFrame < 120)
+            return;
+        namesAssetCount = assetCount;
+        namesMeshCount = meshCount;
+        namesFrame = frame;
+
+        namesByStorageIndex.clear();
+        for (auto& kv : AssetLibrary::instance->map)
+        {
+            if (kv.second.type != AssetLibrary::AssetType::mesh || kv.second.storageIndex == ~0u)
+                continue;
+            const String& path = kv.second.originalFilePath.size() > 0 ? kv.second.originalFilePath : kv.second.path;
+            std::string_view name = path.c_str();
+            size_t slash = name.find_last_of("/\\");
+            namesByStorageIndex[kv.second.storageIndex] = slash == std::string_view::npos ? name : name.substr(slash + 1);
+        }
+    }
+
     void DrawASTable(MeshStorage* ms, double toMB)
     {
-        ImGui::SeparatorText("Acceleration structures");
+        RefreshNames(ms);
 
-        struct Row
-        {
-            std::string name;
-            const char* kind;
-            uint primitives;
-            uint scratchBytes;
-            uint scratchEnd;
-            uint resultBytes;
-            uint builds;
-            uint lastFrame;
-            uint meshIndex;
-            bool isOverride;
-        };
-        std::vector<Row> rows;
+        rows.clear();
         {
             std::lock_guard<std::mutex> lk(ms->asBuildsLock);
-            rows.reserve(ms->asBuilds.size());
             for (auto& kv : ms->asBuilds)
             {
                 auto& b = kv.second;
-                Row r;
+                Row& r = rows.emplace_back();
                 r.kind = MeshStorage::ASKindName(b.kind);
                 r.primitives = b.primitives;
                 r.scratchBytes = b.scratchBytes;
@@ -1363,57 +1396,27 @@ class MeshStorageWindow : public EditorWindow
                 r.lastFrame = b.lastFrame;
                 r.meshIndex = b.index;
                 r.isOverride = false;
-                r.name = b.kind == MeshStorage::AS_TLAS ? std::format("view {}", b.index) : std::format("mesh {}", b.index);
-                if (b.kind != MeshStorage::AS_TLAS)
+                if (b.kind == MeshStorage::AS_TLAS)
                 {
-                    // a terrain node's BLAS belongs to an override mesh : follow it back to the
-                    // source asset, which is the name that means something to the reader
-                    auto src = ms->overrideSourceByIndex.find(b.index);
-                    if (src != ms->overrideSourceByIndex.end())
-                    {
-                        r.meshIndex = src->second;
-                        r.isOverride = true;
-                    }
+                    snprintf(r.name, sizeof(r.name), "view %u", b.index);
+                    continue;
                 }
-                rows.push_back(std::move(r));
-            }
-        }
-
-        if (AssetLibrary::instance != nullptr)
-        {
-            std::unordered_map<uint, std::string> namesByStorageIndex;
-            for (auto& kv : AssetLibrary::instance->map)
-            {
-                if (kv.second.type != AssetLibrary::AssetType::mesh || kv.second.storageIndex == ~0u)
-                    continue;
-                const String& path = kv.second.originalFilePath.size() > 0 ? kv.second.originalFilePath : kv.second.path;
-                std::string name = path.c_str();
-                size_t slash = name.find_last_of("/\\");
-                namesByStorageIndex[kv.second.storageIndex] = slash == std::string::npos ? name : name.substr(slash + 1);
-            }
-            for (auto& r : rows)
-            {
-                if (r.kind == MeshStorage::ASKindName(MeshStorage::AS_TLAS))
-                    continue;
+                // a terrain node's BLAS belongs to an override mesh : follow it back to the
+                // source asset, which is the name that means something to the reader
+                auto src = ms->overrideSourceByIndex.find(b.index);
+                if (src != ms->overrideSourceByIndex.end())
+                {
+                    r.meshIndex = src->second;
+                    r.isOverride = true;
+                }
+                const char* suffix = r.isOverride ? " (terrain node)" : "";
                 auto it = namesByStorageIndex.find(r.meshIndex);
                 if (it != namesByStorageIndex.end())
-                    r.name = r.isOverride ? it->second + " (terrain node)" : it->second;
-                else if (r.isOverride)
-                    r.name += " (terrain node)";
+                    snprintf(r.name, sizeof(r.name), "%s%s", it->second.c_str(), suffix);
+                else
+                    snprintf(r.name, sizeof(r.name), "mesh %u%s", b.index, suffix);
             }
         }
-
-        if (rows.empty())
-        {
-            ImGui::TextDisabled("No acceleration structure built yet.");
-            return;
-        }
-
-        uint resultTotal = 0, batchEndMax = 0;
-        for (auto& r : rows) { resultTotal += r.resultBytes; batchEndMax = max(batchEndMax, r.scratchEnd); }
-        ImGui::Text("%zu structures | %.2f MB live", rows.size(), resultTotal * toMB);
-        ImGui::Text("largest batch end %.2f MB -> what the %.0f MB reservation must cover",
-            batchEndMax * toMB, ms->maxScratchSizeInBytes * toMB);
 
         const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY
             | ImGuiTableFlags_Sortable | ImGuiTableFlags_Resizable | ImGuiTableFlags_HighlightHoveredColumn;
@@ -1440,7 +1443,7 @@ class MeshStorageWindow : public EditorWindow
                             int cmp = 0;
                             switch (spec.ColumnIndex)
                             {
-                            case 0: cmp = a.name.compare(b.name); break;
+                            case 0: cmp = strcmp(a.name, b.name); break;
                             case 1: cmp = strcmp(a.kind, b.kind); break;
                             case 2: cmp = a.primitives < b.primitives ? -1 : (a.primitives > b.primitives ? 1 : 0); break;
                             case 3: cmp = a.scratchBytes < b.scratchBytes ? -1 : (a.scratchBytes > b.scratchBytes ? 1 : 0); break;
@@ -1461,9 +1464,9 @@ class MeshStorageWindow : public EditorWindow
                 // built this frame -> highlighted, so a mesh rebuilding every frame stands out
                 bool rebuiltNow = frameNumber > 0 && r.lastFrame + 2 >= frameNumber;
                 if (rebuiltNow)
-                    ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f), "%s", r.name.c_str());
+                    ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f), "%s", r.name);
                 else
-                    ImGui::TextUnformatted(r.name.c_str());
+                    ImGui::TextUnformatted(r.name);
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("last built on frame %u (%u builds)", r.lastFrame, r.builds);
                 ImGui::TableNextColumn(); ImGui::TextUnformatted(r.kind);
@@ -1549,10 +1552,39 @@ public:
             ms->maxScratchSizeInBytes * toMB);
         ImGui::Text("extra batches last frame %u", ms->scratchBatchesLastFrame.load(std::memory_order_relaxed));
 
-        DrawASTable(ms, toMB);
+        // broad AS totals: a plain walk of the builds, no copies
+        ImGui::SeparatorText("Acceleration structures");
+        size_t asCount = 0;
+        uint resultTotal = 0, batchEndMax = 0;
+        {
+            std::lock_guard<std::mutex> lk(ms->asBuildsLock);
+            asCount = ms->asBuilds.size();
+            for (auto& kv : ms->asBuilds)
+            {
+                resultTotal += kv.second.resultBytes;
+                batchEndMax = max(batchEndMax, kv.second.scratchEnd);
+            }
+        }
+        if (asCount == 0)
+            ImGui::TextDisabled("No acceleration structure built yet.");
+        else
+        {
+            ImGui::Text("%zu structures | %.2f MB live", asCount, resultTotal * toMB);
+            ImGui::Text("largest batch end %.2f MB -> what the %.0f MB reservation must cover",
+                batchEndMax * toMB, ms->maxScratchSizeInBytes * toMB);
+        }
+
+        // per-structure table and per-mesh layout: only paid for when expanded
+        if (asCount > 0 && ImGui::CollapsingHeader("Acceleration structure details"))
+            DrawASTable(ms, toMB);
+
+        if (!ImGui::CollapsingHeader("Vertex buffer layout"))
+        {
+            ImGui::End();
+            return;
+        }
 
         // Visual layout of the vertices buffer: each mesh occupies [vertexOffset, +vertexCount].
-        ImGui::SeparatorText("Vertex buffer layout");
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p0 = ImGui::GetCursorScreenPos();
         float width = ImGui::GetContentRegionAvail().x;
