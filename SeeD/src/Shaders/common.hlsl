@@ -1225,6 +1225,43 @@ struct SurfaceData
     ShadingDomain shadingDomain;
 };
 
+// Directional albedo of the GGX specular lobe (split-sum DFG term), verbatim from the
+// DLSS-RR Integration Guide appendix [Ray Tracing Gems, Chapter 32]. alpha = roughness^2.
+float3 EnvBRDFApprox2(float3 SpecularColor, float alpha, float NoV)
+{
+    NoV = abs(NoV);
+    float4 X;
+    X.x = 1.f;
+    X.y = NoV;
+    X.z = NoV * NoV;
+    X.w = NoV * X.z;
+    float4 Y;
+    Y.x = 1.f;
+    Y.y = alpha;
+    Y.z = alpha * alpha;
+    Y.w = alpha * Y.z;
+    float2x2 M1 = float2x2(0.99044f, -1.28514f, 1.29678f, -0.755907f);
+    float3x3 M2 = float3x3(1.f, 2.92338f, 59.4188f, 20.3225f, -27.0302f, 222.592f, 121.563f, 626.13f, 316.627f);
+    float2x2 M3 = float2x2(0.0365463f, 3.32707, 9.0632f, -9.04756);
+    float3x3 M4 = float3x3(1.f, 3.59685f, -1.36772f, 9.04401f, -16.3174f, 9.22949f, 5.56589f, 19.7886f, -20.2123f);
+    float bias = dot(mul(M1, X.xy), Y.xy) * rcp(dot(mul(M2, X.xyw), Y.xyw));
+    float scale = dot(mul(M3, X.xy), Y.xy) * rcp(dot(mul(M4, X.xzw), Y.xyw));
+    // This is a hack for specular reflectance of 0
+    bias *= saturate(SpecularColor.g * 50);
+    return mad(SpecularColor, max(0, scale), max(0, bias));
+}
+
+// DLSS-RR specularAlbedo guide: the average specular reflectance for this view direction, not
+// the F0 tint. Writing 1 for dielectrics (the old lerp(1, albedo, metalness)) told RR every
+// dielectric reflects like a white mirror, so it misattributed the diffuse signal as specular.
+float3 GBufferSpecularAlbedo(in SurfaceData s, float2 svPosition)
+{
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    float3 viewDir = FroxelViewDir(svPosition - 0.5f, viewContext.renderResolution.xy, cameras[0]); // unjittered: sub-pixel, irrelevant here
+    float3 specularF0 = lerp(0.04f, s.albedo.xyz, s.metalness); // == baseColorToSpecularF0 (raytracingCommon.hlsl)
+    return EnvBRDFApprox2(specularF0, s.roughness * s.roughness, dot(normalize(s.normal), viewDir));
+}
+
 // Exact sRGB transfer functions (IEC 61966-2-1).
 // Color textures (albedo, emissive) are stored sRGB-encoded in plain UNORM formats, so they are
 // decoded here after sampling; the post process encodes the final image for the UNORM backbuffer.

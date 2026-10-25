@@ -81,7 +81,7 @@ PS_OUTPUT PixelForward(MSVert inVerts, MSPrim inPrim)
     SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent.xyz, binormal);
 
     o.albedo = s.albedo;
-    o.specularAlbedo = lerp(1, s.albedo, s.metalness);
+    o.specularAlbedo = float4(GBufferSpecularAlbedo(s, inVerts.pos.xy), 1);
     o.metalness = s.metalness;
     // normal.a carries roughness (DLSS-RR packed mode; lighting.hlsl preserves it on its rewrite)
     o.normal = float4(StoreNormal(normalize(s.normal)), s.roughness);
@@ -141,7 +141,7 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts, MSPrim inPrim)
         InterlockedAdd(overdraw[uint2(inVerts.pos.xy)], 1, previous);
     }
 
-    o.specularAlbedo = lerp(1, s.albedo, s.metalness);
+    o.specularAlbedo = float4(GBufferSpecularAlbedo(s, inVerts.pos.xy), 1);
     o.metalness = s.metalness;
     // normal.a carries roughness (DLSS-RR packed mode; lighting.hlsl preserves it on its rewrite)
     o.normal = float4(StoreNormal(normalize(s.normal)), s.roughness);

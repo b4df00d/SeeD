@@ -190,6 +190,22 @@ public:
         return id;
     }
 
+    // Per-frame safe Add: once the id is known it builds no String and only takes the shared lock.
+    // std::hash<string_view> matches std::hash<string>, so the id is the one Add would compute.
+    assetID AddIfMissing(const char* path, assetID id = {})
+    {
+        if (id.hash == 0)
+            id.hash = std::hash<std::string_view>{}(path);
+        bool known;
+        {
+            std::shared_lock<std::shared_mutex> lk(lock);
+            known = map.contains(id);
+        }
+        if (!known)
+            Add(path, path, id);
+        return id;
+    }
+
     assetID AddHardCoded(String path)
     {
         ZoneScoped;

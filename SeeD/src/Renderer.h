@@ -3861,11 +3861,11 @@ public:
                             // The Shader entity carries its own path (set wherever it's created --
                             // CreateMaterials, the "New Terrain" menu, ...), so it self-registers in
                             // AssetLibrary from saved data alone: no pass needs to hardcode it ahead
-                            // of time. Idempotent, so calling it every frame for every material is
-                            // cheap and safe (same pattern as GetOrRegister itself).
+                            // of time. AddIfMissing, not Add: Add rebuilds the path Strings every
+                            // call, which for every material every frame was a stream of allocations.
                             Components::Shader& shaderCmp = materialCmp.shader.Get();
                             if (shaderCmp.path[0] != 0)
-                                AssetLibrary::instance->Add(shaderCmp.path, shaderCmp.path, shaderCmp.id);
+                                AssetLibrary::instance->AddIfMissing(shaderCmp.path, shaderCmp.id);
                             material.shaderIndex = frameWorld.shaderBucketRegistry.GetOrRegister(shaderCmp.id, IsDoubleSided(materialCmp));
                         }
                         for (uint paramIndex = 0; paramIndex < HLSL::MaterialParametersCount; paramIndex++)

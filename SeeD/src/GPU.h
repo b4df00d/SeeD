@@ -2531,8 +2531,9 @@ public:
 
                 if (batchContiguousUploads && dirtyIndices.size() > 1)
                 {
-                    // Sort dirty indices to batch contiguous ranges
-                    std::vector<uint> sortedIndices = dirtyIndices;
+                    // Sort dirty indices to batch contiguous ranges. In place: the list is cleared
+                    // right after the upload, so a sorted copy would only be a per-frame allocation.
+                    std::vector<uint>& sortedIndices = dirtyIndices;
                     std::sort(sortedIndices.begin(), sortedIndices.end());
 
                     // Copy all dirty entries into upload buffer

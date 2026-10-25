@@ -3,6 +3,7 @@
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define TRACING_DISTANCE                10000.0f
 #define SPECULAR_HITT_MAX               65504.0f // fp16 max: the specularHitDistance guide is R16_FLOAT, anything above becomes +Inf
+#define SPECULAR_HITT_TRACE_ROUGHNESS_MAX 0.7f   // above this the DLSS-RR hitT guide keeps the diffuse-lobe distance instead of tracing a dedicated specular ray
 #define BOUNCES_MIN                     0
 #define BOUNCES_MAX                     10
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
@@ -182,9 +183,10 @@ void PathTraceRays()
     // Feeding 0 makes it reproject reflections as if they were painted onto the surface, the
     // history never matches while the camera moves, and RR falls back to a wide spatial
     // filter -> reflections blur on motion and only resharpen once the camera stops.
-    // Samples whose primary lobe was specular are the signal RR actually wants; the
-    // diffuse-lobe distance is kept as a fallback because on rough surfaces the specular lobe
-    // is wide and of the same scale (and RR weighs hitT less there anyway).
+    // Only samples whose primary lobe was specular measure the right distance; when none did,
+    // a dedicated specular ray is traced after the sample loop (see there). The diffuse-lobe
+    // distance is only kept as a fallback on rough surfaces, where the specular lobe is wide
+    // and of the same scale (and RR weighs hitT less there anyway).
     float specularHitTSum = 0.0f;
     float anyHitTSum = 0.0f;
     uint hitTCounts = 0; // specular count << 16 | any count (fewer values live across TraceRay)
@@ -663,11 +665,66 @@ void PathTraceRays()
     RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
     lighted[pixel] = color;
 
-    // Prefer the specular-lobe samples, fall back to the diffuse-lobe first-bounce distance,
-    // and only write 0 ("reflection sits on the surface") when the path never left the primary
-    // hit. lighting.hlsl overwrites this for sky pixels and must not clear it for the rest.
     uint specularHitTCount = hitTCounts >> 16;
     uint anyHitTCount = hitTCounts & 0xFFFF;
+
+    // No sample picked the specular lobe off the primary surface: trace one ray along a
+    // specular sample just for the guide. Dielectrics pick that lobe ~10% of the time
+    // (GetSpecularBrdfProbability clamps at 0.1), so on most frames the guide used to carry a
+    // random cosine-lobe distance instead, RR reprojected the reflection history to a
+    // different virtual point every frame, rejected it and blurred reflections under motion.
+    if (specularHitTCount == 0)
+    {
+        GBufferCameraData cd = GetGBufferCameraData(pixel);
+        SurfaceData s = GetSurfaceData(pixel);
+        if (cd.reverseZ > 0.0 && s.roughness <= SPECULAR_HITT_TRACE_ROUGHNESS_MAX)
+        {
+            // same normal flips and origin as bounce 0 of the path loop
+            float3 viewVector = -cd.viewDir;
+            float3 geometryNormal = s.objectNormal;
+            if (dot(geometryNormal, viewVector) < 0.0f)
+                geometryNormal = -geometryNormal;
+            float3 shadingNormal = s.normal;
+            if (dot(geometryNormal, shadingNormal) < 0.0f)
+                shadingNormal = -shadingNormal;
+
+            RayDesc ray;
+            float3 brdfWeight;
+            float brdfPdf;
+            float2 rand2 = float2(RNG(rngState), RNG(rngState));
+            if (evalIndirectCombinedBRDF(rand2, shadingNormal, geometryNormal, viewVector, s, SPECULAR_TYPE, 1.0f, ray.Direction, brdfWeight, brdfPdf))
+            {
+                ray.Origin = OffsetRay(cd.offsetedWorldPos, geometryNormal);
+                ray.TMin = 0.01f;
+                ray.TMax = TRACING_DISTANCE;
+                uint rayFlags = (!rtParameters.enableBackFaceCull) ? RAY_FLAG_NONE : RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+#if DISABLE_BACK_FACE_CULLING
+                rayFlags &= (~RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
+#endif // DISABLE_BACK_FACE_CULLING
+
+                RayPayload payload;
+                payload.hitDistance = -1.0f;
+                payload.instanceID = ~0U;
+                payload.primitiveIndex = ~0U;
+                payload.geometryIndex = ~0U;
+                payload.barycentrics = 0;
+#if USE_SER
+                // only the distance is needed: no reorder, no closesthit/miss invocation
+                dx::HitObject hit = dx::HitObject::TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
+                specularHitTSum = hit.IsHit() ? hit.GetRayTCurrent() : TRACING_DISTANCE;
+#else
+                TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
+                specularHitTSum = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE;
+#endif
+                specularHitTCount = 1;
+            }
+        }
+    }
+
+    // Prefer the specular-lobe distance, fall back to the diffuse-lobe first-bounce distance
+    // (rough surfaces, or the specular sample went under the surface), and only write 0
+    // ("reflection sits on the surface") when the path never left the primary hit.
+    // lighting.hlsl overwrites this for sky pixels and must not clear it for the rest.
     float outSpecularHitT = specularHitTCount > 0 ? specularHitTSum / specularHitTCount
                           : (anyHitTCount > 0 ? anyHitTSum / anyHitTCount : 0.0f);
     specularHitDistance[pixel] = min(outSpecularHitT, SPECULAR_HITT_MAX);
