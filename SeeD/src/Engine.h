@@ -24,6 +24,11 @@ public:
     Physics physics;
     Calibration calibration;
 
+    // the frame graph is built once and re-run (see Tasks.h): these are its persistent sub-graphs
+    tf::Taskflow worldFlow;
+    tf::Taskflow rendererFlow;
+    size_t builtScheduleKey = ~size_t(0);
+
     void On()
     {
         ZoneScoped;
@@ -62,23 +67,10 @@ public:
             ui.FrameStart();
             ios.ProcessMessages();
 
-            TASK(UpdateWindow);
-            TASKWITHSUBFLOW(ScheduleInputs);
-            TASKWITHSUBFLOW(ScheduleLoading);
-            TASKWITHSUBFLOW(ScheduleWorld);
-            TASKWITHSUBFLOW(ScheduleEditor);
-            TASKWITHSUBFLOW(ScheduleRenderer);
-            TASK_(PhysicsStep, physics.Step);
-
-            UpdateWindow.precede(ScheduleInputs);
-            ScheduleInputs.precede(ScheduleWorld);
-            PhysicsStep.succeed(ScheduleWorld);
-            ScheduleWorld.succeed(ScheduleLoading);
-            ScheduleWorld.precede(ScheduleEditor);
-            ScheduleRenderer.succeed(ScheduleEditor, ScheduleLoading);
+            if (ScheduleKey() != builtScheduleKey)
+                BuildSchedule();
 
             RUN();
-            CLEAR();
 
             if (ShaderStatsCollector::instance)
                 ShaderStatsCollector::instance->Update();
@@ -98,6 +90,8 @@ public:
         renderer.WaitFrame(); // wait previous frame
         gpu.FrameStart();
         renderer.WaitFrame(); // wait current frame
+
+        CLEAR(); // its module tasks point at worldFlow/rendererFlow
 
         physics.Off();
         if (options.playerSystem) player.Off();
@@ -120,10 +114,39 @@ public:
         time.Off();
     }
 
-    void ScheduleInputs(tf::Subflow& subflow)
+    // Everything the frame graph's shape depends on. A system's task reads systems[i] at run time,
+    // so only the count matters, not which systems they are.
+    size_t ScheduleKey()
+    {
+        return world.systems.size();
+    }
+
+    void BuildSchedule()
     {
         ZoneScoped;
-        SUBTASK_(InputsUpdate, ios.Update);
+        CLEAR();
+        worldFlow.clear();
+        rendererFlow.clear();
+
+        ScheduleWorld(worldFlow);
+        renderer.Schedule(world, rendererFlow);
+
+        TASK(UpdateWindow);
+        TASK_(Inputs, ios.Update);
+        tf::Task LoadAssets = taskflow.emplace([]() { AssetLibrary::instance->Open(); AssetLibrary::instance->LoadAssets(); }).name("Loading");
+        MODULE(WorldModule, worldFlow);
+        tf::Task EditorWindows = taskflow.emplace([]() { EditorWindow::UpdateWindows(); }).name("Editor");
+        MODULE(RendererModule, rendererFlow);
+        TASK_(PhysicsStep, physics.Step);
+
+        UpdateWindow.precede(Inputs);
+        Inputs.precede(WorldModule);
+        PhysicsStep.succeed(WorldModule);
+        WorldModule.succeed(LoadAssets);
+        WorldModule.precede(EditorWindows);
+        RendererModule.succeed(EditorWindows, LoadAssets);
+
+        builtScheduleKey = ScheduleKey();
     }
 
     void UpdateWindow()
@@ -140,46 +163,21 @@ public:
         }
     }
 
-    tf::Task ScheduleLoading(tf::Subflow& subflow)
+    void ScheduleWorld(tf::FlowBuilder& flow)
     {
         ZoneScoped;
 
-        tf::Task loadingTask = subflow.emplace([]() {AssetLibrary::instance->Open(); AssetLibrary::instance->LoadAssets(); }).name("Loading");
-
-        return loadingTask;
-    }
-
-    void ScheduleWorld(tf::Subflow& subflow)
-    {
-        ZoneScoped;
-
-        tf::Task prefabTask = subflow.emplace([this]() { prefabStreaming.Update(&world); }).name("PrefabStreaming");
-        tf::Task terrainTask = subflow.emplace([this]() { terrainStreaming.Update(&world); }).name("TerrainStreaming");
-        tf::Task deferredReleaseTask = subflow.emplace([this]() { world.DeferredRelease(); }).name("DeferredRelease"); // thread this ?
-        tf::Task physicsSyncTask = subflow.emplace([this]() { physics.SyncAndReadback(&world); }).name("PhysicsSyncReadback");
+        tf::Task frameStartTask = flow.emplace([this]() { world.FrameStart(); }).name("WorldFrameStart");
+        tf::Task prefabTask = flow.emplace([this]() { prefabStreaming.Update(&world); }).name("PrefabStreaming");
+        tf::Task terrainTask = flow.emplace([this]() { terrainStreaming.Update(&world); }).name("TerrainStreaming");
+        tf::Task deferredReleaseTask = flow.emplace([this]() { world.DeferredRelease(); }).name("DeferredRelease"); // thread this ?
+        tf::Task physicsSyncTask = flow.emplace([this]() { physics.SyncAndReadback(&world); }).name("PhysicsSyncReadback");
+        frameStartTask.precede(prefabTask);
         prefabTask.precede(terrainTask);
         terrainTask.precede(physicsSyncTask);
         physicsSyncTask.precede(deferredReleaseTask);
 
-        world.Schedule(subflow, deferredReleaseTask);
-    }
-
-    void ScheduleEditor(tf::Subflow& subflow)
-    {
-        EditorWindow::UpdateWindows();
-        /*
-        for (uint i = 0; i < EditorWindow::guiWindows.size(); i++)
-        {
-            auto window = EditorWindow::guiWindows[i];
-            //SUBTASKWINDOW(window); // no multithreading draw for imgui ?
-            window->Update();
-        }
-        */
-    }
-
-    void ScheduleRenderer(tf::Subflow& subflow)
-    {
-        renderer.Schedule(world, subflow);
+        world.Schedule(flow, deferredReleaseTask);
     }
 
     bool IsRunning()

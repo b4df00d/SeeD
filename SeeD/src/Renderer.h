@@ -627,7 +627,7 @@ public:
             item.second.Release();
         }
     }
-    virtual tf::Task Schedule(World& world, tf::Subflow& subflow) = 0;
+    virtual tf::Task Schedule(World& world, tf::FlowBuilder& flow) = 0;
 
     Resource& GetRegisteredResource(String name)
     {
@@ -3431,10 +3431,10 @@ public:
 
 // After recording, mark this pass ready and submit every now-contiguous-ready pass from the cursor.
 // Whichever worker unblocks the cursor performs the submission inline -- no dedicated submit thread.
-#define SUBTASKVIEWPASS(pass) tf::Task pass##Task = subflow.emplace([this](){this->pass.Render(this); this->submissions->MarkReadyAndDrain(this->pass.submitIndex);}).name(#pass)
-#define SUBTASKPASS(pass) tf::Task pass##Task = subflow.emplace([this](){this->pass.Render(nullptr); this->submissions->MarkReadyAndDrain(this->pass.submitIndex);}).name(#pass)
-#define SUBTASKRENDERERWORLD(pass) tf::Task pass = subflow.emplace([this, world](){this->pass(world);}).name(#pass)
-#define SUBTASKRENDERER(pass) tf::Task pass = subflow.emplace([this](){this->pass();}).name(#pass)
+#define SUBTASKVIEWPASS(pass) tf::Task pass##Task = flow.emplace([this](){this->pass.Render(this); this->submissions->MarkReadyAndDrain(this->pass.submitIndex);}).name(#pass)
+#define SUBTASKPASS(pass) tf::Task pass##Task = flow.emplace([this](){this->pass.Render(nullptr); this->submissions->MarkReadyAndDrain(this->pass.submitIndex);}).name(#pass)
+#define SUBTASKRENDERERWORLD(pass) tf::Task pass = flow.emplace([this, world](){this->pass(world);}).name(#pass)
+#define SUBTASKRENDERER(pass) tf::Task pass = flow.emplace([this](){this->pass();}).name(#pass)
 
 // a view per type of render ? one for main view, one for cubemap, one for minimap ?
 // main view render should always be the last one to render ?\
@@ -3472,6 +3472,13 @@ public:
 
     HLSL::Camera mainCamera = {}; // last-computed main (camera index 0) camera; read directly by Systems::TerrainStreaming via Renderer::instance->mainView
     HLSL::HazeLayer hazeLayerData[HLSL::HazeLayerCount] = {}; // UpdateHazeLayers -> UploadAndSetup
+
+    // PrepareFrameQueries -> UpdateMaterials/UpdateInstances (the graph is built once, see Tasks.h:
+    // the per-frame ranges live here, read by the for_each tasks through std::ref)
+    uint frameMaterialQuery = 0;
+    uint frameMaterialCount = 0;
+    uint frameInstanceQuery = 0;
+    uint frameInstanceCount = 0;
 
     void On(uint2 _displayResolution, uint2 _renderResolution) override
     {
@@ -3534,20 +3541,21 @@ public:
         View::Off();
     }
 
-    tf::Task Schedule(World& world, tf::Subflow& subflow) override
+    tf::Task Schedule(World& world, tf::FlowBuilder& flow) override
     {
         ZoneScoped;
 
-        tf::Task reset = Reset(world, subflow);
-        tf::Task updateMaterials = UpdateMaterials(world, subflow);
-        tf::Task updateInstances = UpdateInstances(world, subflow);
-        tf::Task updateLights = UpdateLights(world, subflow);
-        tf::Task updateFogVolumes = UpdateFogVolumes(world, subflow);
-        tf::Task updateHazeLayers = UpdateHazeLayers(world, subflow);
-        tf::Task updateCameras = UpdateCameras(world, subflow);
-        tf::Task updateRenderSettings = UpdateRenderSettings(world, subflow);
+        tf::Task reset = Reset(world, flow);
+        tf::Task prepareFrameQueries = flow.emplace([this, &world]() { this->PrepareFrameQueries(world); }).name("PrepareFrameQueries");
+        tf::Task updateMaterials = UpdateMaterials(world, flow);
+        tf::Task updateInstances = UpdateInstances(world, flow);
+        tf::Task updateLights = UpdateLights(world, flow);
+        tf::Task updateFogVolumes = UpdateFogVolumes(world, flow);
+        tf::Task updateHazeLayers = UpdateHazeLayers(world, flow);
+        tf::Task updateCameras = UpdateCameras(world, flow);
+        tf::Task updateRenderSettings = UpdateRenderSettings(world, flow);
 
-        tf::Task uploadAndSetup = UploadAndSetup(world, subflow);
+        tf::Task uploadAndSetup = UploadAndSetup(world, flow);
 
         SUBTASKVIEWPASS(profileReadback);
         SUBTASKVIEWPASS(gpuDebugInit);
@@ -3573,6 +3581,7 @@ public:
         SUBTASKVIEWPASS(present);
 
         reset.precede(updateInstances, updateMaterials, updateLights, updateFogVolumes, updateHazeLayers, updateCameras); // should precede all, user need to check that
+        prepareFrameQueries.precede(updateMaterials, updateInstances);
         updateInstances.succeed(updateMaterials);
         structuredCommandBufferUpdateTask.succeed(updateInstances);
         uploadAndSetup.succeed(structuredCommandBufferUpdateTask, updateLights, updateFogVolumes, updateHazeLayers, updateCameras, updateRenderSettings); // ViewContext::atmosphere needs the blended settings
@@ -3614,11 +3623,11 @@ public:
     }
 
 
-    tf::Task Reset(World& world, tf::Subflow& subflow)
+    tf::Task Reset(World& world, tf::FlowBuilder& flow)
     {
         ZoneScoped;
 
-        tf::Task task = subflow.emplace(
+        tf::Task task = flow.emplace(
             [this]()
             {
                 ZoneScoped;
@@ -3635,24 +3644,33 @@ public:
         return task;
     }
 
-    tf::Task UpdateInstances(World& world, tf::Subflow& subflow)
+    // Per-frame setup of UpdateMaterials and UpdateInstances: their query and the Reserve calls
+    // must land before either one's loop starts.
+    void PrepareFrameQueries(World& world)
     {
         ZoneScoped;
 
+        frameMaterialQuery = world.Query(Components::Material::mask, 0, true);
+        frameMaterialCount = (uint)world.frameQueries[frameMaterialQuery].size();
+
         viewWorld.meshletsCount = 0;
 
-#define UpdateInstancesStepSize 512 
-        ViewWorld& frameWorld = viewWorld;
-        
-        uint instanceQueryIndex = world.Query(Components::Instance::mask | Components::WorldMatrix::mask, 0, true);
-        uint entityCount = (uint)world.frameQueries[instanceQueryIndex].size();
-        frameWorld.instances.Reserve(entityCount);
+        frameInstanceQuery = world.Query(Components::Instance::mask | Components::WorldMatrix::mask, 0, true);
+        frameInstanceCount = (uint)world.frameQueries[frameInstanceQuery].size();
+        viewWorld.instances.Reserve(frameInstanceCount);
 
         uint materialsCount = world.CountQuery(Components::Material::mask, 0);
-        frameWorld.materials.Reserve(materialsCount);
-        
-        tf::Task task = subflow.for_each_index(uint(0), entityCount, uint(UpdateInstancesStepSize),
-            [this, &world, instanceQueryIndex](int i)
+        viewWorld.materials.Reserve(materialsCount);
+    }
+
+    tf::Task UpdateInstances(World& world, tf::FlowBuilder& flow)
+    {
+        ZoneScoped;
+
+#define UpdateInstancesStepSize 512
+
+        tf::Task task = flow.for_each_index(uint(0), std::ref(frameInstanceCount), uint(UpdateInstancesStepSize),
+            [this, &world](int i)
             {
                 ZoneScopedN("UpdateInstance");
 
@@ -3661,7 +3679,7 @@ public:
                 uint instanceRayTracingCount = 0;
                 for (uint subQuery = 0; subQuery < UpdateInstancesStepSize; subQuery++)
                 {
-                    auto& queryResult = world.frameQueries[instanceQueryIndex];
+                    auto& queryResult = world.frameQueries[frameInstanceQuery];
                     if ((i + subQuery) > (queryResult.size() - 1)) 
                         break;
 
@@ -3806,7 +3824,7 @@ public:
         return task;
     }
 
-    tf::Task UpdateMaterials(World& world, tf::Subflow& subflow)
+    tf::Task UpdateMaterials(World& world, tf::FlowBuilder& flow)
     {
         ZoneScoped;
         // parallel for materials in frameworld
@@ -3815,19 +3833,16 @@ public:
             // upload textures
             // upload materials
 
-        uint queryIndex = world.Query(Components::Material::mask, 0, true);
-
-        uint entityCount = (uint)world.frameQueries[queryIndex].size();
 #define UpdateMaterialsStepSize 1024
         ViewWorld& frameWorld = viewWorld;
 
-        tf::Task task = subflow.for_each_index(uint(0), entityCount, UpdateMaterialsStepSize,
-            [this, &world, &frameWorld, queryIndex](int i)
+        tf::Task task = flow.for_each_index(uint(0), std::ref(frameMaterialCount), uint(UpdateMaterialsStepSize),
+            [this, &world, &frameWorld](int i)
             {
                 ZoneScopedN("UpdateMaterials");
                 for (uint subQuery = 0; subQuery < UpdateMaterialsStepSize; subQuery++)
                 {
-                    auto& queryResult = world.frameQueries[queryIndex];
+                    auto& queryResult = world.frameQueries[frameMaterialQuery];
                     if (i + subQuery > queryResult.size() - 1)
                         return;
 
@@ -3884,21 +3899,14 @@ public:
         return task;
     }
 
-    tf::Task UpdateLights(World& world, tf::Subflow& subflow)
+    tf::Task UpdateLights(World& world, tf::FlowBuilder& flow)
     {
         ZoneScoped;
-        // upload lights
-        uint queryIndex = world.Query(Components::Light::mask, 0, true);
-
-        uint entityCount = (uint)world.frameQueries[queryIndex].size();
-        uint entityStep = 1;
-        ViewWorld& frameWorld = viewWorld;
-
-        // upload lights : no need to schedule that before all other passes for the moment because
+        // upload lights :no need to schedule that before all other passes for the moment because
         // the proj and the planes are not used on the CPU
         // we will need to make the task preced watherver pass needs to have up to date camera data
 
-        tf::Task task = subflow.emplace(
+        tf::Task task = flow.emplace(
             [this, &world]()
             {
                 ZoneScoped;
@@ -3947,10 +3955,10 @@ public:
     }
 
     // FogVolume components -> viewWorld.fogVolumes (sampled by FogMedium in AtmosphericScattering.hlsl)
-    tf::Task UpdateFogVolumes(World& world, tf::Subflow& subflow)
+    tf::Task UpdateFogVolumes(World& world, tf::FlowBuilder& flow)
     {
         ZoneScoped;
-        tf::Task task = subflow.emplace(
+        tf::Task task = flow.emplace(
             [this, &world]()
             {
                 ZoneScoped;
@@ -3976,10 +3984,10 @@ public:
     // HazeLayer components -> hazeLayerData, one slot per layer index; UploadAndSetup adds the map
     // fields (GBuffers::SetupHazeMaps) and uploads it to viewWorld.hazeLayers (sampled by SurfaceHaze in
     // AtmosphericScattering.hlsl). Unused slots keep resolution 0 (no maps); layer 0 is "no haze"
-    tf::Task UpdateHazeLayers(World& world, tf::Subflow& subflow)
+    tf::Task UpdateHazeLayers(World& world, tf::FlowBuilder& flow)
     {
         ZoneScoped;
-        tf::Task task = subflow.emplace(
+        tf::Task task = flow.emplace(
             [this, &world]()
             {
                 ZoneScoped;
@@ -4020,14 +4028,14 @@ public:
         return task;
     }
 
-    tf::Task UpdateCameras(World& world, tf::Subflow& subflow)
+    tf::Task UpdateCameras(World& world, tf::FlowBuilder& flow)
     {
         ZoneScoped;
         // upload camera : no need to schedule that before all other passes for the moment because
         // the proj and the planes are not used on the CPU
         // we will need to make the task preced watherver pass needs to have up to date camera data
 
-        tf::Task task = subflow.emplace(
+        tf::Task task = flow.emplace(
             [this, &world]()
             {
                 ZoneScoped;
@@ -4150,10 +4158,10 @@ public:
         return task;
     }
 
-    tf::Task UpdateRenderSettings(World& world, tf::Subflow& subflow)
+    tf::Task UpdateRenderSettings(World& world, tf::FlowBuilder& flow)
     {
         ZoneScoped;
-        tf::Task task = subflow.emplace(
+        tf::Task task = flow.emplace(
             [this, &world]()
             {
                 ZoneScoped;
@@ -4311,9 +4319,9 @@ public:
         return task;
     }
 
-    tf::Task UploadAndSetup(World& world, tf::Subflow& subflow)
+    tf::Task UploadAndSetup(World& world, tf::FlowBuilder& flow)
     {
-        tf::Task task = subflow.emplace(
+        tf::Task task = flow.emplace(
             [this]()
             {
                 ZoneScoped;
@@ -4413,7 +4421,7 @@ public:
         editor.Off();
     }
 
-    tf::Task Schedule(World& world, tf::Subflow& subflow) override
+    tf::Task Schedule(World& world, tf::FlowBuilder& flow) override
     {
         ZoneScoped;
         SUBTASKVIEWPASS(editor);
@@ -4436,6 +4444,8 @@ public:
     ShaderStorage shaderStorage;
     MainView mainView;
     EditorView editorView;
+    tf::Taskflow mainViewFlow;   // built once with the frame graph (see Tasks.h), run as modules of the renderer's flow
+    tf::Taskflow editorViewFlow;
     SubmissionList submissions; // shared by every view; passes reach it through view->submissions, not a global
 
     void BuildSubmissions()
@@ -4473,7 +4483,36 @@ public:
         instance = nullptr;
     }
 
-    void Schedule(World& world, tf::Subflow& subflow)
+    // Called once per build of the frame graph, not per frame (see Tasks.h): the caller clears
+    // flow, the view flows are cleared here.
+    void Schedule(World& world, tf::FlowBuilder& flow)
+    {
+        ZoneScoped;
+
+        mainViewFlow.clear();
+        editorViewFlow.clear();
+        mainView.Schedule(world, mainViewFlow);
+        editorView.Schedule(world, editorViewFlow);
+
+        SUBTASKRENDERER(BeginFrame);
+        tf::Task mainViewTask = flow.composed_of(mainViewFlow).name("MainView");
+        tf::Task editorViewTask = flow.composed_of(editorViewFlow).name("EditorView");
+        SUBTASKRENDERER(ExecuteFrame);
+        SUBTASKRENDERER(Cleanup);
+        SUBTASKRENDERER(WaitFrame);
+        SUBTASKRENDERER(PresentFrame);
+
+        SUBTASKRENDERER(ApplyPendingQualityChange);
+
+        BeginFrame.precede(mainViewTask, editorViewTask);
+        ExecuteFrame.succeed(mainViewTask, editorViewTask);
+        ExecuteFrame.precede(Cleanup);
+        Cleanup.precede(WaitFrame);
+        WaitFrame.precede(PresentFrame);
+        PresentFrame.precede(ApplyPendingQualityChange);
+    }
+
+    void BeginFrame()
     {
         ZoneScoped;
 
@@ -4486,22 +4525,6 @@ public:
         Profiler::instance->frameData.verticesCount = 0;
 
         constantBuffer.Reset();
-
-        auto mainViewEndTask = mainView.Schedule(world, subflow);
-        auto editorViewEndTask = editorView.Schedule(world, subflow);
-
-        SUBTASKRENDERER(ExecuteFrame);
-        SUBTASKRENDERER(Cleanup);
-        SUBTASKRENDERER(WaitFrame);
-        SUBTASKRENDERER(PresentFrame);
-
-        SUBTASKRENDERER(ApplyPendingQualityChange);
-
-        ExecuteFrame.succeed(mainViewEndTask, editorViewEndTask);
-        ExecuteFrame.precede(Cleanup);
-        Cleanup.precede(WaitFrame);
-        WaitFrame.precede(PresentFrame);
-        PresentFrame.precede(ApplyPendingQualityChange);
     }
 
     void ExecuteFrame()

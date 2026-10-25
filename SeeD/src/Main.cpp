@@ -102,8 +102,16 @@
 // [ ] 15. deal with this comment in renderer.h :
 //         // Path registration only (no entity, no bucket) for the other built-in mesh-shader variants.....
 // 
-// [ ] 16. All task scheduling allocates a lot. 
+// [X] 16. All task scheduling allocates a lot.
 //         See to recreate the scheduling only when not the same as the previous frame.
+//         - Engine::BuildSchedule builds the frame graph once and RUN() re-runs it; it is rebuilt only
+//           when Engine::ScheduleKey (the ECS system count) changes
+//         - no more subflows (Taskflow clears and re-emplaces them every run): world, renderer and each
+//           view are persistent tf::Taskflow modules (composed_of), Schedule functions take a FlowBuilder&
+//         - per-frame work that lived in Schedule bodies is now a task (World::FrameStart,
+//           Renderer::BeginFrame, MainView::PrepareFrameQueries); per-frame loop ranges go through std::ref
+//         - still allocating per frame: Taskflow's for_each_index spawns its workers' async tasks at run
+//           time (TF_ENABLE_TASK_POOL would recycle them), and executor.run creates a topology
 //
 // [X] 17. rework MeshData to store compressed vertices to avoid Pack vertices each loading.
 //         - PackMeshVertices (GPU.h) runs once at import, from MeshLoader::Process; MeshData and the

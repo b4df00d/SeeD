@@ -10,46 +10,46 @@ static tf::Executor executor;
 static tf::Taskflow taskflow;
 
 // Two separate phases, easy to conflate:
-//  1. BUILD (every line below that calls TASK/TASKWITHSUBFLOW/.precede()/.succeed()): runs
-//     synchronously, once per frame, in normal C++ call order. This only registers task nodes and
-//     graph edges -- none of the task bodies (the lambdas the macros wrap) execute yet.
+//  1. BUILD (every line that calls TASK/MODULE/flow.emplace/.precede()/.succeed()): only registers
+//     task nodes and graph edges -- none of the task bodies (the lambdas) execute yet.
 //  2. RUN() (executor.run(taskflow).wait()): this is the ONLY point anything actually executes.
 //     The executor runs whatever nodes currently have every predecessor satisfied, across worker
 //     threads, in whatever order dependencies allow -- NOT the order tasks were registered in
 //     during the build phase.
 // So a task's C++ function body runs later than, and independently of, where its TASK(...) line
 // appears in the code -- ordering between two tasks is decided ENTIRELY by .succeed()/.precede()
-// edges, never by their registration order. Relying on "task A's setup code runs before task B's"
-// just because A's TASK(...) line is textually earlier is not something Taskflow guarantees.
+// edges, never by their registration order.
 //
-// TASKWITHSUBFLOW's lambda takes a tf::Subflow&: any further subflow.emplace(...) calls inside it
-// create a NESTED graph. By default a subflow auto-joins its parent -- the outer task isn't
-// considered complete until every task spawned in its subflow is (call subflow.detach() to opt
-// out, not used anywhere in this codebase). So `B.succeed(A)` where A is a TASKWITHSUBFLOW task
-// correctly waits for everything A's subflow spawned too, not just A's own immediate body.
+// The frame graph is built ONCE and re-run every frame (Engine::BuildSchedule): rebuilding it each
+// frame (and the subflows it used to spawn, which Taskflow clears and re-emplaces on every run)
+// was a node + std::function + name allocation per task per frame. It is rebuilt only when its
+// shape changes (Engine::ScheduleKey, today the ECS system count). Consequences for anything that
+// builds into it:
+//  - no per-frame work in a Schedule function body: it runs once, at build. Per-frame setup
+//    (queries, Reserve, Reset, ...) goes in its own task with edges to whatever consumes it.
+//  - no per-frame values captured by value in a task lambda: capture `this` / references, and
+//    keep frame values in members written by an upstream task. A for_each_index whose range
+//    changes per frame takes its end through std::ref(member) (Taskflow reads it at run time).
+//  - a group of tasks that must complete as a unit (what a subflow join used to give) is a
+//    persistent tf::Taskflow added with MODULE()/composed_of: the module task completes only once
+//    its whole graph has.
 //
 // Preferred style in this codebase: express real ordering requirements between operations as
-// explicit tasks + .succeed()/.precede() edges (see Main.cpp's ScheduleWorld for prefab/terrain
-// streaming -> DeferredRelease -> ECS systems), not as plain sequential C++ calls inside one
-// task's body that happen to work due to another task's subflow-join timing -- correct today, but
-// implicit and easy to break silently in a later refactor.
+// explicit tasks + .succeed()/.precede() edges (see Engine::ScheduleWorld for prefab/terrain
+// streaming -> DeferredRelease -> ECS systems), not as sequential C++ calls inside one task's
+// body that happen to work due to some other task's timing.
 
 #define TASK_(namef, function) tf::Task namef = taskflow.emplace([this](){this->function();}).name(#namef)
 #define TASK(function) TASK_(function, function)
 
-/*
-#define TASKFLOW_(namef, function) tf::Task namef = taskflow.emplace([this](){this->function();}).name(#namef)
-#define TASKFLOW(function) TASK_(function, function)
-*/
+// a persistent tf::Taskflow run as one task of the frame graph (not copied: it must outlive the graph)
+#define MODULE(namef, flow) tf::Task namef = taskflow.composed_of(flow).name(#namef)
 
-#define TASKWITHSUBFLOW_(namef, function) tf::Task namef = taskflow.emplace([this](tf::Subflow& subflow){this->function(subflow);}).name(#namef)
-#define TASKWITHSUBFLOW(function) TASKWITHSUBFLOW_(function, function)
+// NEED a tf::FlowBuilder& flow variable that exist via function parameter (likely)
+#define SUBTASK_(namef, function) tf::Task namef = flow.emplace([this](){this->function();}).name(#namef)
+#define SUBTASK(function) SUBTASK_(function, function)
 
-// NEED a subflow variable that exist via function parameter (likely)
-#define SUBTASK_(namef, function) tf::Task namef = subflow.emplace([this](){this->function();}).name(#namef)
-#define SUBTASK(function) SUBTASK_(subflow, function, function)
-
-#define SUBTASKWINDOW(window) tf::Task window##Task = subflow.emplace([window](){window->Update();}).name(wstringToconstchar(window->name))
+#define SUBTASKWINDOW(window) tf::Task window##Task = flow.emplace([window](){window->Update();}).name(wstringToconstchar(window->name))
 
 //#define LINK(S, T, P) T.succeed(S); P.succeed(T)
 #define LINK(S, T) T.succeed(S)

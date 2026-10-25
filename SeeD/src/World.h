@@ -1516,18 +1516,23 @@ public:
         }
     }
 
+    // first world task of the frame (Engine::ScheduleWorld): frame queries are only valid until the next one
+    void FrameStart()
+    {
+        frameQueriesIndex = 0;
+    }
+
+    // Built once, re-run every frame (see Tasks.h): one task per system, so the graph is rebuilt
+    // when systems.size() changes (Engine::ScheduleKey).
     // predecessor: if non-empty, every system task succeeds it (e.g. prefab/terrain streaming +
     // DeferredRelease must land before the ECS systems read the world this frame).
-    void Schedule(tf::Subflow& subflow, tf::Task predecessor = tf::Task())
+    void Schedule(tf::FlowBuilder& flow, tf::Task predecessor = tf::Task())
     {
         ZoneScoped;
-        frameQueriesIndex = 0;
         //ECS systems
         for (uint i = 0; i < systems.size(); i++)
         {
-            auto sys = systems[i];
-            //SUBTASKWORLD(sys);
-            tf::Task t = subflow.emplace([this, i]() {this->systems[i]->Update(this); }).name("#system");
+            tf::Task t = flow.emplace([this, i]() { if (i < this->systems.size()) this->systems[i]->Update(this); }).name("#system"); // the guard: systems can change before the next rebuild
             if (!predecessor.empty())
                 t.succeed(predecessor);
         }
