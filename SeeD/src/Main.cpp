@@ -66,17 +66,27 @@
 //        - Bone list comes from Assimp asset loading.
 //        - Feeds the bone matrices consumed by the skinning compute shader (6).
 //
-// [ ] 8. Jolt integration with ECS
+// [X] 8. Jolt integration with ECS
 //        - ECS components: rigidbody, collisionmesh, constraint.
 //        - System A: initializes Jolt bodies/constraints from the ECS components.
 //        - System B: reads transforms back from Jolt and writes them into the ECS
 //          each frame.
+//        - Physic.h: RigidBody / CollisionShape / Constraint / PhysicsBody, plus Vehicle + Wheel
+//          (wheeled cars, wheel child Transforms are written back from the simulation)
 //
 // [X] 9. Execute pass command buffers as soon as they are ready, in the correct
 //        order -- WITHOUT locking a dedicated thread just to do the submission.
 //
 // [O] 10. DLSS parameters UI: model, quality.
 //         Changing quality is craching
+//         - UI done (Editor.h), quality change is deferred to Renderer::ApplyPendingQualityChange
+//           (Flush, release the NGX feature, views Off/On).
+//         - still broken: after a quality change all assets are unloaded and stay unloaded
+//           (likely lead: ApplyPendingQualityChange calls Resource::ReleaseResources(true), which frees
+//           everything, asset GPU resources included, and nothing triggers a reload).
+//         - no check on the creation of the reservoir buffers (giReservoir CreateBuffer in
+//           Renderer.h, resolution.x * resolution.y entries): crashes on Ultra Quality, maybe the
+//           buffer is too big ?
 //
 // [X] 11. GBuffer draw calls (ExecuteIndirect) must be able to run different
 //         shaders -- at least one with early-Z and one without -- so cutout works
@@ -99,8 +109,9 @@
 // 
 // [ ] 14. texture importer does not work correctly when texture is not 32bits and pow2
 // 
-// [ ] 15. deal with this comment in renderer.h :
+// [X] 15. deal with this comment in renderer.h :
 //         // Path registration only (no entity, no bucket) for the other built-in mesh-shader variants.....
+//         - obsolete: the comment is gone from Renderer.h
 // 
 // [X] 16. All task scheduling allocates a lot.
 //         See to recreate the scheduling only when not the same as the previous frame.
@@ -135,8 +146,10 @@
 // [ ] 21. add gpu profile for tracy : tracy gpu zone with multithreaded command buffer recording is not working well.
 //         it create a lane per thread that did the recording... not nice
 // 
-// [ ] 22. add a validation and conversion function to convert old version of the world to the new one 
+// [X] 22. add a validation and conversion function to convert old version of the world to the new one
 //         (for example if a component is removed or added) and add a UI function to start the conversion
+//         - not needed as a separate tool: the current loading system can take a slow path to load a
+//           previous version of the world file, so an old world is converted by simply resaving it.
 // 
 // [ ] 23. better resource transition. always return to the comon state after a pass ?
 //         since this is the end of a commandlist for each pass, the transition event should not degrade the performance.
