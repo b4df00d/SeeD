@@ -219,12 +219,15 @@ def fitted_scale(seed, blender, pixels):
 # --------------------------------------------------------------------------
 # picture
 
-def comparison_image(out_path, width, height, seed, blender, ids, scale):
+def comparison_image(out_path, width, height, seed, blender, ids, scale, pixels_in_scene):
     """Blender | SeeD | log2-ratio false colour, side by side.
 
     Both renders are shown at their own exposure (SeeD divided by the fitted
     scale) so they are visually comparable and the ratio panel carries the
     actual information instead of a brightness difference nobody can read.
+    One preview exposure for both, set so the median scene pixel lands on 0.18:
+    the scenes span ~1000x in absolute level (sunlit ground ~6, a bulb-lit room
+    ~0.01), and a flat 1.0 clips one or crushes the other.
     """
     sr, sg, sb = seed
     br, bg, bb = blender
@@ -232,6 +235,10 @@ def comparison_image(out_path, width, height, seed, blender, ids, scale):
     pixels = bytearray(panel * height * 3)
     inv = 1.0 / scale if scale and scale == scale and scale > 0 else 1.0
     rounded = [int(v + 0.5) for v in ids]
+    lums = sorted(luminance(br, bg, bb, i) for i in pixels_in_scene)
+    median = lums[len(lums) // 2] if lums else 0.0
+    exposure = 0.18 / median if median > 1e-9 else 1.0
+    inv *= exposure
 
     for y in range(height):
         row = y * panel * 3
@@ -239,9 +246,9 @@ def comparison_image(out_path, width, height, seed, blender, ids, scale):
             i = y * width + x
 
             j = row + x * 3
-            pixels[j] = pngio.encode_srgb(br[i])
-            pixels[j + 1] = pngio.encode_srgb(bg[i])
-            pixels[j + 2] = pngio.encode_srgb(bb[i])
+            pixels[j] = pngio.encode_srgb(br[i] * exposure)
+            pixels[j + 1] = pngio.encode_srgb(bg[i] * exposure)
+            pixels[j + 2] = pngio.encode_srgb(bb[i] * exposure)
 
             j = row + (width + x) * 3
             pixels[j] = pngio.encode_srgb(sr[i] * inv)
@@ -393,7 +400,7 @@ def compare_entry(project_dir, entry):
 
     out_dir = os.path.dirname(seed_path)
     comparison_image(os.path.join(out_dir, name + "_compare.png"),
-                     width, height, seed_img, ref_img, ids, scale)
+                     width, height, seed_img, ref_img, ids, scale, all_pixels)
 
     with open(os.path.join(out_dir, name + "_report.csv"), "w", encoding="utf-8") as f:
         f.write("object,pixels,albedo_r,albedo_g,albedo_b,"
