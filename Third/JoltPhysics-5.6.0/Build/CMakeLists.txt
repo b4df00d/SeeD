@@ -203,7 +203,9 @@ if (MSVC)
 		set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /DEBUG")
 	endif()
 	if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
-		if (CROSS_PLATFORM_DETERMINISTIC)
+		# SeeD: MSVC 19.52 /O2 /fp:fast miscompiles Quat::operator* (sign-mask math -> non-unit
+		# quaternions, IsNormalized asserts in Release). Always precise until the compiler is fixed.
+		if (CROSS_PLATFORM_DETERMINISTIC OR TRUE)
 			set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /fp:precise")
 		else()
 			set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /fp:fast") # Clang doesn't use fast math because it cannot be turned off inside a single compilation unit

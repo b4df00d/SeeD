@@ -289,8 +289,8 @@ namespace hlslpp
 		if (reverseZ)
 		{
 			float4x4 reverse = float4x4::identity();
-			reverse.f32_128_2[2] = -1;
-			reverse.f32_128_3[2] = 1;
+			reverse[2].z = -1;
+			reverse[3].z = 1;
 			M = mul(M, reverse);
 		}
 

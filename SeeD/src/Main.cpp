@@ -178,6 +178,14 @@
 //         and OMSetRenderTargets died with INVALID_DESCRIPTOR_HANDLE (#646). Fixed for 'lighted';
 //         the same trap applies to anything else that later becomes a render target.
 //
+// [ ] 29. Build SeeD with /arch:AVX2 (SeeD.vcxproj EnableEnhancedInstructionSet, currently SSE2).
+//         Jolt.lib is built AVX2 and its Jolt.cmake marks /arch:AVX2 PUBLIC, so SeeD should match.
+//         Tried 2026-10-25 and reverted: asset loading broke. Likely cause: under AVX hlslpp stores
+//         float4x4 & co. as __m256, which changes size/alignment/padding, so code that hashes or
+//         serializes raw struct bytes (asset ids, .seed files) sees different or stale bits.
+//         Find and fix those byte-level hashes first. HLSL_Extension.h already avoids the
+//         SSE-only f32_128_N members, so it compiles under both.
+//
 // ============================================================================
 
 #define WIN32_LEAN_AND_MEAN

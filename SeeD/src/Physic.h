@@ -8,6 +8,13 @@
 #undef min
 #undef max
 
+// SeeD builds with /fp:fast, and MSVC 19.52 /O2 /fp:fast miscompiles Jolt's SIMD sign-mask math:
+// Quat::operator* flips term signs and returns a non-unit quaternion (trips the IsNormalized
+// assert in MotionProperties::GetInverseInertiaForRotation, Release only). Precise semantics for
+// every Jolt inline function fixes it, even when inlined into /fp:fast SeeD code. Jolt.lib itself
+// is built /fp:precise for the same reason (Build/CMakeLists.txt).
+#pragma float_control(precise, on, push)
+
 #include <Jolt/Jolt.h>
 #include <Jolt/RegisterTypes.h>
 #include <Jolt/Core/Factory.h>
@@ -41,6 +48,8 @@
 #include <Jolt/Physics/Vehicle/VehicleConstraint.h>
 #include <Jolt/Physics/Vehicle/VehicleCollisionTester.h>
 #include <Jolt/Physics/Vehicle/WheeledVehicleController.h>
+
+#pragma float_control(pop)
 
 #pragma pop_macro("max")
 #pragma pop_macro("min")
@@ -325,6 +334,18 @@ static void PhysicsGetWorldPose(World::Entity ent, float3& outPosition, quaterni
 {
     float3 ignoredScale;
     PhysicsGetWorldPose(ent, outPosition, outRotation, ignoredScale);
+}
+
+// The ONLY way a SeeD quaternion may reach Jolt: Jolt asserts IsNormalized() on every rotation it
+// takes, and a degenerate world matrix (zero scale axis -> normalize() NaN) or garbage component
+// memory can hand us anything. Non-finite or near-zero falls back to identity.
+static JPH::Quat ToJoltRotation(quaternion rotation)
+{
+    float qx = rotation.f32[0], qy = rotation.f32[1], qz = rotation.f32[2], qw = rotation.f32[3];
+    float lengthSq = qx * qx + qy * qy + qz * qz + qw * qw;
+    if (!PHYSICS_VALID(lengthSq) || lengthSq <= 1.0e-6f)
+        return JPH::Quat::sIdentity();
+    return JPH::Quat(qx, qy, qz, qw).Normalized();
 }
 
 static void PhysicsSetWorldPose(World::Entity ent, float3 position, quaternion rotation)
@@ -1742,7 +1763,7 @@ private:
 
                     bodyInterface.SetPositionAndRotation(record->second.bodyID,
                         JPH::RVec3(position[0], position[1], position[2]),
-                        JPH::Quat(rotation.f32[0], rotation.f32[1], rotation.f32[2], rotation.f32[3]).Normalized(),
+                        ToJoltRotation(rotation),
                         bodyInterface.GetMotionType(record->second.bodyID) == JPH::EMotionType::Static ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
                     record->second.transformVersion = transformVersion;
                 }
@@ -1993,10 +2014,7 @@ private:
             if (!PHYSICS_VALID(position[axis]))
                 position[axis] = 0.0f;
         }
-        // Same garbage-memory concern: an unnormalized quaternion trips a Jolt assert.
-        float qx = rotation.f32[0], qy = rotation.f32[1], qz = rotation.f32[2], qw = rotation.f32[3];
-        float lengthSq = qx * qx + qy * qy + qz * qz + qw * qw;
-        JPH::Quat jphRotation = (PHYSICS_VALID(lengthSq) && lengthSq > 1.0e-6f) ? JPH::Quat(qx, qy, qz, qw).Normalized() : JPH::Quat::sIdentity();
+        JPH::Quat jphRotation = ToJoltRotation(rotation);
         JPH::RVec3 jphPosition(position[0], position[1], position[2]);
 
         JPH::BodyCreationSettings settings(shape, jphPosition, jphRotation, motionType, objectLayer);
