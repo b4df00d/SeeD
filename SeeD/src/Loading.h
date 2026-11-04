@@ -668,38 +668,29 @@ public:
         {
             ZoneScopedN("COPY");
             // copy texture data...
+            // D3D12 pads each row to 256 bytes and each subresource to 512, while DirectXTex rows are
+            // tightly packed (rowPitch), so copy row by row (rows are block rows for BC formats).
+            // Subresource order (mip + item * mipLevels) matches ScratchImage's item-major layout.
+            const bool is3D = metadata.dimension == DirectX::TEX_DIMENSION_TEXTURE3D;
             for (UINT subResourceIdx = 0; subResourceIdx < subresourceCount; subResourceIdx++)
             {
-                const auto& resourceFootprint = subresourceFootprints[subResourceIdx];
-                const auto& footprint = resourceFootprint.Footprint;
+                const auto& footprint = subresourceFootprints[subResourceIdx].Footprint;
+                const size_t mip = subResourceIdx % metadata.mipLevels;
+                const size_t item = subResourceIdx / metadata.mipLevels;
+                const size_t rowCount = subresourceRowsCount[subResourceIdx];
+                const size_t rowBytes = subresourceRowByteCount[subResourceIdx];
+                uint8_t* dstSlice = textureData.data() + subresourceFootprints[subResourceIdx].Offset;
 
-                if (footprint.RowPitch > 256)
+                for (uint z = 0; z < footprint.Depth; z++)
                 {
-                    const uint size = (uint)((subResourceIdx < subresourceCount - 1 ? subresourceFootprints[subResourceIdx + 1].Offset : subresourceTotalByteCount) - resourceFootprint.Offset);
-                    auto resourcePtr = textureData.data() + resourceFootprint.Offset;
-                    memcpy((char*)resourcePtr, image->GetImages()[subResourceIdx].pixels, size);
+                    const DirectX::Image* src = is3D ? image->GetImage(mip, 0, z) : image->GetImage(mip, item, 0);
+                    if (!src)
+                        continue;
+                    const size_t copyBytes = std::min(rowBytes, src->rowPitch);
+                    uint8_t* dst = dstSlice + z * rowCount * footprint.RowPitch;
+                    for (size_t y = 0; y < rowCount; y++)
+                        memcpy(dst + y * footprint.RowPitch, src->pixels + y * src->rowPitch, copyBytes);
                 }
-                else
-                {
-                    // Src setup
-                    size_t srcRowPitchBytes = ((DirectX::BitsPerPixel(metadata.format) * metadata.width) + 7) / 8; // rounded to nearest byte.
-                    size_t srcSlicePitchBytes = srcRowPitchBytes * metadata.height; // assuming tightly packed image.
-
-                    // Dst setup
-                    auto resourcePtr = textureData.data() + resourceFootprint.Offset;
-                    size_t dstRowPitchBytes = resourceFootprint.Footprint.RowPitch; // padded row pitch.
-                    size_t dstRowPitchPackedBytes = subresourceRowByteCount[subResourceIdx];
-                    size_t dstSlicePitchBytes = subresourceRowsCount[subResourceIdx] * dstRowPitchBytes;
-
-                    size_t resolvedHeight = std::min(subresourceRowsCount[subResourceIdx], (uint)metadata.height);
-                    size_t resolvedPackedRowPitch = std::min(std::min(dstRowPitchBytes, srcRowPitchBytes), dstRowPitchPackedBytes);
-
-                    for (uint32_t y = 0; y < resolvedHeight; y++)
-                    {
-                        memcpy((char*)resourcePtr + y * dstRowPitchBytes, imageBC.GetImages()[subResourceIdx].pixels + y * resolvedPackedRowPitch, resolvedPackedRowPitch);
-                    }
-                }
-
             }
         }
 
