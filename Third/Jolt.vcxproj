@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{a1d5c2e7-3f4b-4c8a-9e2d-7b6f0a1c5d93}</ProjectGuid>
+    <RootNamespace>Jolt</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'!='Debug'">false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="Jolt.props" />
+  </ImportGroup>
+  <PropertyGroup>
+    <OutDir>..\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>..\$(Platform)\$(Configuration)\JoltInt\</IntDir>
+    <TargetName>Jolt</TargetName>
+    <!-- Path to dxc.exe used to compile Jolt's compute shaders, see the CustomBuild item below. -->
+    <JoltShaderCompiler>$(MSBuildThisFileDirectory)DirectXShaderCompiler-main\bin\x64\dxc.exe</JoltShaderCompiler>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <!-- 4530: C++ exception handler used without /EHsc : SeeD builds without exceptions. -->
+      <DisableSpecificWarnings>4530;4577;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <PreprocessorDefinitions Condition="'$(Configuration)'=='Debug'">_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)'!='Debug'">NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <SDLCheck>false</SDLCheck>
+      <!-- These four must stay in sync with SeeD.vcxproj: they are part of the ABI. -->
+      <ExceptionHandling>false</ExceptionHandling>
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+      <!-- Jolt is built /fp:precise (as its own CMake build does) rather than /fp:fast: it relies
+           on well defined float behaviour for its collision detection. -->
+      <FloatingPointModel>Precise</FloatingPointModel>
+      <FloatingPointExceptions>false</FloatingPointExceptions>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <SupportJustMyCode>false</SupportJustMyCode>
+      <FunctionLevelLinking Condition="'$(Configuration)'!='Debug'">true</FunctionLevelLinking>
+      <IntrinsicFunctions Condition="'$(Configuration)'!='Debug'">true</IntrinsicFunctions>
+      <FavorSizeOrSpeed Condition="'$(Configuration)'!='Debug'">Speed</FavorSizeOrSpeed>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <!-- Wildcards, so pulling a newer Jolt in does not need this project to be edited.
+         The Vulkan and Metal backends are excluded, SeeD only uses the DX12 / CPU ones. -->
+    <ClCompile Include="JoltPhysics-5.6.0\Jolt\**\*.cpp" Exclude="JoltPhysics-5.6.0\Jolt\Compute\VK\**\*.cpp" />
+    <ClInclude Include="JoltPhysics-5.6.0\Jolt\**\*.h" />
+    <Natvis Include="JoltPhysics-5.6.0\Jolt\Jolt.natvis" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Compute shaders, compiled to .dxil next to their source exactly like Jolt's own CMake
+         build does. Every shader depends on every shader header: like upstream, we have no way
+         to track the real #include graph. -->
+    <JoltShaderHeader Include="JoltPhysics-5.6.0\Jolt\Shaders\*.h" />
+    <CustomBuild Include="JoltPhysics-5.6.0\Jolt\Shaders\*.hlsl" Condition="Exists('$(JoltShaderCompiler)')">
+      <Command>"$(JoltShaderCompiler)" -E main -T cs_6_0 -I "$(JoltDir)Jolt\Shaders" -WX -all_resources_bound -O3 "%(FullPath)" -Fo "%(RootDir)%(Directory)%(Filename).dxil"</Command>
+      <Outputs>%(RootDir)%(Directory)%(Filename).dxil</Outputs>
+      <AdditionalInputs>@(JoltShaderHeader->'%(FullPath)');%(AdditionalInputs)</AdditionalInputs>
+      <Message>Compiling HLSL %(Filename)%(Extension)</Message>
+    </CustomBuild>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

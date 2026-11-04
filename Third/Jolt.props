@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!--
+    Shared Jolt configuration, imported by both Jolt.vcxproj (which builds the library) and
+    SeeD.vcxproj (which includes its headers). Every JPH_* define below changes the layout of
+    Jolt types and the inline code in its headers, so the library and everything that includes
+    it must be compiled with the exact same list : keeping them in one place makes that
+    impossible to get wrong.
+  -->
+  <PropertyGroup Label="UserMacros">
+    <JoltDir>$(MSBuildThisFileDirectory)JoltPhysics-5.6.0\</JoltDir>
+    <JoltDefines>JPH_FLOATING_POINT_EXCEPTIONS_ENABLED;JPH_USE_DX12;JPH_USE_CPU_COMPUTE;JPH_DEBUG_RENDERER;JPH_EXTERNAL_PROFILE;JPH_ENABLE_ASSERTS;JPH_OBJECT_STREAM;JPH_USE_AVX2;JPH_USE_AVX;JPH_USE_SSE4_1;JPH_USE_SSE4_2;JPH_USE_LZCNT;JPH_USE_TZCNT;JPH_USE_F16C;JPH_USE_FMADD</JoltDefines>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>$(JoltDefines);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(JoltDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>
