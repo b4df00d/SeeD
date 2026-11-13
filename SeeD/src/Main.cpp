@@ -206,6 +206,10 @@
 //         serializes raw struct bytes (asset ids, .seed files) sees different or stale bits.
 //         Find and fix those byte-level hashes first. HLSL_Extension.h already avoids the
 //         SSE-only f32_128_N members, so it compiles under both.
+// 
+// [ ] 30. move haze pass from gbuffers to it own pass
+// 
+// 
 //
 // ============================================================================
 

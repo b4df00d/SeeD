@@ -1914,7 +1914,7 @@ namespace Systems
 
             float sensDt = sensibility * Time::instance->deltaSeconds;
             float sensLookDt = sensibilityLook;
-            if (IOs::instance->keys.down[VK_W])// || IOs::instance->keys.down[VK_UP])
+            if (IOs::instance->keys.down[VK_W] || IOs::instance->keys.down[VK_Z])// || IOs::instance->keys.down[VK_UP])
             {
                 trans.position = trans.position + (float3(mat.matrix[2].xyz) * sensDt);
             }
@@ -1926,7 +1926,7 @@ namespace Systems
             {
                 trans.position = trans.position + (float3(mat.matrix[0].xyz) * sensDt);
             }
-            if (IOs::instance->keys.down[VK_A])// || IOs::instance->keys.down[VK_LEFT])
+            if (IOs::instance->keys.down[VK_A] || IOs::instance->keys.down[VK_Q])// || IOs::instance->keys.down[VK_LEFT])
             {
                 trans.position = trans.position - (float3(mat.matrix[0].xyz) * sensDt);
             }
