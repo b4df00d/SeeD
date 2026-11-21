@@ -6,8 +6,8 @@
     <LocalDebuggerCommandArgumentsHistory>G:\Work\TempleSeedProj\cave.seedproj|G:\Work\CaveSeedProj\cave.seedproj|G:\Work\ArchiSeedProj\archi.seedproj|</LocalDebuggerCommandArgumentsHistory>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <LocalDebuggerCommandArguments>C:\Users\ponso\Documents\Dev\ArchiSeedProj\archi.seedproj</LocalDebuggerCommandArguments>
+    <LocalDebuggerCommandArguments>G:\Work\ArchiSeedProj\archi.seedproj</LocalDebuggerCommandArguments>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
-    <LocalDebuggerCommandArgumentsHistory>G:\Work\TempleSeedProj\cave.seedproj|G:\Work\Dev\SeeD\calibration\falloff.seedproj|G:\Work\CaveSeedProj\cave.seedproj|G:\Work\ArchiSeedProj\archi.seedproj|C:\Users\ponso\Documents\Dev\ArchiSeedProj\archi.seedproj|</LocalDebuggerCommandArgumentsHistory>
+    <LocalDebuggerCommandArgumentsHistory>G:\Work\TempleSeedProj\cave.seedproj|G:\Work\Dev\SeeD\calibration\falloff.seedproj|G:\Work\CaveSeedProj\cave.seedproj|C:\Users\ponso\Documents\Dev\ArchiSeedProj\archi.seedproj|G:\Work\ArchiSeedProj\archi.seedproj|</LocalDebuggerCommandArgumentsHistory>
   </PropertyGroup>
 </Project>

@@ -191,6 +191,8 @@ copy /Y "..\Third\omm-main\bin\*.*" "..\x64\Release\"</Command>
     <ClInclude Include="src\IO.h" />
     <ClInclude Include="src\Loading.h" />
     <ClInclude Include="src\Physic.h" />
+    <ClInclude Include="src\RCBuggy.h" />
+    <ClInclude Include="src\RCBuggyKinematics.h" />
     <ClInclude Include="src\Project.h" />
     <ClInclude Include="src\Renderer.h" />
     <ClInclude Include="src\Shaders\HashGridCommon.h">

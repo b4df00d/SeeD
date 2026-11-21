@@ -2255,6 +2255,8 @@ void SetPhysicsPreset(World::Entity ent, uint motionType, uint shapeType)
         collisionShape.halfExtent = float3(0.5f, 0.5f, 0.5f);
         collisionShape.offset = float3(0.0f, 0.0f, 0.0f);
         collisionShape.convexRadius = 0.05f;
+        collisionShape.overrideCenterOfMass = 0;
+        collisionShape.centerOfMass = float3(0.0f, 0.0f, 0.0f);
     }
 
     ent.Get<Components::RigidBody>().motionType = motionType;
@@ -2430,6 +2432,8 @@ void MakeVehicle(const VehiclePreset& preset)
     collisionShape.halfExtent = float3(preset.halfWidth, preset.halfHeight, preset.halfLength);
     collisionShape.offset = float3(0, preset.chassisOffsetY, 0);
     collisionShape.convexRadius = preset.convexRadius;
+    collisionShape.overrideCenterOfMass = 0;
+    collisionShape.centerOfMass = float3(0, 0, 0);
 
     auto& vehicle = chassis.Get<Components::Vehicle>();
     vehicle.up = float3(0, 1, 0);
@@ -3535,6 +3539,12 @@ public:
                         MakeDefaultBuggy();
                     }
                     ImGui::SetItemTooltip("The same thing at 1/8 RC scale: a 400 x 140 x 90 mm body, 327 mm wheelbase, 102 mm\ntires narrow at the front and fat at the rear, 3 kg. Every number that does not scale with the\nvehicle is re-tuned for it -- suspension frequency above all, since static sag is g / (2*pi*f)^2\nno matter how small the car gets.");
+                    if (ImGui::MenuItem("RC Buggy 1/10 2WD (RC10B7.1)"))
+                        MakeRCBuggy(false);
+                    ImGui::SetItemTooltip("Team Associated RC10B7.1-style 2WD buggy with the real suspension linkage, shocks,\nbrushless motor, gearing and gear diff, from a race setup sheet. Its moving parts are\nchild entities -- hang the in-place meshes on them. Drive with the arrow keys while playing.");
+                    if (ImGui::MenuItem("RC Buggy 1/10 4WD (RC10B84.1)"))
+                        MakeRCBuggy(true);
+                    ImGui::SetItemTooltip("The same, 4WD: front and rear gear diffs on one layshaft, slipper clutch, B84.1-ish setup.");
                     ImGui::EndMenu();
                 }
                 if (ImGui::MenuItem("Generate components Metadata"))

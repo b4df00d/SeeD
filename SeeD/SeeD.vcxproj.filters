@@ -104,6 +104,12 @@
     <ClInclude Include="src\Physic.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\RCBuggy.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\RCBuggyKinematics.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\Calibration.h">
       <Filter>Third Files</Filter>
     </ClInclude>

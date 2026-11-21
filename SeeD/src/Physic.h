@@ -40,6 +40,7 @@
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Constraints/SliderConstraint.h>
@@ -86,6 +87,8 @@ namespace Components
         float3 halfExtent;             // Box: half size on each axis. Sphere: .x = radius. Capsule/Cylinder: .x = radius, .y = half height of the cylindrical section (a capsule's total height is 2*(.y + .x)).
         float3 offset;                 // shape origin relative to the entity Transform (Jolt rotates around the shape's center of mass)
         float  convexRadius = 0.05f;   // Box/Cylinder bevel, keep small
+        uint   overrideCenterOfMass = 0;   // 1 = use centerOfMass below instead of the shape's own (uniform density) one
+        float3 centerOfMass;           // entity local space; where Jolt puts the mass and rotates the body around
     };
 
     struct Constraint : ComponentBase<Constraint>
@@ -422,6 +425,16 @@ public:
 };
 #endif
 
+// 1/10 RC buggies (RCBuggy.h, included after this header). They run off their own Jolt step
+// listeners, built from the chassis bodies this file creates, so they sync right after the cars.
+void RCBuggySync(World* world);
+void RCBuggyShutdown();
+// For Systems::Driver: an RC buggy chassis (or one of its parts -> its chassis), the first one in
+// the world, and its two inputs. Entity() when there is none.
+World::Entity RCBuggyChassisOf(World::Entity ent);
+World::Entity RCBuggyFirst(World* world);
+void RCBuggySetInput(World::Entity chassis, float throttle, float steering);
+
 struct Physics
 {
     static Physics* instance;
@@ -554,6 +567,9 @@ struct Physics
     {
         ZoneScoped;
 
+        // RC buggies are step listeners too, holding body ids: out before anything else goes.
+        RCBuggyShutdown();
+
         if (tempAllocator != nullptr)
         {
             // Cars first: a VehicleConstraint is also a step listener, and leaving one registered
@@ -601,6 +617,7 @@ struct Physics
         Sync(world);
         SyncConstraints(world);
         SyncVehicles(world);
+        RCBuggySync(world);
         DrawDebug();
     }
 
@@ -783,7 +800,17 @@ struct Physics
 
         // Just do a step every frame... I like it better to test
         // see if does really simulate unheavenly. If so, maybe subdivide the collisionSteps depending on deltatime?
-        physicsSystem.Update(Time::instance->deltaSeconds, collisionSteps, tempAllocator, jobSystem);
+        // A hitch (shader compile, loading) used to arrive as one huge step: 10 sub-steps of 27 ms
+        // for a 0.27 s frame, which stiff things -- an RC buggy's suspension and tires, step
+        // listeners in general -- cannot survive. Clamp the frame, and keep the sub-step at or
+        // below what 10 steps give at 60 fps (1/600 s) by adding steps when the frame is long.
+        float stepSeconds = Time::instance->deltaSeconds;
+        if (stepSeconds > 0.05f)
+            stepSeconds = 0.05f;
+        int steps = (int)ceilf(stepSeconds * 600.0f);
+        if (steps < collisionSteps)
+            steps = collisionSteps;
+        physicsSystem.Update(stepSeconds, steps, tempAllocator, jobSystem);
         while (accumulator >= fixedDeltaSeconds)
         {
             //physicsSystem.Update(fixedDeltaSeconds, collisionSteps, tempAllocator, jobSystem);
@@ -1941,6 +1968,26 @@ private:
             shape = offsetResult.Get();
         }
 
+        // A car is not a box of uniform density: the battery and motor sit low. Shifting the centre
+        // of mass leaves the collider where it is and moves only the mass (and the inertia with it).
+        if (collisionShape.overrideCenterOfMass != 0)
+        {
+            float com[3];
+            store(collisionShape.centerOfMass, com);
+            bool finite = PHYSICS_VALID(com[0]) && PHYSICS_VALID(com[1]) && PHYSICS_VALID(com[2]);
+            if (finite)
+            {
+                JPH::Vec3 shift = JPH::Vec3(com[0], com[1], com[2]) - shape->GetCenterOfMass();
+                JPH::ShapeSettings::ShapeResult comResult = JPH::OffsetCenterOfMassShapeSettings(shift, shape).Create();
+                if (comResult.HasError())
+                {
+                    IOs::Log("Physics: entity {} centre of mass override failed: {}", entityId, comResult.GetError().c_str());
+                    return nullptr;
+                }
+                shape = comResult.Get();
+            }
+        }
+
         bool scaled = false;
         for (uint axis = 0; axis < 3; axis++)
         {
@@ -2151,15 +2198,25 @@ namespace Systems
                     if (chassis.IsValid() && chassis.Has<Components::Vehicle>())
                         return chassis;
                 }
+                World::Entity buggy = RCBuggyChassisOf(selected);
+                if (buggy.IsValid())
+                    return buggy;
             }
 
             uint queryIndex = world->Query(Components::Vehicle::mask, 0, true);
             auto& queryResult = world->frameQueries[queryIndex];
-            return queryResult.empty() ? World::Entity() : queryResult[0];
+            return queryResult.empty() ? RCBuggyFirst(world) : queryResult[0];
         }
 
         static void SetInput(World::Entity vehicle, float forward, float right, float brake)
         {
+            if (!vehicle.Has<Components::Vehicle>())
+            {
+                // An RC buggy: its ESC does brake-then-reverse itself, from the raw stick. Driver's
+                // `right` follows Jolt's sign (Right arrow = -1); the buggy's steering is + = right.
+                RCBuggySetInput(vehicle, brake > 0.0f ? -brake : forward, -right);
+                return;
+            }
             auto& authored = vehicle.Get<Components::Vehicle>();
             authored.forwardInput = forward;
             authored.rightInput = right;

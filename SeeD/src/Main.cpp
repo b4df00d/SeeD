@@ -349,6 +349,7 @@ void ImportSceneFile(String path);
 #include "Loading.h"
 #include "Terrain.h"
 #include "Physic.h"
+#include "RCBuggy.h"
 #include "ImageWriter.h"
 #include "Renderer.h"
 #include "Calibration.h"
