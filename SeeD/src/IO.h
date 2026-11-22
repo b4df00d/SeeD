@@ -6,6 +6,13 @@
 #include <io.h>
 #include <fcntl.h>
 
+// Game controllers: XInput for Xbox pads, winmm's joystick API for everything else Windows sees as a
+// game controller (an RC transmitter in USB joystick mode or on a sim dongle, a wheel, a DirectInput pad).
+#include <Xinput.h>
+#include <mmsystem.h>
+#pragma comment(lib, "Xinput.lib")
+#pragma comment(lib, "winmm.lib")
+
 #define VK_0 0x30
 #define VK_1 0x31
 #define VK_2 0x32
@@ -95,6 +102,311 @@ public:
         int3 mouseStopDrag;
     };
 
+    // ---- game controller ---------------------------------------------------------------------
+    // One controller is read at a time (ControllerSettings::device). Its raw axes/buttons land in
+    // `controller`, and the driving mapping (steering, throttle, reset) is applied here too, so a
+    // consumer only reads controller.steering / controller.throttle.
+
+    static constexpr int controllerAuto = -1;           // first XInput pad, else first joystick
+    static constexpr int controllerXInput = 0;          // + XInput slot 0..3
+    static constexpr int controllerJoystick = 100;      // + winmm joystick id 0..15
+
+    struct ControllerAxisMap
+    {
+        int axis = -1;                  // index into Controller::axes, -1 = unused
+        bool invert = false;
+        float min = -1.0f;              // calibration, in raw axis units: the two ends of the travel
+        float center = 0.0f;            // and where it rests (a pistol-grip trigger's neutral)
+        float max = 1.0f;
+        float deadzone = 0.05f;         // fraction of travel around the center that reads 0
+        float expo = 0.0f;              // 0 linear .. 1 cubic, a radio's expo
+
+        // -1..1 after calibration, deadzone, expo and invert. Each side of the center is scaled
+        // separately, so an off-centre neutral still reaches +-1 at both ends.
+        float Apply(const float* axes, uint axisCount) const
+        {
+            if (axis < 0 || axis >= (int)axisCount)
+                return 0.0f;
+            float v = axes[axis];
+            float span = v >= center ? max - center : center - min;
+            float x = span > 1.0e-4f ? (v - center) / span : 0.0f;
+            x = x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
+            float dz = deadzone < 0.0f ? 0.0f : (deadzone > 0.95f ? 0.95f : deadzone);
+            float a = fabsf(x);
+            a = a <= dz ? 0.0f : (a - dz) / (1.0f - dz);
+            a = (1.0f - expo) * a + expo * a * a * a;
+            x = x < 0.0f ? -a : a;
+            return invert ? -x : x;
+        }
+        void ResetCalibration() { min = -1.0f; center = 0.0f; max = 1.0f; }
+    };
+
+    struct ControllerMapping
+    {
+        ControllerAxisMap steering;     // + = right
+        ControllerAxisMap throttle;     // + = forward, - = brake, then reverse once stopped
+        int resetButton = -1;           // puts the car back on its wheels, like R. -1 = none
+    };
+
+    struct ControllerSettings
+    {
+        bool enabled = true;
+        int device = controllerAuto;
+        ControllerMapping xinput;       // used when the device read is an XInput pad
+        ControllerMapping joystick;     // used for any winmm joystick
+
+        ControllerSettings()
+        {
+            // Xbox: left stick steers, RT - LT (axis 6) is throttle/brake, Y resets.
+            xinput.steering.axis = 0;
+            xinput.steering.deadzone = 0.12f;   // worn sticks rest well off 0
+            xinput.steering.expo = 0.3f;
+            xinput.throttle.axis = 6;
+            xinput.throttle.deadzone = 0.03f;
+            xinput.resetButton = 3;
+            // Generic joystick / RC radio: X steers, Y (up = forward, winmm's Y grows downward) is
+            // throttle. A radio's channel order varies -- pick the axes in the Controller window.
+            joystick.steering.axis = 0;
+            joystick.steering.deadzone = 0.02f;
+            joystick.throttle.axis = 1;
+            joystick.throttle.invert = true;
+            joystick.throttle.deadzone = 0.03f;
+        }
+    };
+
+    struct ControllerDevice
+    {
+        int device;
+        char name[128];
+        // winmm only: raw range per axis X Y Z R U V, from joyGetDevCaps
+        bool hasAxis[6];
+        uint axisMin[6];
+        uint axisMax[6];
+        uint buttonCount;
+    };
+
+    struct Controller
+    {
+        static constexpr uint maxAxes = 8;
+        static constexpr uint maxButtons = 32;
+
+        bool connected;
+        int device;                     // what is being read, controllerXInput + n / controllerJoystick + n
+        char name[128];
+        uint axisCount;
+        uint buttonCount;
+        const char* axisNames[maxAxes];
+        bool axisPresent[maxAxes];
+        float axes[maxAxes];            // raw: sticks -1..1, XInput triggers 0..1
+        bool down[maxButtons];
+        bool pressed[maxButtons];       // true the frame the button goes down
+
+        // the driving mapping, applied
+        float steering;                 // -1..1, + = right
+        float throttle;                 // -1..1, + = forward
+        bool reset;                     // the reset button was pressed this frame
+
+        bool IsXInput() const { return device >= controllerXInput && device < controllerXInput + XUSER_MAX_COUNT; }
+    };
+
+    ControllerSettings controllerSettings;
+    Controller controller{};
+    std::vector<ControllerDevice> controllerDevices;    // what the last scan found, XInput pads first
+    std::atomic<bool> controllerRescan = true;          // set by WM_DEVICECHANGE, and on a read failure
+
+    ControllerMapping& ActiveMapping()
+    {
+        return controller.IsXInput() ? controllerSettings.xinput : controllerSettings.joystick;
+    }
+
+    static void Narrow(const WCHAR* wide, char* out, int outSize)
+    {
+        int n = WideCharToMultiByte(CP_UTF8, 0, wide, -1, out, outSize, nullptr, nullptr);
+        if (n <= 0) out[0] = 0;
+        out[outSize - 1] = 0;
+    }
+
+    // winmm only gives "Microsoft PC-joystick driver"-style names in szPname; the product name
+    // ("Radiomaster TX16S Joystick", ...) sits in the registry under the OEM key it points at.
+    static bool JoystickOEMName(UINT id, const JOYCAPSW& caps, char* out, int outSize)
+    {
+        WCHAR path[256];
+        swprintf(path, 256, L"System\\CurrentControlSet\\Control\\MediaResources\\Joystick\\%s\\CurrentJoystickSettings", caps.szRegKey);
+        WCHAR valueName[64];
+        swprintf(valueName, 64, L"Joystick%uOEMName", id + 1);
+        WCHAR oemKey[256];
+        DWORD size = sizeof(oemKey);
+        if (RegGetValueW(HKEY_CURRENT_USER, path, valueName, RRF_RT_REG_SZ, nullptr, oemKey, &size) != ERROR_SUCCESS &&
+            RegGetValueW(HKEY_LOCAL_MACHINE, path, valueName, RRF_RT_REG_SZ, nullptr, oemKey, &size) != ERROR_SUCCESS)
+            return false;
+        swprintf(path, 256, L"System\\CurrentControlSet\\Control\\MediaProperties\\PrivateProperties\\Joystick\\OEM\\%s", oemKey);
+        WCHAR name[128];
+        size = sizeof(name);
+        if (RegGetValueW(HKEY_CURRENT_USER, path, L"OEMName", RRF_RT_REG_SZ, nullptr, name, &size) != ERROR_SUCCESS &&
+            RegGetValueW(HKEY_LOCAL_MACHINE, path, L"OEMName", RRF_RT_REG_SZ, nullptr, name, &size) != ERROR_SUCCESS)
+            return false;
+        Narrow(name, out, outSize);
+        return out[0] != 0;
+    }
+
+    // Only on start-up, on WM_DEVICECHANGE, or when the device being read stops answering: polling an
+    // empty XInput slot or an unplugged winmm id costs real time, so it is never done every frame.
+    void ScanControllers()
+    {
+        ZoneScoped;
+        controllerDevices.clear();
+
+        for (DWORD slot = 0; slot < XUSER_MAX_COUNT; slot++)
+        {
+            XINPUT_STATE state{};
+            if (XInputGetState(slot, &state) != ERROR_SUCCESS)
+                continue;
+            ControllerDevice d{};
+            d.device = controllerXInput + (int)slot;
+            snprintf(d.name, sizeof(d.name), "Xbox controller %u (XInput)", slot + 1);
+            controllerDevices.push_back(d);
+        }
+
+        joyConfigChanged(0);        // winmm caches its device list; pick up hot-plugged ones
+        UINT count = joyGetNumDevs();
+        for (UINT id = 0; id < count && id < 16; id++)
+        {
+            JOYINFOEX info{};
+            info.dwSize = sizeof(info);
+            info.dwFlags = JOY_RETURNALL;
+            if (joyGetPosEx(id, &info) != JOYERR_NOERROR)
+                continue;
+            JOYCAPSW caps{};
+            if (joyGetDevCapsW(id, &caps, sizeof(caps)) != JOYERR_NOERROR)
+                continue;
+
+            ControllerDevice d{};
+            d.device = controllerJoystick + (int)id;
+            char product[96];
+            if (!JoystickOEMName(id, caps, product, sizeof(product)))
+                Narrow(caps.szPname, product, sizeof(product));
+            snprintf(d.name, sizeof(d.name), "%s (joystick %u)", product, id);
+            d.hasAxis[0] = true;
+            d.hasAxis[1] = true;
+            d.hasAxis[2] = (caps.wCaps & JOYCAPS_HASZ) != 0;
+            d.hasAxis[3] = (caps.wCaps & JOYCAPS_HASR) != 0;
+            d.hasAxis[4] = (caps.wCaps & JOYCAPS_HASU) != 0;
+            d.hasAxis[5] = (caps.wCaps & JOYCAPS_HASV) != 0;
+            uint mins[6] = { caps.wXmin, caps.wYmin, caps.wZmin, caps.wRmin, caps.wUmin, caps.wVmin };
+            uint maxs[6] = { caps.wXmax, caps.wYmax, caps.wZmax, caps.wRmax, caps.wUmax, caps.wVmax };
+            for (uint a = 0; a < 6; a++) { d.axisMin[a] = mins[a]; d.axisMax[a] = maxs[a]; }
+            d.buttonCount = caps.wNumButtons < Controller::maxButtons ? caps.wNumButtons : Controller::maxButtons;
+            controllerDevices.push_back(d);
+        }
+    }
+
+    const ControllerDevice* FindControllerDevice(int device) const
+    {
+        for (const ControllerDevice& d : controllerDevices)
+            if (d.device == device)
+                return &d;
+        return nullptr;
+    }
+
+    bool ReadController(const ControllerDevice& d)
+    {
+        Controller& c = controller;
+        bool downNow[Controller::maxButtons] = {};
+
+        if (d.device >= controllerXInput && d.device < controllerXInput + XUSER_MAX_COUNT)
+        {
+            XINPUT_STATE state{};
+            if (XInputGetState((DWORD)(d.device - controllerXInput), &state) != ERROR_SUCCESS)
+                return false;
+            const XINPUT_GAMEPAD& g = state.Gamepad;
+            auto stick = [](SHORT v) { float f = (float)v / 32767.0f; return f < -1.0f ? -1.0f : f; };
+            static const char* names[] = { "Left stick X", "Left stick Y", "Right stick X", "Right stick Y", "LT", "RT", "RT - LT" };
+            c.axisCount = 7;
+            c.axes[0] = stick(g.sThumbLX);
+            c.axes[1] = stick(g.sThumbLY);
+            c.axes[2] = stick(g.sThumbRX);
+            c.axes[3] = stick(g.sThumbRY);
+            c.axes[4] = g.bLeftTrigger / 255.0f;
+            c.axes[5] = g.bRightTrigger / 255.0f;
+            c.axes[6] = c.axes[5] - c.axes[4];
+            for (uint a = 0; a < c.axisCount; a++) { c.axisNames[a] = names[a]; c.axisPresent[a] = true; }
+
+            // A B X Y LB RB Back Start LS RS Up Down Left Right
+            static const WORD masks[] = { XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
+                XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, XINPUT_GAMEPAD_BACK, XINPUT_GAMEPAD_START,
+                XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB,
+                XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT };
+            c.buttonCount = (uint)(sizeof(masks) / sizeof(masks[0]));
+            for (uint b = 0; b < c.buttonCount; b++)
+                downNow[b] = (g.wButtons & masks[b]) != 0;
+        }
+        else
+        {
+            JOYINFOEX info{};
+            info.dwSize = sizeof(info);
+            info.dwFlags = JOY_RETURNALL;
+            if (joyGetPosEx((UINT)(d.device - controllerJoystick), &info) != JOYERR_NOERROR)
+                return false;
+            static const char* names[] = { "X", "Y", "Z", "R (Rx)", "U (Ry)", "V (Rz)" };
+            DWORD raw[6] = { info.dwXpos, info.dwYpos, info.dwZpos, info.dwRpos, info.dwUpos, info.dwVpos };
+            c.axisCount = 6;
+            for (uint a = 0; a < 6; a++)
+            {
+                c.axisNames[a] = names[a];
+                c.axisPresent[a] = d.hasAxis[a];
+                float range = (float)d.axisMax[a] - (float)d.axisMin[a];
+                c.axes[a] = d.hasAxis[a] && range > 0.0f ? ((float)raw[a] - (float)d.axisMin[a]) / range * 2.0f - 1.0f : 0.0f;
+            }
+            c.buttonCount = d.buttonCount;
+            for (uint b = 0; b < c.buttonCount; b++)
+                downNow[b] = (info.dwButtons & (1u << b)) != 0;
+        }
+
+        for (uint b = 0; b < Controller::maxButtons; b++)
+        {
+            c.pressed[b] = downNow[b] && !c.down[b];
+            c.down[b] = downNow[b];
+        }
+        return true;
+    }
+
+    void UpdateController()
+    {
+        ZoneScoped;
+        if (controllerRescan.exchange(false))
+            ScanControllers();
+
+        int device = controllerSettings.device;
+        if (device == controllerAuto)
+            device = controllerDevices.empty() ? -2 : controllerDevices[0].device;
+        const ControllerDevice* d = FindControllerDevice(device);
+
+        if (controller.device != device)
+        {
+            // switching devices: no button state carries over, so nothing reads as pressed or held
+            memset(&controller, 0, sizeof(controller));
+            controller.device = device;
+        }
+
+        if (!controllerSettings.enabled || d == nullptr || !ReadController(*d))
+        {
+            if (controller.connected && controllerSettings.enabled && d != nullptr)
+                controllerRescan = true;    // it stopped answering -- unplugged, or the radio went off
+            memset(&controller, 0, sizeof(controller));
+            controller.device = device;
+            return;
+        }
+
+        controller.connected = true;
+        controller.device = device;
+        snprintf(controller.name, sizeof(controller.name), "%s", d->name);
+
+        const ControllerMapping& map = ActiveMapping();
+        controller.steering = map.steering.Apply(controller.axes, controller.axisCount);
+        controller.throttle = map.throttle.Apply(controller.axes, controller.axisCount);
+        controller.reset = map.resetButton >= 0 && map.resetButton < (int)Controller::maxButtons && controller.pressed[map.resetButton];
+    }
+
 	Keys _keys{};
 	Keys keys{};
 	Mouse _mouse{};
@@ -136,6 +448,8 @@ public:
 
         memcpy(&mouse, &_mouse, sizeof(Mouse));
         memcpy(&keys, &_keys, sizeof(Keys));
+
+        UpdateController();
 
 		// reset all inputs
         for (unsigned int i = 0; i < 256; i++)
@@ -219,6 +533,13 @@ public:
 			}
 			DragFinish(drop);
 			break;
+		}
+
+		case WM_DEVICECHANGE:
+		{
+			// a pad, a radio or its dongle came or went -- rescan on the next Update
+			pThis->controllerRescan = true;
+			return DefWindowProc(hwnd, umessage, wparam, lparam);
 		}
 
 		case WM_DESTROY:

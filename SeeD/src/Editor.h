@@ -3827,3 +3827,241 @@ public:
 };
 AboutWindow aboutWindow;
 */
+
+// "Controller" window: pick the game controller / RC radio that drives the car (Systems::Driver), see
+// its raw axes, and map + calibrate steering and throttle. Saved in the project file.
+class ControllerWindow : public EditorWindow
+{
+public:
+    ControllerWindow() : EditorWindow("Controller") {}
+
+    // Detect: the next axis moved well away from where it was, or the next button pressed, is assigned.
+    enum class Detect { None, Steering, Throttle, Reset };
+    Detect detect = Detect::None;
+    float detectSnapshot[IOs::Controller::maxAxes] = {};
+
+    // Calibrate: track the extremes of every axis while the user sweeps them, rest position on Done.
+    bool calibrating = false;
+    float calMin[IOs::Controller::maxAxes] = {};
+    float calMax[IOs::Controller::maxAxes] = {};
+
+    static void AxisBar(const char* label, float value, float lo = -1.0f, float hi = 1.0f)
+    {
+        char overlay[64];
+        snprintf(overlay, sizeof(overlay), "%s  %+.3f", label, value);
+        ImGui::ProgressBar((value - lo) / (hi - lo), ImVec2(-FLT_MIN, 0.0f), overlay);
+    }
+
+    void AxisMapUI(const char* label, IOs::ControllerAxisMap& map, Detect which, const IOs::Controller& c)
+    {
+        ImGui::PushID(label);
+        ImGui::SeparatorText(label);
+
+        const char* preview = map.axis < 0 ? "None" : (map.axis < (int)c.axisCount && c.axisNames[map.axis] ? c.axisNames[map.axis] : "?");
+        ImGui::SetNextItemWidth(160.0f);
+        if (ImGui::BeginCombo("axis", preview))
+        {
+            if (ImGui::Selectable("None", map.axis < 0)) map.axis = -1;
+            for (uint a = 0; a < c.axisCount; a++)
+                if (ImGui::Selectable(c.axisNames[a], map.axis == (int)a))
+                {
+                    map.axis = (int)a;
+                    map.ResetCalibration();
+                }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (detect == which)
+        {
+            if (ImGui::Button("Move it...")) detect = Detect::None;
+        }
+        else if (ImGui::Button("Detect"))
+        {
+            detect = which;
+            memcpy(detectSnapshot, c.axes, sizeof(detectSnapshot));
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("invert", &map.invert);
+
+        ImGui::SetNextItemWidth(160.0f);
+        ImGui::SliderFloat("deadzone", &map.deadzone, 0.0f, 0.5f, "%.2f");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(160.0f);
+        ImGui::SliderFloat("expo", &map.expo, 0.0f, 1.0f, "%.2f");
+        ImGui::Text("calibration  min %+.3f  center %+.3f  max %+.3f", map.min, map.center, map.max);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("reset")) map.ResetCalibration();
+
+        AxisBar("output", map.Apply(c.axes, c.axisCount));
+        ImGui::PopID();
+    }
+
+    void Update() override
+    {
+        ZoneScoped;
+        if (!ImGui::Begin("Controller", &isOpen, ImGuiWindowFlags_None))
+        {
+            ImGui::End();
+            return;
+        }
+
+        IOs& ios = *IOs::instance;
+        IOs::ControllerSettings& settings = ios.controllerSettings;
+        const IOs::Controller& c = ios.controller;
+
+        ImGui::Checkbox("Drive with a controller", &settings.enabled);
+        ImGui::SetItemTooltip("Arrow keys still override it while held. Select the car (or have only one) and press Play.");
+
+        const IOs::ControllerDevice* selected = ios.FindControllerDevice(settings.device);
+        const char* preview = settings.device == IOs::controllerAuto ? "Auto (first found)" : (selected ? selected->name : "(not connected)");
+        ImGui::SetNextItemWidth(320.0f);
+        if (ImGui::BeginCombo("device", preview))
+        {
+            if (ImGui::Selectable("Auto (first found)", settings.device == IOs::controllerAuto))
+                settings.device = IOs::controllerAuto;
+            for (const IOs::ControllerDevice& d : ios.controllerDevices)
+                if (ImGui::Selectable(d.name, settings.device == d.device))
+                    settings.device = d.device;
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Rescan"))
+            ios.controllerRescan = true;
+
+        if (!c.connected)
+        {
+            ImGui::TextDisabled(ios.controllerDevices.empty() ? "No controller found. Plug one in (an RC radio must be in USB joystick mode)." : "Not reading any controller.");
+            detect = Detect::None;
+            calibrating = false;
+            ImGui::End();
+            return;
+        }
+        ImGui::Text("Reading: %s", c.name);
+
+        // ---- raw input
+        if (ImGui::CollapsingHeader("Raw input", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            for (uint a = 0; a < c.axisCount; a++)
+            {
+                if (!c.axisPresent[a]) continue;
+                AxisBar(c.axisNames[a], c.axes[a]);
+            }
+            ImGui::Text("buttons:");
+            for (uint b = 0; b < c.buttonCount; b++)
+            {
+                ImGui::SameLine();
+                if (c.down[b]) ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "%u", b);
+                else ImGui::TextDisabled("%u", b);
+            }
+            if (c.IsXInput())
+                ImGui::TextDisabled("0 A  1 B  2 X  3 Y  4 LB  5 RB  6 Back  7 Start  8 LS  9 RS  10-13 D-pad");
+        }
+
+        IOs::ControllerMapping& map = ios.ActiveMapping();
+
+        // ---- detect
+        if (detect == Detect::Reset)
+        {
+            for (uint b = 0; b < c.buttonCount; b++)
+                if (c.pressed[b]) { map.resetButton = (int)b; detect = Detect::None; break; }
+        }
+        else if (detect != Detect::None)
+        {
+            int best = -1;
+            float bestDelta = 0.5f;     // a quarter of the travel: ignores noise and a resting trim
+            for (uint a = 0; a < c.axisCount; a++)
+            {
+                float delta = fabsf(c.axes[a] - detectSnapshot[a]);
+                if (c.axisPresent[a] && delta > bestDelta) { best = (int)a; bestDelta = delta; }
+            }
+            if (best >= 0)
+            {
+                IOs::ControllerAxisMap& target = detect == Detect::Steering ? map.steering : map.throttle;
+                target.axis = best;
+                target.ResetCalibration();
+                // Pushed one way to detect it: make that way + (right for steering, forward for throttle).
+                target.invert = c.axes[best] < detectSnapshot[best];
+                detect = Detect::None;
+            }
+        }
+
+        ImGui::Text("Mapping for %s", c.IsXInput() ? "Xbox controllers" : "joysticks / RC radios");
+        ImGui::TextDisabled("Detect: push the control RIGHT (steering) or FORWARD / full throttle (throttle).");
+        AxisMapUI("Steering (+ right)", map.steering, Detect::Steering, c);
+        AxisMapUI("Throttle (+ forward, - brake / reverse)", map.throttle, Detect::Throttle, c);
+
+        ImGui::SeparatorText("Reset car");
+        if (map.resetButton >= 0) ImGui::Text("button %d", map.resetButton);
+        else ImGui::TextDisabled("none");
+        ImGui::SameLine();
+        if (detect == Detect::Reset)
+        {
+            if (ImGui::Button("Press a button...")) detect = Detect::None;
+        }
+        else if (ImGui::Button("Detect##reset"))
+            detect = Detect::Reset;
+        ImGui::SameLine();
+        if (ImGui::Button("None##reset"))
+            map.resetButton = -1;
+
+        // ---- calibration
+        ImGui::SeparatorText("Calibration");
+        if (!calibrating)
+        {
+            ImGui::TextDisabled("For RC radios and anything whose ends or neutral are not exactly -1 / 0 / +1.");
+            if (ImGui::Button("Calibrate"))
+            {
+                calibrating = true;
+                for (uint a = 0; a < IOs::Controller::maxAxes; a++) { calMin[a] = c.axes[a]; calMax[a] = c.axes[a]; }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Defaults"))
+            {
+                IOs::ControllerSettings defaults;
+                map = c.IsXInput() ? defaults.xinput : defaults.joystick;
+            }
+        }
+        else
+        {
+            for (uint a = 0; a < c.axisCount; a++)
+            {
+                calMin[a] = std::min(calMin[a], c.axes[a]);
+                calMax[a] = std::max(calMax[a], c.axes[a]);
+            }
+            ImGui::TextWrapped("Move the steering and the throttle to both ends a few times, then let go "
+                "so they rest at neutral, and click Done.");
+            auto range = [&](const IOs::ControllerAxisMap& m)
+            {
+                if (m.axis >= 0 && m.axis < (int)c.axisCount)
+                    ImGui::Text("  %s: %+.3f .. %+.3f", c.axisNames[m.axis], calMin[m.axis], calMax[m.axis]);
+            };
+            range(map.steering);
+            range(map.throttle);
+            if (ImGui::Button("Done"))
+            {
+                auto apply = [&](IOs::ControllerAxisMap& m)
+                {
+                    if (m.axis < 0 || m.axis >= (int)c.axisCount || calMax[m.axis] - calMin[m.axis] < 0.2f)
+                        return;                 // not moved: keep what it had
+                    m.min = calMin[m.axis];
+                    m.max = calMax[m.axis];
+                    // A trigger rests at one end: its neutral is that end, not the middle.
+                    m.center = std::clamp(c.axes[m.axis], m.min, m.max);
+                };
+                apply(map.steering);
+                apply(map.throttle);
+                calibrating = false;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel"))
+                calibrating = false;
+        }
+
+        ImGui::SeparatorText("Driving");
+        AxisBar("steering", c.steering);
+        AxisBar("throttle", c.throttle);
+
+        ImGui::End();
+    }
+};
+ControllerWindow controllerWindow;

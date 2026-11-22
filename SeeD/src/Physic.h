@@ -2309,8 +2309,9 @@ namespace Systems
                 return;
 
             IOs::Keys& keys = IOs::instance->keys;
+            const IOs::Controller& pad = IOs::instance->controller;
 
-            if (keys.pressed[VK_R])
+            if (keys.pressed[VK_R] || pad.reset)
                 ResetVehicle(vehicle);
 
             float forward = 0.0f;
@@ -2320,9 +2321,18 @@ namespace Systems
             if (keys.down[VK_RIGHT]) right -= 1.0f;
             if (keys.down[VK_LEFT])  right += 1.0f;
 
+            // A game controller / RC radio (IOs::controller), analog. The keyboard wins on each axis
+            // while one of its keys is held. Driver's `right` is + = left, the controller's + = right.
+            if (pad.connected)
+            {
+                if (forward == 0.0f) forward = pad.throttle;
+                if (right == 0.0f)   right = -pad.steering;
+            }
+
             // Asking for the opposite direction to the one we committed to is the brake until the
             // car has actually stopped, and only then a gear change -- the same rule as Jolt's
             // vehicle sample. Feeding the gearbox a reverse request at speed snaps the car around.
+            // The brake is as hard as the stick is pushed back (1 from the keyboard).
             float brake = 0.0f;
             if (previousForward * forward < 0.0f)
             {
@@ -2330,8 +2340,8 @@ namespace Systems
                 bool known = Physics::instance != nullptr && Physics::instance->GetVehicleForwardSpeed(vehicle, speed);
                 if (known && ((forward > 0.0f && speed < -0.1f) || (forward < 0.0f && speed > 0.1f)))
                 {
+                    brake = fabsf(forward);
                     forward = 0.0f;
-                    brake = 1.0f;
                 }
                 else
                 {

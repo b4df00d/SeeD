@@ -56,6 +56,40 @@ public:
     float cameraPos[3] = { 0, 1, -2 };
     float cameraRot[4] = { 0, 0, 0, 1 };
 
+    // game controller / RC radio (IOs::controllerSettings). Lines:
+    //   controller <enabled> <device>
+    //   controllerXInput|controllerJoystick <steering axis map> <throttle axis map> <resetButton>
+    //   with an axis map = axis invert min center max deadzone expo
+    IOs::ControllerSettings controller;
+
+    static void WriteAxisMap(std::ostream& f, const IOs::ControllerAxisMap& m)
+    {
+        f << " " << m.axis << " " << (m.invert ? 1 : 0) << " " << m.min << " " << m.center << " " << m.max
+          << " " << m.deadzone << " " << m.expo;
+    }
+    static void WriteMapping(std::ostream& f, const char* key, const IOs::ControllerMapping& m)
+    {
+        f << key;
+        WriteAxisMap(f, m.steering);
+        WriteAxisMap(f, m.throttle);
+        f << " " << m.resetButton << "\n";
+    }
+    static void ReadAxisMap(std::istream& ss, IOs::ControllerAxisMap& m)
+    {
+        int invert = m.invert ? 1 : 0;
+        ss >> m.axis >> invert >> m.min >> m.center >> m.max >> m.deadzone >> m.expo;
+        m.invert = invert != 0;
+    }
+    static void ReadMapping(const std::string& val, IOs::ControllerMapping& m)
+    {
+        IOs::ControllerMapping read = m;
+        std::istringstream ss(val);
+        ReadAxisMap(ss, read.steering);
+        ReadAxisMap(ss, read.throttle);
+        ss >> read.resetButton;
+        if (!ss.fail()) m = read;   // a truncated line keeps the defaults rather than half of it
+    }
+
     // [calibration] : offline render captures, run in order at startup and then the
     // app exits. Empty for every normal project, which is what keeps this free.
     // One line each: capture <name> <scene> <output> <directOnly> <warmupFrames> [cameraSpeed m/frame]
@@ -173,6 +207,11 @@ public:
         f << "shaderStatsCsv " << (options.shaderStatsCsv ? 1 : 0) << "\n";
         f << "playerSystem " << (options.playerSystem ? 1 : 0) << "\n";
 
+        const IOs::ControllerSettings& pad = enginePtr->ios.controllerSettings;
+        f << "controller " << (pad.enabled ? 1 : 0) << " " << pad.device << "\n";
+        WriteMapping(f, "controllerXInput", pad.xinput);
+        WriteMapping(f, "controllerJoystick", pad.joystick);
+
         // Written back verbatim: Save() rewrites the whole file, so skipping this
         // would quietly drop the calibration setup the next time the editor saves.
         if (!captures.empty())
@@ -217,6 +256,8 @@ public:
         options.distanceCullingValueRT = distanceCullingValueRT;
         options.shaderStatsCsv = shaderStatsCsv;
         options.playerSystem = playerSystem;
+
+        engine.ios.controllerSettings = controller;
 
         auto& rt = engine.renderer.mainView.raytracingContext.rtParameters;
         rt.maxFrameFilteringCount = maxFrameFilteringCount;
@@ -329,6 +370,16 @@ private:
                 else if (key == "dlssdPreset") dlssdPreset = std::stoi(val);
                 else if (key == "shaderStatsCsv") shaderStatsCsv = std::stoi(val) != 0;
                 else if (key == "playerSystem") playerSystem = std::stoi(val) != 0;
+                else if (key == "controller")
+                {
+                    std::istringstream ss(val);
+                    int enabled = 1, device = IOs::controllerAuto;
+                    ss >> enabled >> device;
+                    controller.enabled = enabled != 0;
+                    controller.device = device;
+                }
+                else if (key == "controllerXInput") ReadMapping(val, controller.xinput);
+                else if (key == "controllerJoystick") ReadMapping(val, controller.joystick);
                 else if (key == "camera")
                 {
                     std::istringstream ss(val);
