@@ -3478,10 +3478,7 @@ public:
                         World::Entity matEnt;
                         matEnt.Make(Components::Material::mask | Components::Name::mask, "Terrain Material");
                         auto& mat = matEnt.Get<Components::Material>();
-                        for (uint i = 0; i < HLSL::MaterialTextureCount; i++)
-                            mat.textures[i] = Components::Handle<Components::Texture>{ entityInvalid };
-                        for (uint i = 0; i < HLSL::MaterialParametersCount; i++)
-                            mat.parameters[i] = 0.0f;
+                        Components::MaterialSetDefaults(mat);
                         // Routes this material's meshlets to the terrain shading bucket (generic
                         // multi-shader GBuffer draw buckets by Material::shader / shaderIndex, not a
                         // parameter flag). The Shader entity carries its own path, so UpdateMaterials

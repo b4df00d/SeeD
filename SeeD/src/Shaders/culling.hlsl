@@ -83,7 +83,7 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
         HLSL::D3D12_RAYTRACING_INSTANCE_DESC instanceDesc;
         instanceDesc.InstanceID = instanceIndex | (lowLod ? HLSL::RTInstanceLowLodBit : 0);
         instanceDesc.InstanceContributionToHitGroupIndex = 0;
-        if(material.parameters[6] == 0)
+        if(material.alphaCutoff == 0)
         {
             instanceDesc.Flags = HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_NONE
                                | HLSL::D3D12_RAYTRACING_INSTANCE_FLAGS::D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;   
@@ -103,7 +103,7 @@ void CullingInstances(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThr
         
     
         // mesh or material opted out of ray tracing: only in the TLAS when neither did
-        bool noRayTracing = (instance.rtFlags & HLSL::RTInstanceFlagNoRayTracing) || material.parameters[HLSL::MaterialNoRayTracingParam] != 0;
+        bool noRayTracing = (instance.rtFlags & HLSL::RTInstanceFlagNoRayTracing) || (material.flags & HLSL::MaterialFlagNoRayTracing) != 0;
         bool culled = noRayTracing || rawLod > viewContext.distanceCullingValueRT;
         if(culled)
             instanceDesc.AccelerationStructure = 0;
@@ -313,7 +313,7 @@ void CullingMeshlets(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThre
     if (!culled && instance.boundingSphereOverride.w <= 0)
     {
         StructuredBuffer<HLSL::Material> coneMaterials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
-        bool doubleSided = coneMaterials[instance.materialIndex].parameters[HLSL::MaterialDoubleSidedParam] != 0;
+        bool doubleSided = (coneMaterials[instance.materialIndex].flags & HLSL::MaterialFlagDoubleSided) != 0;
         float3x3 rotation = (float3x3)worldMatrix;
         if (!doubleSided && determinant(rotation) > 0)
         {

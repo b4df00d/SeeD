@@ -1276,91 +1276,25 @@ float3 LinearToSRGB(float3 c)
     return lerp(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, (float3)(c <= 0.0031308));
 }
 
+#include "openpbr.hlsli"
+
+// Bridge from the OpenPBR parameters to the legacy SurfaceData the current BRDF code consumes.
+// Temporary: step 2 of the OpenPBR rework moves every consumer to the OpenPBR closure and deletes
+// SurfaceData.
 SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, float3 tangent, float3 binormal)
 {
-    normal = normalize(normal);
+    OpenPBRSurface p = ResolveOpenPBR(material, uv, normal, tangent, binormal);
+
     SurfaceData s;
-    s.shadingDomain = ShadingDomain::Standard;
-    uint textureIndex = ~0;
-    
-    // Material parameter layout: 0,1,2 albedo RGB | 3 roughness | 4 metalness |
-    // 5 normal scale | 6 cutout threshold | 7,8,9 emissive RGB.
-    s.albedo = float4(material.parameters[0], material.parameters[1], material.parameters[2], 1);
-    textureIndex = material.textures[0];
-    if(textureIndex != ~0)
-    {
-        Texture2D<float4> albedo = ResourceDescriptorHeap[textureIndex];
-        #ifdef RAY_DISPATCH
-        float4 albedoSample = albedo.SampleLevel(samplerLinear, uv, 1);
-        #else
-        float4 albedoSample = albedo.SampleBias(samplerLinear, uv, -1);
-        #endif
-        s.albedo *= float4(SRGBToLinear(albedoSample.xyz), albedoSample.a); // alpha is linear coverage
-    }
-    
-    if(s.albedo.a < 0.99)
-    {
-        //s.albedo.xyz = float3(1, 0, 0);
-        s.shadingDomain = ShadingDomain::TransmissiveAlphaTested;
-        //s.albedo.a *= material.parameters[6];
-    }
-    
-    s.roughness = material.parameters[3];
-    textureIndex = material.textures[1];
-    if(textureIndex != ~0)
-    {
-        Texture2D<float4> roughtness = ResourceDescriptorHeap[textureIndex];
-        #ifdef RAY_DISPATCH
-        s.roughness *= roughtness.SampleLevel(samplerLinear, uv, 3).x;
-        #else
-        s.roughness *= roughtness.SampleBias(samplerLinear, uv, -1).x;
-        #endif
-    }
-    
-    s.metalness = min(material.parameters[4], 0.995);
-    textureIndex = material.textures[2];
-    if(textureIndex != ~0)
-    {
-        Texture2D<float4> metalness = ResourceDescriptorHeap[textureIndex];
-        #ifdef RAY_DISPATCH
-        s.metalness = metalness.SampleLevel(samplerLinear, uv, 3).x;
-        #else
-        s.metalness = metalness.SampleBias(samplerLinear, uv, -1).x;
-        #endif
-    }
-    
-    s.normal = normal;
-    s.objectNormal = normal;
-    s.tangent = tangent;
-    s.binormal = binormal;
-    textureIndex = material.textures[3];
-    float normalStrength = material.parameters[5];
-    if(textureIndex != ~0)
-    {
-        Texture2D<float4> normals = ResourceDescriptorHeap[textureIndex];
-        
-        #ifdef RAY_DISPATCH
-        float3 nrm = normals.SampleLevel(samplerLinear, uv, 3).xyz;
-        #else
-        float3 nrm = normals.SampleBias(samplerLinear, uv, -1).xyz;
-	    float3x3 tbn = float3x3(normalize(tangent), normalize(binormal), normalize(normal));
-        s.normal = WorldNormal(nrm, tbn, normalStrength); //< c´est fucké avec le RT
-        #endif
-        
-    }
-    
-    s.emissiveColor = float3(material.parameters[7], material.parameters[8], material.parameters[9]);
-    textureIndex = material.textures[5];
-    if(textureIndex != ~0)
-    {
-        Texture2D<float4> emissive = ResourceDescriptorHeap[textureIndex];
-        #ifdef RAY_DISPATCH
-        s.emissiveColor *= SRGBToLinear(emissive.SampleLevel(samplerLinear, uv, 1).xyz);
-        #else
-        s.emissiveColor *= SRGBToLinear(emissive.SampleBias(samplerLinear, uv, -1).xyz);
-        #endif
-    }
-    
+    s.albedo = float4(p.base_color * p.base_weight, p.geometry_opacity);
+    s.shadingDomain = (p.geometry_opacity < 0.99) ? ShadingDomain::TransmissiveAlphaTested : ShadingDomain::Standard;
+    s.roughness = p.specular_roughness;
+    s.metalness = min(p.base_metalness, 0.995);
+    s.normal = p.normal;
+    s.objectNormal = p.geometricNormal;
+    s.tangent = p.tangent;
+    s.binormal = p.bitangent;
+    s.emissiveColor = p.emission;
     s.occlusion = 1;
     s.specularTint = 1;
     s._specular = 1;
@@ -1371,7 +1305,6 @@ SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, fl
     s.clearcoatGloss = 1;
     s.subsurface = 0;
     s.transmission = 0;
-    
     return s;
 }
 

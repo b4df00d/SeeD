@@ -140,7 +140,7 @@ uint3 DecodeMeshletTriangle(uint groupThreadId)
 static const uint hazeBayer4x4[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
 void HazeSplat(float2 pixel, float4 currentPos, float3 geometricNormal, HLSL::Material material)
 {
-    uint layerIndex = (uint)material.parameters[HLSL::MaterialHazeLayerParam];
+    uint layerIndex = material.hazeLayer;
     if (layerIndex == 0 || layerIndex >= HLSL::HazeLayerCount || viewContext.hazeMap.layersIndex == HLSL::invalidUINT)
         return;
 #if !HAZE_SPLAT_EVERY_PIXEL
@@ -159,7 +159,7 @@ void HazeSplat(float2 pixel, float4 currentPos, float3 geometricNormal, HLSL::Ma
     // walls, trunks and the undersides of overhangs must not write heights (per layer: foliage lowers
     // it); a double-sided surface is seen from either side
     float up = normalize(geometricNormal).y;
-    if (material.parameters[HLSL::MaterialDoubleSidedParam] != 0.0f)
+    if ((material.flags & HLSL::MaterialFlagDoubleSided) != 0)
         up = abs(up);
     if (up < layer.upThreshold)
         return;

@@ -1859,88 +1859,115 @@ public:
             strcpy_s(name.name, 256, m->GetName().C_Str());
 
             auto& newMat = ent.Get<Components::Material>();
+            Components::MaterialSetDefaults(newMat);
 
-            for (uint j = 0; j < HLSL::MaterialTextureCount; j++)
-            {
-                newMat.textures[j] = { entityInvalid };
-            }
+            // glTF metallic-roughness (+ KHR_materials_*) -> OpenPBR, after the mapping of the
+            // OpenPBR spec's appendix / Khronos' glTF interop notes. FBX & co. go through the same
+            // assimp keys, their legacy Phong values falling back where the PBR key is missing.
+            newMat.baseColorTexture = CreateOrLoadTexture(m, 2, aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE);
+            newMat.specularRoughnessTexture = CreateOrLoadTexture(m, 2, aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_SHININESS);
+            newMat.baseMetalnessTexture = CreateOrLoadTexture(m, 2, aiTextureType_METALNESS, aiTextureType_SPECULAR);
+            newMat.normalTexture = CreateOrLoadTexture(m, 3, aiTextureType_NORMAL_CAMERA, aiTextureType_NORMALS, aiTextureType_HEIGHT);
+            newMat.emissionTexture = CreateOrLoadTexture(m, 2, aiTextureType_EMISSION_COLOR, aiTextureType_EMISSIVE);
 
-            newMat.textures[0] = CreateOrLoadTexture(m, 2, aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE);
-            newMat.textures[1] = CreateOrLoadTexture(m, 2, aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_SHININESS);
-            newMat.textures[2] = CreateOrLoadTexture(m, 2, aiTextureType_METALNESS, aiTextureType_SPECULAR);
-            newMat.textures[3] = CreateOrLoadTexture(m, 3, aiTextureType_NORMAL_CAMERA, aiTextureType_NORMALS, aiTextureType_HEIGHT);
-            newMat.textures[4] = CreateOrLoadTexture(m, 2, aiTextureType_AMBIENT_OCCLUSION, aiTextureType_AMBIENT);
-            newMat.textures[5] = CreateOrLoadTexture(m, 2, aiTextureType_EMISSION_COLOR, aiTextureType_EMISSIVE);
-
-            // Parameter layout: 0,1,2 albedo RGB | 3 roughness | 4 metalness |
-            // 5 normal scale | 6 cutout threshold | 7,8,9 emissive RGB.
-            // Zero first: anything left unwritten must read as "off", and an
-            // emissive slot defaulting to 1 would make every material glow.
-            for (uint j = 0; j < HLSL::MaterialParametersCount; j++)
-                newMat.parameters[j] = 0.0f;
-
-            // Albedo, as a colour
+            // base
             aiColor4D baseColor(1, 1, 1, 1);
             if (m->Get(AI_MATKEY_BASE_COLOR, baseColor) != AI_SUCCESS)
                 m->Get(AI_MATKEY_COLOR_DIFFUSE, baseColor);
-            newMat.parameters[0] = baseColor.r;
-            newMat.parameters[1] = baseColor.g;
-            newMat.parameters[2] = baseColor.b;
+            newMat.baseColor = float3(baseColor.r, baseColor.g, baseColor.b);
 
-            // Roughness: prefer PBR factor, fall back to shininess conversion
-            newMat.parameters[3] = 1.0f;
+            // Textures multiply their factor: a format without a metallic factor (FBX) but with a
+            // metalness map means "the map decides", i.e. factor 1.
+            float metalness = newMat.baseMetalnessTexture.IsValid() ? 1.0f : 0.0f;
+            m->Get(AI_MATKEY_METALLIC_FACTOR, metalness);
+            newMat.baseMetalness = metalness;
+
+            // specular
             float roughness = 1.0f;
-            if (m->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness) == AI_SUCCESS)
-                newMat.parameters[3] = roughness;
-            else
+            if (m->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness) != AI_SUCCESS)
             {
                 float shininess = 0.0f;
                 if (m->Get(AI_MATKEY_SHININESS, shininess) == AI_SUCCESS && shininess > 0.0f)
-                    newMat.parameters[3] = 1.0f - sqrtf(shininess / 1024.0f); // perceptual remap
+                    roughness = 1.0f - sqrtf(shininess / 1024.0f); // perceptual remap
+            }
+            newMat.specularRoughness = roughness;
+            m->Get(AI_MATKEY_ANISOTROPY_FACTOR, newMat.specularRoughnessAnisotropy); // KHR_materials_anisotropy
+            m->Get(AI_MATKEY_REFRACTI, newMat.specularIor);                           // KHR_materials_ior
+            if (newMat.specularIor < 1.0f) newMat.specularIor = 1.5f;                // FBX writes 0/1 for "unset"
+            m->Get(AI_MATKEY_SPECULAR_FACTOR, newMat.specularWeight);                 // KHR_materials_specular
+
+            // coat (KHR_materials_clearcoat: its IOR is fixed at 1.5, the coat is untinted)
+            m->Get(AI_MATKEY_CLEARCOAT_FACTOR, newMat.coatWeight);
+            m->Get(AI_MATKEY_CLEARCOAT_ROUGHNESS_FACTOR, newMat.coatRoughness);
+            if (newMat.coatWeight > 0.0f)
+                newMat.coatIor = 1.5f;
+
+            // fuzz (KHR_materials_sheen: the sheen colour carries the weight)
+            aiColor4D sheenColor(0, 0, 0, 1);
+            if (m->Get(AI_MATKEY_SHEEN_COLOR_FACTOR, sheenColor) == AI_SUCCESS)
+            {
+                float sheenMax = std::max(sheenColor.r, std::max(sheenColor.g, sheenColor.b));
+                if (sheenMax > 0.0f)
+                {
+                    newMat.fuzzWeight = 1.0f;
+                    newMat.fuzzColor = float3(sheenColor.r, sheenColor.g, sheenColor.b);
+                    m->Get(AI_MATKEY_SHEEN_ROUGHNESS_FACTOR, newMat.fuzzRoughness);
+                }
             }
 
-            // Metalness: PBR factor
-            float metalness = 0.0f;
-            if (m->Get(AI_MATKEY_METALLIC_FACTOR, metalness) == AI_SUCCESS)
-                newMat.parameters[4] = metalness;
+            // transmission (KHR_materials_transmission + KHR_materials_volume). No volume
+            // thickness means an infinitely thin surface.
+            m->Get(AI_MATKEY_TRANSMISSION_FACTOR, newMat.transmissionWeight);
+            if (newMat.transmissionWeight > 0.0f)
+            {
+                float thickness = 0.0f;
+                m->Get(AI_MATKEY_VOLUME_THICKNESS_FACTOR, thickness);
+                newMat.geometryThinWalled = thickness <= 0.0f;
+                float attenuationDistance = 0.0f;
+                aiColor4D attenuationColor(1, 1, 1, 1);
+                if (m->Get(AI_MATKEY_VOLUME_ATTENUATION_DISTANCE, attenuationDistance) == AI_SUCCESS && attenuationDistance > 0.0f && attenuationDistance < 1e30f
+                    && m->Get(AI_MATKEY_VOLUME_ATTENUATION_COLOR, attenuationColor) == AI_SUCCESS)
+                {
+                    newMat.transmissionColor = float3(attenuationColor.r, attenuationColor.g, attenuationColor.b);
+                    newMat.transmissionDepth = attenuationDistance;
+                }
+            }
 
-            // Normal scale
-            float normalScale = 1.0f;
-            m->Get(AI_MATKEY_BUMPSCALING, normalScale);
-            newMat.parameters[5] = normalScale;
+            // emission: glTF emissive * KHR_materials_emissive_strength is radiance in SeeD's
+            // (Blender's) units, which OpenPBRNitsToRadiance (openpbr.hlsli) maps from 683 nits.
+            aiColor4D emissive(0, 0, 0, 1);
+            if (m->Get(AI_MATKEY_COLOR_EMISSIVE, emissive) == AI_SUCCESS && (emissive.r > 0.0f || emissive.g > 0.0f || emissive.b > 0.0f))
+            {
+                float emissiveStrength = 1.0f;
+                m->Get(AI_MATKEY_EMISSIVE_INTENSITY, emissiveStrength);
+                newMat.emissionColor = float3(emissive.r, emissive.g, emissive.b);
+                newMat.emissionLuminance = 683.0f * emissiveStrength;
+            }
 
-            // Cutout threshold -- parameters[6] = 0 means opaque (no alpha test).
-            // AI_MATKEY_OPACITY: 1=fully opaque, 0=fully transparent.
-            // AI_MATKEY_TRANSPARENCYFACTOR: 0=opaque, 1=transparent (inverse convention).
+            // geometry
+            m->Get(AI_MATKEY_BUMPSCALING, newMat.normalScale);
+
+            // Alpha test: AI_MATKEY_OPACITY 1 = opaque, 0 = transparent; AI_MATKEY_TRANSPARENCYFACTOR
+            // is the inverse convention. Anything not opaque becomes a cutout at that threshold.
             float opacity = 1.0f;
             m->Get(AI_MATKEY_OPACITY, opacity);
             float transparency = 0.0f;
             m->Get(AI_MATKEY_TRANSPARENCYFACTOR, transparency);
             float effectiveOpacity = opacity * (1.0f - transparency);
             if (effectiveOpacity < 0.99f)
-                newMat.parameters[6] = effectiveOpacity;
-
-            aiColor4D emissive(0, 0, 0, 1);
-            if (m->Get(AI_MATKEY_COLOR_EMISSIVE, emissive) == AI_SUCCESS)
-            {
-                float emissiveStrength = 1.0f;
-                m->Get(AI_MATKEY_EMISSIVE_INTENSITY, emissiveStrength);
-                newMat.parameters[7] = emissive.r * emissiveStrength;
-                newMat.parameters[8] = emissive.g * emissiveStrength;
-                newMat.parameters[9] = emissive.b * emissiveStrength;
-            }
+                newMat.alphaCutoff = effectiveOpacity;
 
             // Route to the cutout mesh shader so bucketing by Material::shader (the generic
-            // multi-shader GBuffer draw) picks up the alpha-test PSO; parameters[6] keeps its
-            // shading-threshold role in the cutout pixel shader regardless.
-            newMat.shader = (newMat.parameters[6] != 0.0f) ? Components::Handle<Components::Shader>{ shaderCutout } : Components::Handle<Components::Shader>{ shader };
+            // multi-shader GBuffer draw) picks up the alpha-test PSO; alphaCutoff keeps its
+            // threshold role in the cutout pixel shader regardless.
+            newMat.shader = (newMat.alphaCutoff != 0.0f) ? Components::Handle<Components::Shader>{ shaderCutout } : Components::Handle<Components::Shader>{ shader };
 
             // Double-sided when the source says so, and for cutout materials (foliage cards are
             // usually single planes seen from both sides). Everything else is single-sided:
             // back-face culled and meshlet cone culled (culling.hlsl).
             int twoSided = 0;
             m->Get(AI_MATKEY_TWOSIDED, twoSided);
-            newMat.parameters[HLSL::MaterialDoubleSidedParam] = (twoSided != 0 || newMat.parameters[6] != 0.0f) ? 1.0f : 0.0f;
+            newMat.doubleSided = twoSided != 0 || newMat.alphaCutoff != 0.0f;
 
             matIndexToEntity.push_back(ent);
         }
@@ -2123,7 +2150,7 @@ public:
         if (!instanceCmp.mesh.IsValid() || !instanceCmp.material.IsValid())
             return;
         Components::Material& materialCmp = instanceCmp.material.Get();
-        if (!materialCmp.textures[0].IsValid())
+        if (!materialCmp.baseColorTexture.IsValid())
         {
             IOs::Log("bake OMM: the material has no albedo texture");
             return;
@@ -2137,7 +2164,7 @@ public:
 
         Request req;
         req.meshPath = AssetLibrary::instance->GetPath(meshId);
-        req.texName = World::Entity(materialCmp.textures[0]).Get<Components::Name>().name;
+        req.texName = World::Entity(materialCmp.baseColorTexture).Get<Components::Name>().name;
         IOs::Log("bake OMM: queued {} <- {}", req.meshPath.c_str(), req.texName.c_str());
 
         std::lock_guard<std::mutex> guard(lock);

@@ -129,7 +129,7 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts, MSPrim inPrim)
     }
 
 #ifdef CUTOUT
-    if((o.albedo.a+0.01) < material.parameters[6]) discard;
+    if((o.albedo.a+0.01) < material.alphaCutoff) discard;
 #endif
 
     HazeSplat(inVerts.pos.xy, inVerts.currentPos, inVerts.normal, material);

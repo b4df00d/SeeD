@@ -204,10 +204,51 @@ struct ShaderBucketInfo
     uint meshletCount;
 };
 
-// Materials flag double-sidedness in parameters[HLSL::MaterialDoubleSidedParam] (0 = single-sided).
+// Double-sided materials draw with CULL_NONE and skip meshlet cone culling.
 static bool IsDoubleSided(const Components::Material& material)
 {
-    return material.parameters[HLSL::MaterialDoubleSidedParam] != 0.0f;
+    return material.doubleSided;
+}
+
+// Bindless SRV index of a material texture slot; ~0 when unset or not streamed in yet.
+static uint MaterialTextureIndex(Components::Handle<Components::Texture> handle)
+{
+    if (!handle.IsValid())
+        return ~0u;
+    Resource* texture = AssetLibrary::instance->Get<Resource>(handle.Get().id);
+    return texture ? texture->srv.offset : ~0u;
+}
+
+// Components::Material (OpenPBR, one field per spec parameter) -> the GPU packing of structs.hlsl,
+// unpacked by openpbr.hlsli's ResolveOpenPBR. Leaves shaderIndex to the caller.
+static void PackMaterial(const Components::Material& m, HLSL::Material& g)
+{
+    g.baseColorWeight = float4(m.baseColor, m.baseWeight);
+    g.specularColorWeight = float4(m.specularColor, m.specularWeight);
+    g.transmissionColorWeight = float4(m.transmissionColor, m.transmissionWeight);
+    g.transmissionScatter = float4(m.transmissionScatter, m.transmissionScatterAnisotropy);
+    g.subsurfaceColorWeight = float4(m.subsurfaceColor, m.subsurfaceWeight);
+    g.subsurfaceRadius = float4(m.subsurfaceRadiusScale, m.subsurfaceRadius);
+    g.coatColorWeight = float4(m.coatColor, m.coatWeight);
+    g.fuzzColorWeight = float4(m.fuzzColor, m.fuzzWeight);
+    g.emissionColorLuminance = float4(m.emissionColor, m.emissionLuminance);
+    g.base = float4(m.baseDiffuseRoughness, m.baseMetalness, m.geometryOpacity, m.normalScale);
+    g.specular = float4(m.specularRoughness, m.specularRoughnessAnisotropy, m.specularIor, m.subsurfaceScatterAnisotropy);
+    g.transmission = float4(m.transmissionDepth, m.transmissionDispersionScale, m.transmissionDispersionAbbeNumber, 0.0f);
+    g.coat = float4(m.coatRoughness, m.coatRoughnessAnisotropy, m.coatIor, m.coatDarkening);
+    g.fuzzThinFilm = float4(m.fuzzRoughness, m.thinFilmWeight, m.thinFilmThickness, m.thinFilmIor);
+
+    g.alphaCutoff = m.alphaCutoff;
+    g.flags = (m.doubleSided ? HLSL::MaterialFlagDoubleSided : 0u)
+            | (m.noRayTracing ? HLSL::MaterialFlagNoRayTracing : 0u)
+            | (m.geometryThinWalled ? HLSL::MaterialFlagThinWalled : 0u);
+    g.hazeLayer = m.hazeLayer;
+
+    g.baseColorTexture = MaterialTextureIndex(m.baseColorTexture);
+    g.specularRoughnessTexture = MaterialTextureIndex(m.specularRoughnessTexture);
+    g.baseMetalnessTexture = MaterialTextureIndex(m.baseMetalnessTexture);
+    g.normalTexture = MaterialTextureIndex(m.normalTexture);
+    g.emissionTexture = MaterialTextureIndex(m.emissionTexture);
 }
 
 // Debug-UI snapshot of one bucket's state; see ShaderBucketRegistry::GetDebugStats.
@@ -3771,7 +3812,7 @@ public:
                     // (an override mesh never carries OMM -- omm.textureHash stays 0 -- so this is
                     // naturally a no-op for overridden instances)
                     if (effectiveMesh->omm.textureHash != 0
-                        && (!materialCmp.textures[0].IsValid() || materialCmp.textures[0].Get().id.hash != effectiveMesh->omm.textureHash))
+                        && (!materialCmp.baseColorTexture.IsValid() || materialCmp.baseColorTexture.Get().id.hash != effectiveMesh->omm.textureHash))
                         instance.rtFlags |= HLSL::RTInstanceFlagDisableOMMs;
                     if (meshCmp.noRayTracing)
                         instance.rtFlags |= HLSL::RTInstanceFlagNoRayTracing;
@@ -3847,6 +3888,7 @@ public:
                         return;
 
                     HLSL::Material material;
+                    memset(&material, 0, sizeof(material)); // DirtyTrackingStructuredBuffer compares bytes: no garbage in the padding
                     {
                         Components::Material& materialCmp = queryResult[i + subQuery].Get<Components::Material>();
 
@@ -3868,29 +3910,7 @@ public:
                                 AssetLibrary::instance->AddIfMissing(shaderCmp.path, shaderCmp.id);
                             material.shaderIndex = frameWorld.shaderBucketRegistry.GetOrRegister(shaderCmp.id, IsDoubleSided(materialCmp));
                         }
-                        for (uint paramIndex = 0; paramIndex < HLSL::MaterialParametersCount; paramIndex++)
-                        {
-                            // memcpy ? it is even just a cashline 
-                            material.parameters[paramIndex] = materialCmp.parameters[paramIndex];
-                        }
-                        bool materialReady = true;
-                        for (uint texIndex = 0; texIndex < HLSL::MaterialTextureCount; texIndex++)
-                        {
-                            if (materialCmp.textures[texIndex] != entityInvalid)
-                            {
-                                Components::Texture& textureCmp = materialCmp.textures[texIndex].Get();
-                                Resource* texture = AssetLibrary::instance->Get<Resource>(textureCmp.id);
-                                if (!texture)
-                                {
-                                    materialReady = false;
-                                    material.textures[texIndex] = ~0;
-                                }
-                                else
-                                    material.textures[texIndex] = texture->srv.offset;
-                            }
-                            else
-                                material.textures[texIndex] = ~0;
-                        }
+                        PackMaterial(materialCmp, material);
                     }
                     frameWorld.materials.AddOrUpdate(World::Entity(queryResult[i + subQuery].Get<Components::Entity>()), material);
                 }

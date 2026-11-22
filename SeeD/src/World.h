@@ -170,7 +170,7 @@ namespace Components
     struct Mesh : ComponentBase<Mesh>
     {
         assetID id;
-        bool noRayTracing; // instances of this mesh are left out of the TLAS (see also MaterialNoRayTracingParam)
+        bool noRayTracing; // instances of this mesh are left out of the TLAS (see also Material::noRayTracing)
     };
 
     struct Texture : ComponentBase<Texture>
@@ -178,74 +178,259 @@ namespace Components
         assetID id;
     };
 
+    // OpenPBR Surface 1.1 (https://academysoftwarefoundation.github.io/OpenPBR/): every spec
+    // parameter, camelCase of the spec's snake_case name, so Blender (OpenPBR from its next release)
+    // round-trips losslessly. The renderer may not use them all yet: see Shaders/openpbr.hlsli.
+    // Components are not constructed (World::Entity::Make), so a new material MUST go through
+    // MaterialSetDefaults. One field per line: the metadata generator parses this.
     struct Material : ComponentBase<Material>
     {
         Handle<Shader> shader;
-        Handle<Texture> textures[HLSL::MaterialTextureCount]; //name:[albedo, roughness, metalness, normal, occlusion, emissive]
-        // 0,1,2 albedo RGB | 3 roughness | 4 metalness | 5 normal scale |
-        // 6 cutout threshold (0 = opaque) | 7,8,9 emissive RGB | 10 double sided | 11 haze layer
-        float parameters[HLSL::MaterialParametersCount];
+        // texture slots, each multiplies its parameter
+        Handle<Texture> baseColorTexture;         // rgb base_color (sRGB), a geometry_opacity
+        Handle<Texture> specularRoughnessTexture; // r
+        Handle<Texture> baseMetalnessTexture;     // r
+        Handle<Texture> normalTexture;            // tangent space
+        Handle<Texture> emissionTexture;          // rgb emission_color (sRGB)
+        // base
+        float baseWeight;
+        float3 baseColor;
+        float baseDiffuseRoughness;
+        float baseMetalness;
+        // specular
+        float specularWeight;
+        float3 specularColor;
+        float specularRoughness;
+        float specularRoughnessAnisotropy;
+        float specularIor;
+        // transmission
+        float transmissionWeight;
+        float3 transmissionColor;
+        float transmissionDepth;
+        float3 transmissionScatter;
+        float transmissionScatterAnisotropy;
+        float transmissionDispersionScale;
+        float transmissionDispersionAbbeNumber;
+        // subsurface
+        float subsurfaceWeight;
+        float3 subsurfaceColor;
+        float subsurfaceRadius;
+        float3 subsurfaceRadiusScale;
+        float subsurfaceScatterAnisotropy;
+        // coat
+        float coatWeight;
+        float3 coatColor;
+        float coatRoughness;
+        float coatRoughnessAnisotropy;
+        float coatIor;
+        float coatDarkening;
+        // fuzz
+        float fuzzWeight;
+        float3 fuzzColor;
+        float fuzzRoughness;
+        // thin film
+        float thinFilmWeight;
+        float thinFilmThickness; // micrometers
+        float thinFilmIor;
+        // emission
+        float emissionLuminance; // nits (cd/m^2)
+        float3 emissionColor;
+        // geometry
+        float geometryOpacity;
+        bool geometryThinWalled;
+        // engine
+        float normalScale;
+        float alphaCutoff;  // 0 = opaque; else alpha-tested (cutout shader, discard below it)
+        bool doubleSided;   // CULL_NONE + no meshlet cone culling
+        bool noRayTracing;  // instances using this material are left out of the TLAS (culling.hlsl)
+        uint hazeLayer;     // HazeLayer index splatted into the haze map, 0 = none
     };
+    // The spec's defaults; no textures, no shader.
+    static void MaterialSetDefaults(Material& m)
+    {
+        m.shader = Handle<Shader>{ entityInvalid };
+        m.baseColorTexture = Handle<Texture>{ entityInvalid };
+        m.specularRoughnessTexture = Handle<Texture>{ entityInvalid };
+        m.baseMetalnessTexture = Handle<Texture>{ entityInvalid };
+        m.normalTexture = Handle<Texture>{ entityInvalid };
+        m.emissionTexture = Handle<Texture>{ entityInvalid };
+        m.baseWeight = 1.0f;
+        m.baseColor = float3(0.8f, 0.8f, 0.8f);
+        m.baseDiffuseRoughness = 0.0f;
+        m.baseMetalness = 0.0f;
+        m.specularWeight = 1.0f;
+        m.specularColor = float3(1.0f, 1.0f, 1.0f);
+        m.specularRoughness = 0.3f;
+        m.specularRoughnessAnisotropy = 0.0f;
+        m.specularIor = 1.5f;
+        m.transmissionWeight = 0.0f;
+        m.transmissionColor = float3(1.0f, 1.0f, 1.0f);
+        m.transmissionDepth = 0.0f;
+        m.transmissionScatter = float3(0.0f, 0.0f, 0.0f);
+        m.transmissionScatterAnisotropy = 0.0f;
+        m.transmissionDispersionScale = 0.0f;
+        m.transmissionDispersionAbbeNumber = 20.0f;
+        m.subsurfaceWeight = 0.0f;
+        m.subsurfaceColor = float3(0.8f, 0.8f, 0.8f);
+        m.subsurfaceRadius = 1.0f;
+        m.subsurfaceRadiusScale = float3(1.0f, 0.5f, 0.25f);
+        m.subsurfaceScatterAnisotropy = 0.0f;
+        m.coatWeight = 0.0f;
+        m.coatColor = float3(1.0f, 1.0f, 1.0f);
+        m.coatRoughness = 0.0f;
+        m.coatRoughnessAnisotropy = 0.0f;
+        m.coatIor = 1.6f;
+        m.coatDarkening = 1.0f;
+        m.fuzzWeight = 0.0f;
+        m.fuzzColor = float3(1.0f, 1.0f, 1.0f);
+        m.fuzzRoughness = 0.5f;
+        m.thinFilmWeight = 0.0f;
+        m.thinFilmThickness = 0.5f;
+        m.thinFilmIor = 1.4f;
+        m.emissionLuminance = 0.0f;
+        m.emissionColor = float3(1.0f, 1.0f, 1.0f);
+        m.geometryOpacity = 1.0f;
+        m.geometryThinWalled = false;
+        m.normalScale = 1.0f;
+        m.alphaCutoff = 0.0f;
+        m.doubleSided = false;
+        m.noRayTracing = false;
+        m.hazeLayer = 0;
+    }
+    // Pre-OpenPBR materials stored "parameters[24]" + "textures[7]", by index:
+    // 0,1,2 albedo | 3 roughness | 4 metalness | 5 normal scale | 6 cutout | 7,8,9 emissive RGB |
+    // 10 double sided | 11 haze layer | 12 no ray tracing; textures albedo, roughness, metalness,
+    // normal, occlusion, emissive. Called by World::Load's by-name migration with those two old
+    // fields' raw bytes, after the fields matched by name (shader) were copied. Texture handles are
+    // still saved ids here and get remapped afterwards like any other handle.
+    static void MaterialMigrateLegacy(Material& m, const float* parameters, const EntityBase* textures)
+    {
+        Handle<Shader> shader = m.shader;
+        MaterialSetDefaults(m);
+        m.shader = shader;
+        m.baseColorTexture = Handle<Texture>{ textures[0] };
+        m.specularRoughnessTexture = Handle<Texture>{ textures[1] };
+        m.baseMetalnessTexture = Handle<Texture>{ textures[2] };
+        m.normalTexture = Handle<Texture>{ textures[3] };
+        m.emissionTexture = Handle<Texture>{ textures[5] }; // [4] occlusion: dropped, a path tracer has no use for it
+        m.baseColor = float3(parameters[0], parameters[1], parameters[2]);
+        m.specularRoughness = parameters[3];
+        // the old shader REPLACED the metalness factor with the texture (roughness multiplied)
+        m.baseMetalness = (textures[2].id != entityInvalid.id) ? 1.0f : parameters[4];
+        m.normalScale = parameters[5];
+        m.alphaCutoff = parameters[6];
+        // the old emissive was radiance: OpenPBRNitsToRadiance (openpbr.hlsli) maps 683 nits to 1
+        m.emissionColor = float3(parameters[7], parameters[8], parameters[9]);
+        m.emissionLuminance = 683.0f;
+        m.doubleSided = parameters[10] != 0.0f;
+        m.hazeLayer = (uint)parameters[11];
+        m.noRayTracing = parameters[12] != 0.0f;
+    }
     static void MaterialPropertyDraw(char* mat)
     {
-        Material* material = (Material*)mat;
-
+        Material* m = (Material*)mat;
         uint pushID = 0;
-        ImGui::PushID(pushID++);
-        UIHelpers::DrawHandle(*(EntityBase*)&material->shader, Shader::mask);
-        ImGui::PopID();
-        ImGui::Spacing();
-
-        // Texture slot -> the parameter it scales. Albedo and emissive are colours
-        // (3 floats each), the rest are single values, so they cannot share one loop.
-        ImGui::Text("albedo");
-        ImGui::PushID(pushID++);
-        UIHelpers::DrawHandle(*(EntityBase*)&material->textures[0], Texture::mask);
-        ImGui::PopID();
-        ImGui::ColorEdit3("albedo", &material->parameters[0]);
-        ImGui::Spacing();
-
-        const char* scalarNames[] = { "roughness", "metalness", "normal", "cutout" };
-        const uint scalarParam[] = { 3, 4, 5, 6 };
-        const uint scalarTexture[] = { 1, 2, 3, ~0u }; // cutout has no texture of its own
-        for (uint i = 0; i < ARRAYSIZE(scalarNames); i++)
+        auto texture = [&](Handle<Texture>& t)
         {
-            ImGui::Text(scalarNames[i]);
-            if (scalarTexture[i] != ~0u)
-            {
-                ImGui::PushID(pushID++);
-                UIHelpers::DrawHandle(*(EntityBase*)&material->textures[scalarTexture[i]], Texture::mask);
-                ImGui::PopID();
-            }
-            ImGui::SliderFloat(scalarNames[i], &material->parameters[scalarParam[i]], 0, 1);
-            ImGui::Spacing();
-        }
+            ImGui::PushID(pushID++);
+            UIHelpers::DrawHandle(*(EntityBase*)&t, Texture::mask);
+            ImGui::PopID();
+        };
+        auto color = [](const char* name, float3& c, ImGuiColorEditFlags flags = 0)
+        {
+            float v[3] = { c.x, c.y, c.z };
+            if (ImGui::ColorEdit3(name, v, flags))
+                c = float3(v[0], v[1], v[2]);
+        };
+        auto slider = [](const char* name, float& v, float min = 0.0f, float max = 1.0f)
+        {
+            ImGui::SliderFloat(name, &v, min, max);
+        };
 
-        ImGui::Text("emissive");
         ImGui::PushID(pushID++);
-        UIHelpers::DrawHandle(*(EntityBase*)&material->textures[5], Texture::mask);
+        UIHelpers::DrawHandle(*(EntityBase*)&m->shader, Shader::mask);
         ImGui::PopID();
-        ImGui::ColorEdit3("emissive", &material->parameters[7], ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_Float);
-        ImGui::Spacing();
 
-        // Re-buckets the material's meshlets (sidedness picks the PSO cull mode): instances already
-        // loaded keep their old bucket's capacity, so they only draw correctly after a reload.
-        bool doubleSided = material->parameters[HLSL::MaterialDoubleSidedParam] != 0.0f;
-        if (ImGui::Checkbox("double sided", &doubleSided))
-            material->parameters[HLSL::MaterialDoubleSidedParam] = doubleSided ? 1.0f : 0.0f;
-        ImGui::Spacing();
-
-        // HazeLayer component index this material's surfaces emit (0 = none)
-        int hazeLayer = (int)material->parameters[HLSL::MaterialHazeLayerParam];
-        if (ImGui::SliderInt("haze layer", &hazeLayer, 0, HLSL::HazeLayerCount - 1))
-            material->parameters[HLSL::MaterialHazeLayerParam] = (float)hazeLayer;
-        ImGui::Spacing();
-
-        // Read by culling.hlsl every frame: instances using this material get a null BLAS
-        bool noRayTracing = material->parameters[HLSL::MaterialNoRayTracingParam] != 0.0f;
-        if (ImGui::Checkbox("no ray tracing", &noRayTracing))
-            material->parameters[HLSL::MaterialNoRayTracingParam] = noRayTracing ? 1.0f : 0.0f;
-        ImGui::Spacing();
+        if (ImGui::CollapsingHeader("Base", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            slider("base weight", m->baseWeight);
+            texture(m->baseColorTexture);
+            color("base color", m->baseColor);
+            slider("diffuse roughness", m->baseDiffuseRoughness);
+            texture(m->baseMetalnessTexture);
+            slider("metalness", m->baseMetalness);
+        }
+        if (ImGui::CollapsingHeader("Specular", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            slider("specular weight", m->specularWeight);
+            color("specular color", m->specularColor);
+            texture(m->specularRoughnessTexture);
+            slider("roughness", m->specularRoughness);
+            slider("anisotropy", m->specularRoughnessAnisotropy);
+            slider("ior", m->specularIor, 1.0f, 3.0f);
+        }
+        if (ImGui::CollapsingHeader("Transmission"))
+        {
+            slider("transmission weight", m->transmissionWeight);
+            color("transmission color", m->transmissionColor);
+            slider("depth", m->transmissionDepth);
+            color("scatter", m->transmissionScatter);
+            slider("scatter anisotropy", m->transmissionScatterAnisotropy, -1.0f, 1.0f);
+            slider("dispersion scale", m->transmissionDispersionScale);
+            slider("abbe number", m->transmissionDispersionAbbeNumber, 9.0f, 91.0f);
+        }
+        if (ImGui::CollapsingHeader("Subsurface"))
+        {
+            slider("subsurface weight", m->subsurfaceWeight);
+            color("subsurface color", m->subsurfaceColor);
+            slider("radius", m->subsurfaceRadius);
+            color("radius scale", m->subsurfaceRadiusScale);
+            slider("subsurface anisotropy", m->subsurfaceScatterAnisotropy, -1.0f, 1.0f);
+        }
+        if (ImGui::CollapsingHeader("Coat"))
+        {
+            slider("coat weight", m->coatWeight);
+            color("coat color", m->coatColor);
+            slider("coat roughness", m->coatRoughness);
+            slider("coat anisotropy", m->coatRoughnessAnisotropy);
+            slider("coat ior", m->coatIor, 1.0f, 3.0f);
+            slider("darkening", m->coatDarkening);
+        }
+        if (ImGui::CollapsingHeader("Fuzz"))
+        {
+            slider("fuzz weight", m->fuzzWeight);
+            color("fuzz color", m->fuzzColor);
+            slider("fuzz roughness", m->fuzzRoughness);
+        }
+        if (ImGui::CollapsingHeader("Thin film"))
+        {
+            slider("thin film weight", m->thinFilmWeight);
+            slider("thickness (um)", m->thinFilmThickness);
+            slider("thin film ior", m->thinFilmIor, 1.0f, 3.0f);
+        }
+        if (ImGui::CollapsingHeader("Emission"))
+        {
+            ImGui::DragFloat("luminance (nits)", &m->emissionLuminance, 1.0f, 0.0f, 1e6f);
+            texture(m->emissionTexture);
+            color("emission color", m->emissionColor, ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_Float);
+        }
+        if (ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            slider("opacity", m->geometryOpacity);
+            ImGui::Checkbox("thin walled", &m->geometryThinWalled);
+            texture(m->normalTexture);
+            slider("normal scale", m->normalScale, 0.0f, 2.0f);
+            // the cutout shader is picked at import: changing this alone doesn't switch the PSO
+            slider("alpha cutoff", m->alphaCutoff);
+            // Re-buckets the material's meshlets (sidedness picks the PSO cull mode): instances already
+            // loaded keep their old bucket's capacity, so they only draw correctly after a reload.
+            ImGui::Checkbox("double sided", &m->doubleSided);
+            // Read by culling.hlsl every frame: instances using this material get a null BLAS
+            ImGui::Checkbox("no ray tracing", &m->noRayTracing);
+            int hazeLayer = (int)m->hazeLayer;
+            if (ImGui::SliderInt("haze layer", &hazeLayer, 0, HLSL::HazeLayerCount - 1))
+                m->hazeLayer = (uint)hazeLayer;
+        }
     }
 
     struct Transform : ComponentBase<Transform>
@@ -1145,6 +1330,10 @@ public:
             bool isEntity = false;  // self-id component, never copied (set by Make)
             std::vector<FieldCopy> copies;     // matched fields
             std::vector<HandleField> handles;  // ALL current handle fields (for remap + invalidation)
+            // pre-OpenPBR Material ("parameters" + "textures" arrays): file offsets of the two
+            // fields, fed to Components::MaterialMigrateLegacy. -1 when the file isn't one.
+            int legacyMaterialParameters = -1;
+            int legacyMaterialTextures = -1;
         };
         std::vector<Plan> plans((size_t)schemaCount);
         for (uint si = 0; si < schemaCount; si++)
@@ -1190,6 +1379,17 @@ public:
                 else identical = false; // a current field is absent from the file
             }
             pl.bulkCopy = identical;
+
+            if (sc.name == "Material")
+                for (auto& f : sc.fields)
+                {
+                    if (f.name == "parameters" && f.size >= 13 * sizeof(float)) pl.legacyMaterialParameters = (int)f.offset;
+                    if (f.name == "textures" && f.size >= 6 * sizeof(EntityBase)) pl.legacyMaterialTextures = (int)f.offset;
+                }
+            if (pl.legacyMaterialParameters < 0 || pl.legacyMaterialTextures < 0)
+                pl.legacyMaterialParameters = pl.legacyMaterialTextures = -1;
+            else
+                IOs::Log("  pre-OpenPBR materials in {}: converting", name.c_str());
         }
 
         // ---- read pools, create entities, build savedId -> new entity map ----
@@ -1273,6 +1473,10 @@ public:
                                 *(EntityBase*)(dst + hf.dstOffset + (size_t)k * sizeof(EntityBase)) = entityInvalid;
                         for (auto& fc : pl.copies)
                             memcpy(dst + fc.dstOffset, src + fc.srcOffset, fc.size);
+                        if (pl.legacyMaterialParameters >= 0)
+                            Components::MaterialMigrateLegacy(*(Components::Material*)dst,
+                                (const float*)(src + pl.legacyMaterialParameters),
+                                (const EntityBase*)(src + pl.legacyMaterialTextures));
                     }
                 }
             }

@@ -353,16 +353,46 @@ namespace HLSL
         }
     };
     
-    static const uint MaterialTextureCount = 7;
-    static const uint MaterialParametersCount = 24;
-    static const uint MaterialDoubleSidedParam = 10; // parameters[10] != 0 : double-sided (CULL_NONE, no meshlet cone culling)
-    static const uint MaterialHazeLayerParam = 11;   // parameters[11] : haze layer splatted into the haze map (HazeLayer index, 0 = none)
-    static const uint MaterialNoRayTracingParam = 12; // parameters[12] != 0 : instances using this material are left out of the TLAS (culling.hlsl)
+    // Material::flags bits
+    static const uint MaterialFlagDoubleSided = 1u << 0;   // CULL_NONE, no meshlet cone culling
+    static const uint MaterialFlagNoRayTracing = 1u << 1;  // instances using this material are left out of the TLAS (culling.hlsl)
+    static const uint MaterialFlagThinWalled = 1u << 2;    // OpenPBR geometry_thin_walled
+
+    // OpenPBR Surface 1.1 parameters (https://academysoftwarefoundation.github.io/OpenPBR/), packed
+    // for the GPU from Components::Material (Renderer.h UpdateMaterials). Only openpbr.hlsli's
+    // ResolveOpenPBR unpacks this, into OpenPBRSurface with the spec's names: read the material there,
+    // not here. Every member is a float4 or a scalar: hlslpp's C++ float3 is 16 bytes, HLSL's 12.
+    // Texture slots are bindless SRV indices (~0 = none) and multiply their parameter.
     struct Material
     {
-        float parameters[MaterialParametersCount];
-        uint textures[MaterialTextureCount];
-        uint shaderIndex; // stable per-shader-bucket index (Renderer.h MainView shader-bucket registry); routes this material's meshlets to the matching draw bucket in culling.hlsl instead of the old cutout/terrain bool flags
+        float4 baseColorWeight;          // rgb base_color, a base_weight
+        float4 specularColorWeight;      // rgb specular_color, a specular_weight
+        float4 transmissionColorWeight;  // rgb transmission_color, a transmission_weight
+        float4 transmissionScatter;      // rgb transmission_scatter, a transmission_scatter_anisotropy
+        float4 subsurfaceColorWeight;    // rgb subsurface_color, a subsurface_weight
+        float4 subsurfaceRadius;         // rgb subsurface_radius_scale, a subsurface_radius
+        float4 coatColorWeight;          // rgb coat_color, a coat_weight
+        float4 fuzzColorWeight;          // rgb fuzz_color, a fuzz_weight
+        float4 emissionColorLuminance;   // rgb emission_color, a emission_luminance (nits)
+        float4 base;                     // x base_diffuse_roughness, y base_metalness, z geometry_opacity, w normal map scale
+        float4 specular;                 // x specular_roughness, y specular_roughness_anisotropy, z specular_ior, w subsurface_scatter_anisotropy
+        float4 transmission;             // x transmission_depth, y transmission_dispersion_scale, z transmission_dispersion_abbe_number, w unused
+        float4 coat;                     // x coat_roughness, y coat_roughness_anisotropy, z coat_ior, w coat_darkening
+        float4 fuzzThinFilm;             // x fuzz_roughness, y thin_film_weight, z thin_film_thickness (um), w thin_film_ior
+
+        float alphaCutoff;               // 0 = opaque; else alpha-tested (cutout PSO, discard below it)
+        uint flags;                      // MaterialFlag*
+        uint hazeLayer;                  // haze layer splatted into the haze map (HazeLayer index, 0 = none)
+        uint shaderIndex;                // stable per-shader-bucket index (Renderer.h MainView shader-bucket registry); routes this material's meshlets to the matching draw bucket in culling.hlsl
+
+        uint baseColorTexture;           // rgb base_color (sRGB-encoded), a geometry_opacity
+        uint specularRoughnessTexture;   // r specular_roughness
+        uint baseMetalnessTexture;       // r base_metalness
+        uint normalTexture;              // tangent-space normal map
+        uint emissionTexture;            // rgb emission_color (sRGB-encoded)
+        uint _pad0;
+        uint _pad1;
+        uint _pad2;
     };
     
     struct TerrainErosionParameters
@@ -432,7 +462,7 @@ namespace HLSL
     // culling.hlsl then adds D3D12_RAYTRACING_INSTANCE_FLAG_DISABLE_OMMS for that instance
     static const uint RTInstanceFlagDisableOMMs = 1u << 0;
     // set when the instance's Components::Mesh has noRayTracing: culling.hlsl writes a null BLAS
-    // (inactive TLAS instance). The material's own opt-out is read on the GPU (MaterialNoRayTracingParam)
+    // (inactive TLAS instance). The material's own opt-out is read on the GPU (MaterialFlagNoRayTracing)
     static const uint RTInstanceFlagNoRayTracing = 1u << 1;
 
     struct Instance
