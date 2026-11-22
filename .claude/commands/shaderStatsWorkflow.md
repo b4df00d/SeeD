@@ -12,8 +12,9 @@ wait for a fresh result, and read the effect — without rebuilding or relaunchi
    "C:\Program Files\Microsoft Visual Studio\18\Insiders\MSBuild\Current\Bin\MSBuild.exe" \
        SeeD.sln -m -p:Configuration=Release -p:Platform=x64
    ```
-2. Launch the engine (it loads `Save.seed` and keeps running):
-   - exe:        `x64\Release\SeeD.exe`  (repo-root output tree)
+2. Launch the engine (pass the test project as argument — with no argument it loads `Save.seed`,
+   which renders almost nothing and gives noise-level pass timings):
+   - exe:        `x64\Release\SeeD.exe "G:\Work\CaveSeedProj\Cave.seedproj"`  (repo-root output tree)
    - working dir: `SeeD\`  (so `src\Shaders\` and `..\assetLibrary.txt` resolve)
 3. It writes **`shaderStats.csv`** at the repo root every ~0.5 s. Toggle with
    `options.shaderStatsCsv` (Main.cpp). Release is the meaningful config — Debug compiles
@@ -36,6 +37,13 @@ Protocol:
    - `COMPILE_ERROR` → read `error`, fix, back to step 2 (instant; no need to wait on timing).
    - `OK` → wait until `secondsSinceReload >= 3–4`, then read the settled timing/stats.
 4. Compare to the pre-edit baseline; decide the next edit.
+
+`shaderStatsWait.ps1` (repo root) implements this whole handshake in one command — use it instead
+of ad-hoc polling loops (`-PassFilter -MinReloadId -SettleSeconds -Zones`; exit 2 = COMPILE_ERROR,
+1 = timeout). It also serves as the startup "CSV is live" check (`-SettleSeconds 5`), and appends
+a `gpu,<sm clock>, <temp>, <power>` line: timings scale with boost clocks, so an A/B comparison is
+only fair when that line matches between readings (cold-start boost inflates results 5-10% vs
+heat-soaked — don't trust readings from a freshly launched engine).
 
 Editing a shared include (e.g. `common.hlsl`) fans out: every dependent pass recompiles and
 bumps its own `reloadId`. A broken edit bumps `reloadId` once and stays in `COMPILE_ERROR`
