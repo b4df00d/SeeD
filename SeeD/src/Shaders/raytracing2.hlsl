@@ -236,7 +236,7 @@ void PathTraceRays()
                 payload.geometryIndex = ~0U;
                 payload.barycentrics = 0;
 
-                s = GetGBufferSurface(pixel);
+                s = GetPrimarySurface(pixel);
 
                 // == GBufferCameraData::offsetedWorldPos (s.normal is the same gbuffer normal as cd.worldNorm)
                 float viewDist = ray.TMax;
@@ -443,7 +443,15 @@ void PathTraceRays()
             }
 
 #if !(SHARC_UPDATE && SHARC_SEPARATE_EMISSIVE)
-            sampleRadiance += closure.emission * throughput;
+#ifndef SHARC_UPDATE // == SHARC_QUERY
+            // The primary surface's own emission is direct light, like the NEE above: sampleRadiance
+            // becomes the ReSTIR GI sample, reprojected and shared between pixels, which would drag
+            // the emitter's colour across the screen whenever the camera or the object moves.
+            if (bounce == 0)
+                accumulatedSampleData.radiance += closure.emission;
+            else
+#endif
+                sampleRadiance += closure.emission * throughput;
 #endif
 
             if (!SharcUpdateHit(sharcParameters, sharcState, sharcHitData, sampleRadiance, RNG(rngState)))
@@ -586,7 +594,7 @@ void PathTraceRays()
     if (specularHitTCount == 0)
     {
         GBufferCameraData cd = GetGBufferCameraData(pixel);
-        OpenPBRSurface s = GetGBufferSurface(pixel);
+        OpenPBRSurface s = GetPrimarySurface(pixel);
         if (cd.reverseZ > 0.0 && s.specular_roughness <= SPECULAR_HITT_TRACE_ROUGHNESS_MAX)
         {
             // same normals and origin as bounce 0 of the path loop

@@ -33,6 +33,7 @@ public:
         String output;       // .exr / .hdr / .dds / .png
         bool directOnly = false;
         uint warmupFrames = 120;
+        float cameraSpeed = 0.0f; // m per frame along world X during warmup: exercises motion vectors / temporal reuse
     };
 
     // Exit codes, read by run.ps1.
@@ -122,6 +123,8 @@ public:
             break;
 
         case State::Warmup:
+            if (captures[entryIndex].cameraSpeed != 0.0f)
+                MoveCameras(captures[entryIndex].cameraSpeed);
             if (framesInState > captures[entryIndex].warmupFrames)
                 Enter(State::Capture);
             break;
@@ -165,6 +168,20 @@ private:
         {
             std::ofstream f((std::string)logPath, std::ios::app);
             if (f.is_open()) f << message << "\n";
+        }
+    }
+
+    // Slides every camera along world X; the renderer rebuilds the camera matrix from the Transform
+    // each frame, so the motion vectors, ReSTIR reprojection and DLSS-RR history all see the move.
+    void MoveCameras(float speed)
+    {
+        uint query = World::instance->Query(Components::Camera::mask | Components::Transform::mask, 0, false);
+        auto& cameras = World::instance->frameQueries[query];
+        for (uint i = 0; i < (uint)cameras.size(); i++)
+        {
+            auto& t = cameras[i].Get<Components::Transform>();
+            t.position = t.position + float3(speed, 0.0f, 0.0f);
+            t.version++;
         }
     }
 
@@ -237,12 +254,24 @@ private:
         // The tonemapped frame (PostProcess output, what gets copied to the backbuffer).
         std::filesystem::path display((std::string)outPath);
         display.replace_filename(display.stem().string() + "_display" + display.extension().string());
-        return WriteResource(view, name, "postProcessed", String(display.string().c_str()));
+        if (!WriteResource(view, name, "postProcessed", String(display.string().c_str())))
+            return false;
+
+        // DLSS-RR's inputs, at render resolution, for debugging the denoiser / temporal side
+        // (out\<name>_<resource>.exr). They rest in COMMON, not UAV, and are never scored.
+        for (const char* guide : { "motion", "albedo", "specularAlbedo", "normal", "specularHitDistance" })
+        {
+            std::filesystem::path guidePath((std::string)outPath);
+            guidePath.replace_filename(guidePath.stem().string() + "_" + guide + guidePath.extension().string());
+            WriteResource(view, name, guide, String(guidePath.string().c_str()), D3D12_RESOURCE_STATE_COMMON, false);
+        }
+        return true;
     }
 
     // Both resources sit in UNORDERED_ACCESS at rest. Anything that isn't float is converted, so
     // an R8G8B8A8_UNORM target comes out as its encoded 0-1 values.
-    bool WriteResource(MainView& view, const String& name, const char* resourceName, const String& outPath)
+    bool WriteResource(MainView& view, const String& name, const char* resourceName, const String& outPath,
+                       D3D12_RESOURCE_STATES restState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS, bool checkSize = true)
     {
         // GetRegisteredResource default-constructs on a miss, so check the D3D
         // resource rather than trusting the lookup.
@@ -256,8 +285,7 @@ private:
 
         DirectX::ScratchImage captured;
         HRESULT hr = DirectX::CaptureTexture(GPU::instance->graphicQueue, source, false, captured,
-                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                                             restState, restState);
         if (FAILED(hr))
         {
             Log("[calibration] CaptureTexture failed (hr 0x{:08x})", (uint)hr);
@@ -280,7 +308,7 @@ private:
 
         const uint width = (uint)image->width;
         const uint height = (uint)image->height;
-        if (expectedWidth != 0 && (width != expectedWidth || height != expectedHeight))
+        if (checkSize && expectedWidth != 0 && (width != expectedWidth || height != expectedHeight))
         {
             // Worth shouting about: the reference was rendered at the requested
             // size, so a smaller window silently invalidates the comparison.

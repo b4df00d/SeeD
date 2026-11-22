@@ -734,11 +734,10 @@ public:
         viewContextParams.shaderBucketOffsetsIndex = viewWorld.shaderBucketOffsets.Get().gpuData.srv.offset;
         viewContextParams.shaderBucketCount = (uint)viewWorld.shaderBuckets.size();
         viewContextParams.albedoIndex = GetRegisteredResource("albedo").srv.offset;
-        viewContextParams.metalnessIndex = GetRegisteredResource("metalness").srv.offset;
+        viewContextParams.visibilityIndex = GetRegisteredResource("visibility").srv.offset; // read-only Texture2D<uint2>: gbufferResolve.hlsl, the path tracer's primary hit, selection.hlsl, debugBuffers.hlsl
         viewContextParams.normalIndex = GetRegisteredResource("normal").srv.offset;
         viewContextParams.normalUAVIndex = GetRegisteredResource("normal").uav.offset;
         viewContextParams.motionIndex = GetRegisteredResource("motion").srv.offset;
-        viewContextParams.instanceIDIndex = GetRegisteredResource("instanceID").srv.offset; // read-only Texture2D<uint> in debugBuffers.hlsl/selection.hlsl, never RW
         viewContextParams.overdrawIndex = GetRegisteredResource("overdraw").uav.offset;
         viewContextParams.depthIndex = GetRegisteredResource("depth").srv.offset;
         viewContextParams.reverseZ = true;
@@ -1079,7 +1078,10 @@ public:
                 commandBuffer->cmd->ClearRenderTargetView(RTs[i], clearColor.f32, 1, &rect);
         }
 
-        commandBuffer->cmd->OMSetRenderTargets(RTCount, RTs, true, depth ? &depth->dsv.handle : nullptr);
+        // RTsSingleHandleToDescriptorRange = FALSE: RTs is an array of independent handles. TRUE would
+        // bind RTCount consecutive descriptors starting at RTs[0], which only happened to work while
+        // every multi-target pass created its targets back to back.
+        commandBuffer->cmd->OMSetRenderTargets(RTCount, RTs, false, depth ? &depth->dsv.handle : nullptr);
 
         if (depth)
         {
@@ -1574,14 +1576,17 @@ public:
 
 class GBuffers : public Pass
 {
+    // Visibility buffer: the draws only write visibility (which triangle, common.hlsl PackVisibility)
+    // and motion. albedo / specularAlbedo / normal are written afterwards by the material resolve
+    // (gbufferResolve.hlsl): they are DLSS-RR's guides plus the normal GetGBufferCameraData reads.
+    ViewResource visibility;
     ViewResource albedo;
     ViewResource specularAlbedo;
     ViewResource normal;
-    ViewResource metalness;
     ViewResource depth;
     ViewResource motion;
-    ViewResource instanceID;
     ViewResource overdraw;
+    Components::Handle<Components::Shader> resolveShader;
 
     // Surface haze maps (structs.hlsl HazeLayer, hazeMap.hlsl), one set per active haze layer: the
     // GBuffer pixel shaders splat into splat, Render resolves it into maps[frame % 2] after the draws,
@@ -1684,19 +1689,22 @@ public:
         hazeClearSplatShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\hazeMap.hlsl|ClearSplat");
         hazeClearShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\hazeMap.hlsl|Clear");
         hazeActiveMask = 0;
+        resolveShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\gbufferResolve.hlsl|Resolve");
+        visibility.Register("visibility", view);
+        visibility.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32G32_UINT, "visibility");
         albedo.Register("albedo", view);
         albedo.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "albedo");
         specularAlbedo.Register("specularAlbedo", view);
         specularAlbedo.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8G8B8A8_UNORM, "specularAlbedo");
         normal.Register("normal", view);
         normal.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16B16A16_FLOAT, "normal"); // a = roughness (DLSS-RR packed mode)
-        metalness.Register("metalness", view);
-        metalness.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R8_UNORM, "metalness");
         depth.Register("depth", view);
         motion.Register("motion", view);
-        motion.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R16G16_FLOAT, "motion");
-        instanceID.Register("instanceID", view);
-        instanceID.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "instanceID");
+        // R32G32_FLOAT, not R16G16: the GBuffer PSO takes its render target formats from the pixel
+        // shader's reflection (Loading.h), which can only say R32G32_FLOAT for a float2 -- a PSO / RTV
+        // format mismatch is undefined, and lost every motion vector once visibility (an integer
+        // target) took slot 0.
+        motion.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32G32_FLOAT, "motion");
         overdraw.Register("overdraw", view);
         overdraw.Get().CreateRenderTarget(view->renderResolution, DXGI_FORMAT_R32_UINT, "overdraw"); // per-pixel atomic counter for the overdraw heatmap
 
@@ -1704,23 +1712,20 @@ public:
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        visibility.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         commandBuffer.Get().cmd->DiscardResource(albedo.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(specularAlbedo.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(normal.Get().GetResource(), nullptr);
-        commandBuffer.Get().cmd->DiscardResource(metalness.Get().GetResource(), nullptr);
+        commandBuffer.Get().cmd->DiscardResource(visibility.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(motion.Get().GetResource(), nullptr);
-        commandBuffer.Get().cmd->DiscardResource(instanceID.Get().GetResource(), nullptr);
         commandBuffer.Get().cmd->DiscardResource(overdraw.Get().GetResource(), nullptr);
         albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-        metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        visibility.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-        instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         Close();
         ExecuteNow();
@@ -1729,12 +1734,11 @@ public:
     {
         Pass::Off();
         ZoneScoped;
+        visibility.Unregister();
         albedo.Unregister();
         specularAlbedo.Unregister();
         normal.Unregister();
-        metalness.Unregister();
         motion.Unregister();
-        instanceID.Unregister();
         overdraw.Unregister();
         for (HazeLayerMaps& maps : hazeLayerMaps)
             if (maps.resolution != 0)
@@ -1749,12 +1753,8 @@ public:
         ZoneScoped;
         Open();
 
-        albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        visibility.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
         bool overdrawEnabled = options.debugDraw == Options::DebugDraw::overdraw;
         if (overdrawEnabled)
@@ -1797,7 +1797,7 @@ public:
             }
         }
 
-        Resource rts[] = { albedo.Get(), specularAlbedo.Get(), normal.Get(), metalness.Get(), motion.Get(), instanceID.Get()};
+        Resource rts[] = { visibility.Get(), motion.Get() }; // order = mesh.hlsl PS_OUTPUT (meshCommon.hlsli)
         SetupView(view, rts, ARRAYSIZE(rts), true, &depth.Get(), true, false);
 
         for (uint bucketIndex = 0; bucketIndex < view->viewWorld.shaderBuckets.size(); bucketIndex++)
@@ -1835,17 +1835,35 @@ public:
             commandBuffer->cmd->ExecuteIndirect(shader->commandSignature, 1, view->viewContext.meshDispatchArgs.GetResourcePtr(), (UINT64)bucketIndex * sizeof(HLSL::MeshDispatchArgs), nullptr, 0);
         }
 
-        albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-        specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-        normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-        metalness.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
+        visibility.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         motion.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
-        instanceID.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
 
         if (overdrawEnabled)
             overdraw.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
 
         depth.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COMMON);
+
+        // Material resolve: one OpenPBR evaluation per pixel from the visibility buffer -> the DLSS-RR
+        // guides + normal. visibility and depth are read from COMMON (implicit promotion to SRV).
+        {
+            GPUMarker marker(commandBuffer.Get(), "gBufferResolve");
+            albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+            Shader& resolve = *AssetLibrary::instance->Get<Shader>(resolveShader.Get().id, true);
+            commandBuffer->SetCompute(resolve);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(CommonResourcesIndicesRegister, commonResourcesIndicesAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(ViewContextRegister, viewContextAddress);
+            commandBuffer->cmd->SetComputeRootConstantBufferView(EditorContextRegister, editorContextAddress);
+            uint targets[512 / sizeof(uint)] = { albedo.Get().uav.offset, specularAlbedo.Get().uav.offset, normal.Get().uav.offset }; // PushConstantBuffer copies a full 512-byte stride
+            commandBuffer->cmd->SetComputeRootConstantBufferView(Custom1Register, ConstantBuffer::instance->PushConstantBuffer(targets));
+            commandBuffer->cmd->Dispatch(resolve.DispatchX(view->renderResolution.x), resolve.DispatchY(view->renderResolution.y), 1);
+
+            albedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+            specularAlbedo.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+            normal.Get().Transition(commandBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        }
 
         // Haze map resolve per layer: this frame's splats (blurred) + last frame's map -> this frame's
         // map, then the splats are cleared (after a barrier: the blur reads neighbouring splats)
@@ -2236,8 +2254,6 @@ class Forward : public Pass
 {
     ViewResource lighted;
     ViewResource depth;
-    Components::Handle<Components::Shader> meshShader;
-
 public:
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override
     {
@@ -2245,7 +2261,6 @@ public:
         ZoneScoped;
         depth.Register("depth", view);
         lighted.Register("lighted", view);
-        meshShader.GetPermanent().id = AssetLibrary::instance->AddHardCoded("src\\Shaders\\mesh.hlsl|DefaultF");
     }
     void Setup(View* view) override
     {

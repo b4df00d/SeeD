@@ -3,16 +3,6 @@
 #include "common.hlsl"
 #include "meshCommon.hlsli"
 
-struct PS_OUTPUT
-{
-    float4 albedo : SV_Target0; //DXGI_FORMAT_R8G8B8A8_UNORM
-    float4 specularAlbedo : SV_Target1; //DXGI_FORMAT_R8G8B8A8_UNORM
-    float4 normal : SV_Target2; //DXGI_FORMAT_R16G16B16A16_FLOAT (a = roughness, DLSS-RR packed mode)
-    float metalness : SV_Target3; //DXGI_FORMAT_R8_UNORM
-    float2 motion : SV_Target4; //DXGI_FORMAT_R16G16_FLOAT
-    uint instanceID : SV_Target5; //DXGI_FORMAT_R32_UINT
-};
-
 // Routed as its own late-Z GBuffer draw (3rd bucket, see culling.hlsl / Renderer.h GBuffers::Render)
 // -- there's no alpha discard here, but keeping early-Z off costs nothing extra since terrain draws
 // are a handful of large patches, not a mainstay of overdraw.
@@ -65,47 +55,5 @@ void MeshMainTerrain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_
 [earlydepthstencil]
 PS_OUTPUT PixelgBufferTerrain(MSVert inVerts, MSPrim inPrim)
 {
-    PS_OUTPUT o;
-
-    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
-    HLSL::Instance instance = instances[inPrim.instanceIndex];
-
-    StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
-    HLSL::Material material = materials[instance.materialIndex];
-
-    float3 binormal = cross(inVerts.normal, inVerts.tangent.xyz) * inVerts.tangent.w;
-    OpenPBRSurface s = ResolveOpenPBR(material, inVerts.uv, inVerts.normal, inVerts.tangent.xyz, binormal);
-
-    o.albedo = float4(s.base_color * s.base_weight, s.geometry_opacity);
-
-    if (editorContext.debugFlags & HLSL::EditorDebugClusters)
-    {
-        o.albedo = 1;
-        o.albedo.xyz = RandUINT(inPrim.meshletIndex); // per-meshlet debug color (computed here, not interpolated)
-    }
-    if (editorContext.debugFlags & HLSL::EditorDebugTriangles)
-    {
-        o.albedo = 1;
-        o.albedo.xyz = RandUINT(inPrim.meshletIndex * HLSL::max_triangles + inPrim.primitiveID); // unique seed per triangle
-    }
-
-    HazeSplat(inVerts.pos.xy, inVerts.currentPos, inVerts.normal, material);
-
-    if (editorContext.debugFlags & HLSL::EditorDebugOverdraw) // count shaded fragments per pixel for the overdraw heatmap
-    {
-        RWTexture2D<uint> overdraw = ResourceDescriptorHeap[viewContext.overdrawIndex];
-        uint previous;
-        InterlockedAdd(overdraw[uint2(inVerts.pos.xy)], 1, previous);
-    }
-
-    o.specularAlbedo = float4(GBufferSpecularAlbedo(s, inVerts.pos.xy), 1);
-    o.metalness = s.base_metalness;
-    // normal.a carries roughness (DLSS-RR packed mode; lighting.hlsl preserves it on its rewrite)
-    o.normal = float4(StoreNormal(s.normal), s.specular_roughness);
-
-    o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
-
-    o.instanceID = inPrim.instanceIndex; // objectID is derived from this in selection.hlsl
-
-    return o;
+    return GBufferPixel(inVerts, inPrim);
 }

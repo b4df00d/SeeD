@@ -87,21 +87,48 @@ struct OpenPBRSurface
     float3 bitangent;
 };
 
-// Material texture fetch. Ray dispatches have no derivatives, so they read a fixed coarse mip;
-// raster has them and biases one mip sharper.
-float4 OpenPBRSampleTexture(uint textureIndex, float2 uv, float rayLod)
+// Where a material texture is read. Screen-space resolves (the visibility buffer, pixel shaders)
+// know the uv footprint of their pixel; secondary ray hits don't and read a fixed coarse mip.
+struct OpenPBRTexCoord
+{
+    float2 uv;
+    float2 ddx;     // uv change toward the next pixel, x and y
+    float2 ddy;
+    bool fixedLod;  // ray hit: no footprint
+};
+
+OpenPBRTexCoord OpenPBRTexCoordGrad(float2 uv, float2 uvDdx, float2 uvDdy)
+{
+    OpenPBRTexCoord t;
+    t.uv = uv;
+    t.ddx = uvDdx;
+    t.ddy = uvDdy;
+    t.fixedLod = false;
+    return t;
+}
+
+OpenPBRTexCoord OpenPBRTexCoordRay(float2 uv)
+{
+    OpenPBRTexCoord t;
+    t.uv = uv;
+    t.ddx = 0.0f;
+    t.ddy = 0.0f;
+    t.fixedLod = true;
+    return t;
+}
+
+// rayLod: the mip a ray hit reads; a footprint reads one mip sharper than it (DLSS upscales from it)
+float4 OpenPBRSampleTexture(uint textureIndex, OpenPBRTexCoord t, float rayLod)
 {
     Texture2D<float4> texture = ResourceDescriptorHeap[textureIndex];
-#ifdef RAY_DISPATCH
-    return texture.SampleLevel(samplerLinear, uv, rayLod);
-#else
-    return texture.SampleBias(samplerLinear, uv, -1);
-#endif
+    if (t.fixedLod)
+        return texture.SampleLevel(samplerLinear, t.uv, rayLod);
+    return texture.SampleGrad(samplerLinear, t.uv, t.ddx * 0.5f, t.ddy * 0.5f);
 }
 
 // normal / tangent / bitangent: interpolated world-space vertex frame (tangent and bitangent may be
 // 0 where the caller has none: the normal map is then skipped).
-OpenPBRSurface ResolveOpenPBR(HLSL::Material m, float2 uv, float3 normal, float3 tangent, float3 bitangent)
+OpenPBRSurface ResolveOpenPBR(HLSL::Material m, OpenPBRTexCoord uv, float3 normal, float3 tangent, float3 bitangent)
 {
     OpenPBRSurface s;
 
@@ -161,20 +188,18 @@ OpenPBRSurface ResolveOpenPBR(HLSL::Material m, float2 uv, float3 normal, float3
     s.normal = s.geometricNormal;
     s.tangent = tangent;
     s.bitangent = bitangent;
-#ifndef RAY_DISPATCH // hit shaders build no tangent frame yet
-    if (m.normalTexture != HLSL::invalidUINT)
+    if (m.normalTexture != HLSL::invalidUINT && dot(tangent, tangent) > 0.0f) // ray hits build no tangent frame yet
     {
         float3 nrm = OpenPBRSampleTexture(m.normalTexture, uv, 3).xyz;
         float3x3 tbn = float3x3(normalize(tangent), normalize(bitangent), s.geometricNormal);
         s.normal = WorldNormal(nrm, tbn, m.base.w);
     }
-#endif
 
     return s;
 }
 
 // geometry_opacity alone, for alpha-test any-hit shaders (one texture fetch)
-float OpenPBROpacity(HLSL::Material m, float2 uv)
+float OpenPBROpacity(HLSL::Material m, OpenPBRTexCoord uv)
 {
     float opacity = m.base.z;
     if (m.baseColorTexture != HLSL::invalidUINT)

@@ -244,12 +244,11 @@ namespace HLSL
         uint meshletsCounterIndex; // one counter per shader bucket now (was fixed 3: opaque/cutout/terrain)
         uint shaderBucketOffsetsIndex; // heap index of a StructuredBuffer<uint>: exclusive-prefix-sum base offset per shader bucket, into meshletsCulledArgs
         uint shaderBucketCount; // number of shader buckets this frame (CullingReset zeroes exactly this many meshletsCounters entries)
-        uint albedoIndex;
-        uint metalnessIndex;
+        uint albedoIndex; // DLSS-RR diffuse albedo guide, written by gbufferResolve.hlsl
+        uint visibilityIndex; // Texture2D<uint2> visibility buffer: instance, meshlet << 7 | triangle (common.hlsl GetVisibilityHit)
         uint normalIndex; // gbuffer normal, a = roughness (DLSS-RR packed mode); SRV slot, every reader (GetGBufferCameraData) samples it read-only
-        uint normalUAVIndex; // same resource's UAV slot -- currently unused: the gbuffer pass writes the final full-range normal + roughness, nothing rewrites it
+        uint normalUAVIndex; // same resource's UAV slot -- currently unused: gbufferResolve.hlsl gets its targets from its own constants
         uint motionIndex;
-        uint instanceIDIndex;
         uint overdrawIndex;
         uint depthIndex;
         uint reverseZ;

@@ -40,11 +40,15 @@ The project holds two scenes, each with a `direct` and a `full` entry:
 - `materials`: the falloff lighting with one Standard Shader Ball per OpenPBR
   lobe (glossy, rough and black dielectrics, two metals, coat, fuzz, smooth and
   rough glass), carried through glTF's KHR material extensions. Its reference
-  needs **Blender 5.4+**, where the Principled BSDF is OpenPBR. Expected to
-  fail on coat, fuzz and glass until the GBuffer stops dropping them at the
-  primary hit (OpenPBR rework step 3). The `Neutral_*` cores seen through the
-  balls' openings are small, edge-dominated masks: read them with the
-  compare image, not the table.
+  needs **Blender 5.4+**, where the Principled BSDF is OpenPBR. Known misses:
+  - smooth lobes (black dielectric, coat, smooth glass) under the small sun
+    and point light: Blender puts most of their energy in a few pixel-sized
+    glints, which SeeD's lower render resolution + DLSS-RR smear and lose
+  - coat: per the OpenPBR spec the base reflects against the coat's IOR (none
+    at all for a 1.5 coat over a 1.5 base) and is roughened by it; Blender
+    5.4 keeps the base reflecting against air
+  - the `Neutral_*` cores seen through the balls' openings are small,
+    edge-dominated masks: read them with the compare image, not the table
 
   Geometry: the [Standard Shader Ball](https://github.com/usd-wg/assets/tree/main/full_assets/StandardShaderBall)
   (CC BY 4.0, usd-wg/assets, after Thomas Anagnostou's Simball), not in git.
@@ -111,6 +115,16 @@ structure is not.
 Keep the project's `windowWidth`/`windowHeight` equal to the `.blend`'s render
 resolution; `compare.py` refuses to score a size mismatch rather than
 silently resampling.
+
+## Debugging the denoiser / temporal side
+
+Every capture also writes DLSS-RR's inputs at render resolution, never scored:
+`out\<name>_{motion,albedo,specularAlbedo,normal,specularHitDistance}.exr`.
+A 6th `capture` field, `cameraSpeed` (m per frame along world X), slides the
+camera during warmup, so motion vectors, ReSTIR reprojection and the DLSS-RR
+history all see a moving view (motion should then be positive in x, 0 in y,
+larger on closer surfaces). Use it in a scratch project: a moved camera no
+longer matches the reference.
 
 ## Why the project turns the player off
 

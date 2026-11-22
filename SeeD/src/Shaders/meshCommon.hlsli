@@ -81,17 +81,13 @@ void LoadMeshlet(uint drawIndex)
     meshlet.triangleCount = min(HLSL::max_triangles, meshlet.triangleCount);
 }
 
-// Decode SNORM16 position (local to mesh AABB). packedPos.x = [x|y<<16], packedPos.y = [z|handedness<<16].
-float3 DecodeVertexPositionOS(HLSL::Vertex v)
-{
-    int3 qi = int3(int(v.packedPos.x << 16) >> 16, int(v.packedPos.x) >> 16, int(v.packedPos.y << 16) >> 16);
-    float3 q = max(float3(qi) / 32767.0f, -1.0f);
-    return mesh.aabbMin.xyz + (q * 0.5f + 0.5f) * mesh.aabbExtent.xyz;
-}
+// Vertex decode against this group's mesh (common.hlsl holds the shared decoders, also used by the
+// visibility buffer resolve).
+float3 DecodeVertexPositionOS(HLSL::Vertex v) { return DecodeMeshVertexPosition(mesh, v); }
 
 float3 DecodeVertexNormalOS(HLSL::Vertex v) { return i_octahedral_32(v.normalOct, 16); }
 float3 DecodeVertexTangentOS(HLSL::Vertex v) { return i_octahedral_32(v.tangentOct, 16); }
-float DecodeVertexHandedness(HLSL::Vertex v) { return ((int(v.packedPos.y) >> 16) >= 0 ? 1.0f : -1.0f) * worldDetSign; }
+float DecodeVertexHandedness(HLSL::Vertex v) { return DecodeMeshVertexHandedness(v) * worldDetSign; }
 
 // objectPos/normalOS/tangentOS are object-space (pre-worldMatrix). Callers that displace the vertex
 // (terrainmesh.hlsl sampling a heightmap) pass the already-displaced objectPos and a recomputed
@@ -119,15 +115,7 @@ MSVert BuildOutputVertex(float3 objectPos, float3 normalOS, float3 tangentOS, fl
 // Decodes triangle indices for one meshlet triangle (groupThreadId < meshlet.triangleCount).
 uint3 DecodeMeshletTriangle(uint groupThreadId)
 {
-    ByteAddressBuffer trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex]; // because of uint8 format
-    uint offset = meshlet.triangleOffset + groupThreadId * 3;
-    uint alignedOffset = offset & ~3;
-    uint shift = (offset - alignedOffset) * 8;
-    uint2 packedData = trianglesData.Load2(alignedOffset);
-
-    // Funnel-shift the 3 index bytes down to bit 0 (HLSL shifts are mod-32: guard shift==0).
-    uint tri3 = (packedData.x >> shift) | (shift == 0 ? 0 : packedData.y << (32 - shift));
-    uint3 tri = uint3(tri3 & 0xff, (tri3 >> 8) & 0xff, (tri3 >> 16) & 0xff);
+    uint3 tri = DecodeMeshletTriangleIndices(meshlet.triangleOffset, groupThreadId);
     // a mirrored instance flips the screen-space winding: swap back so CULL_BACK keeps its front faces
     return worldDetSign < 0.0f ? tri.xzy : tri;
 }
@@ -178,4 +166,44 @@ void HazeSplat(float2 pixel, float4 currentPos, float3 geometricNormal, HLSL::Ma
         if (HazeTexel(HazeCell(world.xz, HazeTexelSize(layer, level)), HazeOrigin(layer.origin, level), level, layer.resolution, texel))
             InterlockedMax(splat[texel], height);
     }
+}
+
+// ---- GBuffer pixel shader --------------------------------------------------------------------
+// A visibility buffer: the pixel shaders only record which triangle covers the pixel, plus its motion.
+// The material is resolved afterwards, once per pixel instead of once per overdrawn fragment, by
+// gbufferResolve.hlsl (DLSS-RR guides) and by the path tracer's primary hit (common.hlsl
+// GetVisibilityHit). The only material reads left here are the alpha test and the haze splat.
+// PSO render target formats come from this struct's reflection (Loading.h): visibility is
+// R32G32_UINT, motion R32G32_FLOAT (Renderer.h GBuffers): the targets must match these exactly.
+struct PS_OUTPUT
+{
+    uint2 visibility : SV_Target0;
+    float2 motion : SV_Target1;
+};
+
+PS_OUTPUT GBufferPixel(MSVert inVerts, MSPrim inPrim)
+{
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+    StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
+    HLSL::Material material = materials[instances[inPrim.instanceIndex].materialIndex];
+
+#ifdef CUTOUT
+    OpenPBRTexCoord uv = OpenPBRTexCoordGrad(inVerts.uv, ddx(inVerts.uv), ddy(inVerts.uv));
+    if (OpenPBROpacity(material, uv) + 0.01f < material.alphaCutoff)
+        discard;
+#endif
+
+    HazeSplat(inVerts.pos.xy, inVerts.currentPos, inVerts.normal, material);
+
+    if (editorContext.debugFlags & HLSL::EditorDebugOverdraw) // count shaded fragments per pixel for the overdraw heatmap
+    {
+        RWTexture2D<uint> overdraw = ResourceDescriptorHeap[viewContext.overdrawIndex];
+        uint previous;
+        InterlockedAdd(overdraw[uint2(inVerts.pos.xy)], 1, previous);
+    }
+
+    PS_OUTPUT o;
+    o.visibility = PackVisibility(inPrim.instanceIndex, inPrim.meshletIndex, inPrim.primitiveID);
+    o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
+    return o;
 }

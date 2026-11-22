@@ -58,7 +58,7 @@ public:
 
     // [calibration] : offline render captures, run in order at startup and then the
     // app exits. Empty for every normal project, which is what keeps this free.
-    // One line each: capture <name> <scene> <output> <directOnly> <warmupFrames>
+    // One line each: capture <name> <scene> <output> <directOnly> <warmupFrames> [cameraSpeed m/frame]
     // Paths are project-relative and, like every other key here, may not contain
     // spaces. Kept relative here so Save() round-trips what was written; Setup()
     // hands Calibration its own copy with the paths resolved.
@@ -179,8 +179,12 @@ public:
         {
             f << "[calibration]\n";
             for (auto& c : captures)
+            {
                 f << "capture " << c.name << " " << c.scene << " " << c.output
-                  << " " << (c.directOnly ? 1 : 0) << " " << c.warmupFrames << "\n";
+                  << " " << (c.directOnly ? 1 : 0) << " " << c.warmupFrames;
+                if (c.cameraSpeed != 0.0f) f << " " << c.cameraSpeed;
+                f << "\n";
+            }
         }
 
         f << "[uilayout]\n";
@@ -343,13 +347,16 @@ private:
                 std::string name, scene, output;
                 int directOnly = 0;
                 uint warmup = e.warmupFrames;
+                float cameraSpeed = 0.0f;
                 ss >> name >> scene >> output >> directOnly >> warmup;
+                if (!(ss >> cameraSpeed)) cameraSpeed = 0.0f;
                 if (name.empty() || scene.empty() || output.empty()) continue;
                 e.name = name;
                 e.scene = scene;
                 e.output = output;
                 e.directOnly = directOnly != 0;
                 e.warmupFrames = warmup;
+                e.cameraSpeed = cameraSpeed;
                 captures.push_back(e);
             }
             else if (section == "uilayout")

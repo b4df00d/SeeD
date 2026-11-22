@@ -1212,50 +1212,171 @@ float3 LinearToSRGB(float3 c)
 
 #include "openpbr.hlsli"
 
-// The surface at a GBuffer pixel. The GBuffer only stores base color + opacity, metalness, roughness
-// and the shading normal, so every other OpenPBR parameter takes the spec default: coat, fuzz,
-// transmission... are lost at the primary hit until the visibility buffer (OpenPBR rework step 3)
-// re-resolves the full material.
-OpenPBRSurface GetGBufferSurface(uint2 pixel)
-{
-    Texture2D<float4> albedo = ResourceDescriptorHeap[viewContext.albedoIndex];
-    Texture2D<float> metalness = ResourceDescriptorHeap[viewContext.metalnessIndex];
-    Texture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalIndex];
+/// ---- mesh vertex / meshlet decode, shared by the mesh shaders (meshCommon.hlsli) and the
+// visibility buffer resolve below ---------------------------------------------------------------
 
-    float4 packedNormal = normal[pixel]; // a = roughness (DLSS-RR packed layout)
-    float4 baseColor = albedo[pixel];
+// SNORM16 position, local to the mesh AABB. packedPos.x = [x|y<<16], packedPos.y = [z|handedness<<16].
+float3 DecodeMeshVertexPosition(HLSL::Mesh m, HLSL::Vertex v)
+{
+    int3 qi = int3(int(v.packedPos.x << 16) >> 16, int(v.packedPos.x) >> 16, int(v.packedPos.y << 16) >> 16);
+    float3 q = max(float3(qi) / 32767.0f, -1.0f);
+    return m.aabbMin.xyz + (q * 0.5f + 0.5f) * m.aabbExtent.xyz;
+}
+
+// object-space binormal sign (the world-space one also takes the instance's determinant sign)
+float DecodeMeshVertexHandedness(HLSL::Vertex v)
+{
+    return (int(v.packedPos.y) >> 16) >= 0 ? 1.0f : -1.0f;
+}
+
+// The three meshlet-local vertex indices of one meshlet triangle (uint8 triplets).
+uint3 DecodeMeshletTriangleIndices(uint triangleOffset, uint triangleIndex)
+{
+    ByteAddressBuffer trianglesData = ResourceDescriptorHeap[commonResourcesIndices.meshletTrianglesHeapIndex];
+    uint offset = triangleOffset + triangleIndex * 3;
+    uint alignedOffset = offset & ~3;
+    uint shift = (offset - alignedOffset) * 8;
+    uint2 packedData = trianglesData.Load2(alignedOffset);
+    // Funnel-shift the 3 index bytes down to bit 0 (HLSL shifts are mod-32: guard shift==0).
+    uint tri3 = (packedData.x >> shift) | (shift == 0 ? 0 : packedData.y << (32 - shift));
+    return uint3(tri3 & 0xff, (tri3 >> 8) & 0xff, (tri3 >> 16) & 0xff);
+}
+
+// ---- visibility buffer -------------------------------------------------------------------------
+// The GBuffer pixel shaders (mesh.hlsl, terrainmesh.hlsl) only write which triangle covers the
+// pixel: .x instance index, .y meshlet index << VisibilityTriangleBits | triangle within the meshlet.
+// Everything else is rebuilt from it: the triangle's vertices, the barycentrics of the camera ray
+// through the pixel, and the uv footprint from the rays through the next pixels.
+
+static const uint VisibilityTriangleBits = 7; // HLSL::max_triangles (124) < 128
+
+uint2 PackVisibility(uint instanceIndex, uint meshletIndex, uint triangleIndex)
+{
+    return uint2(instanceIndex, (meshletIndex << VisibilityTriangleBits) | triangleIndex);
+}
+
+struct VisibilityHit
+{
+    HLSL::Material material;
+    uint instanceIndex;
+    uint meshletIndex;
+    uint triangleIndex;
+    float3 position;        // world
+    float3 normal;          // interpolated world vertex frame (not normalized)
+    float3 tangent;
+    float3 bitangent;
+    OpenPBRTexCoord uv;
+};
+
+// Camera ray through a render-target position (pixels), at the sample the rasterizer used: the
+// projection was jittered, viewProj_inv is not (same convention as GetGBufferCameraData).
+float3 CameraRayDirection(HLSL::Camera camera, float2 pixelPosition)
+{
+    float2 ndc = pixelPosition * viewContext.renderResolution.zw * 2.0f - 1.0f;
+    ndc.y = -ndc.y;
+    ndc -= viewContext.jitter.xy;
+    float4 p = mul(camera.viewProj_inv, float4(ndc, 0.5f, 1.0f));
+    return normalize(p.xyz / p.w - camera.worldPos.xyz);
+}
+
+// Barycentrics (of p1, p2) where the ray meets the triangle's plane, inside the triangle or not
+// (the neighbour-pixel rays of the uv footprint may miss it).
+float2 RayTriangleBarycentrics(float3 origin, float3 direction, float3 p0, float3 p1, float3 p2)
+{
+    float3 e1 = p1 - p0;
+    float3 e2 = p2 - p0;
+    float3 pv = cross(direction, e2);
+    float det = dot(e1, pv);
+    float invDet = abs(det) > 1.0e-20f ? 1.0f / det : 0.0f;
+    float3 tv = origin - p0;
+    float3 qv = cross(tv, e1);
+    return float2(dot(tv, pv), dot(direction, qv)) * invDet;
+}
+
+bool GetVisibilityHit(uint2 pixel, out VisibilityHit hit)
+{
+    hit = (VisibilityHit)0;
+    Texture2D<float> depth = ResourceDescriptorHeap[viewContext.depthIndex];
+    if (depth[pixel] <= 0.0f) // reverse Z: nothing rasterized here
+        return false;
+
+    Texture2D<uint2> visibility = ResourceDescriptorHeap[viewContext.visibilityIndex];
+    uint2 packed = visibility[pixel];
+    hit.instanceIndex = packed.x;
+    hit.meshletIndex = packed.y >> VisibilityTriangleBits;
+    hit.triangleIndex = packed.y & ((1u << VisibilityTriangleBits) - 1u);
+    if (hit.instanceIndex >= commonResourcesIndices.instanceCount)
+        return false;
+
+    StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
+    StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
+    StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
+    StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
+    StructuredBuffer<uint> meshletVertices = ResourceDescriptorHeap[commonResourcesIndices.meshletVerticesHeapIndex];
+    StructuredBuffer<HLSL::Vertex> vertices = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+
+    HLSL::Instance instance = instances[hit.instanceIndex];
+    HLSL::Mesh mesh = meshes[instance.meshIndex];
+    HLSL::Meshlet meshlet = meshlets[hit.meshletIndex];
+    hit.material = materials[instance.materialIndex];
+
+    uint3 tri = DecodeMeshletTriangleIndices(meshlet.triangleOffset, hit.triangleIndex);
+    HLSL::Vertex v0 = vertices[meshletVertices[meshlet.vertexOffset + tri.x] + mesh.vertexOffset];
+    HLSL::Vertex v1 = vertices[meshletVertices[meshlet.vertexOffset + tri.y] + mesh.vertexOffset];
+    HLSL::Vertex v2 = vertices[meshletVertices[meshlet.vertexOffset + tri.z] + mesh.vertexOffset];
+
+    float4x4 worldMatrix = instance.unpack(instance.current);
+    float3 p0 = mul(worldMatrix, float4(DecodeMeshVertexPosition(mesh, v0), 1.0f)).xyz;
+    float3 p1 = mul(worldMatrix, float4(DecodeMeshVertexPosition(mesh, v1), 1.0f)).xyz;
+    float3 p2 = mul(worldMatrix, float4(DecodeMeshVertexPosition(mesh, v2), 1.0f)).xyz;
+
+    HLSL::Camera camera = cameras[0];
+    float3 origin = camera.worldPos.xyz;
+    float2 b = RayTriangleBarycentrics(origin, CameraRayDirection(camera, pixel + 0.5f), p0, p1, p2);
+    float2 bx = RayTriangleBarycentrics(origin, CameraRayDirection(camera, pixel + float2(1.5f, 0.5f)), p0, p1, p2);
+    float2 by = RayTriangleBarycentrics(origin, CameraRayDirection(camera, pixel + float2(0.5f, 1.5f)), p0, p1, p2);
+    float3 w = float3(1.0f - b.x - b.y, b.x, b.y);
+
+    hit.position = w.x * p0 + w.y * p1 + w.z * p2;
+
+    float2 uv = w.x * v0.uv + w.y * v1.uv + w.z * v2.uv;
+    float2 dUVdb1 = v1.uv - v0.uv;
+    float2 dUVdb2 = v2.uv - v0.uv;
+    float2 uvDdx = dUVdb1 * (bx.x - b.x) + dUVdb2 * (bx.y - b.y);
+    float2 uvDdy = dUVdb1 * (by.x - b.x) + dUVdb2 * (by.y - b.y);
+    hit.uv = OpenPBRTexCoordGrad(uv, uvDdx, uvDdy);
+
+    // same frame as the mesh shaders' BuildOutputVertex + the pixel shaders' binormal rebuild
+    float3x3 rotation = (float3x3)worldMatrix;
+    float detSign = determinant(rotation) >= 0.0f ? 1.0f : -1.0f;
+    hit.normal = mul(rotation, w.x * i_octahedral_32(v0.normalOct, 16) + w.y * i_octahedral_32(v1.normalOct, 16) + w.z * i_octahedral_32(v2.normalOct, 16));
+    hit.tangent = mul(rotation, w.x * i_octahedral_32(v0.tangentOct, 16) + w.y * i_octahedral_32(v1.tangentOct, 16) + w.z * i_octahedral_32(v2.tangentOct, 16));
+    hit.bitangent = cross(hit.normal, hit.tangent) * (DecodeMeshVertexHandedness(v0) * detSign);
+    return true;
+}
+
+// The full OpenPBR surface seen at a pixel; the spec defaults (an opaque grey) where nothing was
+// rasterized, so callers can stay branch-free on sky pixels.
+OpenPBRSurface GetPrimarySurface(uint2 pixel)
+{
+    VisibilityHit hit;
+    if (GetVisibilityHit(pixel, hit))
+        return ResolveOpenPBR(hit.material, hit.uv, hit.normal, hit.tangent, hit.bitangent);
 
     OpenPBRSurface s = (OpenPBRSurface)0;
     s.base_weight = 1.0f;
-    s.base_color = baseColor.rgb;
-    s.base_metalness = metalness[pixel];
+    s.base_color = 0.8f;
     s.specular_weight = 1.0f;
     s.specular_color = 1.0f;
-    s.specular_roughness = packedNormal.a;
+    s.specular_roughness = 0.3f;
     s.specular_ior = 1.5f;
-    s.coat_color = 1.0f;
     s.coat_ior = 1.6f;
-    s.coat_darkening = 1.0f;
-    s.fuzz_color = 1.0f;
     s.fuzz_roughness = 0.5f;
-    s.transmission_color = 1.0f;
-    s.subsurface_color = 0.8f;
-    s.geometry_opacity = 1.0f; // alpha-tested at raster: whatever reached the GBuffer is opaque
-    s.normal = ReadNormal(packedNormal.xyz);
+    s.geometry_opacity = 1.0f;
+    s.normal = float3(0.0f, 1.0f, 0.0f);
     s.geometricNormal = s.normal;
     return s;
-}
-
-// DLSS-RR specular albedo guide at a rasterized pixel: the directional albedo of the reflection
-// lobes toward the camera, not the F0 tint.
-float3 GBufferSpecularAlbedo(OpenPBRSurface s, float2 svPosition)
-{
-    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    float3 viewDir = FroxelViewDir(svPosition - 0.5f, viewContext.renderResolution.xy, cameras[0]); // unjittered: sub-pixel, irrelevant here
-    OpenPBRClosure c = OpenPBRPrepare(s, -viewDir);
-    float3 diffuseAlbedo, specularAlbedo;
-    OpenPBRGuides(c, diffuseAlbedo, specularAlbedo);
-    return specularAlbedo;
 }
 
 // Sky luminance along direction, from the camera's sky-view LUT (see atmosphere.hlsl). The sun disk
@@ -1318,14 +1439,14 @@ RTHit GetRTHit(uint committedInstanceIndex, uint committedPrimitiveIndex, float2
 OpenPBRSurface GetRTSurface(uint committedInstanceIndex, uint committedPrimitiveIndex, float2 bary)
 {
     RTHit hit = GetRTHit(committedInstanceIndex, committedPrimitiveIndex, bary, true);
-    return ResolveOpenPBR(hit.material, hit.uv, hit.normal, 0, 0);
+    return ResolveOpenPBR(hit.material, OpenPBRTexCoordRay(hit.uv), hit.normal, 0, 0);
 }
 
 // Coverage for the alpha-test any-hit shaders: only the opacity, one texture fetch.
 float GetRTOpacity(uint committedInstanceIndex, uint committedPrimitiveIndex, float2 bary)
 {
     RTHit hit = GetRTHit(committedInstanceIndex, committedPrimitiveIndex, bary, false);
-    return OpenPBROpacity(hit.material, hit.uv);
+    return OpenPBROpacity(hit.material, OpenPBRTexCoordRay(hit.uv));
 }
 struct RESTIRRay
 {

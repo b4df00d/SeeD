@@ -35,7 +35,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
 
     GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
 
-    OpenPBRSurface s = GetGBufferSurface(cd.pixel.xy);
+    OpenPBRSurface s = GetPrimarySurface(cd.pixel.xy);
     Texture2D<float4> albedoGBuffer = ResourceDescriptorHeap[viewContext.albedoIndex];
     float4 albedo = albedoGBuffer[cd.pixel.xy];
 
@@ -164,8 +164,8 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         if (inRange)
         {
 
-            Texture2D<uint> instanceID = ResourceDescriptorHeap[viewContext.instanceIDIndex];
-            uint sampleInstanceID = instanceID[debugPixel];
+            Texture2D<uint2> visibility = ResourceDescriptorHeap[viewContext.visibilityIndex];
+            uint sampleInstanceID = visibility[debugPixel].x;
 
             StructuredBuffer<HLSL:: Instance > instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
             HLSL::Instance instance = instances[sampleInstanceID];
