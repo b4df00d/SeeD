@@ -16,7 +16,6 @@ cbuffer CustomRT : register(b3)
 #define BOUNCES_MIN                     3
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
 #define SHADOW_RAY_IN_RIS               0 // Enable this to cast shadow rays for each candidate during resampling. This is expensive but increases quality
-#define ENABLE_SPECULAR_LOBE            1 // Enable to use the specular lobe for splitting between diffuse and specular BRDFs
 #define SHARC_SEPARATE_EMISSIVE         1
 
 #include "raytracingCommon.hlsl"
@@ -103,7 +102,7 @@ void RayGen()
     //return;
     int2 dtid = DispatchRaysIndex().xy;
     if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y) return;
-    
+
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
     //lighted[dtid.xy] = float4(0,0,0,1);
@@ -121,16 +120,15 @@ void RayGen()
         specularHitDistance[dtid.xy] = SPECULAR_HITT_MAX; // "infinitely far"; 10000*100 overflowed R16_FLOAT to +Inf
         return;
     }
-    SurfaceData s = GetSurfaceData(dtid.xy);
-    
+
     const uint2 launchIndex = DispatchRaysIndex().xy;
     const uint2 launchDimensions = DispatchRaysDimensions().xy;
     uint seed = InitRNG(launchIndex, launchDimensions, viewContext.frameTime);
     uint poissonDiskCount = clamp(rtParameters.spacialSampleCount, 1u, 64u); // tweakable neighbour count
     uint poissonIndexRng = nextRand(seed) * (64 - poissonDiskCount);
-    
+
     RaytracingAccelerationStructure AccelerationStructure = ResourceDescriptorHeap[rtParameters.BVH];
-    
+
     RWStructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[rtParameters.giReservoirIndex];
     uint resW = viewContext.renderResolution.x;
     HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[dtid.x + dtid.y * resW]);
@@ -279,7 +277,7 @@ void RayGen()
     // (SHARCRadianceScale is only SHARC's own fixed-point factor).
     float ucw = r.Wsum / max(r.Wcount * r.W, 1e-5f);
     float3 indirect = r.color * ucw;
-    
+
     if ((editorContext.debugFlags & (HLSL::EditorDebugGIBounces | HLSL::EditorDebugGIAlbedo | HLSL::EditorDebugGINormals)) == 0 && !rtParameters.directOnly)
         lighted[dtid.xy] += float4(indirect, 0.0f);
 
@@ -307,23 +305,7 @@ void ClosestHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib :
 [shader("anyhit")]
 void AnyHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
 {
-    SurfaceData s = GetRTSurfaceData(InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.uv);
-
-    switch (s.shadingDomain)
-    {
-        case ShadingDomain::AlphaTested:
-        case ShadingDomain::TransmissiveAlphaTested:
-        {
-            if (s.albedo.a < 0.5)
-                IgnoreHit();
-
-            break;
-        }
-
-        default:
-            break;
-    }
-    // AcceptHit but continue looking for the closest hit
+    AlphaTestAnyHit(attrib);
 }
 
 
@@ -344,26 +326,5 @@ void ClosestHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attribu
 [shader("anyhit")]
 void AnyHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
 {
-    SurfaceData s = GetRTSurfaceData(InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.uv);
-
-    switch (s.shadingDomain)
-    {
-        case ShadingDomain::AlphaTested:
-        case ShadingDomain::TransmissiveAlphaTested:
-        {
-            if (s.albedo.a < 0.5)
-                IgnoreHit();
-
-            break;
-        }
-
-        default:
-            // Modulate the visiblity by the material's transmission
-            payload.visibility *= (1.0f - s.albedo.a) * s.albedo.rgb;
-            if (dot(payload.visibility, 0.333f) > 0.001f)
-                IgnoreHit();
-
-            break;
-    }
-    AcceptHitAndEndSearch();
+    AlphaTestAnyHitShadow(attrib);
 }

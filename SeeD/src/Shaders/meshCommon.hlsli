@@ -109,7 +109,7 @@ MSVert BuildOutputVertex(float3 objectPos, float3 normalOS, float3 tangentOS, fl
 
     o.previousPos = mul(previousMvp, pos);
 
-    // Not normalized here: GetSurfaceData renormalizes after interpolation anyway.
+    // Not normalized here: ResolveOpenPBR renormalizes after interpolation anyway.
     o.normal = mul((float3x3)worldMatrix, normalOS);
     o.tangent = float4(mul((float3x3)worldMatrix, tangentOS), handedness);
     o.uv = uv;

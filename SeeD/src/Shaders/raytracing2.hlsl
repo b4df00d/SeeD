@@ -8,7 +8,6 @@
 #define BOUNCES_MAX                     10
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
 #define SHADOW_RAY_IN_RIS               0 // Enable this to cast shadow rays for each candidate during resampling. This is expensive but increases quality
-#define ENABLE_SPECULAR_LOBE            1 // Enable to use the specular lobe for splitting between diffuse and specular BRDFs
 #define SHARC_SEPARATE_EMISSIVE         1
 #define USE_SER                         1 // Shader Execution Reordering (SM 6.9): regroup threads by hit coherence after traversal, before the divergent shading
 
@@ -57,23 +56,7 @@ void ClosestHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib :
 [shader("anyhit")]
 void AnyHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
 {
-    SurfaceData s = GetRTSurfaceData(InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.uv);
-    
-    switch (s.shadingDomain)
-    {
-        case ShadingDomain::AlphaTested:
-        case ShadingDomain::TransmissiveAlphaTested:
-        {
-            if (s.albedo.a < 0.5)
-                IgnoreHit();
-
-            break;
-        }
-
-        default:
-            break;
-    }
-    // AcceptHit but continue looking for the closest hit
+    AlphaTestAnyHit(attrib);
 }
 
 
@@ -94,28 +77,7 @@ void ClosestHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attribu
 [shader("anyhit")]
 void AnyHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
 {
-    SurfaceData s = GetRTSurfaceData(InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.uv);
-
-    switch (s.shadingDomain)
-    {
-        case ShadingDomain::AlphaTested:
-        case ShadingDomain::TransmissiveAlphaTested:
-        {
-            if (s.albedo.a < 0.5)
-                IgnoreHit();
-
-            break;
-        }
-
-        default:
-            // Modulate the visiblity by the material's transmission
-            payload.visibility *= (1.0f - s.albedo.a) * s.albedo.rgb;
-            if (dot(payload.visibility, 0.333f) > 0.001f)
-                IgnoreHit();
-
-            break;
-    }
-    AcceptHitAndEndSearch();
+    AlphaTestAnyHitShadow(attrib);
 }
 
 struct AccumulatedSampleData
@@ -169,7 +131,7 @@ void PathTraceRays()
 #else // !(SHARC_UPDATE)
     const bool isUpdatePass = false;
 #endif // !(SHARC_UPDATE)
-    
+
     const uint2 launchIndex = DispatchRaysIndex().xy;
     const uint2 launchDimensions = DispatchRaysDimensions().xy;
     uint rngState = InitRNG(launchIndex, launchDimensions, viewContext.frameTime);
@@ -201,8 +163,8 @@ void PathTraceRays()
     if (!isUpdatePass)
         lighted[launchIndex] = float4(0.0f, 0.0f, 0.0f, 0.0f);
     */
-    
-    
+
+
     const int samplesPerPixel = isUpdatePass ? 1 : rtParameters.SHARCSamplesPerPixel;
     for (int sampleIndex = 0; sampleIndex < samplesPerPixel; sampleIndex++)
     {
@@ -251,9 +213,9 @@ void PathTraceRays()
         float hitDistance = 0.0f; // Used by denoiser
 
         bool internalRay = false;
-        
-        SurfaceData s;
-        
+
+        OpenPBRSurface s;
+
         int bounce;
         for (bounce = 0; true /* break from the middle */; bounce++)
         {
@@ -263,9 +225,9 @@ void PathTraceRays()
             payload.primitiveIndex = ~0U;
             payload.geometryIndex = ~0U;
             payload.barycentrics = 0;
-            
+
             float3 hitPos = 0;
-            
+
             if (bounce == 0) // Primary ray use GBuffer surface attributes
             {
                 payload.hitDistance = ray.TMax;
@@ -274,14 +236,14 @@ void PathTraceRays()
                 payload.geometryIndex = ~0U;
                 payload.barycentrics = 0;
 
-                s = GetSurfaceData(pixel);
+                s = GetGBufferSurface(pixel);
 
                 // == GBufferCameraData::offsetedWorldPos (s.normal is the same gbuffer normal as cd.worldNorm)
                 float viewDist = ray.TMax;
                 hitPos = ray.Origin + ray.Direction * viewDist - ray.Direction * 0.002 * viewDist + s.normal * 0.002 * viewDist;
                 ray.TMax = TRACING_DISTANCE;
-                
-                primaryRoughtness = s.roughness;
+
+                primaryRoughtness = s.specular_roughness;
             }
             else
             {
@@ -292,7 +254,7 @@ void PathTraceRays()
 #endif // DISABLE_BACK_FACE_CULLING
                 //rayFlags &= (~RAY_FLAG_FORCE_OPAQUE);
                 //rayFlags &= (~RAY_FLAG_FORCE_NON_OPAQUE);
-                
+
 #if USE_SER
                 dx::HitObject hit = dx::HitObject::TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
                 dx::MaybeReorderThread(hit);
@@ -314,8 +276,8 @@ void PathTraceRays()
                 TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
 #endif
                 hitPos = ray.Origin + ray.Direction * payload.hitDistance;
-                
-                s = GetRTSurfaceData(payload.instanceID, payload.primitiveIndex, payload.geometryIndex, payload.barycentrics);
+
+                s = GetRTSurface(payload.instanceID, payload.primitiveIndex, payload.barycentrics);
             }
 
 #if SHARC_UPDATE
@@ -324,14 +286,14 @@ void PathTraceRays()
             sampleRadiance = float3(0.0f, 0.0f, 0.0f);
             throughput = float3(1.0f, 1.0f, 1.0f);
 #endif // SHARC_UPDATE
-            
+
             if(bounce == 1)
             {
                 restirDirection = ray.Direction;
                 restirHitNormal = s.normal;
                 restirHitDistance = length(hitPos - ray.Origin);
             }
-            
+
             hitDistance = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE * 100;
 
             // Distance from the primary surface to the first indirect hit -> DLSS-RR guide.
@@ -355,28 +317,27 @@ void PathTraceRays()
             if (!payload.Hit())
             {
                 float3 skyValue = Sky(ray.Direction);
-                
+
                 SharcUpdateMiss(sharcParameters, sharcState, skyValue);
 
                 sampleRadiance += skyValue * throughput;
-                
+
                 hitPos = ray.Origin + ray.Direction * TRACING_DISTANCE * 100;
-                
+
                 break;
             }
 
-            // Flip normals towards the incident ray direction (needed for backfacing triangles)
             float3 viewVector = -ray.Direction;
-
-            // Flip the triangle normal, based on positional data, NOT the provided vertex normal
-            float3 geometryNormal = s.objectNormal;
-            if (dot(geometryNormal, viewVector) < 0.0f)
-                geometryNormal = -geometryNormal;
-
-            // Flip the shading normal, based on texture
-            float3 shadingNormal = s.normal;
-            if (dot(geometryNormal, shadingNormal) < 0.0f)
-                shadingNormal = -shadingNormal;
+            if (!rtParameters.enableTransmission)
+                s.transmission_weight = 0.0f;
+#if SHARC_UPDATE
+            // the cache stores diffuse-ish radiance: no sharp lobes feeding it
+            s.specular_roughness = max(rtParameters.SHARCRoughnessThreshold, s.specular_roughness);
+            s.coat_roughness = max(rtParameters.SHARCRoughnessThreshold, s.coat_roughness);
+#endif // SHARC_UPDATE
+            // the closure turns the normals toward the viewer (back faces, normal maps)
+            OpenPBRClosure closure = OpenPBRPrepare(s, viewVector);
+            float3 geometryNormal = closure.Ng;
 
 
             // Construct SharcHitData structure needed for creating a query point at this hit location
@@ -384,24 +345,19 @@ void PathTraceRays()
             sharcHitData.positionWorld = hitPos;
             sharcHitData.normalWorld = geometryNormal;
 #if SHARC_MATERIAL_DEMODULATION
-            sharcHitData.materialDemodulation = float3(1.0f, 1.0f, 1.0f);
-            if (g_Global.sharcMaterialDemodulation)
             {
-                float3 specularFAvg = s.specularF0 + (1.0f - s.specularF0) * 0.047619; // 1/21
-                sharcHitData.materialDemodulation = max(s.diffuseAlbedo, 0.05f) + max(s.specularF0, 0.02f) * luminance(specularFAvg);
+                float3 diffuseAlbedo, specularAlbedo;
+                OpenPBRGuides(closure, diffuseAlbedo, specularAlbedo);
+                sharcHitData.materialDemodulation = max(diffuseAlbedo, 0.05f) + max(specularAlbedo, 0.02f);
             }
 #endif // SHARC_MATERIAL_DEMODULATION
 #if SHARC_SEPARATE_EMISSIVE
-            sharcHitData.emissive = s.emissiveColor;
+            sharcHitData.emissive = closure.emission;
 #endif // SHARC_SEPARATE_EMISSIVE
-
-#if SHARC_UPDATE
-            s.roughness = max(rtParameters.SHARCRoughnessThreshold, s.roughness);
-#endif // SHARC_UPDATE
 
 //#if SHARC_QUERY
 #ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
-            
+
             //if (bounce > BOUNCES_MIN)
             {
                 uint gridLevel = HashGridGetLevel(hitPos, sharcParameters.gridParameters);
@@ -436,10 +392,10 @@ void PathTraceRays()
 #endif // SHARC_ENABLE_DEBUG
             }
 #endif // SHARC_QUERY
-            
+
             if (rtParameters.enableLighting)
             {
-                // Evaluate direct light (next event estimation), start by sampling one light 
+                // Evaluate direct light (next event estimation), start by sampling one light
                 HLSL::Light light;
                 float lightWeight;
 
@@ -466,8 +422,9 @@ void PathTraceRays()
                         // Directional lights are defined at the top of the atmosphere (as the sky is)
                         if (light.type == HLSL::LightType::Directional && viewContext.atmosphere.transmittanceLUT != HLSL::invalidUINT)
                             lightContribution *= SampleTransmittance(viewContext.atmosphere, AtmospherePosition(viewContext.atmosphere, hitPos), vectorToLight);
-                        lightContribution *= evalCombinedBRDF(shadingNormal, vectorToLight, viewVector, s);
-                        
+                        float bsdfPdf;
+                        lightContribution *= OpenPBREval(closure, vectorToLight, bsdfPdf);
+
 #ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
                         if (bounce == 0)
                             accumulatedSampleData.radiance += lightContribution; // direct light (UpdateSampleData is a plain +=)
@@ -486,7 +443,7 @@ void PathTraceRays()
             }
 
 #if !(SHARC_UPDATE && SHARC_SEPARATE_EMISSIVE)
-            sampleRadiance += s.emissiveColor * throughput;
+            sampleRadiance += closure.emission * throughput;
 #endif
 
             if (!SharcUpdateHit(sharcParameters, sharcState, sharcHitData, sampleRadiance, RNG(rngState)))
@@ -503,86 +460,42 @@ void PathTraceRays()
                     throughput /= rrProbability;
             }
 
-            // Sample BRDF to generate the next ray
-            // First, figure out whether to sample diffuse or specular BRDF
-            int brdfType = DIFFUSE_TYPE;
+            // Sample the BSDF for the next ray
+            float3 bsdfWeight;
+            float bsdfPdf;
+            uint bsdfFlags;
+            float lobeRoughness;
+            if (!OpenPBRSample(closure, float3(RNG(rngState), RNG(rngState), RNG(rngState)), ray.Direction, bsdfWeight, bsdfPdf, bsdfFlags, lobeRoughness))
+                break; // the sample was absorbed
 
-            float specularBrdfProbability = GetSpecularBrdfProbability(s, viewVector, shadingNormal);
-            if (RNG(rngState) < specularBrdfProbability)
-            {
-                brdfType = SPECULAR_TYPE;
-                throughput /= specularBrdfProbability;
-            }
-            else if (rtParameters.enableTransmission)
-            {
-                float transmissiveProbability = (1.0f - specularBrdfProbability) * s.transmission;
-
-                if (RNG(rngState) < s.transmission)
-                {
-                    brdfType = TRANSMISSIVE_TYPE;
-                    throughput /= transmissiveProbability;
-                }
-                else
-                {
-                    brdfType = DIFFUSE_TYPE;
-                    throughput /= (1.0f - specularBrdfProbability - transmissiveProbability);
-                }
-            }
-            else
-            {
-                brdfType = DIFFUSE_TYPE;
-                throughput /= (1.0f - specularBrdfProbability);
-            }
+            bool transition = (bsdfFlags & OpenPBRSampleTransmission) != 0;
+            // a reflection the shading normal sent under the triangle: lost
+            if (!transition && dot(geometryNormal, ray.Direction) <= 0.0f)
+                break;
 
             // The lobe picked off the primary surface decides whether the bounce-1 hit distance
             // recorded above counts as a specular hit distance for DLSS-RR.
             if (bounce == 0)
-                isDiffusePath = (brdfType != SPECULAR_TYPE);
+                isDiffusePath = (bsdfFlags & OpenPBRSampleGlossy) == 0;
 
 //#if SHARC_QUERY
 #ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
-            materialRoughnessPrev += brdfType == DIFFUSE_TYPE ? 1.0f : s.roughness;
+            materialRoughnessPrev += lobeRoughness;
 #endif // SHARC_QUERY
 
-            // Run importance sampling of selected BRDF to generate reflecting ray direction
-            float3 brdfWeight = float3(0.0f, 0.0f, 0.0f);
-            float brdfPdf = 0.0f;
-            float refractiveIndex = 1.0f; // ior //1.1f;
-
-            // Generates a new ray direction
-            float2 rand2 = float2(RNG(rngState), RNG(rngState));
-            if (!evalIndirectCombinedBRDF(rand2, shadingNormal, geometryNormal, viewVector, s, brdfType, refractiveIndex, ray.Direction, brdfWeight, brdfPdf))
-            {
-                //accumulatedSampleData.radiance = float3(10, 0, 0);
-                break; // Ray was eaten by the surface :(
-            }
-
-            // Refraction requires the ray offset to go in the opposite direction
-            bool transition = dot(geometryNormal, ray.Direction) <= 0.0f;
+            // Transmission requires the ray offset to go in the opposite direction
             ray.Origin = OffsetRay(hitPos, transition ? -geometryNormal : geometryNormal);
-
-            // If we are internal, assume we will be leaving the object on a transition and air has an ior of ~1.0
-            if (internalRay)
-            {
-                refractiveIndex = 1.0f / refractiveIndex;
-
-                //if (g_Global.enableAbsorbtion)
-                //    throughput *= exp(-0.5f * payload.hitDistance); // Beers law of attenuation
-            }
-
-            if (transition)
+            // inside a closed medium the back faces are the ones to hit
+            if (bsdfFlags & OpenPBRSampleCrossesMedium)
                 internalRay = !internalRay;
-            
-            throughput *= s.occlusion;
 
-            // Account for surface properties using the BRDF "weight"
-            throughput *= brdfWeight;
+            throughput *= bsdfWeight;
 
             SharcSetThroughput(sharcState, throughput);
             if (!isUpdatePass && luminance(throughput) < rtParameters.throughputThreshold * 0.00001f)
                 break;
         }
-        
+
         if (!isUpdatePass)
         {
             RESTIRRay indirectRay;
@@ -614,9 +527,9 @@ void PathTraceRays()
     // Write radiance to output buffer
     // No intensity scale: SHARCRadianceScale is SHARC's fixed-point factor (SharcCommon.h), not an output gain
     float4 color = ResolveSampleData(accumulatedSampleData, rtParameters.SHARCSamplesPerPixel, 1.0f);
-    
-    
-    
+
+
+
     if (editorContext.debugFlags & HLSL::EditorDebugGIBounces)// Bounce Heatmap
         color = float4(BounceHeatmap(debugBounce), 1);
     if (editorContext.debugFlags & (HLSL::EditorDebugGIAlbedo | HLSL::EditorDebugGINormals))
@@ -627,40 +540,37 @@ void PathTraceRays()
         ray.Direction = cd.viewDir;
         ray.TMin = 0.01f;
         ray.TMax = TRACING_DISTANCE;
-        
+
         RayPayload payload;
         payload.hitDistance = -1.0f;
         payload.instanceID = ~0U;
         payload.primitiveIndex = ~0U;
         payload.geometryIndex = ~0U;
         payload.barycentrics = 0;
-        
+
         uint rayFlags = (!rtParameters.enableBackFaceCull) ? RAY_FLAG_NONE : RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
 
 #if DISABLE_BACK_FACE_CULLING
     rayFlags &= (~RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
 #endif // DISABLE_BACK_FACE_CULLING
     //rayFlags &= (~RAY_FLAG_FORCE_OPAQUE);
-                
+
         TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
-                
-        SurfaceData s = GetRTSurfaceData(payload.instanceID, payload.primitiveIndex, payload.geometryIndex, payload.barycentrics);
-        
-        //s = GetSurfaceData(pixel);
-        
-        float2 rand2 = float2(RNG(rngState), RNG(rngState));
-        float brdfPdf;
-        float3 brdfWeight;
-        float3 sampleDir;
-        evalIndirectCombinedBRDF(rand2, s.normal, s.objectNormal, -cd.viewDir, s, DIFFUSE_TYPE, 1, sampleDir, brdfWeight, brdfPdf);
-        
+
+        OpenPBRSurface s = GetRTSurface(payload.instanceID, payload.primitiveIndex, payload.barycentrics);
+        OpenPBRClosure closure = OpenPBRPrepare(s, -cd.viewDir);
+
         if (editorContext.debugFlags & HLSL::EditorDebugGIAlbedo)
-            color = float4(s.albedo.xyz, 1);
+        {
+            float3 diffuseAlbedo, specularAlbedo;
+            OpenPBRGuides(closure, diffuseAlbedo, specularAlbedo);
+            color = float4(diffuseAlbedo + specularAlbedo, 1);
+        }
         if (editorContext.debugFlags & HLSL::EditorDebugGINormals)
-            color = float4(sampleDir * 0.5 + 0.5, 1);
+            color = float4(closure.N * 0.5 + 0.5, 1);
     }
 
-    
+
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
     RWTexture2D<float> specularHitDistance = ResourceDescriptorHeap[rtParameters.specularHitDistanceIndex];
     lighted[pixel] = color;
@@ -670,29 +580,22 @@ void PathTraceRays()
 
     // No sample picked the specular lobe off the primary surface: trace one ray along a
     // specular sample just for the guide. Dielectrics pick that lobe ~10% of the time
-    // (GetSpecularBrdfProbability clamps at 0.1), so on most frames the guide used to carry a
+    // (in proportion to their reflected energy), so on most frames the guide used to carry a
     // random cosine-lobe distance instead, RR reprojected the reflection history to a
     // different virtual point every frame, rejected it and blurred reflections under motion.
     if (specularHitTCount == 0)
     {
         GBufferCameraData cd = GetGBufferCameraData(pixel);
-        SurfaceData s = GetSurfaceData(pixel);
-        if (cd.reverseZ > 0.0 && s.roughness <= SPECULAR_HITT_TRACE_ROUGHNESS_MAX)
+        OpenPBRSurface s = GetGBufferSurface(pixel);
+        if (cd.reverseZ > 0.0 && s.specular_roughness <= SPECULAR_HITT_TRACE_ROUGHNESS_MAX)
         {
-            // same normal flips and origin as bounce 0 of the path loop
-            float3 viewVector = -cd.viewDir;
-            float3 geometryNormal = s.objectNormal;
-            if (dot(geometryNormal, viewVector) < 0.0f)
-                geometryNormal = -geometryNormal;
-            float3 shadingNormal = s.normal;
-            if (dot(geometryNormal, shadingNormal) < 0.0f)
-                shadingNormal = -shadingNormal;
+            // same normals and origin as bounce 0 of the path loop
+            OpenPBRClosure closure = OpenPBRPrepare(s, -cd.viewDir);
+            float3 geometryNormal = closure.Ng;
 
             RayDesc ray;
-            float3 brdfWeight;
-            float brdfPdf;
             float2 rand2 = float2(RNG(rngState), RNG(rngState));
-            if (evalIndirectCombinedBRDF(rand2, shadingNormal, geometryNormal, viewVector, s, SPECULAR_TYPE, 1.0f, ray.Direction, brdfWeight, brdfPdf))
+            if (OpenPBRSampleReflectionDirection(closure, rand2, ray.Direction) && dot(geometryNormal, ray.Direction) > 0.0f)
             {
                 ray.Origin = OffsetRay(cd.offsetedWorldPos, geometryNormal);
                 ray.TMin = 0.01f;
@@ -729,7 +632,7 @@ void PathTraceRays()
                           : (anyHitTCount > 0 ? anyHitTSum / anyHitTCount : 0.0f);
     specularHitDistance[pixel] = min(outSpecularHitT, SPECULAR_HITT_MAX);
 
-    
+
     /*
     // Debug output calculation
     if (editorContext.GIAlbedo)

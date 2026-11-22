@@ -1896,11 +1896,14 @@ public:
             if (newMat.specularIor < 1.0f) newMat.specularIor = 1.5f;                // FBX writes 0/1 for "unset"
             m->Get(AI_MATKEY_SPECULAR_FACTOR, newMat.specularWeight);                 // KHR_materials_specular
 
-            // coat (KHR_materials_clearcoat: its IOR is fixed at 1.5, the coat is untinted)
+            // coat (KHR_materials_clearcoat: its IOR is fixed at 1.5, the coat is untinted). glTF's
+            // layering has no darkening of the base by light trapped under the coat, and neither has
+            // Blender's (5.4 Principled = OpenPBR, coat_darkening left out): match the authoring side.
             m->Get(AI_MATKEY_CLEARCOAT_FACTOR, newMat.coatWeight);
             m->Get(AI_MATKEY_CLEARCOAT_ROUGHNESS_FACTOR, newMat.coatRoughness);
             if (newMat.coatWeight > 0.0f)
                 newMat.coatIor = 1.5f;
+            newMat.coatDarkening = 0.0f;
 
             // fuzz (KHR_materials_sheen: the sheen colour carries the weight)
             aiColor4D sheenColor(0, 0, 0, 1);
@@ -1916,10 +1919,12 @@ public:
             }
 
             // transmission (KHR_materials_transmission + KHR_materials_volume). No volume
-            // thickness means an infinitely thin surface.
+            // thickness means an infinitely thin surface. glTF (and Blender) tint the transmitted
+            // light by the base colour, OpenPBR by transmission_color.
             m->Get(AI_MATKEY_TRANSMISSION_FACTOR, newMat.transmissionWeight);
             if (newMat.transmissionWeight > 0.0f)
             {
+                newMat.transmissionColor = newMat.baseColor;
                 float thickness = 0.0f;
                 m->Get(AI_MATKEY_VOLUME_THICKNESS_FACTOR, thickness);
                 newMat.geometryThinWalled = thickness <= 0.0f;
@@ -1928,7 +1933,7 @@ public:
                 if (m->Get(AI_MATKEY_VOLUME_ATTENUATION_DISTANCE, attenuationDistance) == AI_SUCCESS && attenuationDistance > 0.0f && attenuationDistance < 1e30f
                     && m->Get(AI_MATKEY_VOLUME_ATTENUATION_COLOR, attenuationColor) == AI_SUCCESS)
                 {
-                    newMat.transmissionColor = float3(attenuationColor.r, attenuationColor.g, attenuationColor.b);
+                    newMat.transmissionColor = newMat.baseColor * float3(attenuationColor.r, attenuationColor.g, attenuationColor.b);
                     newMat.transmissionDepth = attenuationDistance;
                 }
             }

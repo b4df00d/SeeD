@@ -30,17 +30,19 @@ float3 OverdrawColor(float t)
 void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
     if (dtid.x > viewContext.renderResolution.x || dtid.y > viewContext.renderResolution.y) return;
-    
+
     RWTexture2D<float4> lighted = ResourceDescriptorHeap[rtParameters.lightedIndex];
-    
+
     GBufferCameraData cd = GetGBufferCameraData(dtid.xy);
-    
-    SurfaceData s = GetSurfaceData(cd.pixel.xy);
-        
+
+    OpenPBRSurface s = GetGBufferSurface(cd.pixel.xy);
+    Texture2D<float4> albedoGBuffer = ResourceDescriptorHeap[viewContext.albedoIndex];
+    float4 albedo = albedoGBuffer[cd.pixel.xy];
+
     if ((editorContext.debugFlags & (HLSL::EditorDebugAlbedo | HLSL::EditorDebugClusters | HLSL::EditorDebugTriangles)) != 0)
     {
         // clusters/triangles wrote their debug colors into the albedo gbuffer: show it unlit
-        lighted[dtid.xy] = s.albedo;
+        lighted[dtid.xy] = albedo;
     }
     else if (editorContext.debugFlags & HLSL::EditorDebugNormals)
     {
@@ -88,7 +90,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
                 }
             }
         }
-        lighted[dtid.xy] = float4(lerp(s.albedo.rgb * 0.2f, color, 0.8f), 1);
+        lighted[dtid.xy] = float4(lerp(albedo.rgb * 0.2f, color, 0.8f), 1);
     }
     else if (editorContext.debugFlags & HLSL::EditorDebugLighting)
     {
@@ -107,7 +109,7 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         float3 probePos = cd.offsetedWorldPos;
         float3 color = HashGridDebugColoredHash(probePos, cd.worldNorm, gridParameters);
         //lighted[dtid.xy] = float4(color, 1);
-            
+
         // Initialize SHARC parameters
         SharcParameters sharcParameters;
         {
@@ -133,17 +135,16 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
         sharcHitData.positionWorld = probePos;
         sharcHitData.normalWorld = cd.worldNorm;
 #if SHARC_MATERIAL_DEMODULATION
-        sharcHitData.materialDemodulation = float3(1.0f, 1.0f, 1.0f);
-        if (g_Global.sharcMaterialDemodulation)
         {
-            float3 specularFAvg = s.specularF0 + (1.0f - s.specularF0) * 0.047619; // 1/21
-            sharcHitData.materialDemodulation = max(s.diffuseAlbedo, 0.05f) + max(s.specularF0, 0.02f) * luminance(specularFAvg);
+            float3 diffuseAlbedo, specularAlbedo;
+            OpenPBRGuides(OpenPBRPrepare(s, -cd.viewDir), diffuseAlbedo, specularAlbedo);
+            sharcHitData.materialDemodulation = max(diffuseAlbedo, 0.05f) + max(specularAlbedo, 0.02f);
         }
 #endif // SHARC_MATERIAL_DEMODULATION
 #if SHARC_SEPARATE_EMISSIVE
-        sharcHitData.emissive = s.emissiveColor;
+        sharcHitData.emissive = 0; // the GBuffer keeps no emission
 #endif // SHARC_SEPARATE_EMISSIVE
-            
+
         float3 sharcRadiance;
         if (SharcGetCachedRadiance(sharcParameters, sharcHitData, sharcRadiance, false))
         {
@@ -155,23 +156,23 @@ void Lighting(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, u
             lighted[dtid.xy] = float4(0, 0, 0, 1);
         }
     }
-   
+
     if (editorContext.debugFlags & HLSL::EditorDebugBoundingVolumes) // daw boundingbox
     {
         int2 debugPixel = viewContext.mousePixel.xy / float2(viewContext.displayResolution.xy) * float2(viewContext.renderResolution.xy);
         bool inRange = abs(length(debugPixel - int2(dtid.xy))) <= 0;
         if (inRange)
         {
-            
+
             Texture2D<uint> instanceID = ResourceDescriptorHeap[viewContext.instanceIDIndex];
             uint sampleInstanceID = instanceID[debugPixel];
-    
+
             StructuredBuffer<HLSL:: Instance > instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
             HLSL::Instance instance = instances[sampleInstanceID];
-        
+
             StructuredBuffer<HLSL:: Mesh > meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
             HLSL::Mesh mesh = meshes[instance.meshIndex];
-        
+
             float4x4 worldMatrix = instance.unpack(instance.current);
             float4 meshBS = mesh.GetBoundingSphere();
             float3 center = mul(worldMatrix, float4(meshBS.xyz, 1)).xyz;

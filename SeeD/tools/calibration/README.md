@@ -37,6 +37,20 @@ The project holds two scenes, each with a `direct` and a `full` entry:
 - `cornell`: a room-sized Cornell box lit only by a 1600 lm bulb (2.34 W),
   black world. `full` is dominated by interreflection, at indoor light levels
   about 1000x darker than the falloff scene.
+- `materials`: the falloff lighting with one Standard Shader Ball per OpenPBR
+  lobe (glossy, rough and black dielectrics, two metals, coat, fuzz, smooth and
+  rough glass), carried through glTF's KHR material extensions. Its reference
+  needs **Blender 5.4+**, where the Principled BSDF is OpenPBR. Expected to
+  fail on coat, fuzz and glass until the GBuffer stops dropping them at the
+  primary hit (OpenPBR rework step 3). The `Neutral_*` cores seen through the
+  balls' openings are small, edge-dominated masks: read them with the
+  compare image, not the table.
+
+  Geometry: the [Standard Shader Ball](https://github.com/usd-wg/assets/tree/main/full_assets/StandardShaderBall)
+  (CC BY 4.0, usd-wg/assets, after Thomas Anagnostou's Simball), not in git.
+  `make_materials_scene.py` reads it from `calibration\Source\StandardShaderBall\`:
+  `LICENCE`, `layers\shaderball.usda` and `material_surface_geo\triangulated.usda`
+  from that folder of the repository.
 
 Each `full` entry also writes `out\<name>_display.exr` (SeeD's tonemapped
 frame), compared against `reference\<scene>\full_agx.exr` (Blender's AgX view).
@@ -52,6 +66,7 @@ workflow (there is no freshness tracking):
 ```powershell
 blender -b calibration\falloff.blend -P SeeD\tools\calibration\render_reference.py -- calibration
 blender -b calibration\cornell.blend -P SeeD\tools\calibration\render_reference.py -- calibration
+<blender 5.4> -b calibration\materials.blend -P SeeD\tools\calibration\render_reference.py -- calibration
 ```
 
 Each writes `reference\<scene>\{direct,full,full_agx,ids}.exr` and
@@ -63,6 +78,7 @@ To rebuild a scene from scratch (overwrites its `.blend`):
 ```powershell
 blender -b -P SeeD\tools\calibration\make_falloff_scene.py
 blender -b -P SeeD\tools\calibration\make_cornell_scene.py
+<blender 5.4> -b -P SeeD\tools\calibration\make_materials_scene.py
 ```
 
 ## Reading the output

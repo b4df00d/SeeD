@@ -32,7 +32,6 @@ cbuffer CustomAS : register(b4)
 #define BOUNCES_MIN                     1
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
 #define SHADOW_RAY_IN_RIS               0 // Enable this to cast shadow rays for each candidate during resampling. This is expensive but increases quality
-#define ENABLE_SPECULAR_LOBE            0 // Enable to use the specular lobe for splitting between diffuse and specular BRDFs
 
 #include "raytracingCommon.hlsl"
 
@@ -382,11 +381,11 @@ void RayGen()
             inScattered += Sky(dir);
         else
         {
-            SurfaceData s = GetRTSurfaceData(payload.instanceID, payload.primitiveIndex, payload.geometryIndex, payload.barycentrics);
+            OpenPBRSurface s = GetRTSurface(payload.instanceID, payload.primitiveIndex, payload.barycentrics);
             SharcHitData sharcHitData;
             sharcHitData.positionWorld = worldPos + dir * payload.hitDistance;
-            sharcHitData.normalWorld = dot(s.objectNormal, dir) > 0.0f ? -s.objectNormal : s.objectNormal; // same key as raytracing2.hlsl
-            sharcHitData.emissive = s.emissiveColor;
+            sharcHitData.normalWorld = dot(s.geometricNormal, dir) > 0.0f ? -s.geometricNormal : s.geometricNormal; // same key as raytracing2.hlsl
+            sharcHitData.emissive = OpenPBRPrepare(s, -dir).emission;
             float3 sharcRadiance;
             if (SharcGetCachedRadiance(GetSharcParameters(), sharcHitData, sharcRadiance, false))
                 inScattered += sharcRadiance;
@@ -428,23 +427,7 @@ void ClosestHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib :
 [shader("anyhit")]
 void AnyHit(inout RayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
 {
-    SurfaceData s = GetRTSurfaceData(InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.uv);
-
-    switch (s.shadingDomain)
-    {
-        case ShadingDomain::AlphaTested:
-        case ShadingDomain::TransmissiveAlphaTested:
-        {
-            if (s.albedo.a < 0.5)
-                IgnoreHit();
-
-            break;
-        }
-
-        default:
-            break;
-    }
-    // AcceptHit but continue looking for the closest hit
+    AlphaTestAnyHit(attrib);
 }
 
 // Load-bearing: shadow rays trace with RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, so reaching
@@ -464,28 +447,7 @@ void ClosestHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attribu
 [shader("anyhit")]
 void AnyHitShadow(inout ShadowRayPayload payload : SV_RayPayload, in Attributes attrib : SV_IntersectionAttributes)
 {
-    SurfaceData s = GetRTSurfaceData(InstanceID(), PrimitiveIndex(), GeometryIndex(), attrib.uv);
-
-    switch (s.shadingDomain)
-    {
-        case ShadingDomain::AlphaTested:
-        case ShadingDomain::TransmissiveAlphaTested:
-        {
-            if (s.albedo.a < 0.5)
-                IgnoreHit();
-
-            break;
-        }
-
-        default:
-            // Modulate the visiblity by the material's transmission
-            payload.visibility *= (1.0f - s.albedo.a) * s.albedo.rgb;
-            if (dot(payload.visibility, 0.333f) > 0.001f)
-                IgnoreHit();
-
-            break;
-    }
-    AcceptHitAndEndSearch();
+    AlphaTestAnyHitShadow(attrib);
 }
 
 #ifndef RAY_DISPATCH
@@ -559,20 +521,20 @@ void AtmosphericScatteringAccumulation(uint3 gtid : SV_GroupThreadID, uint3 dtid
 void AtmosphericScatteringReprojection(uint3 gtid : SV_GroupThreadID, uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
 {
     uint seed = initRand(dtid.xy * dtid.z);
-    
+
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[viewContext.cameraIndex];
-    
+
     StructuredBuffer<HLSL::Froxels> froxels = ResourceDescriptorHeap[asParameters.froxelsIndex];
     HLSL::Froxels currentFroxel = froxels[asParameters.currentFroxelIndex];
     HLSL::Froxels historyFroxel = froxels[asParameters.historyFroxelIndex];
-    
+
     float3 currentWorldPos = FroxelToWorld(dtid.xyz, currentFroxel.resolution.xyz, asParameters.specialNear, camera);
     float3 historyFroxelPos = WorldTohistoryFroxelUVW(currentWorldPos, historyFroxel.resolution.xyz, asParameters.specialNear, camera);
-    
+
     Texture3D<float4> historyFroxelData = ResourceDescriptorHeap[historyFroxel.srvIndex];
     float4 previousData = historyFroxelData.Sample(samplerLinearClamp, historyFroxelPos);
-    
+
     RWTexture3D<float4> froxelData = ResourceDescriptorHeap[currentFroxel.index];
     if (viewContext.frameNumber > 10)
     {

@@ -74,9 +74,9 @@ PS_OUTPUT PixelgBufferTerrain(MSVert inVerts, MSPrim inPrim)
     HLSL::Material material = materials[instance.materialIndex];
 
     float3 binormal = cross(inVerts.normal, inVerts.tangent.xyz) * inVerts.tangent.w;
-    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent.xyz, binormal);
+    OpenPBRSurface s = ResolveOpenPBR(material, inVerts.uv, inVerts.normal, inVerts.tangent.xyz, binormal);
 
-    o.albedo = s.albedo;
+    o.albedo = float4(s.base_color * s.base_weight, s.geometry_opacity);
 
     if (editorContext.debugFlags & HLSL::EditorDebugClusters)
     {
@@ -99,9 +99,9 @@ PS_OUTPUT PixelgBufferTerrain(MSVert inVerts, MSPrim inPrim)
     }
 
     o.specularAlbedo = float4(GBufferSpecularAlbedo(s, inVerts.pos.xy), 1);
-    o.metalness = s.metalness;
+    o.metalness = s.base_metalness;
     // normal.a carries roughness (DLSS-RR packed mode; lighting.hlsl preserves it on its rewrite)
-    o.normal = float4(StoreNormal(normalize(s.normal)), s.roughness);
+    o.normal = float4(StoreNormal(s.normal), s.specular_roughness);
 
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
 

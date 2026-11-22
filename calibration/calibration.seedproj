@@ -18,3 +18,5 @@ capture falloff_direct Source\falloff\falloff.gltf out\falloff_direct.exr 1 120
 capture falloff_full Source\falloff\falloff.gltf out\falloff_full.exr 0 120
 capture cornell_direct Source\cornell\cornell.gltf out\cornell_direct.exr 1 120
 capture cornell_full Source\cornell\cornell.gltf out\cornell_full.exr 0 120
+capture materials_direct Source\materials\materials.gltf out\materials_direct.exr 1 120
+capture materials_full Source\materials\materials.gltf out\materials_full.exr 0 120

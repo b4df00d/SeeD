@@ -70,21 +70,21 @@ void MeshMain(in uint3 groupId : SV_GroupID, in uint3 groupThreadId : SV_GroupTh
 PS_OUTPUT PixelForward(MSVert inVerts, MSPrim inPrim)
 {
     PS_OUTPUT o;
-    
+
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[inPrim.instanceIndex];
-    
+
     StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
     HLSL::Material material = materials[instance.materialIndex];
 
     float3 binormal = cross(inVerts.normal, inVerts.tangent.xyz) * inVerts.tangent.w;
-    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent.xyz, binormal);
+    OpenPBRSurface s = ResolveOpenPBR(material, inVerts.uv, inVerts.normal, inVerts.tangent.xyz, binormal);
 
-    o.albedo = s.albedo;
+    o.albedo = float4(s.base_color * s.base_weight, s.geometry_opacity);
     o.specularAlbedo = float4(GBufferSpecularAlbedo(s, inVerts.pos.xy), 1);
-    o.metalness = s.metalness;
+    o.metalness = s.base_metalness;
     // normal.a carries roughness (DLSS-RR packed mode; lighting.hlsl preserves it on its rewrite)
-    o.normal = float4(StoreNormal(normalize(s.normal)), s.roughness);
+    o.normal = float4(StoreNormal(s.normal), s.specular_roughness);
 
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
 
@@ -108,14 +108,14 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts, MSPrim inPrim)
 
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[inPrim.instanceIndex];
-    
+
     StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
     HLSL::Material material = materials[instance.materialIndex];
 
     float3 binormal = cross(inVerts.normal, inVerts.tangent.xyz) * inVerts.tangent.w;
-    SurfaceData s = GetSurfaceData(material, inVerts.uv, inVerts.normal, inVerts.tangent.xyz, binormal);
+    OpenPBRSurface s = ResolveOpenPBR(material, inVerts.uv, inVerts.normal, inVerts.tangent.xyz, binormal);
 
-    o.albedo = s.albedo;
+    o.albedo = float4(s.base_color * s.base_weight, s.geometry_opacity);
 
     if (editorContext.debugFlags & HLSL::EditorDebugClusters)
     {
@@ -142,10 +142,10 @@ PS_OUTPUT PixelgBuffer(MSVert inVerts, MSPrim inPrim)
     }
 
     o.specularAlbedo = float4(GBufferSpecularAlbedo(s, inVerts.pos.xy), 1);
-    o.metalness = s.metalness;
+    o.metalness = s.base_metalness;
     // normal.a carries roughness (DLSS-RR packed mode; lighting.hlsl preserves it on its rewrite)
-    o.normal = float4(StoreNormal(normalize(s.normal)), s.roughness);
-    
+    o.normal = float4(StoreNormal(s.normal), s.specular_roughness);
+
     o.motion = CalcVelocity(inVerts.currentPos, inVerts.previousPos, viewContext.renderResolution.xy);
 
     o.instanceID = inPrim.instanceIndex; // objectID is derived from this in selection.hlsl
@@ -169,50 +169,50 @@ groupshared uint payloadIndex;
 void AmplificationMain(uint gtid : SV_GroupThreadID, uint dtid : SV_DispatchThreadID, uint gid : SV_GroupID)
 {
     uint instanceIndex = dtid.x;
-    
+
     StructuredBuffer<HLSL::Instance> instances = ResourceDescriptorHeap[commonResourcesIndices.instancesHeapIndex];
     HLSL::Instance instance = instances[instanceIndex];
-    
+
     StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
-    
+
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     HLSL::Camera camera = cameras[viewContext.cameraIndex];
-    
+
     uint meshletCount = min(512, mesh.meshletCount);
-    
+
     float4x4 worldMatrix = instance.unpack(instance.current);
     float4 boundingSphere = mul(worldMatrix, float4(mesh.boundingSphere.xyz, 1));
     boundingSphere.w = mesh.boundingSphere.w;
-    
+
     bool culled = FrustumCulling(camera, boundingSphere);
-    
+
     if (culled)  meshletCount = 0;
-    
-    
+
+
     payloadIndex = 0;
     uint index = 0;
     for (uint i = 0; i < meshletCount; i++)
     {
-        
+
         StructuredBuffer<HLSL::Meshlet> meshlets = ResourceDescriptorHeap[commonResourcesIndices.meshletsHeapIndex];
         HLSL::Meshlet meshlet = meshlets[mesh.meshletOffset + i];
-        
+
         boundingSphere = mul(worldMatrix, float4(meshlet.boundingSphere.xyz, 1));
         boundingSphere.w = mesh.boundingSphere.w;
-    
+
         culled = FrustumCulling(camera, boundingSphere);
-    
+
         if (!culled)
         {
             InterlockedAdd(payloadIndex, 1, index);
-            if (instanceIndex >= commonResourcesIndices.instanceCount) 
+            if (instanceIndex >= commonResourcesIndices.instanceCount)
                 instanceIndex = HLSL::invalidUINT;
             sPayload.instanceIndex[index] = instanceIndex;
             sPayload.meshletIndices[index] = mesh.meshletOffset + i;
         }
     }
-    
+
     DispatchMesh(min(256, payloadIndex), 1, 1, sPayload);
 }
 */

@@ -1196,72 +1196,6 @@ float Luminance(float3 color)
     return dot(float3(0.299, 0.587, 0.114), color);
 }
 
-enum class ShadingDomain
-{
-    Standard,
-    AlphaTested,
-    TransmissiveAlphaTested,
-};
-struct SurfaceData
-{
-    float4 albedo; //with alpha
-    float3 normal;
-    float3 objectNormal;
-    float3 tangent;
-    float3 binormal;
-    float3 emissiveColor;
-    float metalness;
-    float roughness;
-    float occlusion;
-    float specularTint;
-    float _specular;
-    float sheen;
-    float sheenTint;
-    float anisotropic;
-    float clearcoat;
-    float clearcoatGloss;
-    float subsurface;
-    float transmission;
-    ShadingDomain shadingDomain;
-};
-
-// Directional albedo of the GGX specular lobe (split-sum DFG term), verbatim from the
-// DLSS-RR Integration Guide appendix [Ray Tracing Gems, Chapter 32]. alpha = roughness^2.
-float3 EnvBRDFApprox2(float3 SpecularColor, float alpha, float NoV)
-{
-    NoV = abs(NoV);
-    float4 X;
-    X.x = 1.f;
-    X.y = NoV;
-    X.z = NoV * NoV;
-    X.w = NoV * X.z;
-    float4 Y;
-    Y.x = 1.f;
-    Y.y = alpha;
-    Y.z = alpha * alpha;
-    Y.w = alpha * Y.z;
-    float2x2 M1 = float2x2(0.99044f, -1.28514f, 1.29678f, -0.755907f);
-    float3x3 M2 = float3x3(1.f, 2.92338f, 59.4188f, 20.3225f, -27.0302f, 222.592f, 121.563f, 626.13f, 316.627f);
-    float2x2 M3 = float2x2(0.0365463f, 3.32707, 9.0632f, -9.04756);
-    float3x3 M4 = float3x3(1.f, 3.59685f, -1.36772f, 9.04401f, -16.3174f, 9.22949f, 5.56589f, 19.7886f, -20.2123f);
-    float bias = dot(mul(M1, X.xy), Y.xy) * rcp(dot(mul(M2, X.xyw), Y.xyw));
-    float scale = dot(mul(M3, X.xy), Y.xy) * rcp(dot(mul(M4, X.xzw), Y.xyw));
-    // This is a hack for specular reflectance of 0
-    bias *= saturate(SpecularColor.g * 50);
-    return mad(SpecularColor, max(0, scale), max(0, bias));
-}
-
-// DLSS-RR specularAlbedo guide: the average specular reflectance for this view direction, not
-// the F0 tint. Writing 1 for dielectrics (the old lerp(1, albedo, metalness)) told RR every
-// dielectric reflects like a white mirror, so it misattributed the diffuse signal as specular.
-float3 GBufferSpecularAlbedo(in SurfaceData s, float2 svPosition)
-{
-    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
-    float3 viewDir = FroxelViewDir(svPosition - 0.5f, viewContext.renderResolution.xy, cameras[0]); // unjittered: sub-pixel, irrelevant here
-    float3 specularF0 = lerp(0.04f, s.albedo.xyz, s.metalness); // == baseColorToSpecularF0 (raytracingCommon.hlsl)
-    return EnvBRDFApprox2(specularF0, s.roughness * s.roughness, dot(normalize(s.normal), viewDir));
-}
-
 // Exact sRGB transfer functions (IEC 61966-2-1).
 // Color textures (albedo, emissive) are stored sRGB-encoded in plain UNORM formats, so they are
 // decoded here after sampling; the post process encodes the final image for the UNORM backbuffer.
@@ -1278,77 +1212,51 @@ float3 LinearToSRGB(float3 c)
 
 #include "openpbr.hlsli"
 
-// Bridge from the OpenPBR parameters to the legacy SurfaceData the current BRDF code consumes.
-// Temporary: step 2 of the OpenPBR rework moves every consumer to the OpenPBR closure and deletes
-// SurfaceData.
-SurfaceData GetSurfaceData(HLSL::Material material, float2 uv, float3 normal, float3 tangent, float3 binormal)
-{
-    OpenPBRSurface p = ResolveOpenPBR(material, uv, normal, tangent, binormal);
-
-    SurfaceData s;
-    s.albedo = float4(p.base_color * p.base_weight, p.geometry_opacity);
-    s.shadingDomain = (p.geometry_opacity < 0.99) ? ShadingDomain::TransmissiveAlphaTested : ShadingDomain::Standard;
-    s.roughness = p.specular_roughness;
-    s.metalness = min(p.base_metalness, 0.995);
-    s.normal = p.normal;
-    s.objectNormal = p.geometricNormal;
-    s.tangent = p.tangent;
-    s.binormal = p.bitangent;
-    s.emissiveColor = p.emission;
-    s.occlusion = 1;
-    s.specularTint = 1;
-    s._specular = 1;
-    s.sheen = 0;
-    s.sheenTint = 0.5;
-    s.anisotropic = 0;
-    s.clearcoat = 0;
-    s.clearcoatGloss = 1;
-    s.subsurface = 0;
-    s.transmission = 0;
-    return s;
-}
-
-SurfaceData GetSurfaceData(uint2 pixel)
+// The surface at a GBuffer pixel. The GBuffer only stores base color + opacity, metalness, roughness
+// and the shading normal, so every other OpenPBR parameter takes the spec default: coat, fuzz,
+// transmission... are lost at the primary hit until the visibility buffer (OpenPBR rework step 3)
+// re-resolves the full material.
+OpenPBRSurface GetGBufferSurface(uint2 pixel)
 {
     Texture2D<float4> albedo = ResourceDescriptorHeap[viewContext.albedoIndex];
     Texture2D<float> metalness = ResourceDescriptorHeap[viewContext.metalnessIndex];
     Texture2D<float4> normal = ResourceDescriptorHeap[viewContext.normalIndex];
 
-    SurfaceData s;
-    s.shadingDomain = ShadingDomain::Standard;
-
     float4 packedNormal = normal[pixel]; // a = roughness (DLSS-RR packed layout)
-    s.albedo = albedo[pixel];
+    float4 baseColor = albedo[pixel];
+
+    OpenPBRSurface s = (OpenPBRSurface)0;
+    s.base_weight = 1.0f;
+    s.base_color = baseColor.rgb;
+    s.base_metalness = metalness[pixel];
+    s.specular_weight = 1.0f;
+    s.specular_color = 1.0f;
+    s.specular_roughness = packedNormal.a;
+    s.specular_ior = 1.5f;
+    s.coat_color = 1.0f;
+    s.coat_ior = 1.6f;
+    s.coat_darkening = 1.0f;
+    s.fuzz_color = 1.0f;
+    s.fuzz_roughness = 0.5f;
+    s.transmission_color = 1.0f;
+    s.subsurface_color = 0.8f;
+    s.geometry_opacity = 1.0f; // alpha-tested at raster: whatever reached the GBuffer is opaque
     s.normal = ReadNormal(packedNormal.xyz);
-    s.objectNormal = s.normal;
-    //uint seed = initRand(pixel.xy);
-    //s.normal = normalize(lerp(s.normal, getCosHemisphereSample(seed, s.normal), 0.01));
-    s.metalness = metalness[pixel];
-    s.roughness = packedNormal.a;
-    s.emissiveColor = 0;
-    s.occlusion = 1;
-    s.tangent = cross(s.normal, float3(1, 0, 0));
-    s.binormal = cross(s.normal, s.tangent);
-    s.specularTint = 1;
-    s._specular = 1;
-    s.sheen = 0;
-    s.sheenTint = 0.5;
-    s.anisotropic = 0;
-    s.clearcoat = 0;
-    s.clearcoatGloss = 1;
-    s.subsurface = 0;
-    s.transmission = 0;
-    
+    s.geometricNormal = s.normal;
     return s;
 }
 
-// disney stuff https://media.disneyanimation.com/uploads/production/publication_asset/48/asset/s2012_pbs_disney_brdf_notes_v3.pdf
-// explanation for cpp https://schuttejoe.github.io/post/disneybsdf/
-// raytraced https://www.shadertoy.com/view/cll3R4
-//https://seblagarde.wordpress.com/wp-content/uploads/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf
-// simple stuff http://filmicworlds.com/blog/optimizing-ggx-shaders-with-dotlh/
-// copy past from https://discussions.unity.com/t/disney-principled-brdf-shader/742743
-
+// DLSS-RR specular albedo guide at a rasterized pixel: the directional albedo of the reflection
+// lobes toward the camera, not the F0 tint.
+float3 GBufferSpecularAlbedo(OpenPBRSurface s, float2 svPosition)
+{
+    StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
+    float3 viewDir = FroxelViewDir(svPosition - 0.5f, viewContext.renderResolution.xy, cameras[0]); // unjittered: sub-pixel, irrelevant here
+    OpenPBRClosure c = OpenPBRPrepare(s, -viewDir);
+    float3 diffuseAlbedo, specularAlbedo;
+    OpenPBRGuides(c, diffuseAlbedo, specularAlbedo);
+    return specularAlbedo;
+}
 
 // Sky luminance along direction, from the camera's sky-view LUT (see atmosphere.hlsl). The sun disk
 // is NOT included: path tracer misses get the sun through next event estimation on the directional
@@ -1359,18 +1267,17 @@ float3 Sky(float3 direction)
     return SkyViewLuminance(viewContext.atmosphere, cameras[viewContext.cameraIndex].worldPos.xyz, direction);
 }
 
-SurfaceData GetRTSurfaceData(
-uint committedInstanceIndex,
-uint committedPrimitiveIndex,
-uint committedGeometryIndex,
-float2 bary)
+// Material, uv and (if needNormal) world vertex normal of a ray-traced triangle hit.
+struct RTHit
 {
-    /*
-    SurfaceData s = (SurfaceData)0;
-    s.albedo = float4(1, 0, 1, 1);
-    return s;
-    */
-    
+    HLSL::Material material;
+    float2 uv;
+    float3 normal;
+};
+RTHit GetRTHit(uint committedInstanceIndex, uint committedPrimitiveIndex, float2 bary, bool needNormal)
+{
+    RTHit hit;
+
     // culling.hlsl packs the low-BLAS bit into the 24-bit InstanceID: triangles must be fetched
     // from the LOD the hit BLAS was built from (LOD0 or the coarsest one).
     bool lowLod = (committedInstanceIndex & HLSL::RTInstanceLowLodBit) != 0;
@@ -1380,42 +1287,46 @@ float2 bary)
     HLSL::Instance instance = instances[instanceIndex];
 
     StructuredBuffer<HLSL::Material> materials = ResourceDescriptorHeap[commonResourcesIndices.materialsHeapIndex];
-    HLSL::Material material = materials[instance.materialIndex];
-    
+    hit.material = materials[instance.materialIndex];
+
     StructuredBuffer<HLSL::Mesh> meshes = ResourceDescriptorHeap[commonResourcesIndices.meshesHeapIndex];
     HLSL::Mesh mesh = meshes[instance.meshIndex];
-    
     StructuredBuffer<HLSL::Vertex> verticesData = ResourceDescriptorHeap[commonResourcesIndices.verticesHeapIndex];
-    
     StructuredBuffer<uint> indicesData = ResourceDescriptorHeap[commonResourcesIndices.indicesHeapIndex];
-    
+
     uint iBase = committedPrimitiveIndex * 3 + mesh.LODs[lowLod ? mesh.lodCount - 1 : mesh.rtHighLod].indexOffset;
     uint i1 = indicesData[iBase + 0] + mesh.vertexOffset;
     uint i2 = indicesData[iBase + 1] + mesh.vertexOffset;
     uint i3 = indicesData[iBase + 2] + mesh.vertexOffset;
 
-    float2 uv1 = verticesData[i1].uv;
-    float2 uv2 = verticesData[i2].uv;
-    float2 uv3 = verticesData[i3].uv;
+    float3 w = float3(1 - bary.x - bary.y, bary.x, bary.y);
+    hit.uv = w.x * verticesData[i1].uv + w.y * verticesData[i2].uv + w.z * verticesData[i3].uv;
 
-    float2 uv = ((1 - bary.x - bary.y) * uv1 + bary.x * uv2 + bary.y * uv3);
-    
-    float3 nrm1 = i_octahedral_32(verticesData[i1].normalOct, 16);
-    float3 nrm2 = i_octahedral_32(verticesData[i2].normalOct, 16);
-    float3 nrm3 = i_octahedral_32(verticesData[i3].normalOct, 16);
-
-    float3 normal = ((1 - bary.x - bary.y) * nrm1 + bary.x * nrm2 + bary.y * nrm3);
-    float4x4 worldMatrix = instance.unpack(instance.current);
-    float3 worldNormal = mul((float3x3) worldMatrix, normal);
-    worldNormal = normalize(worldNormal);
-
-    SurfaceData s = GetSurfaceData(material, uv, worldNormal, 0, 0);
-    s.objectNormal = worldNormal;
-    //s.albedo.xyz = 1;
-    
-    return s;
+    hit.normal = 0;
+    if (needNormal)
+    {
+        float3 normal = w.x * i_octahedral_32(verticesData[i1].normalOct, 16)
+                      + w.y * i_octahedral_32(verticesData[i2].normalOct, 16)
+                      + w.z * i_octahedral_32(verticesData[i3].normalOct, 16);
+        float4x4 worldMatrix = instance.unpack(instance.current);
+        hit.normal = normalize(mul((float3x3)worldMatrix, normal));
+    }
+    return hit;
 }
 
+// The surface at a ray-traced hit. No tangent frame there yet: no normal map, no anisotropy.
+OpenPBRSurface GetRTSurface(uint committedInstanceIndex, uint committedPrimitiveIndex, float2 bary)
+{
+    RTHit hit = GetRTHit(committedInstanceIndex, committedPrimitiveIndex, bary, true);
+    return ResolveOpenPBR(hit.material, hit.uv, hit.normal, 0, 0);
+}
+
+// Coverage for the alpha-test any-hit shaders: only the opacity, one texture fetch.
+float GetRTOpacity(uint committedInstanceIndex, uint committedPrimitiveIndex, float2 bary)
+{
+    RTHit hit = GetRTHit(committedInstanceIndex, committedPrimitiveIndex, bary, false);
+    return OpenPBROpacity(hit.material, hit.uv);
+}
 struct RESTIRRay
 {
     float3 Origin;
@@ -1581,301 +1492,6 @@ bool RESTIR(HLSL::RTParameters rtParameters, inout RESTIRRay restirRay, uint pre
 
     return accept;
 }
-
-float3 RESTIRLight(uint currentReservoirIndex, in GBufferCameraData cd, in SurfaceData s, out float hitDistance)
-{
-    StructuredBuffer<HLSL::GIReservoirCompressed> giReservoir = ResourceDescriptorHeap[currentReservoirIndex];   
-    HLSL::GIReservoir r = UnpackGIReservoir(giReservoir[cd.pixel.x + cd.pixel.y * viewContext.renderResolution.x]);
-    hitDistance = 0;
-    if(any(r.color > 0))
-    {
-        float3 dir = -r.dir;
-        hitDistance = r.dist;
-        float3 pos = cd.worldPos + dir * hitDistance;
-        
-        HLSL::Light light;
-        light.pos = float4(pos, 0);
-        light.dir = float4(dir, 0);
-        light.color.xyz = r.color / r.W * (r.Wsum / r.Wcount);
-        light.range = 1;
-        light.angle = 1;
-        r.color = r.color / max(0.00001, r.W / (r.Wsum / r.Wcount));
-        return r.color;
-        //return ComputeLight(light, 1, s, cd.viewDir);
-    }
-    return float3(0, 0, 0);
-}
-
-/*
-//return color + distance cosine weighted on surface normal
-RESTIRRay DirectLight(HLSL::RTParameters rtParameters, RESTIRRay restirRay, uint depth, inout uint seed)
-{
-    StructuredBuffer<HLSL::Light> lights = ResourceDescriptorHeap[commonResourcesIndices.lightsHeapIndex];
-    uint lightIndex = floor(nextRand(seed) * commonResourcesIndices.lightCount);
-    //lightIndex += viewContext.frameNumber;
-    lightIndex = lightIndex % commonResourcesIndices.lightCount;
-    HLSL::Light light = lights[lightIndex];
-    
-    float lightDist = 0;
-    float3 lightDir = -light.dir.xyz;
-    if (light.type == 0) // directional
-    {
-        light.color.xyz *= 1;
-        lightDist = 10000;
-        lightDir = -light.dir.xyz;
-        light.pos.xyz = lightDir * 10000.0;
-    }
-    else if (light.type == 1) // point
-    {
-        lightDir = light.pos.xyz - restirRay.Origin;
-        lightDist = length(lightDir);// >= 10 ? 10000 : 1;
-        light.color.xyz /= max(0.000001, pow(lightDist + 1, 2));
-        lightDir /= lightDist;
-    }
-    else if (light.type == 2) // spot
-    {
-        lightDir = light.pos.xyz - restirRay.Origin;
-        lightDist = length(lightDir);
-        light.color.xyz /= max(0.000001, pow(lightDist + 1, 2));
-        light.color.xyz *= saturate(dot(light.dir.xyz, lightDir) * 5.0 - light.angle);
-        lightDir /= lightDist;
-    }
-    lightDir = lerp(lightDir, getCosHemisphereSample(seed, lightDir), light.size);
-    
-    restirRay.Direction = lightDir;
-    
-    RayDesc ray;
-    ray.Origin = restirRay.Origin;
-    ray.Direction = normalize(restirRay.Direction);
-    ray.TMin = 0.005;
-    ray.TMax = lightDist;
-    
-    HLSL::HitInfo newPayload;
-    newPayload.color = float3(0.0, 0.0, 0.0);
-    newPayload.hitPos = 0;
-    newPayload.hitDistance = 0;
-    newPayload.type = 0; //direct / visibility / shadow
-    newPayload.depth = depth;
-    newPayload.seed = seed;
-    
-    // cant use RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH because of point/spot lights
-    // wrong ? if TMax is set properly we know that the ray will not hit after the light
-    // so we can use something other than RAY_FLAG_NONE
-    TraceRayCommon(rtParameters, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF, 0, 0, 0, ray, newPayload);
-    
-    // did we hit something ? by knowing if the hit is before or after the light
-    float visible = newPayload.hitDistance >= lightDist ? 1 : 0;
-    float3 color = (light.color.xyz * visible);
-    
-    restirRay.HitRadiance = color;
-    restirRay.HitPosition = light.pos.xyz;
-    restirRay.proba = 1.0f / commonResourcesIndices.lightCount;
-    
-    return restirRay;
-}
-
-//return color + distance cosine weighted on surface normal
-RESTIRRay IndirectLight(HLSL::RTParameters rtParameters, SurfaceData s, RESTIRRay restirRay, uint depth, inout uint seed)
-{
-    RayDesc ray;
-    ray.Origin = restirRay.Origin;
-    ray.Direction = restirRay.Direction;
-    ray.TMin = 0.005;
-    ray.TMax = 10000;
-    
-    HLSL::HitInfo newPayload;
-    newPayload.color = float3(0.0, 0.0, 0.0);
-    newPayload.hitPos = 0;
-    newPayload.hitDistance = 0;
-    newPayload.type = 1; //indirect
-    newPayload.depth = depth;
-    newPayload.seed = seed;
-        
-    TraceRayCommon(rtParameters, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, newPayload);
-    
-    float3 color = newPayload.color;
-    
-    if(depth > 0)
-    {
-        color *= saturate(dot(s.normal, restirRay.Direction)) * s.albedo.xyz;
-        //color *= saturate(dot(s.normal, restirRay.Direction));
-        //color *= lerp(dot(float3(0.299,0.587,0.114), s.albedo.xyz), s.albedo.xyz, 1);
-    }
-        
-    restirRay.HitNormal = newPayload.hitNorm;
-    restirRay.HitPosition = newPayload.hitPos;
-    restirRay.HitRadiance = color;
-    restirRay.proba = pow(lerp(1.0, 0.0, s.roughness), 1000) * 100000.0 + 1.0;
-    
-    return restirRay;
-}
-
-void TraceRayCommon(HLSL::RTParameters rtParameters,
-    uint RayFlags,
-    uint InstanceInclusionMask,
-    uint RayContributionToHitGroupIndex,
-    uint MultiplierForGeometryContributionToHitGroupIndex,
-    uint MissShaderIndex,
-    RayDesc Ray,
-    inout HLSL::HitInfo Payload)
-{
-    RaytracingAccelerationStructure AccelerationStructure = ResourceDescriptorHeap[rtParameters.BVH];
-#ifdef RAY_DISPATCH
-    TraceRay(AccelerationStructure, RayFlags, InstanceInclusionMask, RayContributionToHitGroupIndex, MultiplierForGeometryContributionToHitGroupIndex, MissShaderIndex, Ray, Payload);
-#else
-    // Instantiate ray query object.
-    // Template parameter allows driver to generate a specialized
-    // implemenation.  No specialization in this example.
-    RayQuery<RAY_FLAG_NONE> q;
-
-    // Set up a trace
-    q.TraceRayInline(AccelerationStructure, q.RayFlags(), InstanceInclusionMask, Ray);
-
-    // Storage for procedural primitive hit attributes
-    MyCustomIntersectionAttributes committedCustomAttribs;
-
-    // Proceed() is where behind-the-scenes traversal happens,
-    // including the heaviest of any driver inlined code.
-    // Returns TRUE if there's a task for the shader to perform
-    // as part of traversal
-    while(q.Proceed())
-    {
-        switch(q.CandidateType())
-        {
-            case CANDIDATE_PROCEDURAL_PRIMITIVE:
-            {
-                float tHit;
-                MyCustomIntersectionAttributes candidateAttribs;
-
-                // For procedural primitives, opacity is handled manually -
-                // if an intersection is determined to not be opaque, just don't consider it
-                // as a candidate.
-                while(MyProceduralIntersectionEnumerator(
-                    tHit,
-                    candidateAttribs,
-                    q.CandidateInstanceIndex(),
-                    q.CandidatePrimitiveIndex(),
-                    q.CandidateGeometryIndex()))
-                {
-                    if( (q.RayTMin() <= tHit) && (tHit <= q.CommittedRayT()) )
-                    {
-                        if(q.CandidateProceduralPrimitiveNonOpaque() &&
-                            !MyProceduralAlphaTestLogic(
-                                tHit,
-                                candidateAttribs,
-                                q.CandidateInstanceIndex(),
-                                q.CandidatePrimitiveIndex(),
-                                q.CandidateGeometryIndex()))
-                        {
-                            continue; // non opaque
-                        }
-
-                        q.CommitProceduralPrimitiveHit(tHit);
-                        committedCustomAttribs = candidateAttribs;
-                    }
-                }
-                break;
-            }
-            case CANDIDATE_NON_OPAQUE_TRIANGLE:
-            {
-                if( MyAlphaTestLogic(
-                    q.CandidateInstanceIndex(),
-                    q.CandidatePrimitiveIndex(),
-                    q.CandidateGeometryIndex(),
-                    q.CandidateTriangleRayT(),
-                    q.CandidateTriangleBarycentrics(),
-                    q.CandidateTriangleFrontFace()))
-                {
-                    q.CommitNonOpaqueTriangleHit();
-                }
-                if(MyLogicSaysStopSearchingForSomeReason()) // not typically applicable
-                {
-                    q.Abort(); // Stop traversing and next call to Proceed()
-                               // will return FALSE.
-                               // Post-traversal results will just be based
-                               // on what has been encountered so far.
-                }
-                break;
-            }
-        }
-    }
-    switch(q.CommittedStatus())
-    {
-        case COMMITTED_TRIANGLE_HIT:
-        {
-            // Do hit shading
-            CommonHit(rtParameters, 
-                q.CommittedInstanceIndex(),
-                q.CommittedPrimitiveIndex(),
-                q.CommittedGeometryIndex(),
-                q.CommittedTriangleBarycentrics(),
-                q.WorldRayOrigin(),
-                q.WorldRayDirection(),
-                q.CommittedRayT(),
-                q.CandidateTriangleFrontFace(),
-                Payload);
-            break;
-        }
-        case COMMITTED_PROCEDURAL_PRIMITIVE_HIT:
-        {
-            // Do hit shading for procedural hit,
-            // using manually saved hit attributes (customAttribs)
-            ShadeMyProceduralPrimitiveHit(
-                committedCustomAttribs,
-                q.CommittedInstanceIndex(),
-                q.CommittedPrimitiveIndex(),
-                q.CommittedGeometryIndex(),
-                q.CommittedRayT());
-            break;
-        }
-        case COMMITTED_NOTHING:
-        {
-            // Do miss shading
-            CommonMiss(
-                q.WorldRayOrigin(),
-                q.WorldRayDirection(),
-                q.CommittedRayT(),
-                Payload);
-            break;
-        }
-    }
-#endif
-}
-
-*/
-
-// ----------------------------- DEBUG ----------------------------------
-
-#ifdef RAY_DISPATCH
-void DebugSurfaceData(float3 pos, float3 dir)
-{
-/*
-    RaytracingAccelerationStructure BVH = ResourceDescriptorHeap[rtParameters.BVH];
-    
-    RayDesc ray;
-    ray.Origin = pos;
-    ray.Direction = dir;
-    ray.TMin = 0;
-    ray.TMax = 100000;
-    
-    uint2 launchIndex = DispatchRaysIndex().xy;
-    uint type = 1;
-    uint depth = 0;
-    uint seed = initRand(launchIndex.xy);
-    
-    HLSL::HitInfo payload;
-    payload.color = float3(0.0, 0.0, 0.0);
-    payload.type = 1; //indirect
-    payload.depth = 0;
-    payload.seed = seed;
-    
-    TraceRay( BVH, RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
-    
-    RWTexture2D<float3> GI = ResourceDescriptorHeap[rtParameters.giIndex];
-    GI[launchIndex] = payload.color;
-*/
-}
-#endif
 
 // world space positions
 void DrawLine(float3 begin, float3 end)
