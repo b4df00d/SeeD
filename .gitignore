@@ -5,3 +5,14 @@
 /Assets
 /shaderStats.csv
 /shaderStats.csv.tmp
+/shaderBackups
+
+# Rendering calibration (SeeD/tools/calibration): reference renders, captures
+# and the imported-asset cache are all regenerable, so none of it is tracked.
+/calibration/reference/
+/calibration/out/
+/calibration/Cache/
+/calibration/Source/
+/calibration/*.blend1
+SeeD/tools/calibration/__pycache__/
+assetLibrary.txt
