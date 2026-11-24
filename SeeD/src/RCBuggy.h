@@ -7,6 +7,8 @@
 // WHAT JOLT DOES. The chassis is an ordinary dynamic Jolt body (RigidBody + CollisionShape on the
 // same entity): Jolt integrates it, collides it with the track, rolls it over, lands it. Each tire
 // finds the ground with a Jolt narrow-phase CYLINDER cast the size of that tire, every physics step.
+// The body's collider is a compound (RCBuggySim::ChassisCompound): rounded tub, nose / tail skids,
+// and the four tires as cylinders that only take the contacts the tire cast does not.
 //
 // WHAT THIS FILE DOES, from a Jolt step listener (so at Jolt's sub-step rate, 10x per frame):
 //   * suspension: the real RC10-style linkage (RCBuggyKinematics.h) -- arm, outer pin, camber link,
@@ -46,8 +48,11 @@
 #include <Jolt/Physics/Collision/ShapeCast.h>
 #include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+#include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/DecoratedShape.h>
 #include <Jolt/Physics/PhysicsStepListener.h>
 #include <Jolt/Core/FPException.h>
+#include <mutex>
 #pragma float_control(pop)
 #pragma pop_macro("max")
 #pragma pop_macro("min")
@@ -170,6 +175,20 @@ namespace Components
         float3 rearShockTop;
         float3 rearShockBottom;
         float3 driveshaftInner;             // gearbox / diff output, right side (front ones mirrored to +Z in 4WD)
+
+        // Chassis collider layout (RC Setup > Collision editor), model frame, metres. The tub itself
+        // is the CollisionShape box. 0 = auto: the skids are derived from the tub and its rounding
+        // is at least 15 mm (RCBuggySim::ResolveColliderLayout); the editor's first edit writes
+        // everything out and sets 1, from then on exactly these values are used.
+        uint   colliderAuthored = 0;
+        float  skidRadiusFront = 0.0f;      // capsule radius
+        float  skidHalfWidthFront = 0.0f;   // half length of the capsule's straight part, along X
+        float  skidYFront = 0.0f;           // capsule axis height
+        float  skidZFront = 0.0f;           // capsule axis position along the car
+        float  skidRadiusRear = 0.0f;
+        float  skidHalfWidthRear = 0.0f;
+        float  skidYRear = 0.0f;
+        float  skidZRear = 0.0f;
     };
 
     // A moving piece of the car, on a CHILD entity of the chassis. Its Transform is output.
@@ -209,6 +228,207 @@ namespace RCBuggySim
     static double Pos(float v, double fallback) { return (isfinite(v) && v > 0.0f) ? (double)v : fallback; }
     static double Fin(float v, double fallback) { return isfinite(v) ? (double)v : fallback; }
     static double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+    // ---- chassis collider ------------------------------------------------------------------------
+    // The chassis body's shape (RCBuggyChassisShape) is one mutable compound, in the model frame:
+    //   0     the tub + body shell: the CollisionShape box, rounded (a Jolt box with a convex radius
+    //         IS a chamfered box) -- a near-sharp edge catches the track when the car lands or
+    //         slides, stops it dead and throws it into a spin;
+    //   1, 2  nose and tail skids: capsules across the car at the bottom front / rear edge, sticking
+    //         out past the box like the real bumpers, so a nose-down landing glances off;
+    //   3..6  the four tires as cylinders, moved every frame to the simulated wheel pose. They give
+    //         the wheels side collisions (walls, other cars) and something to land on when the car
+    //         is on its side or upside down. Their contacts with GROUND UNDER THE TIRE are
+    //         rejected (RCBuggyValidateContact) -- that is the tire model's job, via its cast.
+    // Skids and tires get a negligible density so the body's mass and inertia stay the box's.
+    static constexpr JPH::uint32 chassisCompoundTag = 0x52434348;          // 'RCCH', compound user data of sub-shape 0
+    static constexpr JPH::uint64 wheelShapeTag = 0x5243570000000000ull;    // leaf user data of the tires, | corner index
+    static constexpr JPH::uint64 tubShapeTag = 0x5243540000000000ull;      // leaf user data of the tub box
+    static constexpr JPH::uint64 skidShapeTag = 0x5243530000000000ull;     // leaf user data of the skids, | end
+    static constexpr JPH::uint chassisFirstWheel = 3;
+    static constexpr JPH::uint chassisSubShapes = 7;
+    // A contact whose normal is within ~65 deg of the chassis' up is ground for a tire, steeper is a
+    // wall. Shared by the tire cast and the contact filter so the two hand over exactly.
+    static constexpr float groundMinUp = 0.42f;
+    static constexpr float skidDensity = 1.0e-3f;                           // kg/m^3, i.e. massless
+
+    // ---- collision debugging (RC Setup > Collision) ----------------------------------------------
+    // Switches read by RCBuggyValidateContact (Jolt workers) and the shape builder, plus what the
+    // filter saw: per collider part, contacts kept / dropped and the deepest kept penetration --
+    // both for the last frame and as a peak since the last reset, so a throw can be read after
+    // the fact. Global, not per car: it is a debugging aid.
+    enum ColliderPart { partTub, partSkid, partTire, partCount };
+    struct CollisionDebug
+    {
+        std::atomic<bool> enabled[partCount] = { true, true, true };
+        std::atomic<bool> tireGroundFilter = true;      // drop tire contacts whose normal is "ground"
+        std::atomic<bool> tireHeightFilter = true;      // drop tire contacts below -0.5 r
+        std::atomic<bool> edgeRemoval = true;           // Jolt enhanced internal edge removal
+        // shape parameters: need a collider rebuild (button)
+        float tireRadiusScale = 0.88f;
+        // live: friction of the skid / tub contacts (< 0 = the bodies' combined friction)
+        std::atomic<float> skidFriction = 0.05f;
+        std::atomic<float> tubFriction = -1.0f;
+
+        // Written by the workers during the step. Counts are summed over every collision step of the
+        // frame (Physics::Step runs ~10 at 60 fps) and include SPECULATIVE contacts: Jolt reports any
+        // shape pair closer than PhysicsSettings::mSpeculativeContactDistance (20 mm), touching or not.
+        std::atomic<JPH::uint> kept[partCount] = {}, dropped[partCount] = {}, touching[partCount] = {};
+        std::atomic<JPH::uint> deepest[partCount] = {};          // float bits, positive floats order like uints
+        static constexpr JPH::uint noGap = 0x7F800000;          // +inf
+        std::atomic<JPH::uint> nearest[partCount] = { noGap, noGap, noGap };  // smallest gap of a kept speculative contact
+        // last frame / peak, written by Manager::Sync
+        JPH::uint lastKept[partCount] = {}, lastDropped[partCount] = {}, lastTouching[partCount] = {};
+        float lastDeepest[partCount] = {}, peakDeepest[partCount] = {};
+        float lastGap[partCount] = {};                          // +inf = no speculative contact
+
+        // The kept tub / skid contact that most opposes the car's motion this frame: closing =
+        // push-out . chassis velocity (m/s, < 0 = pushes against the motion). A floor contact under
+        // a car driving along is ~0; a ghost edge or a wall is about minus the speed.
+        struct Worst { float closing = 0, up = 1, depth = 0; int part = -1; JPH::uint otherSubType = 0, otherBody = 0; float point[3] = {}; };
+        std::mutex worstMutex;
+        Worst worst, lastWorst;
+        void RecordWorst(const Worst& w)
+        {
+            std::lock_guard<std::mutex> lock(worstMutex);
+            if (w.closing < worst.closing) worst = w;
+        }
+        JPH::uint peakTouching[partCount] = {};
+
+        void Record(int part, bool keep, float depth)
+        {
+            (keep ? kept : dropped)[part].fetch_add(1, std::memory_order_relaxed);
+            if (!keep || !(depth > -1.0f))
+                return;
+            JPH::uint bits;
+            if (depth <= 0.0f)
+            {
+                float gap = -depth;
+                memcpy(&bits, &gap, 4);
+                JPH::uint cur = nearest[part].load(std::memory_order_relaxed);
+                while (bits < cur && !nearest[part].compare_exchange_weak(cur, bits, std::memory_order_relaxed)) {}
+                return;
+            }
+            touching[part].fetch_add(1, std::memory_order_relaxed);
+            memcpy(&bits, &depth, 4);
+            JPH::uint cur = deepest[part].load(std::memory_order_relaxed);
+            while (bits > cur && !deepest[part].compare_exchange_weak(cur, bits, std::memory_order_relaxed)) {}
+        }
+        void EndFrame()
+        {
+            for (int p = 0; p < partCount; p++)
+            {
+                lastKept[p] = kept[p].exchange(0, std::memory_order_relaxed);
+                lastDropped[p] = dropped[p].exchange(0, std::memory_order_relaxed);
+                lastTouching[p] = touching[p].exchange(0, std::memory_order_relaxed);
+                JPH::uint bits = deepest[p].exchange(0, std::memory_order_relaxed);
+                memcpy(&lastDeepest[p], &bits, 4);
+                bits = nearest[p].exchange(noGap, std::memory_order_relaxed);
+                memcpy(&lastGap[p], &bits, 4);
+                if (lastDeepest[p] > peakDeepest[p]) peakDeepest[p] = lastDeepest[p];
+                if (lastTouching[p] > peakTouching[p]) peakTouching[p] = lastTouching[p];
+            }
+            std::lock_guard<std::mutex> lock(worstMutex);
+            lastWorst = worst;
+            worst = Worst();
+        }
+        void ResetPeaks()
+        {
+            for (int p = 0; p < partCount; p++) { peakDeepest[p] = 0; peakTouching[p] = 0; }
+        }
+    };
+    inline CollisionDebug collisionDebug;
+
+    // The tub + skids, resolved from CollisionShape (the tub box) and RCBuggyGeometry's collider
+    // fields. Used by the shape builder and the Collision editor, so both always agree.
+    // Auto (colliderAuthored == 0, every car made before the editor): tub rounding at least 15 mm,
+    // skids R 30 mm, as wide as the tub, centred on its front / rear face, their bottom 5 mm ABOVE
+    // the tub's flat. Why 5 mm above, measured on RCtrack6 (scripted runs, 41 km/h into a 16 mm
+    // step): a skid hanging at or below the tub flat meets the step edge ~50 mm before the front
+    // tire can climb it, with a normal ~55 deg off vertical -- a wall: 41 -> 3 km/h in one frame, or
+    // a launch. 5 mm above it never touches the step, yet still lands first when pitched > ~16 deg.
+    struct ColliderLayout
+    {
+        float half[3] = {}, center[3] = {}, rounding = 0;
+        struct Skid { float radius = 0, halfWidth = 0, y = 0, z = 0; } skid[2];     // 0 front, 1 rear
+        bool authored = false;
+    };
+    static constexpr float autoMinRounding = 0.015f, autoSkidRadius = 0.030f, autoSkidLift = 0.005f;
+    static constexpr float minColliderSize = 0.001f;
+
+    static float MaxRounding(const float half[3])
+    {
+        float smallest = half[0] < half[1] ? half[0] : half[1];
+        if (half[2] < smallest) smallest = half[2];
+        return 0.5f * smallest;     // Jolt's limit for a box's convex radius
+    }
+
+    static ColliderLayout ResolveColliderLayout(const Components::CollisionShape& cs, const Components::RCBuggyGeometry& g)
+    {
+        ColliderLayout L;
+        store(cs.halfExtent, L.half);
+        store(cs.offset, L.center);
+        for (int a = 0; a < 3; a++)
+        {
+            if (!isfinite(L.half[a]) || L.half[a] < minColliderSize) L.half[a] = minColliderSize;
+            if (!isfinite(L.center[a])) L.center[a] = 0.0f;
+        }
+        L.authored = g.colliderAuthored != 0;
+        float r = isfinite(cs.convexRadius) && cs.convexRadius > 0.0f ? cs.convexRadius : 0.0f;
+        if (!L.authored && r < autoMinRounding) r = autoMinRounding;
+        float maxR = MaxRounding(L.half);
+        L.rounding = r > maxR ? maxR : r;
+
+        for (int end = 0; end < 2; end++)
+        {
+            ColliderLayout::Skid& k = L.skid[end];
+            ColliderLayout::Skid authored = end == 0
+                ? ColliderLayout::Skid{ g.skidRadiusFront, g.skidHalfWidthFront, g.skidYFront, g.skidZFront }
+                : ColliderLayout::Skid{ g.skidRadiusRear, g.skidHalfWidthRear, g.skidYRear, g.skidZRear };
+            bool valid = isfinite(authored.radius) && isfinite(authored.halfWidth) && isfinite(authored.y) && isfinite(authored.z) && authored.radius >= minColliderSize;
+            if (L.authored && valid)
+            {
+                k = authored;
+                if (!(k.halfWidth >= 0.5f * minColliderSize)) k.halfWidth = 0.5f * minColliderSize;    // Jolt: > 0
+            }
+            else
+            {
+                k.radius = autoSkidRadius;
+                k.halfWidth = L.half[0];
+                k.y = L.center[1] - L.half[1] + autoSkidLift + autoSkidRadius;
+                k.z = end == 0 ? L.center[2] + L.half[2] : L.center[2] - L.half[2];
+            }
+        }
+        return L;
+    }
+
+    // Writes a layout back (the editor): the tub into CollisionShape, the skids into the geometry,
+    // marks it authored and asks Physics for a new shape (it keeps the body and its velocity).
+    static void WriteColliderLayout(World::Entity car, const ColliderLayout& L)
+    {
+        auto& cs = car.Get<Components::CollisionShape>();
+        cs.halfExtent = float3(L.half[0], L.half[1], L.half[2]);
+        cs.offset = float3(L.center[0], L.center[1], L.center[2]);
+        cs.convexRadius = L.rounding;
+        auto& g = car.Get<Components::RCBuggyGeometry>();
+        g.colliderAuthored = 1;
+        g.skidRadiusFront = L.skid[0].radius; g.skidHalfWidthFront = L.skid[0].halfWidth; g.skidYFront = L.skid[0].y; g.skidZFront = L.skid[0].z;
+        g.skidRadiusRear = L.skid[1].radius;  g.skidHalfWidthRear = L.skid[1].halfWidth;  g.skidYRear = L.skid[1].y;  g.skidZRear = L.skid[1].z;
+        if (car.Has<Components::State>())
+            car.Get<Components::State>().flags |= Components::State::Flags::physicsDirty;
+    }
+
+    static const JPH::MutableCompoundShape* ChassisCompound(const JPH::Shape* s)
+    {
+        while (s != nullptr && s->GetType() == JPH::EShapeType::Decorated)
+            s = static_cast<const JPH::DecoratedShape*>(s)->GetInnerShape();
+        if (s == nullptr || s->GetSubType() != JPH::EShapeSubType::MutableCompound)
+            return nullptr;
+        const JPH::MutableCompoundShape* c = static_cast<const JPH::MutableCompoundShape*>(s);
+        if (c->GetNumSubShapes() != chassisSubShapes || c->GetCompoundUserData(0) != chassisCompoundTag)
+            return nullptr;
+        return c;
+    }
 
     // Interpolated table read. Linear in theta and beta; quaternions nlerp'd (the steps are tiny).
     struct Lookup
@@ -592,8 +812,8 @@ namespace RCBuggySim
                 {
                     JPH::Vec3 normal = -hit.mHit.mPenetrationAxis.NormalizedOr(-up);
                     // A wall is not ground: steeper than ~65 deg from the chassis' up is left to the
-                    // chassis collider.
-                    if (normal.Dot(up) > 0.42f)
+                    // chassis collider (the tire cylinders in it, see ChassisCompound).
+                    if (normal.Dot(up) > groundMinUp)
                     {
                         c.hasGround = true;
                         c.groundPoint = JPH::Vec3(hit.mHit.mContactPointOn2);
@@ -1319,6 +1539,18 @@ namespace RCBuggySim
             rt.built = true;
             warned.erase(entityId);
 
+            // Sliding on a triangle-mesh track, a box catches the INTERNAL edges between triangles
+            // (Jolt's "ghost collisions") and stops dead; enhanced internal edge removal drops
+            // those. NOT LinearCast: its sweep takes the whole compound, tire cylinders included,
+            // which always sit a few mm in the ground -- a sweep that starts inside the floor
+            // returns whatever EPA makes of it, and the CCD impulse threw the car around.
+            {
+                JPH::BodyLockWrite lock(Physics::instance->physicsSystem.GetBodyLockInterface(), bodyID);
+                if (lock.Succeeded())
+                    lock.GetBody().SetEnhancedInternalEdgeRemoval(true);
+            }
+            Physics::instance->physicsSystem.GetBodyInterface().SetMotionQuality(bodyID, JPH::EMotionQuality::Discrete);
+
             const EndParams& F = rt.P.end[0];
             const EndParams& R = rt.P.end[1];
             IOs::Log("RCBuggy: entity {} built -- {:.0f} g, FDR {:.2f}, camber links {:.1f}/{:.1f} mm, steering links {:.1f} mm, preload {:.1f}/{:.1f} N, Ackermann {:.1f}/{:.1f} deg",
@@ -1333,6 +1565,7 @@ namespace RCBuggySim
             if (Physics::instance == nullptr)
                 return;
             frame++;
+            collisionDebug.EndFrame();      // the step that just ran filled the counters
 
             partsByChassis.clear();
             uint partQuery = world->Query(Components::RCBuggyPart::mask, 0, true);
@@ -1402,6 +1635,7 @@ namespace RCBuggySim
                 if (rt->throttle != 0 || rt->steering != 0)
                     Physics::instance->physicsSystem.GetBodyInterface().ActivateBody(rt->body);
 
+                UpdateWheelColliders(*rt);
                 WriteParts(ent, *rt);
             }
 
@@ -1417,6 +1651,38 @@ namespace RCBuggySim
                     ++it;
                 }
             }
+        }
+
+        // ---- tire colliders ------------------------------------------------------------------------
+        // Moves the four tire cylinders of the chassis compound to where the suspension and the
+        // steering put the wheels. Once a frame is plenty for side hits; the ground under the tire
+        // never goes through them anyway. The step is not running here (see Sync).
+        // No NotifyShapeChanged: it would also throw away the body's contact cache (warm starting)
+        // every frame. The chassis is always active, and Jolt refreshes an active body's bounds
+        // every step from the shape's local bounds, which ModifyShapes keeps up to date.
+        void UpdateWheelColliders(Runtime& rt)
+        {
+            JPH::BodyLockWrite lock(Physics::instance->physicsSystem.GetBodyLockInterface(), rt.body);
+            if (!lock.Succeeded())
+                return;
+            JPH::Body& b = lock.GetBody();
+            JPH::MutableCompoundShape* compound = const_cast<JPH::MutableCompoundShape*>(ChassisCompound(b.GetShape()));
+            if (compound == nullptr)
+                return;
+            JPH::Vec3 position[4];
+            JPH::Quat rotation[4];
+            for (int i = 0; i < 4; i++)
+            {
+                const Corner& c = rt.corner[i];
+                Lookup pose;
+                ReadSide(rt.P.end[c.end].table, c.theta, rt.beta, c.side, pose);
+                position[i] = J(pose.wheel);
+                rotation[i] = JPH::Quat::sFromTo(JPH::Vec3::sAxisY(), J(pose.axle).NormalizedOr(JPH::Vec3::sAxisX()));
+                if (position[i].IsNaN() || rotation[i].IsNaN())
+                    return;     // never hand Jolt a NaN pose
+            }
+            compound->ModifyShapes(chassisFirstWheel, 4, position, rotation);
+            b.SetEnhancedInternalEdgeRemoval(collisionDebug.edgeRemoval.load(std::memory_order_relaxed));
         }
 
         // ---- output transforms -------------------------------------------------------------------
@@ -1555,6 +1821,188 @@ void RCBuggySetInput(World::Entity chassis, float throttle, float steering)
     setup.steeringInput = steering;
 }
 
+// Forward-declared in Physic.h, called from Physics::BuildShape. See RCBuggySim::ChassisCompound for
+// the layout. Built in the entity (model) frame, CollisionShape::offset included; Physics wraps it in
+// the centre-of-mass override and the scale as for any other shape.
+bool RCBuggyChassisShape(World::Entity ent, const Components::CollisionShape& collisionShape, float convexRadius, JPH::ShapeRefC& outShape)
+{
+    using namespace RCBuggySim;
+    if (collisionShape.shapeType != 0 || !ent.Has<Components::RCBuggy>() || !ent.Has<Components::RCBuggyGeometry>())
+        return false;
+
+    // convexRadius is already capped by BuildShape; the layout applies the auto rules on top.
+    Components::CollisionShape sanitised = collisionShape;
+    sanitised.convexRadius = convexRadius;
+    const ColliderLayout L = ResolveColliderLayout(sanitised, ent.Get<Components::RCBuggyGeometry>());
+
+    JPH::MutableCompoundShapeSettings settings;
+    JPH::Ref<JPH::BoxShapeSettings> tub = new JPH::BoxShapeSettings(JPH::Vec3(L.half[0], L.half[1], L.half[2]), L.rounding);
+    tub->mUserData = tubShapeTag;
+    settings.AddShape(JPH::Vec3(L.center[0], L.center[1], L.center[2]), JPH::Quat::sIdentity(), tub, chassisCompoundTag);
+
+    JPH::Quat acrossCar = JPH::Quat::sRotation(JPH::Vec3::sAxisZ(), 0.5f * JPH::JPH_PI);
+    for (int end = 0; end < 2; end++)
+    {
+        const ColliderLayout::Skid& k = L.skid[end];
+        JPH::Ref<JPH::CapsuleShapeSettings> skid = new JPH::CapsuleShapeSettings(k.halfWidth, k.radius);
+        skid->SetDensity(skidDensity);
+        skid->mUserData = skidShapeTag | (JPH::uint64)end;
+        settings.AddShape(JPH::Vec3(L.center[0], k.y, k.z), acrossCar, skid);
+    }
+
+    // Tires, at the design pose until the first UpdateWheelColliders. Corner order = Runtime's
+    // (0 FL, 1 FR, 2 RL, 3 RR -- even = left).
+    const auto& g = ent.Get<Components::RCBuggyGeometry>();
+    for (int i = 0; i < 4; i++)
+    {
+        int end = i < 2 ? 0 : 1;
+        RCKin::EndGeometry e = ReadEndGeometry(g, end);
+        double width = end == 0 ? Pos(g.wheelWidthFront, 0.0325) : Pos(g.wheelWidthRear, 0.0517);
+        V3 wheel = e.wheelCenter, axle = e.axle;
+        if (i % 2 == 0)
+        {
+            wheel = RCKin::MirrorX(wheel);
+            axle = RCKin::MirrorX(axle);
+        }
+        // Under the real radius (collisionDebug.tireRadiusScale, 0.88): the tire model lets the tire
+        // sink a few mm into the floor (its radial spring, camber), and the collider should not be
+        // sitting in the floor all the time.
+        double radiusScale = Clamp(collisionDebug.tireRadiusScale, 0.3, 1.2);
+        JPH::Ref<JPH::CylinderShapeSettings> tire = new JPH::CylinderShapeSettings((float)(0.5 * width), (float)(radiusScale * e.wheelRadius), 0.002f);
+        tire->SetDensity(skidDensity);
+        tire->mUserData = wheelShapeTag | (JPH::uint64)i;
+        settings.AddShape(J(wheel), JPH::Quat::sFromTo(JPH::Vec3::sAxisY(), J(axle).NormalizedOr(JPH::Vec3::sAxisX())), tire);
+    }
+
+    JPH::ShapeSettings::ShapeResult result = settings.Create();
+    if (result.HasError())
+    {
+        uint entityId = ent.id;
+        IOs::Log("RCBuggy: entity {} chassis collider failed ({}), using the plain box", entityId, result.GetError().c_str());
+        return false;
+    }
+    outShape = result.Get();
+    return true;
+}
+
+// Forward-declared in Physic.h, called by Jolt (OnContactValidate) on its workers with every body
+// locked -- reads the two bodies only. Rejects a tire cylinder's contact when its normal says
+// "ground under the tire" relative to the chassis: the tire model already carries that contact
+// through its own cast, with suspension and slip. The same tire against a wall, a curb face,
+// another car, or the floor while the car is on its side / upside down stays a rigid contact.
+JPH::ValidateResult RCBuggyValidateContact(const JPH::Body& body1, const JPH::Body& body2, JPH::RVec3Arg baseOffset, const JPH::CollideShapeResult& result)
+{
+    using namespace RCBuggySim;
+    auto isBuggy = [](const JPH::Body& b) { return b.IsDynamic() && ChassisCompound(b.GetShape()) != nullptr; };
+    if (!isBuggy(body1) && !isBuggy(body2))
+        return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+
+    // A tire contact is kept only when it is clearly NOT the tire model's: its normal is not
+    // "ground" relative to the chassis, AND it touches the tire above its lower quarter. The second
+    // test matters: a tire sitting a few mm in the floor also touches every active edge it rolls
+    // over (jump crests, seams, the foot of a ramp), and EPA's normal there is sideways or forward
+    // -- a rigid contact on that is a kick out of nowhere. A wall, another car, or the floor when
+    // the car is on its side or on its roof touches the tire at mid height or above.
+    // Which part of a buggy the hit is on (-1 = not a buggy's), and whether to drop it.
+    CollisionDebug& dbg = collisionDebug;
+    auto judge = [&](const JPH::Body& b, const JPH::SubShapeID& subShape, JPH::Vec3Arg pushOut, JPH::Vec3Arg point, bool& reject) -> int
+    {
+        reject = false;
+        if (!b.IsDynamic())
+            return -1;
+        const JPH::MutableCompoundShape* compound = ChassisCompound(b.GetShape());
+        if (compound == nullptr)
+            return -1;
+        JPH::uint64 tag = b.GetShape()->GetSubShapeUserData(subShape);
+        JPH::uint64 kind = tag & ~JPH::uint64(0xFF);
+        if (kind == tubShapeTag)
+        {
+            reject = !dbg.enabled[partTub].load(std::memory_order_relaxed);
+            return partTub;
+        }
+        if (kind == skidShapeTag)
+        {
+            reject = !dbg.enabled[partSkid].load(std::memory_order_relaxed);
+            return partSkid;
+        }
+        if (kind != wheelShapeTag)
+            return -1;
+        if (!dbg.enabled[partTire].load(std::memory_order_relaxed))
+        {
+            reject = true;
+            return partTire;
+        }
+        JPH::Vec3 up = b.GetRotation() * JPH::Vec3::sAxisY();
+        if (dbg.tireGroundFilter.load(std::memory_order_relaxed) && pushOut.Dot(up) > groundMinUp)
+        {
+            reject = true;
+            return partTire;
+        }
+        if (dbg.tireHeightFilter.load(std::memory_order_relaxed))
+        {
+            const JPH::CompoundShape::SubShape& tire = compound->GetSubShape(chassisFirstWheel + (JPH::uint)(tag & 3));
+            float radius = static_cast<const JPH::CylinderShape*>(tire.mShape.GetPtr())->GetRadius();
+            JPH::Vec3 centerShape = tire.GetPositionCOM() + compound->GetCenterOfMass();      // body shape frame
+            JPH::RVec3 center = b.GetCenterOfMassPosition() + b.GetRotation() * (centerShape - b.GetShape()->GetCenterOfMass());
+            JPH::Vec3 rel = JPH::Vec3(baseOffset + point - center);
+            reject = rel.Dot(up) < -0.5f * radius;
+        }
+        return partTire;
+    };
+    // mPenetrationAxis moves shape 2 out of shape 1: body 2 is pushed along it, body 1 against it.
+    JPH::Vec3 axis = result.mPenetrationAxis.NormalizedOr(JPH::Vec3::sZero());
+    bool reject1, reject2;
+    int part1 = judge(body1, result.mSubShapeID1, -axis, result.mContactPointOn1, reject1);
+    int part2 = judge(body2, result.mSubShapeID2, axis, result.mContactPointOn2, reject2);
+    bool reject = reject1 || reject2;
+    if (part1 >= 0) dbg.Record(part1, !reject, result.mPenetrationDepth);
+    if (part2 >= 0) dbg.Record(part2, !reject, result.mPenetrationDepth);
+    if (!reject)
+        for (int side = 0; side < 2; side++)
+        {
+            int part = side == 0 ? part1 : part2;
+            if (part != partTub && part != partSkid)
+                continue;
+            const JPH::Body& car = side == 0 ? body1 : body2;
+            const JPH::Body& other = side == 0 ? body2 : body1;
+            JPH::Vec3 pushOut = side == 0 ? -axis : axis;
+            CollisionDebug::Worst w;
+            w.closing = pushOut.Dot(car.GetLinearVelocity());
+            if (!(w.closing < 0.0f))
+                continue;
+            w.up = pushOut.GetY();
+            w.depth = result.mPenetrationDepth;
+            w.part = part;
+            w.otherSubType = (JPH::uint)other.GetShape()->GetSubType();
+            w.otherBody = other.GetID().GetIndexAndSequenceNumber();
+            JPH::Vec3 pt = JPH::Vec3(baseOffset + (side == 0 ? result.mContactPointOn1 : result.mContactPointOn2));
+            w.point[0] = pt.GetX(); w.point[1] = pt.GetY(); w.point[2] = pt.GetZ();
+            dbg.RecordWorst(w);
+        }
+    return reject ? JPH::ValidateResult::RejectContact : JPH::ValidateResult::AcceptContact;
+}
+
+// Forward-declared in Physic.h, called by Jolt (OnContactAdded / OnContactPersisted) on its workers.
+// The skids are smooth plastic bumpers: they should glance off a step or a landing, not grab it --
+// with the track's friction a skid catching a step edge at speed stopped the car dead.
+void RCBuggyContactSettings(const JPH::Body& body1, const JPH::Body& body2, const JPH::ContactManifold& manifold, JPH::ContactSettings& ioSettings)
+{
+    using namespace RCBuggySim;
+    for (int side = 0; side < 2; side++)
+    {
+        const JPH::Body& b = side == 0 ? body1 : body2;
+        if (!b.IsDynamic() || ChassisCompound(b.GetShape()) == nullptr)
+            continue;
+        JPH::uint64 kind = b.GetShape()->GetSubShapeUserData(side == 0 ? manifold.mSubShapeID1 : manifold.mSubShapeID2) & ~JPH::uint64(0xFF);
+        float friction = kind == skidShapeTag ? collisionDebug.skidFriction.load(std::memory_order_relaxed)
+                       : kind == tubShapeTag ? collisionDebug.tubFriction.load(std::memory_order_relaxed) : -1.0f;
+        if (friction >= 0.0f && friction < ioSettings.mCombinedFriction)
+            ioSettings.mCombinedFriction = friction;
+        if (kind == skidShapeTag)
+            ioSettings.mCombinedRestitution = 0.0f;
+    }
+}
+
 namespace Components
 {
     static void RCBuggyPropertyDraw(char* p)
@@ -1627,6 +2075,359 @@ public:
     RCSetupWindow() : EditorWindow("RC Setup") {}
 
     int viewEnd = 0;        // 0 front, 1 rear, for the diagrams
+
+    // ---- collider editor: the right column while the Collision tab is open --------------------
+    bool collisionTab = false;
+    int colDrag = -1, colDragView = -1;             // handle being dragged, and in which view
+    float colBounds[4] = {};                        // zMin, zMax, yMax, xMax -- frozen while dragging
+    enum ColHandle
+    {
+        hTubMove, hTubFront, hTubRear, hTubTop, hTubBottom, hTubSidePos, hTubSideNeg, hTubRound,
+        hSkidMove = 10,         // + end (0 front, 1 rear)
+        hSkidRadius = 12,       // + end
+        hSkidWidthPos = 14,     // + end
+        hSkidWidthNeg = 16,     // + end
+    };
+
+    // Side view (Z across, Y up) and top view (Z across, +X up), forward = left like the suspension
+    // diagrams, same scale. Drag: the tub body moves it (Shift: the skids come along), its edges
+    // resize it from the opposite edge, the dot on its front-bottom corner is the rounding; a skid
+    // body moves it, the dot on its rim is its radius (side view), its cap ends its width (top view).
+    // Every edit writes the layout to the car (CollisionShape + RCBuggyGeometry) and rebuilds the shape.
+    void DrawColliderEditor(World::Entity car)
+    {
+        using namespace RCBuggySim;
+        if (!car.Has<Components::CollisionShape>() || !car.Has<Components::RCBuggyGeometry>() || car.Get<Components::CollisionShape>().shapeType != 0)
+        {
+            ImGui::TextDisabled("The chassis needs a box CollisionShape.");
+            return;
+        }
+        Components::RCBuggyGeometry& g = car.Get<Components::RCBuggyGeometry>();
+        ColliderLayout L = ResolveColliderLayout(car.Get<Components::CollisionShape>(), g);
+        bool changed = false;
+        ImGuiIO& io = ImGui::GetIO();
+
+        // Wheels, for reference (design pose; the geometry holds the right side).
+        struct WheelRef { float z, y, x, radius, width; } wheels[2];
+        for (int end = 0; end < 2; end++)
+        {
+            RCKin::EndGeometry e = ReadEndGeometry(g, end);
+            wheels[end] = { (float)e.wheelCenter.z, (float)e.wheelCenter.y, (float)fabs(e.wheelCenter.x), (float)e.wheelRadius,
+                            (float)(end == 0 ? Pos(g.wheelWidthFront, 0.0325) : Pos(g.wheelWidthRear, 0.0517)) };
+        }
+
+        // Framing: everything plus a margin, frozen while a drag is in progress.
+        if (colDrag < 0)
+        {
+            float zMin = 1e9f, zMax = -1e9f, yMax = 0.0f, xMax = 0.0f;
+            for (const WheelRef& w : wheels)
+            {
+                zMin = fminf(zMin, w.z - w.radius); zMax = fmaxf(zMax, w.z + w.radius);
+                yMax = fmaxf(yMax, w.y + w.radius); xMax = fmaxf(xMax, w.x + 0.5f * w.width);
+            }
+            zMin = fminf(zMin, L.center[2] - L.half[2]); zMax = fmaxf(zMax, L.center[2] + L.half[2]);
+            yMax = fmaxf(yMax, L.center[1] + L.half[1]); xMax = fmaxf(xMax, fabsf(L.center[0]) + L.half[0]);
+            for (const ColliderLayout::Skid& k : L.skid)
+            {
+                zMin = fminf(zMin, k.z - k.radius); zMax = fmaxf(zMax, k.z + k.radius);
+                yMax = fmaxf(yMax, k.y + k.radius); xMax = fmaxf(xMax, fabsf(L.center[0]) + k.halfWidth + k.radius);
+            }
+            const float margin = 0.03f;
+            colBounds[0] = zMin - margin; colBounds[1] = zMax + margin; colBounds[2] = yMax + margin; colBounds[3] = xMax + margin;
+        }
+        const float bZMin = colBounds[0], bZMax = colBounds[1], bYMax = colBounds[2], bXMax = colBounds[3], bYMin = -0.015f;
+        const float W = ImGui::GetContentRegionAvail().x - 2.0f;
+        float scale = W / (bZMax - bZMin);
+        const float roomH = ImGui::GetContentRegionAvail().y - 260.0f;     // keep the fields below visible
+        if (roomH > 150.0f && scale * (bYMax - bYMin + 2.0f * bXMax) + 44.0f > roomH)
+            scale = (roomH - 44.0f) / (bYMax - bYMin + 2.0f * bXMax);
+
+        const ImU32 cBg = IM_COL32(25, 27, 32, 255), cGround = IM_COL32(120, 120, 130, 255), cAxis = IM_COL32(60, 62, 72, 255);
+        const ImU32 cWheel = IM_COL32(120, 120, 128, 255), cTireCol = IM_COL32(150, 150, 160, 110);
+        const ImU32 cTub = IM_COL32(70, 130, 220, 80), cTubLine = IM_COL32(110, 170, 255, 255);
+        const ImU32 cSkid = IM_COL32(255, 150, 50, 90), cSkidLine = IM_COL32(255, 180, 90, 255);
+        const ImU32 cHandle = IM_COL32(230, 230, 230, 255), cHot = IM_COL32(255, 230, 80, 255), cText = IM_COL32(230, 230, 230, 255);
+
+        auto view = [&](int v)
+        {
+            // v = 0 side: vertical = Y. v = 1 top: vertical = X (+X = the car's right = up).
+            const float vTop = v == 0 ? bYMax : bXMax, vBottom = v == 0 ? bYMin : -bXMax;
+            const ImVec2 size(W, (vTop - vBottom) * scale + 22.0f);
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton(v == 0 ? "colside" : "coltop", size);
+            const bool hovered = ImGui::IsItemHovered(), activated = ImGui::IsItemActivated(), active = ImGui::IsItemActive();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const float left = p0.x + 0.5f * (W - (bZMax - bZMin) * scale), top = p0.y + 22.0f;
+            auto P = [&](float z, float u) { return ImVec2(left + (bZMax - z) * scale, top + (vTop - u) * scale); };
+            auto Box = [&](float z0, float z1, float u0, float u1, ImVec2& a, ImVec2& b)
+            {
+                ImVec2 p = P(z0, u0), q = P(z1, u1);
+                a = ImVec2(fminf(p.x, q.x), fminf(p.y, q.y)); b = ImVec2(fmaxf(p.x, q.x), fmaxf(p.y, q.y));
+            };
+            auto Inside = [](ImVec2 m, ImVec2 a, ImVec2 b) { return m.x >= a.x && m.x <= b.x && m.y >= a.y && m.y <= b.y; };
+
+            const float cz = L.center[2], hz = L.half[2];
+            const float tu = v == 0 ? L.center[1] : L.center[0], th = v == 0 ? L.half[1] : L.half[0];
+            const float cornerK = L.rounding * (1.0f - 0.70710678f);
+
+            // ---- handles + picking
+            struct Handle { int id; ImVec2 p; };
+            Handle pts[8];
+            int n = 0;
+            pts[n++] = { hTubFront, P(cz + hz, tu) };
+            pts[n++] = { hTubRear, P(cz - hz, tu) };
+            if (v == 0)
+            {
+                pts[n++] = { hTubTop, P(cz, tu + th) };
+                pts[n++] = { hTubBottom, P(cz, tu - th) };
+                pts[n++] = { hTubRound, P(cz + hz - cornerK, tu - th + cornerK) };
+            }
+            else
+            {
+                pts[n++] = { hTubSidePos, P(cz, tu + th) };
+                pts[n++] = { hTubSideNeg, P(cz, tu - th) };
+            }
+            for (int end = 0; end < 2; end++)
+            {
+                const ColliderLayout::Skid& k = L.skid[end];
+                if (v == 0)
+                    pts[n++] = { hSkidRadius + end, P(k.z + (end == 0 ? 0.70710678f : -0.70710678f) * k.radius, k.y + 0.70710678f * k.radius) };
+                else if (n + 2 <= 8)
+                {
+                    pts[n++] = { hSkidWidthPos + end, P(k.z, L.center[0] + k.halfWidth + k.radius) };
+                    pts[n++] = { hSkidWidthNeg + end, P(k.z, L.center[0] - k.halfWidth - k.radius) };
+                }
+            }
+
+            const ImVec2 m = io.MousePos;
+            int hot = -1;
+            if (colDrag >= 0)
+                hot = colDragView == v ? colDrag : -1;
+            else if (hovered)
+            {
+                float best = 8.0f * 8.0f;
+                for (int i = 0; i < n; i++)
+                {
+                    float dx = m.x - pts[i].p.x, dy = m.y - pts[i].p.y;
+                    if (dx * dx + dy * dy < best) { best = dx * dx + dy * dy; hot = pts[i].id; }
+                }
+                for (int end = 0; end < 2 && hot < 0; end++)
+                {
+                    const ColliderLayout::Skid& k = L.skid[end];
+                    if (v == 0)
+                    {
+                        ImVec2 c = P(k.z, k.y);
+                        float dx = m.x - c.x, dy = m.y - c.y, r = k.radius * scale;
+                        if (dx * dx + dy * dy <= r * r) hot = hSkidMove + end;
+                    }
+                    else
+                    {
+                        ImVec2 a, b;
+                        Box(k.z - k.radius, k.z + k.radius, L.center[0] - k.halfWidth - k.radius, L.center[0] + k.halfWidth + k.radius, a, b);
+                        if (Inside(m, a, b)) hot = hSkidMove + end;
+                    }
+                }
+                if (hot < 0)
+                {
+                    ImVec2 a, b;
+                    Box(cz - hz, cz + hz, tu - th, tu + th, a, b);
+                    if (Inside(m, a, b)) hot = hTubMove;
+                }
+            }
+            if (activated && hot >= 0) { colDrag = hot; colDragView = v; }
+            if (!active && colDragView == v) { colDrag = -1; colDragView = -1; }
+            if (hot >= 0)
+            {
+                ImGuiMouseCursor cursor = ImGuiMouseCursor_ResizeAll;
+                if (hot == hTubFront || hot == hTubRear) cursor = ImGuiMouseCursor_ResizeEW;
+                else if (hot == hTubTop || hot == hTubBottom || hot == hTubSidePos || hot == hTubSideNeg || hot >= hSkidWidthPos) cursor = ImGuiMouseCursor_ResizeNS;
+                else if (hot == hTubRound || (hot >= hSkidRadius && hot < hSkidWidthPos)) cursor = ImGuiMouseCursor_ResizeNWSE;
+                ImGui::SetMouseCursor(cursor);
+            }
+
+            // ---- drag
+            if (active && colDrag >= 0 && colDragView == v && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f))
+            {
+                const float dz = -io.MouseDelta.x / scale, du = -io.MouseDelta.y / scale;
+                const float mz = bZMax - (m.x - left) / scale, mu = vTop - (m.y - top) / scale;    // mouse, model units
+                const float minSpan = 2.0f * minColliderSize;
+                float* c = L.center;
+                float* h = L.half;
+                switch (colDrag)
+                {
+                case hTubMove:
+                    c[2] += dz;
+                    if (v == 0) c[1] += du;
+                    if (io.KeyShift)
+                        for (ColliderLayout::Skid& k : L.skid) { k.z += dz; if (v == 0) k.y += du; }
+                    break;
+                case hTubFront: case hTubRear: case hTubTop: case hTubBottom:
+                {
+                    int axis = (colDrag == hTubFront || colDrag == hTubRear) ? 2 : 1;
+                    bool upper = colDrag == hTubFront || colDrag == hTubTop;
+                    float hi = c[axis] + h[axis], lo = c[axis] - h[axis];
+                    if (upper) hi = fmaxf(hi + (axis == 2 ? dz : du), lo + minSpan);
+                    else       lo = fminf(lo + (axis == 2 ? dz : du), hi - minSpan);
+                    c[axis] = 0.5f * (hi + lo); h[axis] = 0.5f * (hi - lo);
+                    break;
+                }
+                case hTubSidePos: h[0] = fmaxf(h[0] + du, minColliderSize); break;
+                case hTubSideNeg: h[0] = fmaxf(h[0] - du, minColliderSize); break;
+                case hTubRound:
+                {
+                    // the dot sits where the arc crosses the corner's diagonal: r (1 - 1/sqrt 2) in from the sharp corner
+                    float t = 0.5f * ((c[2] + h[2] - mz) + (mu - (c[1] - h[1])));
+                    L.rounding = fmaxf(t / (1.0f - 0.70710678f), 0.0f);
+                    break;
+                }
+                default:
+                {
+                    int end = colDrag & 1;
+                    ColliderLayout::Skid& k = L.skid[end];
+                    if (colDrag >= hSkidWidthNeg) k.halfWidth = fmaxf(k.halfWidth - du, 0.5f * minColliderSize);
+                    else if (colDrag >= hSkidWidthPos) k.halfWidth = fmaxf(k.halfWidth + du, 0.5f * minColliderSize);
+                    else if (colDrag >= hSkidRadius) k.radius = fmaxf(sqrtf((mz - k.z) * (mz - k.z) + (mu - k.y) * (mu - k.y)), minColliderSize);
+                    else { k.z += dz; if (v == 0) k.y += du; }
+                    break;
+                }
+                }
+                changed = true;
+            }
+
+            // ---- draw
+            dl->AddRectFilled(p0, ImVec2(p0.x + size.x, p0.y + size.y), cBg);
+            dl->PushClipRect(p0, ImVec2(p0.x + size.x, p0.y + size.y), true);
+            if (v == 0)
+                dl->AddLine(P(bZMax, 0.0f), P(bZMin, 0.0f), cGround, 1.0f);       // ground of the design pose
+            else
+                dl->AddLine(P(bZMax, 0.0f), P(bZMin, 0.0f), cAxis, 1.0f);         // centre line
+            for (const WheelRef& w : wheels)
+            {
+                if (v == 0)
+                {
+                    ImVec2 c = P(w.z, w.y);
+                    dl->AddCircle(c, w.radius * scale, cWheel, 48, 2.0f);
+                    dl->AddCircle(c, w.radius * collisionDebug.tireRadiusScale * scale, cTireCol, 48, 1.0f);
+                }
+                else
+                    for (float side : { 1.0f, -1.0f })
+                    {
+                        ImVec2 a, b;
+                        Box(w.z - w.radius, w.z + w.radius, side * w.x - 0.5f * w.width, side * w.x + 0.5f * w.width, a, b);
+                        dl->AddRect(a, b, cWheel, 3.0f, 0, 2.0f);
+                    }
+            }
+            {
+                ImVec2 a, b;
+                Box(cz - hz, cz + hz, tu - th, tu + th, a, b);
+                bool tubHot = hot >= hTubMove && hot <= hTubRound;
+                dl->AddRectFilled(a, b, cTub, L.rounding * scale);
+                dl->AddRect(a, b, tubHot ? cHot : cTubLine, L.rounding * scale, 0, tubHot ? 2.0f : 1.5f);
+            }
+            for (int end = 0; end < 2; end++)
+            {
+                const ColliderLayout::Skid& k = L.skid[end];
+                bool skidHot = hot >= hSkidMove && (hot & 1) == end;
+                ImU32 line = skidHot ? cHot : cSkidLine;
+                if (v == 0)
+                {
+                    dl->AddCircleFilled(P(k.z, k.y), k.radius * scale, cSkid, 40);
+                    dl->AddCircle(P(k.z, k.y), k.radius * scale, line, 40, skidHot ? 2.0f : 1.5f);
+                }
+                else
+                {
+                    ImVec2 a, b;
+                    Box(k.z - k.radius, k.z + k.radius, L.center[0] - k.halfWidth - k.radius, L.center[0] + k.halfWidth + k.radius, a, b);
+                    dl->AddRectFilled(a, b, cSkid, k.radius * scale);
+                    dl->AddRect(a, b, line, k.radius * scale, 0, skidHot ? 2.0f : 1.5f);
+                }
+            }
+            for (int i = 0; i < n; i++)
+            {
+                ImU32 col = pts[i].id == hot ? cHot : cHandle;
+                dl->AddRectFilled(ImVec2(pts[i].p.x - 3.5f, pts[i].p.y - 3.5f), ImVec2(pts[i].p.x + 3.5f, pts[i].p.y + 3.5f), col);
+            }
+            dl->PopClipRect();
+            dl->AddText(ImVec2(p0.x + 6, p0.y + 4), cText, v == 0 ? "side view (forward = left)   grey line = ground, design pose"
+                                                                 : "top view (forward = left, the car's right side up)");
+        };
+        view(0);
+        view(1);
+
+        // ---- numbers
+        auto mm = [&](const char* label, float& metres, float factor, float lo)
+        {
+            float shown = metres * factor * 1000.0f;
+            if (ImGui::DragFloat(label, &shown, 0.1f, lo, 1000.0f, "%.1f mm"))
+            {
+                metres = fmaxf(shown, lo) * 0.001f / factor;
+                changed = true;
+            }
+        };
+        ImGui::TextDisabled(L.authored ? "saved with the car" : "auto layout (derived from the tub) -- the first edit saves it with the car");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("mirror front -> rear"))
+        {
+            L.skid[1] = L.skid[0];
+            L.skid[1].z = 2.0f * L.center[2] - L.skid[0].z;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("reset to auto"))
+        {
+            g.colliderAuthored = 0;
+            g.skidRadiusFront = g.skidHalfWidthFront = g.skidYFront = g.skidZFront = 0.0f;
+            g.skidRadiusRear = g.skidHalfWidthRear = g.skidYRear = g.skidZRear = 0.0f;
+            if (car.Has<Components::State>())
+                car.Get<Components::State>().flags |= Components::State::Flags::physicsDirty;
+            return;
+        }
+        ImGui::SetItemTooltip("Skids back to the derived layout (R 30 mm, tub width, bottom 5 mm above the tub flat).\nThe tub box keeps its size; its rounding is at least 15 mm again.");
+        if (ImGui::BeginTable("colfields", 3, ImGuiTableFlags_SizingStretchSame))
+        {
+            ImGui::TableSetupColumn("tub");
+            ImGui::TableSetupColumn("front skid");
+            ImGui::TableSetupColumn("rear skid");
+            ImGui::TableHeadersRow();
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::PushItemWidth(-70);
+            mm("length", L.half[2], 2.0f, 2.0f);
+            mm("width", L.half[0], 2.0f, 2.0f);
+            mm("height", L.half[1], 2.0f, 2.0f);
+            mm("centre z", L.center[2], 1.0f, -1000.0f);
+            mm("centre y", L.center[1], 1.0f, -1000.0f);
+            mm("rounding", L.rounding, 1.0f, 0.0f);
+            ImGui::Text("bottom %.1f mm", (L.center[1] - L.half[1]) * 1000.0f);
+            ImGui::SetItemTooltip("Above the ground of the design pose.");
+            ImGui::PopItemWidth();
+            for (int end = 0; end < 2; end++)
+            {
+                ColliderLayout::Skid& k = L.skid[end];
+                ImGui::TableSetColumnIndex(1 + end);
+                ImGui::PushID(end);
+                ImGui::PushItemWidth(-70);
+                mm("radius", k.radius, 1.0f, 1.0f);
+                mm("width", k.halfWidth, 2.0f, 1.0f);
+                ImGui::SetItemTooltip("Straight part of the capsule; the round caps add a radius on each side.");
+                mm("axis z", k.z, 1.0f, -1000.0f);
+                mm("axis y", k.y, 1.0f, -1000.0f);
+                float aboveTub = (k.y - k.radius) - (L.center[1] - L.half[1]);
+                ImGui::Text("bottom %+.1f mm", aboveTub * 1000.0f);
+                ImGui::SetItemTooltip("Skid bottom vs the tub's flat bottom (+ = above).\nAt or below the tub flat it catches track steps the front tires would climb\n(measured: dead stop or launch at a 16 mm step); +5 mm never touches them\nand still lands first when the car is pitched past ~16 deg.");
+                ImGui::PopItemWidth();
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+
+        if (changed)
+        {
+            float maxR = MaxRounding(L.half);
+            if (L.rounding > maxR) L.rounding = maxR;
+            WriteColliderLayout(car, L);
+        }
+    }
 
     static bool Combo(const char* label, float& value, const float* options, const char* const* names, int count, const char* fmt = "%.1f")
     {
@@ -1911,6 +2712,80 @@ public:
         dl->AddText(ImVec2(p0.x + 6, p0.y + 4), IM_COL32(230, 230, 230, 255), std::format("{:.1f} km/h  {:.0f} rpm  {:.0f} A", rt.forwardSpeed * 3.6f, rt.motorRPM, rt.motorCurrent).c_str());
     }
 
+    // Debugging switches for the chassis collider (RCBuggySim::CollisionDebug). Global, live, not
+    // saved. The live ones act from the next physics step; the shape ones need "rebuild collider".
+    void CollisionSection(World::Entity car)
+    {
+        using namespace RCBuggySim;
+        CollisionDebug& d = collisionDebug;
+        auto check = [](const char* label, std::atomic<bool>& v, const char* tip)
+        {
+            bool b = v.load(std::memory_order_relaxed);
+            if (ImGui::Checkbox(label, &b))
+                v.store(b, std::memory_order_relaxed);
+            ImGui::SetItemTooltip("%s", tip);
+        };
+
+        ImGui::SeparatorText("colliders (live)");
+        check("tub", d.enabled[partTub], "The rounded box: chassis plate + body shell.\nOff = the car falls through the floor once the tires stop holding it.");
+        check("nose / tail skids", d.enabled[partSkid], "The two capsules across the car at the bottom front and rear edges.");
+        check("tire cylinders", d.enabled[partTire], "Rigid tire colliders: walls, other cars, car on its side / roof.\nThe tire MODEL (ground cast, suspension, grip) is not affected.");
+        ImGui::Indent();
+        ImGui::BeginDisabled(!d.enabled[partTire].load(std::memory_order_relaxed));
+        check("drop ground under tire", d.tireGroundFilter, "Drop tire contacts whose normal is within ~65 deg of the chassis' up\n(the tire model carries those). Off = the tires also collide rigidly with the floor.");
+        check("drop low contacts", d.tireHeightFilter, "Drop tire contacts touching the tire below half its radius under the axle\n(edges of crests, seams, ramp feet).");
+        ImGui::EndDisabled();
+        ImGui::Unindent();
+        check("enhanced internal edge removal", d.edgeRemoval, "Jolt's fix for ghost collisions on the internal edges of a triangle-mesh track.");
+        auto friction = [](const char* label, std::atomic<float>& v, const char* tip)
+        {
+            float f = v.load(std::memory_order_relaxed);
+            if (ImGui::SliderFloat(label, &f, -0.05f, 1.0f, f < 0.0f ? "body's" : "%.2f"))
+                v.store(f < 0.0f ? -1.0f : f, std::memory_order_relaxed);
+            ImGui::SetItemTooltip("%s", tip);
+        };
+        friction("skid friction", d.skidFriction, "Friction of skid contacts (only ever lowers the combined friction).\nLeft end = the bodies' own combined friction.");
+        friction("tub friction", d.tubFriction, "Friction of tub contacts (only ever lowers the combined friction).\nLeft end = the bodies' own combined friction (chassis 0.3).");
+
+        ImGui::SeparatorText("tire colliders (rebuild)");
+        ImGui::SliderFloat("tire collider radius", &d.tireRadiusScale, 0.5f, 1.05f, "%.2f x");
+        ImGui::SetItemTooltip("Tire cylinder radius vs the real tire (global debug value, not saved).\nThe tub and skids are edited in the views on the right and saved with the car.");
+        if (ImGui::Button("rebuild collider") && car.Has<Components::State>())
+            car.Get<Components::State>().flags |= Components::State::Flags::physicsDirty;
+        ImGui::SetItemTooltip("Rebuilds the chassis shape (keeps the body, its velocity and the car's state).");
+
+        ImGui::SeparatorText("contacts the filter saw");
+        ImGui::TextDisabled("summed over the ~10 collision steps of a frame; new / re-checked\ncontacts only (Jolt reuses a pair's contacts while the car barely moves)");
+        if (ImGui::BeginTable("contacts", 7, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
+        {
+            ImGui::TableSetupColumn("part");
+            ImGui::TableSetupColumn("touching");
+            ImGui::TableSetupColumn("near");
+            ImGui::TableSetupColumn("gap");
+            ImGui::TableSetupColumn("dropped");
+            ImGui::TableSetupColumn("deepest");
+            ImGui::TableSetupColumn("peak");
+            ImGui::TableHeadersRow();
+            const char* names[partCount] = { "tub", "skids", "tires" };
+            for (int p = 0; p < partCount; p++)
+            {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn(); ImGui::TextUnformatted(names[p]);
+                ImGui::TableNextColumn(); ImGui::Text("%u", d.lastTouching[p]);
+                ImGui::TableNextColumn(); ImGui::Text("%u", d.lastKept[p] - d.lastTouching[p]);
+                ImGui::TableNextColumn();
+                if (d.lastGap[p] < 1.0f) ImGui::Text("%.1f mm", d.lastGap[p] * 1000.0f); else ImGui::TextDisabled("-");
+                ImGui::TableNextColumn(); ImGui::Text("%u", d.lastDropped[p]);
+                ImGui::TableNextColumn(); ImGui::Text("%.1f mm", d.lastDeepest[p] * 1000.0f);
+                ImGui::TableNextColumn(); ImGui::Text("%.1f mm (%u)", d.peakDeepest[p] * 1000.0f, d.peakTouching[p]);
+            }
+            ImGui::EndTable();
+        }
+        ImGui::SetItemTooltip("touching: kept contacts actually penetrating. near: kept SPECULATIVE contacts --\nJolt reports every pair closer than 20 mm; they only push if the gap would close within the step.\ngap: the closest of those this frame.\ndropped: rejected by the filter. deepest: deepest kept penetration this frame.\npeak: deepest penetration (and most touching contacts in one frame) since the reset.");
+        if (ImGui::Button("reset peaks"))
+            d.ResetPeaks();
+    }
+
     void Update() override final
     {
         ZoneScoped;
@@ -2022,12 +2897,23 @@ public:
                     changed |= SliderStep("unsprung rear", s.unsprungMassRear, 30.0f, 140.0f, 1.0f, "%.0f g");
                     ImGui::EndTabItem();
                 }
+                collisionTab = false;
+                if (ImGui::BeginTabItem("Collision"))
+                {
+                    CollisionSection(car);
+                    collisionTab = true;
+                    ImGui::EndTabItem();
+                }
                 ImGui::EndTabBar();
             }
             ImGui::PopItemWidth();
 
             ImGui::TableSetColumnIndex(1);
-            if (rt != nullptr && rt->built)
+            if (collisionTab)
+            {
+                DrawColliderEditor(car);
+            }
+            else if (rt != nullptr && rt->built)
             {
                 int cornerIndex = viewEnd == 0 ? 1 : 3;     // the right side, as drawn
                 DrawFront(*rt, viewEnd, cornerIndex);
@@ -2093,7 +2979,7 @@ void MakeRCBuggy(bool fourWD)
     shape.mesh = Components::Handle<Components::Mesh>{ entityInvalid };
     shape.halfExtent = float3(0.058f, 0.039f, 0.158f);
     shape.offset = float3(0, 0.061f, 0.008f);
-    shape.convexRadius = 0.004f;
+    shape.convexRadius = 0.015f;                    // rounded tub, see RCBuggySim::ChassisCompound
     shape.overrideCenterOfMass = 1;
     shape.centerOfMass = float3(0, 0.0373f, fourWD ? 0.0043f : -0.0204f);
 

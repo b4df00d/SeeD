@@ -278,15 +278,6 @@ struct Options
     bool playerSystem = true;
     bool drawPhysicsShapes = false;
     bool drawPhysicsConstraints = false;
-    // Chase camera (Systems::Player, World.h). The two distances are multiples of the followed
-    // car's chassis half length, not metres, so the same rig frames a 4 m road car and a 400 mm
-    // buggy without touching anything.
-    // TODO : put those in a component ? FollowCam ?
-    bool  followVehicle = true;
-    float followDistance = 3.0f;        // behind the car
-    float followHeight = 2.0f;          // above it
-    float followLookAtHeight = 0.75f;    // where on the car the rig aims, above its origin
-    float followSmoothTime = 0.05f;     // seconds for the spring to close the gap
     bool frontToBackSort = true;
     float sortMaxDistance = 512.0f;
     float lodDistanceMultiplier = 0.25f;

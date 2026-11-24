@@ -464,11 +464,17 @@ public:
             Components::Mask mask = Components::Entity::mask;
             if (knownComponents.size() > 0)
                 mask = knownComponents[componentFilterIndex].mask;
-            uint instanceQueryIndex = World::instance->Query(mask, 0, false);
+            // Transient entities are listed only when they have a name: the editor camera does (its
+            // FollowCamera is edited from here), the terrain quadtree nodes -- thousands of them,
+            // rebuilt by the streaming every frame -- do not.
+            uint instanceQueryIndex = World::instance->Query(mask, 0, true);
             auto& result = World::instance->frameQueries[instanceQueryIndex];
 
             for (uint i = 0; i < result.size(); i++)
             {
+                if ((result[i].Get<Components::State>().flags & Components::State::Flags::transient)
+                    && !result[i].Has<Components::Name>())
+                    continue;
                 TreeNode newNode;
                 newNode.entity = { result[i].Get<Components::Entity>() };
                 bool hasName = result[i].Has<Components::Name>();
@@ -1197,19 +1203,7 @@ public:
             ImGui::SetItemTooltip("Wireframe every physics collider, coloured by motion type (static / kinematic / dynamic).\nThe SELECTED entity's collider is drawn even when this is off.");
             ImGui::Checkbox("drawPhysicsConstraints", &options.drawPhysicsConstraints);
             ImGui::SetItemTooltip("Draw every physics constraint: anchors, axes, limits, and a yellow line joining the two bodies.\nWorld-anchored constraints show a yellow marker at the pinned point instead.\nConstraints touching the SELECTED entity are drawn even when this is off, whether it owns the Constraint or is its target.");
-            ImGui::Checkbox("followVehicle", &options.followVehicle);
-            ImGui::SetItemTooltip("While playing, park the camera behind the car Systems::Driver is steering, on a critically\ndamped spring. Off gives the free-fly camera back. The free-fly WASD keys do nothing while this\nis following -- press R to set the car back on its wheels.");
-            if (options.followVehicle)
-            {
-                ImGui::DragFloat("followDistance", &options.followDistance, 0.05f, 0.5f, 20.0f);
-                ImGui::SetItemTooltip("How far behind the car the camera sits, in multiples of the chassis half length.");
-                ImGui::DragFloat("followHeight", &options.followHeight, 0.05f, -2.0f, 20.0f);
-                ImGui::SetItemTooltip("How far above the car the camera sits, in multiples of the chassis half length.");
-                ImGui::DragFloat("followLookAtHeight", &options.followLookAtHeight, 0.05f, -2.0f, 20.0f);
-                ImGui::SetItemTooltip("Where on the car the camera aims, above its origin, in multiples of the chassis half length.");
-                ImGui::DragFloat("followSmoothTime", &options.followSmoothTime, 0.01f, 0.0f, 2.0f);
-                ImGui::SetItemTooltip("Seconds the spring takes to close the gap. 0 welds the camera to the car, 0.25 is a normal\nchase lag, past ~0.6 it starts feeling like the car is towing the camera on a rope.");
-            }
+            ImGui::TextDisabled("Chase camera: the FollowCamera component on \"Camera\" in the hierarchy.");
         }
 
         if (ImGui::CollapsingHeader("Geometry", ImGuiTreeNodeFlags_DefaultOpen))
@@ -2209,6 +2203,8 @@ void InitComponentData(World::Entity ent, const ComponentInfo& info)
     }
     if (info.mask == Components::HazeLayer::mask)
         ent.Get<Components::HazeLayer>() = Components::HazeLayer();
+    if (info.mask == Components::FollowCamera::mask)
+        ent.Get<Components::FollowCamera>() = Components::FollowCamera();
 }
 
 // "new Entity": every component of the new entity except the ones Make itself fills

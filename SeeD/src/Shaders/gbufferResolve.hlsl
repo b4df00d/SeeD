@@ -48,7 +48,7 @@ void GBufferResolve(uint3 dtid : SV_DispatchThreadID)
 
     StructuredBuffer<HLSL::Camera> cameras = ResourceDescriptorHeap[commonResourcesIndices.camerasHeapIndex];
     float3 V = normalize(cameras[0].worldPos.xyz - hit.position);
-    OpenPBRClosure c = OpenPBRPrepare(s, V);
+    OpenPBRData c = OpenPBRPrepare(s, V);
     float3 diffuseAlbedo, specularAlbedo;
     OpenPBRGuides(c, diffuseAlbedo, specularAlbedo);
 

@@ -204,12 +204,6 @@ struct ShaderBucketInfo
     uint meshletCount;
 };
 
-// Double-sided materials draw with CULL_NONE and skip meshlet cone culling.
-static bool IsDoubleSided(const Components::Material& material)
-{
-    return material.doubleSided;
-}
-
 // Bindless SRV index of a material texture slot; ~0 when unset or not streamed in yet.
 static uint MaterialTextureIndex(Components::Handle<Components::Texture> handle)
 {
@@ -217,38 +211,6 @@ static uint MaterialTextureIndex(Components::Handle<Components::Texture> handle)
         return ~0u;
     Resource* texture = AssetLibrary::instance->Get<Resource>(handle.Get().id);
     return texture ? texture->srv.offset : ~0u;
-}
-
-// Components::Material (OpenPBR, one field per spec parameter) -> the GPU packing of structs.hlsl,
-// unpacked by openpbr.hlsli's ResolveOpenPBR. Leaves shaderIndex to the caller.
-static void PackMaterial(const Components::Material& m, HLSL::Material& g)
-{
-    g.baseColorWeight = float4(m.baseColor, m.baseWeight);
-    g.specularColorWeight = float4(m.specularColor, m.specularWeight);
-    g.transmissionColorWeight = float4(m.transmissionColor, m.transmissionWeight);
-    g.transmissionScatter = float4(m.transmissionScatter, m.transmissionScatterAnisotropy);
-    g.subsurfaceColorWeight = float4(m.subsurfaceColor, m.subsurfaceWeight);
-    g.subsurfaceRadius = float4(m.subsurfaceRadiusScale, m.subsurfaceRadius);
-    g.coatColorWeight = float4(m.coatColor, m.coatWeight);
-    g.fuzzColorWeight = float4(m.fuzzColor, m.fuzzWeight);
-    g.emissionColorLuminance = float4(m.emissionColor, m.emissionLuminance);
-    g.base = float4(m.baseDiffuseRoughness, m.baseMetalness, m.geometryOpacity, m.normalScale);
-    g.specular = float4(m.specularRoughness, m.specularRoughnessAnisotropy, m.specularIor, m.subsurfaceScatterAnisotropy);
-    g.transmission = float4(m.transmissionDepth, m.transmissionDispersionScale, m.transmissionDispersionAbbeNumber, 0.0f);
-    g.coat = float4(m.coatRoughness, m.coatRoughnessAnisotropy, m.coatIor, m.coatDarkening);
-    g.fuzzThinFilm = float4(m.fuzzRoughness, m.thinFilmWeight, m.thinFilmThickness, m.thinFilmIor);
-
-    g.alphaCutoff = m.alphaCutoff;
-    g.flags = (m.doubleSided ? HLSL::MaterialFlagDoubleSided : 0u)
-            | (m.noRayTracing ? HLSL::MaterialFlagNoRayTracing : 0u)
-            | (m.geometryThinWalled ? HLSL::MaterialFlagThinWalled : 0u);
-    g.hazeLayer = m.hazeLayer;
-
-    g.baseColorTexture = MaterialTextureIndex(m.baseColorTexture);
-    g.specularRoughnessTexture = MaterialTextureIndex(m.specularRoughnessTexture);
-    g.baseMetalnessTexture = MaterialTextureIndex(m.baseMetalnessTexture);
-    g.normalTexture = MaterialTextureIndex(m.normalTexture);
-    g.emissionTexture = MaterialTextureIndex(m.emissionTexture);
 }
 
 // Debug-UI snapshot of one bucket's state; see ShaderBucketRegistry::GetDebugStats.
@@ -3847,7 +3809,7 @@ public:
                         // later dirty-refresh frames, so in-place mesh/material mutation of an
                         // already-loaded instance is a known, documented limitation (doesn't happen
                         // anywhere in the codebase today).
-                        viewWorld.shaderBucketRegistry.AddInstanceContribution(ent, shaderCmp.id, IsDoubleSided(materialCmp), effectiveMesh->LODs[0].meshletCount);
+                        viewWorld.shaderBucketRegistry.AddInstanceContribution(ent, shaderCmp.id, materialCmp.doubleSided, effectiveMesh->LODs[0].meshletCount);
                     }
 
                     // instanceDirty is consumed exactly here (this is its only reader): clear it so
@@ -3923,9 +3885,35 @@ public:
                             Components::Shader& shaderCmp = materialCmp.shader.Get();
                             if (shaderCmp.path[0] != 0)
                                 AssetLibrary::instance->AddIfMissing(shaderCmp.path, shaderCmp.id);
-                            material.shaderIndex = frameWorld.shaderBucketRegistry.GetOrRegister(shaderCmp.id, IsDoubleSided(materialCmp));
+                            material.shaderIndex = frameWorld.shaderBucketRegistry.GetOrRegister(shaderCmp.id, materialCmp.doubleSided);
                         }
-                        PackMaterial(materialCmp, material);
+                        // OpenPBR (one field per spec parameter) -> the GPU packing of structs.hlsl, unpacked by openpbr.hlsli's ResolveOpenPBR
+                        material.baseColorWeight = float4(materialCmp.baseColor, materialCmp.baseWeight);
+                        material.specularColorWeight = float4(materialCmp.specularColor, materialCmp.specularWeight);
+                        material.transmissionColorWeight = float4(materialCmp.transmissionColor, materialCmp.transmissionWeight);
+                        material.transmissionScatter = float4(materialCmp.transmissionScatter, materialCmp.transmissionScatterAnisotropy);
+                        material.subsurfaceColorWeight = float4(materialCmp.subsurfaceColor, materialCmp.subsurfaceWeight);
+                        material.subsurfaceRadius = float4(materialCmp.subsurfaceRadiusScale, materialCmp.subsurfaceRadius);
+                        material.coatColorWeight = float4(materialCmp.coatColor, materialCmp.coatWeight);
+                        material.fuzzColorWeight = float4(materialCmp.fuzzColor, materialCmp.fuzzWeight);
+                        material.emissionColorLuminance = float4(materialCmp.emissionColor, materialCmp.emissionLuminance);
+                        material.base = float4(materialCmp.baseDiffuseRoughness, materialCmp.baseMetalness, materialCmp.geometryOpacity, materialCmp.normalScale);
+                        material.specular = float4(materialCmp.specularRoughness, materialCmp.specularRoughnessAnisotropy, materialCmp.specularIor, materialCmp.subsurfaceScatterAnisotropy);
+                        material.transmission = float4(materialCmp.transmissionDepth, materialCmp.transmissionDispersionScale, materialCmp.transmissionDispersionAbbeNumber, 0.0f);
+                        material.coat = float4(materialCmp.coatRoughness, materialCmp.coatRoughnessAnisotropy, materialCmp.coatIor, materialCmp.coatDarkening);
+                        material.fuzzThinFilm = float4(materialCmp.fuzzRoughness, materialCmp.thinFilmWeight, materialCmp.thinFilmThickness, materialCmp.thinFilmIor);
+
+                        material.alphaCutoff = materialCmp.alphaCutoff;
+                        material.flags = (materialCmp.doubleSided ? HLSL::MaterialFlagDoubleSided : 0u)
+                                | (materialCmp.noRayTracing ? HLSL::MaterialFlagNoRayTracing : 0u)
+                                | (materialCmp.geometryThinWalled ? HLSL::MaterialFlagThinWalled : 0u);
+                        material.hazeLayer = materialCmp.hazeLayer;
+
+                        material.baseColorTexture = MaterialTextureIndex(materialCmp.baseColorTexture);
+                        material.specularRoughnessTexture = MaterialTextureIndex(materialCmp.specularRoughnessTexture);
+                        material.baseMetalnessTexture = MaterialTextureIndex(materialCmp.baseMetalnessTexture);
+                        material.normalTexture = MaterialTextureIndex(materialCmp.normalTexture);
+                        material.emissionTexture = MaterialTextureIndex(materialCmp.emissionTexture);
                     }
                     frameWorld.materials.AddOrUpdate(World::Entity(queryResult[i + subQuery].Get<Components::Entity>()), material);
                 }
@@ -4101,7 +4089,13 @@ public:
                     float4x4 proj = MatrixPerspectiveFovLH(cam.fovY * (3.14159265358979f / 180.0f), float(this->renderResolution.x) / float(this->renderResolution.y), cam.nearClip, cam.farClip, HLSL::reverseZ);
                     float4x4 viewProj = mul(inverse(mat.matrix), proj);
                     float4 worldPos = float4(mat.matrix[3].xyz, 1);
-                    float4x4 previousViewProj = mul(inverse(previousMat), proj);
+                    // Same pattern as previousMat: Camera::proj still holds last frame's projection until
+                    // overwritten here. Reprojecting with this frame's proj was wrong as soon as fovY (or
+                    // aspect/near/far) changed. A camera never rendered (proj zero: _34 is 1 for any
+                    // perspective proj, so row 2 is never 0) has no history, so it uses its current one.
+                    float4x4 previousProj = any(cam.proj[2] != float4(0.0f, 0.0f, 0.0f, 0.0f)) ? cam.proj : proj;
+                    cam.proj = proj;
+                    float4x4 previousViewProj = mul(inverse(previousMat), previousProj);
                     float4 previousWorldPos = float4(previousMat[3].xyz, 1);
 
                     float4 planes[6];
@@ -4157,7 +4151,7 @@ public:
                     hlslcam.worldPos = worldPos;
 
                     hlslcam.previousViewProj = previousViewProj;
-                    hlslcam.previousViewProj_inv = mul(hlslcam.proj_inv, previousMat);
+                    hlslcam.previousViewProj_inv = mul(inverse(previousProj), previousMat);
                     hlslcam.previousWorldPos = previousWorldPos;
 
                     hlslcam.sizeCulling = 1;

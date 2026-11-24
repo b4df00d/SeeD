@@ -335,9 +335,9 @@ void PathTraceRays()
             s.specular_roughness = max(rtParameters.SHARCRoughnessThreshold, s.specular_roughness);
             s.coat_roughness = max(rtParameters.SHARCRoughnessThreshold, s.coat_roughness);
 #endif // SHARC_UPDATE
-            // the closure turns the normals toward the viewer (back faces, normal maps)
-            OpenPBRClosure closure = OpenPBRPrepare(s, viewVector);
-            float3 geometryNormal = closure.Ng;
+            // OpenPBRPrepare turns the normals toward the viewer (back faces, normal maps)
+            OpenPBRData pbr = OpenPBRPrepare(s, viewVector);
+            float3 geometryNormal = pbr.Ng;
 
 
             // Construct SharcHitData structure needed for creating a query point at this hit location
@@ -347,12 +347,12 @@ void PathTraceRays()
 #if SHARC_MATERIAL_DEMODULATION
             {
                 float3 diffuseAlbedo, specularAlbedo;
-                OpenPBRGuides(closure, diffuseAlbedo, specularAlbedo);
+                OpenPBRGuides(pbr, diffuseAlbedo, specularAlbedo);
                 sharcHitData.materialDemodulation = max(diffuseAlbedo, 0.05f) + max(specularAlbedo, 0.02f);
             }
 #endif // SHARC_MATERIAL_DEMODULATION
 #if SHARC_SEPARATE_EMISSIVE
-            sharcHitData.emissive = closure.emission;
+            sharcHitData.emissive = pbr.emission;
 #endif // SHARC_SEPARATE_EMISSIVE
 
 //#if SHARC_QUERY
@@ -423,7 +423,7 @@ void PathTraceRays()
                         if (light.type == HLSL::LightType::Directional && viewContext.atmosphere.transmittanceLUT != HLSL::invalidUINT)
                             lightContribution *= SampleTransmittance(viewContext.atmosphere, AtmospherePosition(viewContext.atmosphere, hitPos), vectorToLight);
                         float bsdfPdf;
-                        lightContribution *= OpenPBREval(closure, vectorToLight, bsdfPdf);
+                        lightContribution *= OpenPBREval(pbr, vectorToLight, bsdfPdf);
 
 #ifndef SHARC_UPDATE // == SHARC_QUERY for now, better help with having the code not greyed
                         if (bounce == 0)
@@ -448,10 +448,10 @@ void PathTraceRays()
             // becomes the ReSTIR GI sample, reprojected and shared between pixels, which would drag
             // the emitter's colour across the screen whenever the camera or the object moves.
             if (bounce == 0)
-                accumulatedSampleData.radiance += closure.emission;
+                accumulatedSampleData.radiance += pbr.emission;
             else
 #endif
-                sampleRadiance += closure.emission * throughput;
+                sampleRadiance += pbr.emission * throughput;
 #endif
 
             if (!SharcUpdateHit(sharcParameters, sharcState, sharcHitData, sampleRadiance, RNG(rngState)))
@@ -473,7 +473,7 @@ void PathTraceRays()
             float bsdfPdf;
             uint bsdfFlags;
             float lobeRoughness;
-            if (!OpenPBRSample(closure, float3(RNG(rngState), RNG(rngState), RNG(rngState)), ray.Direction, bsdfWeight, bsdfPdf, bsdfFlags, lobeRoughness))
+            if (!OpenPBRSample(pbr, float3(RNG(rngState), RNG(rngState), RNG(rngState)), ray.Direction, bsdfWeight, bsdfPdf, bsdfFlags, lobeRoughness))
                 break; // the sample was absorbed
 
             bool transition = (bsdfFlags & OpenPBRSampleTransmission) != 0;
@@ -566,16 +566,16 @@ void PathTraceRays()
         TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
 
         OpenPBRSurface s = GetRTSurface(payload.instanceID, payload.primitiveIndex, payload.barycentrics);
-        OpenPBRClosure closure = OpenPBRPrepare(s, -cd.viewDir);
+        OpenPBRData pbr = OpenPBRPrepare(s, -cd.viewDir);
 
         if (editorContext.debugFlags & HLSL::EditorDebugGIAlbedo)
         {
             float3 diffuseAlbedo, specularAlbedo;
-            OpenPBRGuides(closure, diffuseAlbedo, specularAlbedo);
+            OpenPBRGuides(pbr, diffuseAlbedo, specularAlbedo);
             color = float4(diffuseAlbedo + specularAlbedo, 1);
         }
         if (editorContext.debugFlags & HLSL::EditorDebugGINormals)
-            color = float4(closure.N * 0.5 + 0.5, 1);
+            color = float4(pbr.N * 0.5 + 0.5, 1);
     }
 
 
@@ -598,12 +598,12 @@ void PathTraceRays()
         if (cd.reverseZ > 0.0 && s.specular_roughness <= SPECULAR_HITT_TRACE_ROUGHNESS_MAX)
         {
             // same normals and origin as bounce 0 of the path loop
-            OpenPBRClosure closure = OpenPBRPrepare(s, -cd.viewDir);
-            float3 geometryNormal = closure.Ng;
+            OpenPBRData pbr = OpenPBRPrepare(s, -cd.viewDir);
+            float3 geometryNormal = pbr.Ng;
 
             RayDesc ray;
             float2 rand2 = float2(RNG(rngState), RNG(rngState));
-            if (OpenPBRSampleReflectionDirection(closure, rand2, ray.Direction) && dot(geometryNormal, ray.Direction) > 0.0f)
+            if (OpenPBRSampleReflectionDirection(pbr, rand2, ray.Direction) && dot(geometryNormal, ray.Direction) > 0.0f)
             {
                 ray.Origin = OffsetRay(cd.offsetedWorldPos, geometryNormal);
                 ray.TMin = 0.01f;

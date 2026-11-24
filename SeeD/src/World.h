@@ -550,7 +550,89 @@ namespace Components
         float fovY;
         float nearClip;
         float farClip;
+        // Output, written by the renderer's UpdateCameras every frame (like WorldMatrix::matrix):
+        // until it is overwritten it holds LAST frame's projection, which reprojection needs when
+        // fovY/near/far/aspect change. Zero = never rendered yet.
+        float4x4 proj;
     };
+
+    // Chase rig, on a camera entity. While playing, Systems::Player (further down) drives the camera
+    // from it toward the car Systems::Driver is steering; without one -- or with nothing to drive --
+    // the camera is the free-fly one. Removing the component is how you turn following off.
+    // The three distances are multiples of the followed car's chassis half length, not metres, so
+    // one set of numbers frames a 4 m road car and a 400 mm buggy without touching anything.
+    struct FollowCamera : ComponentBase<FollowCamera>
+    {
+        enum class Mode : uint
+        {
+            follow = 0,      // the camera and its aim both follow the car
+            targetOnly = 1,  // the camera stays where it is (WASD still moves it), only its aim follows the car
+            cameraOnly = 2,  // the camera follows the car, its aim stays on the point it had when the mode began
+            count
+        };
+        Mode mode = Mode::targetOnly;
+        float distance = 3.0f;      // behind the car
+        float height = 2.0f;        // above it
+        float lookAtHeight = 0.75f; // where on the car the rig aims, above its origin
+        float smoothTime = 0.05f;   // seconds for the spring to close the gap
+        // Zoom: while following, the Camera's fovY is driven from the camera-to-car distance, in
+        // METRES (not chassis multiples -- this is mostly for targetOnly, where that distance is
+        // the camera's placement in the level). fovMin at distanceMin and closer, fovMax at
+        // distanceMax and beyond, linear between: the car keeps roughly its size on screen as it
+        // drives away. The Camera's own fovY comes back when following stops.
+        bool fovByDistance = true;
+        float distanceMin = 0.0f;
+        float distanceMax = 15.0f;
+        float fovMin = 90.0f;       // degrees
+        float fovMax = 30.0f;       // degrees
+    };
+    static void FollowCameraPropertyDraw(char* p)
+    {
+        FollowCamera* follow = (FollowCamera*)p;
+
+        static const char* modeNames[] = { "follow", "targetOnly", "cameraOnly" };
+        static_assert(ARRAYSIZE(modeNames) == (uint)FollowCamera::Mode::count);
+        int mode = (int)follow->mode;
+        if ((uint)mode >= (uint)FollowCamera::Mode::count)
+            mode = 0;
+        if (ImGui::Combo("mode", &mode, modeNames, ARRAYSIZE(modeNames)))
+            follow->mode = (FollowCamera::Mode)mode;
+        ImGui::SetItemTooltip("follow: the camera and its aim both follow the car.\n"
+                              "targetOnly: the camera stays where it is (WASD still moves it), only its aim follows the car.\n"
+                              "cameraOnly: the camera follows the car, its aim stays on the point it had when the mode began.\n"
+                              "Delete the component to get the free-fly camera back.");
+
+        bool followsPosition = follow->mode != FollowCamera::Mode::targetOnly;
+        bool followsAim = follow->mode != FollowCamera::Mode::cameraOnly;
+
+        ImGui::BeginDisabled(!followsPosition);
+        ImGui::DragFloat("distance", &follow->distance, 0.05f, 0.5f, 20.0f);
+        ImGui::SetItemTooltip("How far behind the car the camera sits, in multiples of the chassis half length.");
+        ImGui::DragFloat("height", &follow->height, 0.05f, -2.0f, 20.0f);
+        ImGui::SetItemTooltip("How far above the car the camera sits, in multiples of the chassis half length.");
+        ImGui::EndDisabled();
+
+        ImGui::BeginDisabled(!followsAim);
+        ImGui::DragFloat("lookAtHeight", &follow->lookAtHeight, 0.05f, -2.0f, 20.0f);
+        ImGui::SetItemTooltip("Where on the car the camera aims, above its origin, in multiples of the chassis half length.");
+        ImGui::EndDisabled();
+
+        ImGui::DragFloat("smoothTime", &follow->smoothTime, 0.01f, 0.0f, 2.0f);
+        ImGui::SetItemTooltip("Seconds the spring takes to close the gap. 0 welds the camera to the car, 0.25 is a normal\n"
+                              "chase lag, past ~0.6 it starts feeling like the car is towing the camera on a rope.");
+
+        ImGui::Checkbox("fovByDistance", &follow->fovByDistance);
+        ImGui::SetItemTooltip("Drive the Camera's fovY from the camera-to-car distance (in metres) while following:\n"
+                              "fovMin at distanceMin and closer, fovMax at distanceMax and beyond, linear between.\n"
+                              "The Camera's own fovY comes back when following stops.");
+        ImGui::BeginDisabled(!follow->fovByDistance);
+        ImGui::DragFloatRange2("distance min/max", &follow->distanceMin, &follow->distanceMax, 0.1f, 0.0f, 10000.0f, "%.1f m", "%.1f m");
+        ImGui::SetItemTooltip("Camera-to-car distance, in metres, where the fov reaches fovMin (min) and fovMax (max).");
+        ImGui::DragFloatRange2("fov min/max", &follow->fovMin, &follow->fovMax, 0.25f, 1.0f, 170.0f, "%.1f deg", "%.1f deg");
+        ImGui::SetItemTooltip("Vertical fov, in degrees: fovMin when the car is near, fovMax when it is far.");
+        ImGui::EndDisabled();
+    }
+
     struct Prefab : ComponentBase<Prefab>
     {
         #define ECS_PREFAB_PATH 256
@@ -1974,18 +2056,30 @@ namespace Systems
 
         float3 position = float3(0, 1, -2);
         quaternion rotation = quaternion::identity();
+        // The camera's chase rig as the project saved it (Project.h fills both before On). The
+        // camera entity is transient -- never written to a .seed -- so this is where it persists.
+        bool hasFollowCamera = true;
+        Components::FollowCamera followCamera;
 
         void On() override
         {
-            auto& cam = camera.Make(Components::Transform::mask | Components::WorldMatrix::mask | Components::Camera::mask).Get<Components::Camera>();
+            // Named, so the hierarchy lists it (it skips transient entities that have no name: the
+            // terrain quadtree nodes) and its FollowCamera can be edited in the property window.
+            Components::Mask mask = Components::Transform::mask | Components::WorldMatrix::mask | Components::Camera::mask;
+            if (hasFollowCamera)
+                mask |= Components::FollowCamera::mask;
+            auto& cam = camera.Make(mask, "Camera").Get<Components::Camera>();
             cam.fovY = 90;
             cam.nearClip = 0.02;
             cam.farClip = 8000.0f;
+            cam.proj = float4x4(0.0f);   // no previous projection yet (Make hands back raw pool memory)
             auto& trans = camera.Get<Components::Transform>();
             trans.position = position;
             trans.rotation = rotation;
             trans.scale = 1;
             camera.Get<Components::State>().flags |= Components::State::Flags::transient;
+            if (hasFollowCamera)
+                camera.Get<Components::FollowCamera>() = followCamera;   // Make hands back raw pool memory
 
             World::instance->systems.push_back(this);
         }
@@ -2003,6 +2097,12 @@ namespace Systems
         float3 chaseLookAt = float3(0);
         float3 chaseLookAtVelocity = float3(0);
         uint chaseEntity = chaseCameraNoTarget;   // what the rig is locked onto, to know when to snap
+        Components::FollowCamera::Mode chaseMode = Components::FollowCamera::Mode::follow;
+        float3 chaseCarPosition = float3(0);      // the followed car's origin this frame, for the zoom
+        // FollowCamera::fovByDistance overwrites Camera::fovY while it drives it; the authored value
+        // is kept here and put back the frame it stops, so the zoom never sticks to the free camera.
+        bool fovDriven = false;
+        float fovSaved = 90.0f;
 
         // Critically damped spring: closes most of the gap in `smoothTime` seconds and never
         // overshoots, so the camera lags into a corner and settles instead of ringing. The rational
@@ -2021,16 +2121,19 @@ namespace Systems
             current = target + (offset + temp) * decay;
         }
 
-        // Sits behind and above the car Systems::Driver published, on the springs above. Returns
-        // false when there is nothing to follow, which is what hands the camera back to the free-fly
-        // controls in Update.
+        // Drives the camera from its FollowCamera toward the car Systems::Driver published, on the
+        // springs above. Returns false when there is nothing to follow (no component, not playing, no
+        // car), which is what hands the camera back to the free-fly controls in Update.
         bool UpdateChaseCamera(World* world)
         {
-            if (!options.followVehicle || !engineState.playing)
+            if (!engineState.playing || !camera.Has<Components::FollowCamera>())
             {
                 chaseEntity = chaseCameraNoTarget;
                 return false;
             }
+            const Components::FollowCamera& follow = camera.Get<Components::FollowCamera>();
+            Components::FollowCamera::Mode mode = (uint)follow.mode < (uint)Components::FollowCamera::Mode::count
+                ? follow.mode : Components::FollowCamera::Mode::follow;
 
             uint packed = chaseCameraTarget.entity.load(std::memory_order_relaxed);
             World::Entity target;
@@ -2042,8 +2145,11 @@ namespace Systems
                 return false;
             }
 
+            auto& trans = camera.Get<Components::Transform>();
+
             float4x4 carMatrix = ComputeWorldMatrix(target);
             float3 carPosition = carMatrix[3].xyz;
+            chaseCarPosition = carPosition;
 
             // Yaw only. Letting the rig inherit the car's pitch and roll is what turns a chase
             // camera into a washing machine the first time the car lands on its side.
@@ -2052,37 +2158,58 @@ namespace Systems
             float3 carForward = flatLength > 1.0e-4f ? flat * (1.0f / flatLength) : float3(0, 0, 1);
 
             float scale = chaseCameraTarget.scale.load(std::memory_order_relaxed);
-            float3 desiredPosition = carPosition - carForward * (options.followDistance * scale)
-                                                 + float3(0, options.followHeight * scale, 0);
-            float3 desiredLookAt = carPosition + float3(0, options.followLookAtHeight * scale, 0);
+            float3 desiredPosition = carPosition - carForward * (follow.distance * scale)
+                                                 + float3(0, follow.height * scale, 0);
+            float3 desiredLookAt = carPosition + float3(0, follow.lookAtHeight * scale, 0);
 
             // A different car (or the first frame of following one) is a cut, not a move: springing
             // across the level from wherever the free camera was left would take seconds.
             if (chaseEntity != packed)
             {
                 chaseEntity = packed;
-                chasePosition = desiredPosition;
+                chaseMode = mode;
+                chasePosition = mode == Components::FollowCamera::Mode::targetOnly ? trans.position : desiredPosition;
                 chaseLookAt = desiredLookAt;
                 chasePositionVelocity = float3(0);
                 chaseLookAtVelocity = float3(0);
             }
             else
             {
+                // A mode switch is a move, not a cut: the springs restart from where the camera
+                // actually is, so going back to `follow` glides the camera behind the car instead of
+                // teleporting it. cameraOnly freezes the aim on the point it had at this instant.
+                if (chaseMode != mode)
+                {
+                    chaseMode = mode;
+                    chasePosition = trans.position;
+                    chasePositionVelocity = float3(0);
+                    chaseLookAtVelocity = float3(0);
+                }
+
                 float dt = Time::instance->deltaSeconds;
-                SmoothDamp(chasePosition, chasePositionVelocity, desiredPosition, options.followSmoothTime, dt);
+                if (mode == Components::FollowCamera::Mode::targetOnly)
+                {
+                    // The camera is wherever the free-fly keys (or the Transform field) put it.
+                    MoveFreeFly(trans);
+                    chasePosition = trans.position;
+                }
+                else
+                {
+                    SmoothDamp(chasePosition, chasePositionVelocity, desiredPosition, follow.smoothTime, dt);
+                }
                 // Half the smooth time: the aim has to settle before the position does, or the car
                 // slides around the frame while the rig catches up behind it.
-                SmoothDamp(chaseLookAt, chaseLookAtVelocity, desiredLookAt, options.followSmoothTime * 0.5f, dt);
+                if (mode != Components::FollowCamera::Mode::cameraOnly)
+                    SmoothDamp(chaseLookAt, chaseLookAtVelocity, desiredLookAt, follow.smoothTime * 0.5f, dt);
             }
 
-            auto& trans = camera.Get<Components::Transform>();
             trans.position = chasePosition;
             trans.scale = float3(1);
 
             float3 toTarget = chaseLookAt - chasePosition;
             float toTargetLength = (float)length(toTarget);
             if (toTargetLength < 1.0e-4f)
-                return true;   // sitting on the car; keep last frame's rotation rather than NaN it
+                return true;   // sitting on the target; keep last frame's rotation rather than NaN it
 
             // Rows are right / up / forward, the same left-handed basis the free camera rebuilds at
             // the end of Update, so right = up x forward and up = forward x right.
@@ -2101,50 +2228,82 @@ namespace Systems
             return true;
         }
 
-        void Update(World* world) override
+        // FollowCamera::fovByDistance: fovMax at distanceMin, fovMin at distanceMax, linear and
+        // clamped, from the camera's final position this frame (after the springs) to the car.
+        void UpdateChaseFov(bool chasing)
         {
-            ZoneScoped;
-
-            if (UpdateChaseCamera(world))
-                return;
-
             auto& cam = camera.Get<Components::Camera>();
-            auto& trans = camera.Get<Components::Transform>();
-            Components::WorldMatrix mat;
-            mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
+            bool drive = chasing && camera.Has<Components::FollowCamera>()
+                      && camera.Get<Components::FollowCamera>().fovByDistance;
+            if (!drive)
+            {
+                if (fovDriven)
+                {
+                    cam.fovY = fovSaved;
+                    fovDriven = false;
+                }
+                return;
+            }
+            if (!fovDriven)
+            {
+                fovSaved = cam.fovY;
+                fovDriven = true;
+            }
+
+            const Components::FollowCamera& follow = camera.Get<Components::FollowCamera>();
+            float distance = (float)length(chaseCarPosition - camera.Get<Components::Transform>().position);
+            float range = follow.distanceMax - follow.distanceMin;
+            float t = range > 1.0e-4f ? (distance - follow.distanceMin) / range : (distance >= follow.distanceMax ? 1.0f : 0.0f);
+            t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+            float fov = follow.fovMin + (follow.fovMax - follow.fovMin) * t;
+            cam.fovY = fov < 1.0f ? 1.0f : (fov > 170.0f ? 170.0f : fov);   // a 0 or 180 fov is a degenerate projection
+        }
+
+        // Free-fly translation: WASD (ZQSD) along the camera's own axes, Space / Shift up and down,
+        // mouse wheel scales the speed. Shared by the free camera and the targetOnly chase mode.
+        void MoveFreeFly(Components::Transform& trans)
+        {
+            float4x4 matrix = Matrix(trans.position, trans.rotation, trans.scale);
 
             sensibility += IOs::instance->mouse.mouseWheel * .001f * sensibility;
             sensibility = clamp(float1(sensibility), 0.0025f, 1000.0f);
 
             float sensDt = sensibility * Time::instance->deltaSeconds;
-            float sensLookDt = sensibilityLook;
-            if (IOs::instance->keys.down[VK_W] || IOs::instance->keys.down[VK_Z])// || IOs::instance->keys.down[VK_UP])
-            {
-                trans.position = trans.position + (float3(mat.matrix[2].xyz) * sensDt);
-            }
-            if (IOs::instance->keys.down[VK_S])// || IOs::instance->keys.down[VK_DOWN])
-            {
-                trans.position = trans.position - (float3(mat.matrix[2].xyz) * sensDt);
-            }
-            if (IOs::instance->keys.down[VK_D])// || IOs::instance->keys.down[VK_RIGHT])
-            {
-                trans.position = trans.position + (float3(mat.matrix[0].xyz) * sensDt);
-            }
-            if (IOs::instance->keys.down[VK_A] || IOs::instance->keys.down[VK_Q])// || IOs::instance->keys.down[VK_LEFT])
-            {
-                trans.position = trans.position - (float3(mat.matrix[0].xyz) * sensDt);
-            }
+            if (IOs::instance->keys.down[VK_W] || IOs::instance->keys.down[VK_Z])
+                trans.position = trans.position + (float3(matrix[2].xyz) * sensDt);
+            if (IOs::instance->keys.down[VK_S])
+                trans.position = trans.position - (float3(matrix[2].xyz) * sensDt);
+            if (IOs::instance->keys.down[VK_D])
+                trans.position = trans.position + (float3(matrix[0].xyz) * sensDt);
+            if (IOs::instance->keys.down[VK_A] || IOs::instance->keys.down[VK_Q])
+                trans.position = trans.position - (float3(matrix[0].xyz) * sensDt);
             if (IOs::instance->keys.down[VK_SPACE])
-            {
-                trans.position = trans.position + (float3(mat.matrix[1].xyz) * sensDt);
-            }
+                trans.position = trans.position + (float3(matrix[1].xyz) * sensDt);
             if (IOs::instance->keys.down[VK_SHIFT])
-            {
-                trans.position = trans.position - (float3(mat.matrix[1].xyz) * sensDt);
-            }
+                trans.position = trans.position - (float3(matrix[1].xyz) * sensDt);
+        }
+
+        void Update(World* world) override
+        {
+            ZoneScoped;
+
+            // The camera is listed in the hierarchy, so it can be deleted from there.
+            if (!camera.IsValid() || !camera.Has<Components::Transform>())
+                return;
+
+            bool chasing = UpdateChaseCamera(world);
+            if (camera.Has<Components::Camera>())
+                UpdateChaseFov(chasing);
+            if (chasing)
+                return;
+
+            auto& trans = camera.Get<Components::Transform>();
+            MoveFreeFly(trans);
+
+            Components::WorldMatrix mat;
             mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
 
-            float3 forward = float3(0, 0, 1);
+            float sensLookDt = sensibilityLook;
             if (IOs::instance->mouse.mouseButtonLeft)
             {
                 trans.rotation = mul(quaternion::rotation_axis(float3(mat.matrix[0].xyz), (float)IOs::instance->mouse.mouseDelta.y * sensLookDt), trans.rotation);
@@ -2161,8 +2320,6 @@ namespace Systems
             mat.matrix[0].xyz = right;
             mat.matrix[1].xyz = up;
             trans.rotation = MatrixToQuaternion(float3x3(mat.matrix));
-            mat.matrix = Matrix(trans.position, trans.rotation, trans.scale);
-
         }
     };
 

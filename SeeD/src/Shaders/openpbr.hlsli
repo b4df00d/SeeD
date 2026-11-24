@@ -7,7 +7,7 @@
 // This file owns everything material-side:
 //   - OpenPBRSurface: the resolved parameters at one shading point, with the spec's names
 //   - ResolveOpenPBR: HLSL::Material (structs.hlsl, GPU packing) + textures -> OpenPBRSurface
-//   - OpenPBRClosure: the BSDF at that point for one view direction
+//   - OpenPBRData: the BSDF at that point for one view direction
 //       OpenPBRPrepare -> OpenPBREval (next event estimation) / OpenPBRSample (path continuation)
 //       OpenPBRGuides  -> DLSS-RR diffuse / specular albedo
 //
@@ -414,7 +414,7 @@ float3 OpenPBRSampleCosine(float2 u)
 }
 
 // =============================================================================================
-// Closure
+// Data
 // =============================================================================================
 
 // OpenPBRSample flags
@@ -422,7 +422,7 @@ static const uint OpenPBRSampleGlossy = 1u << 0;        // a microfacet lobe (no
 static const uint OpenPBRSampleTransmission = 1u << 1;  // the direction crossed the surface
 static const uint OpenPBRSampleCrossesMedium = 1u << 2; // ... into or out of a closed medium (not thin-walled / pass-through)
 
-struct OpenPBRClosure
+struct OpenPBRData
 {
     // frame: N is the shading normal and Ng the geometric one, both turned toward the viewer
     float3 N;
@@ -474,20 +474,20 @@ struct OpenPBRClosure
     float3 emission;        // leaving toward V, through coat and fuzz
 };
 
-float3 OpenPBRToLocal(OpenPBRClosure c, float3 w)
+float3 OpenPBRToLocal(OpenPBRData c, float3 w)
 {
     return float3(dot(w, c.T), dot(w, c.B), dot(w, c.N));
 }
 
-float3 OpenPBRToWorld(OpenPBRClosure c, float3 w)
+float3 OpenPBRToWorld(OpenPBRData c, float3 w)
 {
     return w.x * c.T + w.y * c.B + w.z * c.N;
 }
 
 // V: unit vector from the shading point toward the viewer.
-OpenPBRClosure OpenPBRPrepare(OpenPBRSurface s, float3 V)
+OpenPBRData OpenPBRPrepare(OpenPBRSurface s, float3 V)
 {
-    OpenPBRClosure c = (OpenPBRClosure)0;
+    OpenPBRData c = (OpenPBRData)0;
     c.V = V;
 
     // ---- sidedness ---------------------------------------------------------------------------
@@ -638,7 +638,7 @@ OpenPBRClosure OpenPBRPrepare(OpenPBRSurface s, float3 V)
 
 // --- per-lobe evaluation: f * |cos(wo)| and the lobe's own pdf ------------------------------
 
-float3 OpenPBREvalFuzz(OpenPBRClosure c, float3 wi, float3 wo, out float pdf)
+float3 OpenPBREvalFuzz(OpenPBRData c, float3 wi, float3 wo, out float pdf)
 {
     float x = min(wi.z, 1.0f);
     float aInv = OpenPBRFuzzLTCaInv(x, c.fuzzRoughness);
@@ -680,7 +680,7 @@ float OpenPBREvalRefraction(float3 wi, float3 wo, float2 alpha, float eta, out f
 
 // BSDF * |cos(L)| for a light direction L (unit, world space, from the surface). pdf: the mixture
 // pdf OpenPBRSample would have produced L with. Delta lobes (pass-through) are not included.
-float3 OpenPBREval(OpenPBRClosure c, float3 L, out float pdf)
+float3 OpenPBREval(OpenPBRData c, float3 L, out float pdf)
 {
     pdf = 0.0f;
     float3 wi = c.Vl;
@@ -753,7 +753,7 @@ float3 OpenPBREval(OpenPBRClosure c, float3 L, out float pdf)
 
 // Picks a lobe and samples it. weight = BSDF * |cos(L)| / pdf, the throughput factor;
 // roughness: the sampled lobe's (1 for diffuse and fuzz, 0 for pass-through).
-bool OpenPBRSample(OpenPBRClosure c, float3 u, out float3 L, out float3 weight, out float pdf, out uint flags, out float roughness)
+bool OpenPBRSample(OpenPBRData c, float3 u, out float3 L, out float3 weight, out float pdf, out uint flags, out float roughness)
 {
     L = 0.0f;
     weight = 0.0f;
@@ -884,7 +884,7 @@ bool OpenPBRSample(OpenPBRClosure c, float3 u, out float3 L, out float3 weight, 
 
 // A direction from the glossy reflection lobe alone (metal / specular NDF), for the DLSS-RR
 // specular hit distance guide.
-bool OpenPBRSampleReflectionDirection(OpenPBRClosure c, float2 u, out float3 L)
+bool OpenPBRSampleReflectionDirection(OpenPBRData c, float2 u, out float3 L)
 {
     float3 m = OpenPBRSampleGGXVNDF(c.Vl, c.specAlpha, u);
     float3 wo = reflect(-c.Vl, m);
@@ -893,7 +893,7 @@ bool OpenPBRSampleReflectionDirection(OpenPBRClosure c, float2 u, out float3 L)
 }
 
 // DLSS-RR guides: the directional albedos toward the viewer, split by how RR denoises them.
-void OpenPBRGuides(OpenPBRClosure c, out float3 diffuseAlbedo, out float3 specularAlbedo)
+void OpenPBRGuides(OpenPBRData c, out float3 diffuseAlbedo, out float3 specularAlbedo)
 {
     diffuseAlbedo = c.eDiffuse;
     specularAlbedo = c.eSpecular;

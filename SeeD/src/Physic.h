@@ -41,6 +41,7 @@
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
+#include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Constraints/SliderConstraint.h>
@@ -434,6 +435,33 @@ void RCBuggyShutdown();
 World::Entity RCBuggyChassisOf(World::Entity ent);
 World::Entity RCBuggyFirst(World* world);
 void RCBuggySetInput(World::Entity chassis, float throttle, float steering);
+// An RC buggy chassis gets a car-shaped compound (rounded tub, nose/tail skids, wheel cylinders)
+// instead of its plain CollisionShape box. False = not a buggy, build the CollisionShape as usual.
+bool RCBuggyChassisShape(World::Entity ent, const Components::CollisionShape& collisionShape, float convexRadius, JPH::ShapeRefC& outShape);
+// Drops the contacts of a buggy's wheel colliders that the tire model already handles (ground
+// under the tire); everything else on the wheels (walls, other cars, the car on its side or
+// upside down) stays a normal Jolt contact.
+JPH::ValidateResult RCBuggyValidateContact(const JPH::Body& body1, const JPH::Body& body2, JPH::RVec3Arg baseOffset, const JPH::CollideShapeResult& result);
+// Per-part friction / restitution of an RC buggy's chassis collider (skids are slippery).
+void RCBuggyContactSettings(const JPH::Body& body1, const JPH::Body& body2, const JPH::ContactManifold& manifold, JPH::ContactSettings& ioSettings);
+
+class PhysicsContactListener final : public JPH::ContactListener
+{
+public:
+    // Runs on Jolt workers with every body locked: no locking, no world access.
+    virtual JPH::ValidateResult OnContactValidate(const JPH::Body& body1, const JPH::Body& body2, JPH::RVec3Arg baseOffset, const JPH::CollideShapeResult& result) override
+    {
+        return RCBuggyValidateContact(body1, body2, baseOffset, result);
+    }
+    virtual void OnContactAdded(const JPH::Body& body1, const JPH::Body& body2, const JPH::ContactManifold& manifold, JPH::ContactSettings& ioSettings) override
+    {
+        RCBuggyContactSettings(body1, body2, manifold, ioSettings);
+    }
+    virtual void OnContactPersisted(const JPH::Body& body1, const JPH::Body& body2, const JPH::ContactManifold& manifold, JPH::ContactSettings& ioSettings) override
+    {
+        RCBuggyContactSettings(body1, body2, manifold, ioSettings);
+    }
+};
 
 struct Physics
 {
@@ -452,6 +480,7 @@ struct Physics
     PhysicsBroadPhaseLayerInterface broadPhaseLayerInterface;
     PhysicsObjectVsBroadPhaseLayerFilter objectVsBroadPhaseLayerFilter;
     PhysicsObjectLayerPairFilter objectLayerPairFilter;
+    PhysicsContactListener contactListener;
     JPH::PhysicsSystem physicsSystem;
 
     struct BodyRecord
@@ -554,6 +583,7 @@ struct Physics
         */
         
         physicsSystem.Init(maxBodies, numBodyMutexes, maxBodyPairs, maxContactConstraints, broadPhaseLayerInterface, objectVsBroadPhaseLayerFilter, objectLayerPairFilter);
+        physicsSystem.SetContactListener(&contactListener);
 
 #ifdef JPH_DEBUG_RENDERER
         debugRenderer = new PhysicsDebugRenderer();
@@ -1778,7 +1808,7 @@ private:
                         uint entityId = ent.id;
                         JPH::EMotionType motionType = PhysicsMotionType(ent.Get<Components::RigidBody>());
                         bool ignoredRetry = false;
-                        JPH::ShapeRefC shape = BuildShape(ent.Get<Components::CollisionShape>(), motionType, entityId, worldScale, ignoredRetry);
+                        JPH::ShapeRefC shape = BuildShape(ent, ent.Get<Components::CollisionShape>(), motionType, entityId, worldScale, ignoredRetry);
                         if (shape != nullptr)
                         {
                             bodyInterface.SetShape(record->second.bodyID, shape, true, motionType == JPH::EMotionType::Static ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
@@ -1840,7 +1870,7 @@ private:
                 PhysicsGetWorldPose(ent, ignoredPosition, ignoredRotation, worldScale);
             }
             bool ignoredRetry = false;
-            JPH::ShapeRefC shape = BuildShape(ent.Get<Components::CollisionShape>(), motionType, ent.id, worldScale, ignoredRetry);
+            JPH::ShapeRefC shape = BuildShape(ent, ent.Get<Components::CollisionShape>(), motionType, ent.id, worldScale, ignoredRetry);
             if (shape != nullptr && shape != bodyInterface.GetShape(bodyID))
             {
                 bodyInterface.SetShape(bodyID, shape, true, motionType == JPH::EMotionType::Static ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
@@ -1879,7 +1909,7 @@ private:
         }
     }
 
-    JPH::ShapeRefC BuildShape(Components::CollisionShape collisionShape, JPH::EMotionType motionType, uint entityId, float3 worldScale, bool& outRetry)
+    JPH::ShapeRefC BuildShape(World::Entity ent, Components::CollisionShape collisionShape, JPH::EMotionType motionType, uint entityId, float3 worldScale, bool& outRetry)
     {
         outRetry = false;
         for (uint axis = 0; axis < 3; axis++)
@@ -1900,6 +1930,9 @@ private:
         // Capsule/Cylinder = .x radius, .y half height of the CYLINDRICAL section (Jolt's convention -- a capsule's total height is 2 * (halfExtent.y + halfExtent.x)).
         JPH::ShapeRefC shape;
         JPH::ShapeSettings::ShapeResult shapeResult;
+        // An RC buggy builds its own compound, already placed in the entity frame (offset included).
+        const bool chassisCompound = RCBuggyChassisShape(ent, collisionShape, convexRadius, shape);
+        if (!chassisCompound)
         switch (collisionShape.shapeType)
         {
         case 0:
@@ -1957,7 +1990,7 @@ private:
                 collisionShape.offset[axis] = 0.0f;
             hasOffset |= collisionShape.offset[axis] != 0.0f;
         }
-        if (hasOffset)
+        if (hasOffset && !chassisCompound)
         {
             JPH::ShapeSettings::ShapeResult offsetResult = JPH::RotatedTranslatedShapeSettings(JPH::Vec3(collisionShape.offset[0], collisionShape.offset[1], collisionShape.offset[2]), JPH::Quat::sIdentity(), shape).Create();
             if (offsetResult.HasError())
@@ -2040,7 +2073,7 @@ private:
         JPH::EMotionType motionType = PhysicsMotionType(rigidBody);
 
         bool retry = false;
-        JPH::ShapeRefC shape = BuildShape(collisionShape, motionType, entityId, scale, retry);
+        JPH::ShapeRefC shape = BuildShape(ent, collisionShape, motionType, entityId, scale, retry);
         if (shape == nullptr && retry)
             return;
 
@@ -2252,6 +2285,8 @@ namespace Systems
         // way you were pointing -- pitch and roll go, and it lifts 0.1 m so it does not have to
         // resolve its way out of the ground it was leaning against. Zeroing the velocities is not
         // optional here: see Physics::StopBody.
+        static constexpr float fallOffHeight = -1.0f;      // m; below this the car is reset automatically
+
         static void ResetVehicle(World::Entity vehicle)
         {
             if (!vehicle.Has<Components::Transform>())
@@ -2274,9 +2309,12 @@ namespace Systems
                 (float)forward.x, (float)forward.y, (float)forward.z, 0,
                 0, 0, 0, 1);
 
+            // Fell off the world: back to the spawn point instead of righting it down there.
+            float3 target = (float)position.y < fallOffHeight ? float3(0, 0, 1) : position + float3(0, 0.1f, 0);
+
             // Goes through the Transform, so Physics::Sync picks it up as an outside edit next frame
             // and teleports the body -- the one supported way of moving something under simulation.
-            PhysicsSetWorldPose(vehicle, position + float3(0, 0.1f, 0), MatrixToQuaternion(float3x3(upright)));
+            PhysicsSetWorldPose(vehicle, target, MatrixToQuaternion(float3x3(upright)));
 
             if (Physics::instance != nullptr)
                 Physics::instance->StopBody(vehicle);
@@ -2311,7 +2349,15 @@ namespace Systems
             IOs::Keys& keys = IOs::instance->keys;
             const IOs::Controller& pad = IOs::instance->controller;
 
-            if (keys.pressed[VK_R] || pad.reset)
+            bool fellOff = false;
+            if (vehicle.Has<Components::Transform>())
+            {
+                float3 position;
+                quaternion rotation;
+                PhysicsGetWorldPose(vehicle, position, rotation);
+                fellOff = (float)position.y < fallOffHeight;
+            }
+            if (keys.pressed[VK_R] || pad.reset || fellOff)
                 ResetVehicle(vehicle);
 
             float forward = 0.0f;

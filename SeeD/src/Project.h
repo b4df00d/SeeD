@@ -55,6 +55,14 @@ public:
     bool hasCamera = false;
     float cameraPos[3] = { 0, 1, -2 };
     float cameraRot[4] = { 0, 0, 0, 1 };
+    // the camera's chase rig (Components::FollowCamera). The camera entity is transient, so the
+    // .seed never holds it -- this line does. Line:
+    //   followCamera <present> <mode> <distance> <height> <lookAtHeight> <smoothTime>
+    //                <fovByDistance> <distanceMin> <distanceMax> <fovMin> <fovMax>
+    // A project without the line gets the component with its defaults; present = 0 is a camera
+    // whose FollowCamera was deleted in the editor.
+    bool hasFollowCamera = true;
+    Components::FollowCamera followCamera;
 
     // game controller / RC radio (IOs::controllerSettings). Lines:
     //   controller <enabled> <device>
@@ -204,6 +212,18 @@ public:
         f << "camera " << cameraPos[0] << " " << cameraPos[1] << " " << cameraPos[2]
           << " " << cameraRot[0] << " " << cameraRot[1] << " " << cameraRot[2] << " " << cameraRot[3] << "\n";
 
+        if (cam.IsValid())
+        {
+            hasFollowCamera = cam.Has<Components::FollowCamera>();
+            if (hasFollowCamera)
+                followCamera = cam.Get<Components::FollowCamera>();
+        }
+        f << "followCamera " << (hasFollowCamera ? 1 : 0) << " " << (uint)followCamera.mode
+          << " " << followCamera.distance << " " << followCamera.height
+          << " " << followCamera.lookAtHeight << " " << followCamera.smoothTime
+          << " " << (followCamera.fovByDistance ? 1 : 0) << " " << followCamera.distanceMin << " " << followCamera.distanceMax
+          << " " << followCamera.fovMin << " " << followCamera.fovMax << "\n";
+
         f << "shaderStatsCsv " << (options.shaderStatsCsv ? 1 : 0) << "\n";
         f << "playerSystem " << (options.playerSystem ? 1 : 0) << "\n";
 
@@ -300,6 +320,8 @@ public:
         Systems::Player& player = engine.player;
         player.position = float3(cameraPos[0], cameraPos[1], cameraPos[2]);
         player.rotation = quaternion(cameraRot[0], cameraRot[1], cameraRot[2], cameraRot[3]);
+        player.hasFollowCamera = hasFollowCamera;
+        player.followCamera = followCamera;
 
         UI& ui = engine.ui;
         ui.imguiIniPath = imguiIniPath;
@@ -386,6 +408,30 @@ private:
                     ss >> cameraPos[0] >> cameraPos[1] >> cameraPos[2]
                        >> cameraRot[0] >> cameraRot[1] >> cameraRot[2] >> cameraRot[3];
                     hasCamera = true;
+                }
+                else if (key == "followCamera")
+                {
+                    std::istringstream ss(val);
+                    int present = 1;
+                    uint mode = 0;
+                    Components::FollowCamera fc;
+                    ss >> present >> mode >> fc.distance >> fc.height >> fc.lookAtHeight >> fc.smoothTime;
+                    // Zoom fields came later: a line without them keeps the defaults (read into
+                    // temporaries -- a failed >> would write 0 straight into the component).
+                    int fovByDistance = 0;
+                    float distanceMin, distanceMax, fovMin, fovMax;
+                    if (ss >> fovByDistance >> distanceMin >> distanceMax >> fovMin >> fovMax)
+                    {
+                        fc.fovByDistance = fovByDistance != 0;
+                        fc.distanceMin = distanceMin;
+                        fc.distanceMax = distanceMax;
+                        fc.fovMin = fovMin;
+                        fc.fovMax = fovMax;
+                    }
+                    fc.mode = mode < (uint)Components::FollowCamera::Mode::count
+                        ? (Components::FollowCamera::Mode)mode : Components::FollowCamera::Mode::follow;
+                    hasFollowCamera = present != 0;
+                    followCamera = fc;
                 }
             }
             else if (section == "calibration")
