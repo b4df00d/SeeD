@@ -2269,6 +2269,106 @@ void SetPhysicsPreset(World::Entity ent, uint motionType, uint shapeType)
     state.flags |= Components::State::Flags::instanceDirty;
 }
 
+// Root plus every descendant at any depth (root first). There is no children list, so the hierarchy is
+// rebuilt from one Parent query. Returns handles, not slots: callers that Add/Remove components move
+// entities between pools, which would invalidate the query's slots.
+std::vector<EntityBase> CollectHierarchy(World::Entity root)
+{
+    std::vector<EntityBase> order;
+    if (!root.IsValid())
+        return order;
+
+    uint queryIndex = World::instance->Query(Components::Parent::mask, 0, false);
+    auto& result = World::instance->frameQueries[queryIndex];
+    std::vector<std::pair<uint, EntityBase>> parentToChild; // (parent id, child)
+    parentToChild.reserve(result.size());
+    for (uint i = 0; i < result.size(); i++)
+    {
+        uint parentId = result[i].Get<Components::Parent>().entity.id;
+        if (parentId != entityInvalid.id)
+            parentToChild.push_back({ parentId, result[i].Get<Components::Entity>() });
+    }
+
+    std::unordered_set<uint> visited;
+    std::vector<EntityBase> stack;
+    stack.push_back(root.Get<Components::Entity>());
+    while (!stack.empty())
+    {
+        EntityBase e = stack.back(); stack.pop_back();
+        if (!visited.insert(e.id).second)
+            continue;
+        order.push_back(e);
+        for (auto& pc : parentToChild)
+            if (pc.first == e.id)
+                stack.push_back(pc.second);
+    }
+    return order;
+}
+
+// Same preset on root and every descendant that renders a mesh (has an Instance).
+void SetPhysicsPresetRecursive(World::Entity root, uint motionType, uint shapeType)
+{
+    std::vector<EntityBase> targets;
+    for (auto& e : CollectHierarchy(root))
+        if (World::Entity(e).Has<Components::Instance>())
+            targets.push_back(e);
+
+    for (auto& e : targets)
+        SetPhysicsPreset(World::Entity(e), motionType, shapeType);
+    IOs::Log(std::format("Physics preset: applied to {} mesh entit{} in the hierarchy", targets.size(), targets.size() == 1 ? "y" : "ies"));
+}
+
+// ONE dynamic body on root, whose collider is a compound of a ConvexHull per mesh in the hierarchy
+// (see Physics::BuildBodyShape: a CollisionShape without a RigidBody joins the nearest ancestor body).
+// Root keeps its own hull when it renders a mesh, else its shape is None (children only). Any
+// RigidBody below root is removed -- a descendant body would be a separate object and would also cut
+// the compound off below it.
+void SetPhysicsPresetDynamicCompound(World::Entity root)
+{
+    if (!root.IsValid())
+        return;
+    std::vector<EntityBase> hierarchy = CollectHierarchy(root); // before any Add/Remove moves slots
+
+    SetPhysicsPreset(root, 2 /*Dynamic*/, root.Has<Components::Instance>() ? 4 /*ConvexHull*/ : 6 /*None*/);
+    if (!root.Has<Components::Transform>())
+        return;
+
+    uint parts = 0, removedBodies = 0;
+    for (uint i = 1; i < (uint)hierarchy.size(); i++)
+    {
+        World::Entity e(hierarchy[i]);
+        if (!e.IsValid())
+            continue;
+        if (e.Has<Components::RigidBody>())
+        {
+            e.Remove(Components::RigidBody::mask);
+            removedBodies++;
+        }
+        if (e.Has<Components::PhysicsBody>())
+            e.Remove(Components::PhysicsBody::mask);
+        if (!e.Has<Components::Instance>())
+            continue;
+
+        if (AddComponentIfMissing(e, Components::CollisionShape::mask))
+        {
+            auto& collisionShape = e.Get<Components::CollisionShape>();
+            collisionShape.halfExtent = float3(0.5f, 0.5f, 0.5f);
+            collisionShape.offset = float3(0.0f, 0.0f, 0.0f);
+            collisionShape.convexRadius = 0.05f;
+            collisionShape.overrideCenterOfMass = 0;
+            collisionShape.centerOfMass = float3(0.0f, 0.0f, 0.0f);
+        }
+        auto& collisionShape = e.Get<Components::CollisionShape>();
+        collisionShape.shapeType = 4; // ConvexHull
+        collisionShape.mesh = e.Get<Components::Instance>().mesh;
+        parts++;
+    }
+    // The root rebuilds its compound (or recreates its body on a motion type change) from this.
+    root.Get<Components::State>().flags |= Components::State::Flags::physicsDirty;
+    IOs::Log(std::format("Physics preset: one dynamic body, {} child convex hull{}{}", parts, parts == 1 ? "" : "s",
+        removedBodies > 0 ? std::format(" ({} child RigidBody removed)", removedBodies) : std::string()));
+}
+
 // The authored numbers that separate one vehicle preset from another. Everything MakeVehicle does
 // with them -- the component masks, the axis convention, which wheel steers, which one holds the
 // hand brake -- is the same for every car and is not worth a field.
@@ -2769,9 +2869,27 @@ public:
             }
             */
             ImGui::SameLine();
-            if (ImGui::Button("Delete"))
+            // Split buttons (DropDownButton): the chevron picks the mode, the main part runs it.
+            // "+C" in a button label = the mode that also applies to the children.
+            static int deleteMode = 0;
+            static const char* deleteItems[] = { "This entity only", "This entity + all children" };
+            static const char* deleteLabels[] = { "Delete", "Delete+C" };
+            static const char* deleteTips[] = {
+                "Delete this entity only. Its children stay (they show up at the hierarchy root).",
+                "Delete this entity and all its descendants." };
+            int deleteChoice = DropDownButton("delete", deleteMode, deleteItems, deleteLabels, 2, deleteTips);
+            if (deleteChoice >= 0)
             {
-                editorState.selectedObject.Release();
+                if (deleteChoice == 1)
+                {
+                    // Collected before releasing; Release is deferred, so the handles stay valid meanwhile.
+                    for (auto& e : CollectHierarchy(editorState.selectedObject))
+                        World::Entity(e).Release();
+                }
+                else
+                {
+                    editorState.selectedObject.Release();
+                }
                 editorState.selectedObject = entityInvalid;
                 editorState.dirtyHierarchy = true;
 
@@ -2779,19 +2897,37 @@ public:
                 return;
             }
             ImGui::SameLine();
-            if (ImGui::Button("Static"))
+            static int staticMode = 0;
+            static const char* staticItems[] = { "This entity only", "This entity + all children with a mesh" };
+            static const char* staticLabels[] = { "Static", "Static+C" };
+            static const char* staticTips[] = {
+                "Make this a STATIC rigid body with a concave Mesh collider, taken from its rendered mesh.\nAdds RigidBody / CollisionShape with sane defaults if missing; keeps values you already tuned.",
+                "Make this entity and every descendant with a mesh STATIC rigid bodies with concave Mesh colliders, taken from their rendered meshes.\nAdds RigidBody / CollisionShape with sane defaults if missing; keeps values you already tuned." };
+            int staticChoice = DropDownButton("static", staticMode, staticItems, staticLabels, 2, staticTips);
+            if (staticChoice >= 0)
             {
-                SetPhysicsPreset(editorState.selectedObject, 0 /*Static*/, 5 /*Mesh*/);
+                if (staticChoice == 1)
+                    SetPhysicsPresetRecursive(editorState.selectedObject, 0 /*Static*/, 5 /*Mesh*/);
+                else
+                    SetPhysicsPreset(editorState.selectedObject, 0 /*Static*/, 5 /*Mesh*/);
                 editorState.dirtyHierarchy = true;
             }
-            ImGui::SetItemTooltip("Make this a STATIC rigid body with a concave Mesh collider, taken from its rendered mesh.\nAdds RigidBody / CollisionShape with sane defaults if missing; keeps values you already tuned.");
             ImGui::SameLine();
-            if (ImGui::Button("Dynamic"))
+            static int dynamicMode = 0;
+            static const char* dynamicItems[] = { "This entity only", "One body + convex hull per child mesh" };
+            static const char* dynamicLabels[] = { "Dynamic", "Dynamic+C" };
+            static const char* dynamicTips[] = {
+                "Make this a DYNAMIC rigid body with a ConvexHull collider, taken from its rendered mesh.\nAdds RigidBody / CollisionShape with sane defaults if missing; keeps values you already tuned.",
+                "Make this ONE dynamic rigid body whose collider is a compound of a ConvexHull per mesh in its hierarchy.\nChildren get a CollisionShape only (no RigidBody), which joins this body; any child RigidBody is removed." };
+            int dynamicChoice = DropDownButton("dynamic", dynamicMode, dynamicItems, dynamicLabels, 2, dynamicTips);
+            if (dynamicChoice >= 0)
             {
-                SetPhysicsPreset(editorState.selectedObject, 2 /*Dynamic*/, 4 /*ConvexHull*/);
+                if (dynamicChoice == 1)
+                    SetPhysicsPresetDynamicCompound(editorState.selectedObject);
+                else
+                    SetPhysicsPreset(editorState.selectedObject, 2 /*Dynamic*/, 4 /*ConvexHull*/);
                 editorState.dirtyHierarchy = true;
             }
-            ImGui::SetItemTooltip("Make this a DYNAMIC rigid body with a ConvexHull collider, taken from its rendered mesh.\nAdds RigidBody / CollisionShape with sane defaults if missing; keeps values you already tuned.");
 
             uint pushID = 0;
             for (uint i = 0; i < knownComponents.size(); i++)
@@ -3398,6 +3534,13 @@ public:
                 {
                     World::instance->Clear();
                 }
+                if (ImGui::MenuItem("Clean World (unused materials/textures)"))
+                {
+                    editorState.selectedObject = {}; // may be one of the released entities
+                    World::instance->CleanUnusedMaterialsAndTextures();
+                    editorState.dirtyHierarchy = true;
+                }
+                ImGui::SetItemTooltip("Releases every Material and Texture entity that no other entity references\n(repeated until stable, so textures only used by removed materials go too).\nPermanent entities are kept. Save the world afterwards to make it stick.");
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Edit"))

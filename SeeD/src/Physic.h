@@ -41,6 +41,7 @@
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/Constraints/PointConstraint.h>
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
@@ -83,7 +84,7 @@ namespace Components
 
     struct CollisionShape : ComponentBase<CollisionShape>
     {
-        uint   shapeType = 0;          // 0 = Box, 1 = Sphere, 2 = Capsule, 3 = Cylinder, 4 = ConvexHull, 5 = Mesh
+        uint   shapeType = 0;          // 0 = Box, 1 = Sphere, 2 = Capsule, 3 = Cylinder, 4 = ConvexHull, 5 = Mesh, 6 = None (only the child colliders). On an entity WITHOUT a RigidBody, the shape joins the nearest ancestor's body as a compound part.
         Handle<Mesh> mesh;             // shapeType 4/5 only
         float3 halfExtent;             // Box: half size on each axis. Sphere: .x = radius. Capsule/Cylinder: .x = radius, .y = half height of the cylindrical section (a capsule's total height is 2*(.y + .x)).
         float3 offset;                 // shape origin relative to the entity Transform (Jolt rotates around the shape's center of mass)
@@ -368,7 +369,7 @@ static void PhysicsSetWorldPose(World::Entity ent, float3 position, quaternion r
             localRotation[0] = normalize(localRotation[0]);
             localRotation[1] = normalize(localRotation[1]);
             localRotation[2] = normalize(localRotation[2]);
-            rotation = quaternion(localRotation);
+            rotation = MatrixToQuaternion(localRotation);   // not hlslpp's quaternion(float3x3): broken under /fp:fast
 
             position = mul(float4(position, 1.0f), invParentMatrix).xyz;
         }
@@ -530,6 +531,14 @@ struct Physics
     // Rebuilt every SyncVehicles: wheel entities bucketed by the chassis they hang under. A member
     // rather than a local so the buckets keep their capacity across frames.
     std::unordered_map<uint, std::vector<World::Entity>> wheelsByChassis;
+
+    // Child colliders: a descendant with a CollisionShape but NO RigidBody is not a body of its own,
+    // its shape is merged into the nearest ancestor body as a compound (BuildBodyShape). Parent ->
+    // children map, built lazily at most once per sync (Query slots are a fixed 128 per frame, so not
+    // one query per body). Entities with their own RigidBody are left out: they are separate bodies
+    // and stop the descent.
+    std::unordered_map<uint, std::vector<EntityBase>> childrenWithoutBody;
+    uint childrenWithoutBodyFrame = ~0u;
 
     uint syncFrame = 0;
     float accumulator = 0.0f;
@@ -1749,6 +1758,8 @@ private:
         JPH::BodyInterface& bodyInterface = physicsSystem.GetBodyInterface();
         syncFrame++;
 
+        PropagateChildColliderDirty(world);
+
         uint queryIndex = world->Query(Components::RigidBody::mask | Components::CollisionShape::mask, 0, true);
         auto& queryResult = world->frameQueries[queryIndex];
         for (uint i = 0; i < (uint)queryResult.size(); i++)
@@ -1783,8 +1794,8 @@ private:
                         CreateBody(ent, bodyInterface);
                         continue;
                     }
-                    ApplyBodyProperties(ent, record->second.bodyID, bodyInterface);
-                    ent.Get<Components::State>().flags.Unset(Components::State::Flags::physicsDirty);
+                    if (!ApplyBodyProperties(ent, record->second.bodyID, bodyInterface))
+                        ent.Get<Components::State>().flags.Unset(Components::State::Flags::physicsDirty);
                 }
                 // Anything that moved the entity from outside physics (gizmo, a moved ancestor,
                 // a loader) shows up as a version change. Readback refreshes this cache after each
@@ -1808,7 +1819,7 @@ private:
                         uint entityId = ent.id;
                         JPH::EMotionType motionType = PhysicsMotionType(ent.Get<Components::RigidBody>());
                         bool ignoredRetry = false;
-                        JPH::ShapeRefC shape = BuildShape(ent, ent.Get<Components::CollisionShape>(), motionType, entityId, worldScale, ignoredRetry);
+                        JPH::ShapeRefC shape = BuildBodyShape(ent, motionType, worldScale, ignoredRetry);
                         if (shape != nullptr)
                         {
                             bodyInterface.SetShape(record->second.bodyID, shape, true, motionType == JPH::EMotionType::Static ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
@@ -1852,10 +1863,13 @@ private:
         }
     }
 
-    void ApplyBodyProperties(World::Entity ent, JPH::BodyID bodyID, JPH::BodyInterface& bodyInterface)
+    // Returns true when the shape could not be rebuilt yet (a mesh still loading): the caller keeps
+    // physicsDirty so it is tried again next frame instead of keeping the stale shape forever.
+    bool ApplyBodyProperties(World::Entity ent, JPH::BodyID bodyID, JPH::BodyInterface& bodyInterface)
     {
+        bool shapeRetry = false;
         if (bodyID.IsInvalid() || !ent.Has<Components::RigidBody>())
-            return;
+            return shapeRetry;
         auto& rigidBody = ent.Get<Components::RigidBody>();
 
         JPH::EMotionType motionType = PhysicsMotionType(rigidBody);
@@ -1869,8 +1883,7 @@ private:
                 quaternion ignoredRotation;
                 PhysicsGetWorldPose(ent, ignoredPosition, ignoredRotation, worldScale);
             }
-            bool ignoredRetry = false;
-            JPH::ShapeRefC shape = BuildShape(ent, ent.Get<Components::CollisionShape>(), motionType, ent.id, worldScale, ignoredRetry);
+            JPH::ShapeRefC shape = BuildBodyShape(ent, motionType, worldScale, shapeRetry);
             if (shape != nullptr && shape != bodyInterface.GetShape(bodyID))
             {
                 bodyInterface.SetShape(bodyID, shape, true, motionType == JPH::EMotionType::Static ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
@@ -1890,13 +1903,13 @@ private:
         // Damping, mass and the sensor flag have no BodyInterface setters, so go through the body.
         JPH::BodyLockWrite lock(physicsSystem.GetBodyLockInterface(), bodyID);
         if (!lock.Succeeded())
-            return;
+            return shapeRetry;
         JPH::Body& body = lock.GetBody();
         body.SetIsSensor(rigidBody.isSensor != 0);
 
         JPH::MotionProperties* motionProperties = body.GetMotionPropertiesUnchecked();
         if (motionProperties == nullptr)
-            return;
+            return shapeRetry;
         if (PHYSICS_VALID_NONNEG(rigidBody.linearDamping))
             motionProperties->SetLinearDamping(rigidBody.linearDamping);
         if (PHYSICS_VALID_NONNEG(rigidBody.angularDamping))
@@ -1907,6 +1920,7 @@ private:
             massProperties.ScaleToMass(rigidBody.mass);
             motionProperties->SetMassProperties(motionProperties->GetAllowedDOFs(), massProperties);
         }
+        return shapeRetry;
     }
 
     JPH::ShapeRefC BuildShape(World::Entity ent, Components::CollisionShape collisionShape, JPH::EMotionType motionType, uint entityId, float3 worldScale, bool& outRetry)
@@ -2053,6 +2067,166 @@ private:
         return shape;
     }
 
+    void BuildChildrenWithoutBody()
+    {
+        if (childrenWithoutBodyFrame == syncFrame)
+            return;
+        childrenWithoutBodyFrame = syncFrame;
+        for (auto& bucket : childrenWithoutBody)
+            bucket.second.clear();
+        uint queryIndex = World::instance->Query(Components::Parent::mask, Components::RigidBody::mask, true);
+        auto& result = World::instance->frameQueries[queryIndex];
+        for (uint i = 0; i < (uint)result.size(); i++)
+        {
+            uint parentId = result[i].Get<Components::Parent>().entity.id;
+            if (parentId != entityInvalid.id)
+                childrenWithoutBody[parentId].push_back(result[i].Get<Components::Entity>());
+        }
+    }
+
+    // A child collider changes (property edit, preset) -> its own physicsDirty is set, but it has no
+    // body for Sync to visit. Hand the flag to the body it belongs to, which rebuilds its compound.
+    void PropagateChildColliderDirty(World* world)
+    {
+        uint queryIndex = world->Query(Components::CollisionShape::mask | Components::Parent::mask, Components::RigidBody::mask, true);
+        auto& result = world->frameQueries[queryIndex];
+        for (uint i = 0; i < (uint)result.size(); i++)
+        {
+            World::Entity child = result[i];
+            auto& state = child.Get<Components::State>();
+            if (!(state.flags & Components::State::Flags::physicsDirty))
+                continue;
+            state.flags.Unset(Components::State::Flags::physicsDirty);
+
+            World::Entity owner = child;
+            for (uint depth = 0; depth < 256 && owner.Has<Components::Parent>(); depth++)
+            {
+                World::Entity parent = World::Entity((EntityBase)owner.Get<Components::Parent>().entity);
+                if (!parent.IsValid())
+                    break;
+                owner = parent;
+                if (owner.Has<Components::RigidBody>())
+                {
+                    owner.Get<Components::State>().flags |= Components::State::Flags::physicsDirty;
+                    break;
+                }
+            }
+        }
+    }
+
+    // The body's whole shape: its own CollisionShape plus every child collider below it (descendants
+    // with a CollisionShape and no RigidBody, through any depth of plain nodes), as one static
+    // compound. Sub-shapes are placed in the body's rotation+translation frame with their own world
+    // scale baked in, so the compound itself is never scaled. Without child colliders this is exactly
+    // BuildShape. outRetry = some mesh is not loaded yet: return nothing rather than a body missing parts.
+    JPH::ShapeRefC BuildBodyShape(World::Entity ent, JPH::EMotionType motionType, float3 worldScale, bool& outRetry)
+    {
+        outRetry = false;
+        Components::CollisionShape ownShape = ent.Get<Components::CollisionShape>();
+        const bool ownNone = ownShape.shapeType == 6;
+
+        std::vector<EntityBase> colliders;
+        BuildChildrenWithoutBody();
+        {
+            std::vector<uint> stack = { ent.id };
+            std::unordered_set<uint> visited;
+            while (!stack.empty())
+            {
+                uint id = stack.back(); stack.pop_back();
+                if (!visited.insert(id).second)
+                    continue;
+                auto it = childrenWithoutBody.find(id);
+                if (it == childrenWithoutBody.end())
+                    continue;
+                for (auto& c : it->second)
+                {
+                    World::Entity child(c);
+                    if (!child.IsValid())
+                        continue;
+                    if (child.Has<Components::CollisionShape>() && child.Get<Components::CollisionShape>().shapeType != 6)
+                        colliders.push_back(c);
+                    stack.push_back(c.id);
+                }
+            }
+        }
+
+        if (colliders.empty())
+        {
+            if (ownNone)
+            {
+                IOs::Log("Physics: entity {} has CollisionShape None and no child colliders, no shape built", (uint)ent.id);
+                return nullptr;
+            }
+            return BuildShape(ent, ownShape, motionType, ent.id, worldScale, outRetry);
+        }
+
+        float3 rootPosition;
+        quaternion rootRotation;
+        float3 ignoredScale;
+        PhysicsGetWorldPose(ent, rootPosition, rootRotation, ignoredScale);
+        JPH::Quat inverseRootRotation = ToJoltRotation(rootRotation).Conjugated();
+        JPH::Vec3 rootJ(rootPosition[0], rootPosition[1], rootPosition[2]);
+
+        JPH::StaticCompoundShapeSettings compound;
+        if (!ownNone)
+        {
+            Components::CollisionShape own = ownShape;
+            own.overrideCenterOfMass = 0; // applied to the whole compound below
+            bool retry = false;
+            JPH::ShapeRefC shape = BuildShape(ent, own, motionType, ent.id, worldScale, retry);
+            outRetry |= retry;
+            if (shape != nullptr)
+                compound.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), shape);
+        }
+        for (auto& c : colliders)
+        {
+            World::Entity child(c);
+            float3 position;
+            quaternion rotation;
+            float3 scale;
+            PhysicsGetWorldPose(child, position, rotation, scale);
+            Components::CollisionShape childShape = child.Get<Components::CollisionShape>();
+            childShape.overrideCenterOfMass = 0; // only the body's own override means anything
+            bool retry = false;
+            JPH::ShapeRefC shape = BuildShape(child, childShape, motionType, child.id, scale, retry);
+            outRetry |= retry;
+            if (shape == nullptr)
+                continue;
+            JPH::Vec3 relativePosition = inverseRootRotation * (JPH::Vec3(position[0], position[1], position[2]) - rootJ);
+            if (!relativePosition.IsNaN())
+                compound.AddShape(relativePosition, (inverseRootRotation * ToJoltRotation(rotation)).Normalized(), shape);
+        }
+        if (outRetry)
+            return nullptr;
+        if (compound.mSubShapes.empty())
+        {
+            IOs::Log("Physics: entity {} has child colliders but none of them built a shape", (uint)ent.id);
+            return nullptr;
+        }
+
+        JPH::ShapeSettings::ShapeResult compoundResult = compound.Create();
+        if (compoundResult.HasError())
+        {
+            IOs::Log("Physics: entity {} compound of child colliders failed: {}", (uint)ent.id, compoundResult.GetError().c_str());
+            return nullptr;
+        }
+        JPH::ShapeRefC shape = compoundResult.Get();
+
+        if (ownShape.overrideCenterOfMass != 0)
+        {
+            float com[3];
+            store(ownShape.centerOfMass, com);
+            if (PHYSICS_VALID(com[0]) && PHYSICS_VALID(com[1]) && PHYSICS_VALID(com[2]))
+            {
+                JPH::Vec3 shift = JPH::Vec3(com[0], com[1], com[2]) - shape->GetCenterOfMass();
+                JPH::ShapeSettings::ShapeResult comResult = JPH::OffsetCenterOfMassShapeSettings(shift, shape).Create();
+                if (!comResult.HasError())
+                    shape = comResult.Get();
+            }
+        }
+        return shape;
+    }
+
     void CreateBody(World::Entity ent, JPH::BodyInterface& bodyInterface)
     {
         // The get by copy is deliberate: adding a component (PhysicsBody)  invalidates the reference
@@ -2073,7 +2247,7 @@ private:
         JPH::EMotionType motionType = PhysicsMotionType(rigidBody);
 
         bool retry = false;
-        JPH::ShapeRefC shape = BuildShape(ent, collisionShape, motionType, entityId, scale, retry);
+        JPH::ShapeRefC shape = BuildBodyShape(ent, motionType, scale, retry);
         if (shape == nullptr && retry)
             return;
 
@@ -2282,8 +2456,8 @@ namespace Systems
         }
 
         // R: set the car back on its wheels where it stands. Yaw is kept -- you want to carry on the
-        // way you were pointing -- pitch and roll go, and it lifts 0.1 m so it does not have to
-        // resolve its way out of the ground it was leaning against. Zeroing the velocities is not
+        // way you were pointing -- pitch and roll go, and it lifts 0.1 m and moves 0.15 m forward so it
+        // does not have to resolve its way out of the ground (or wall) it was leaning against. Zeroing the velocities is not
         // optional here: see Physics::StopBody.
         static constexpr float fallOffHeight = -1.0f;      // m; below this the car is reset automatically
 
@@ -2310,7 +2484,9 @@ namespace Systems
                 0, 0, 0, 1);
 
             // Fell off the world: back to the spawn point instead of righting it down there.
-            float3 target = (float)position.y < fallOffHeight ? float3(0, 0, 1) : position + float3(0, 0.1f, 0);
+            // Otherwise also 0.15 m along the flattened heading, to clear whatever it was stuck on.
+            static constexpr float resetForward = 0.15f;   // m
+            float3 target = (float)position.y < fallOffHeight ? float3(0, 0, 1) : position + float3(0, 0.1f, 0) + forward * resetForward;
 
             // Goes through the Transform, so Physics::Sync picks it up as an outside edit next frame
             // and teleports the body -- the one supported way of moving something under simulation.

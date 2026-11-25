@@ -28,6 +28,7 @@ public:
     std::vector<assetID> assetsAlive;
     String importPath;
     std::unordered_map<assetID, String> allAssetsInImportPath;
+    String allAssetsIndexedPath;        // importPath the index above was built from (for diagnostics)
     std::unordered_map<assetID, uint> loadingRequest;
     int meshLoadingLimit = 5;
     int shaderLoadingLimit = 5;
@@ -206,6 +207,23 @@ public:
         return id;
     }
 
+    // The cache file behind `id` was rewritten (re-import): forget the resident copy so the next
+    // Get() streams the new file in. The old MeshStorage slot is leaked (no slot reclaim yet, and
+    // in-flight frames may still read it) -- acceptable for an editor re-import.
+    void DropResident(assetID id)
+    {
+        std::unique_lock<std::shared_mutex> lk(lock);
+        auto it = map.find(id);
+        if (it == map.end() || it->second.data == nullptr)
+            return;
+        if (it->second.type == AssetType::texture)
+            TextureStorage::instance->Release(it->second.storageIndex);
+        it->second.data = nullptr;
+        it->second.storageIndex = ~0u;
+        it->second.lastGetFrameCount = 0;
+        assetsAlive.erase(std::remove(assetsAlive.begin(), assetsAlive.end(), id), assetsAlive.end());
+    }
+
     assetID AddHardCoded(String path)
     {
         ZoneScoped;
@@ -288,7 +306,9 @@ public:
 
         if (allAssetsInImportPath.size() == 0)
         {
-            for (const auto& p : std::filesystem::recursive_directory_iterator((std::string)importPath))
+            std::error_code ec;
+            for (const auto& p : std::filesystem::recursive_directory_iterator((std::string)importPath,
+                     std::filesystem::directory_options::skip_permission_denied, ec))
             {
                 if (!std::filesystem::is_directory(p))
                 {
@@ -298,6 +318,11 @@ public:
                     allAssetsInImportPath[id] = p.path().string();
                 }
             }
+            allAssetsIndexedPath = importPath;
+            if (ec)
+                IOs::Log("AssetLibrary: cannot scan import path '{}': {}", importPath.c_str(), ec.message());
+            IOs::Log("AssetLibrary: indexed {} file(s) under import path '{}' (index is built once per session: "
+                     "files added later are not seen until restart)", allAssetsInImportPath.size(), importPath.c_str());
             //return "";
         }
         //else
@@ -308,6 +333,9 @@ public:
             if (allAssetsInImportPath.contains(id))
                 return allAssetsInImportPath[id];
         }
+        if (allAssetsIndexedPath != importPath)
+            IOs::Log("AssetLibrary: import path changed to '{}' but the file index was built from '{}'",
+                     importPath.c_str(), allAssetsIndexedPath.c_str());
         return "";
     }
 };
@@ -319,15 +347,29 @@ AssetLibrary* AssetLibrary::instance = nullptr;
 #include "../../Third/DirectXTex-main/DirectXTex/DirectXTex.h"
 #include <dstorage.h>
 
-inline bool LoadImageFromDisk(String path, DirectX::ScratchImage& imageOut, DirectX::TexMetadata* metadataOut = nullptr)
+// "0x80070002 (The system cannot find the file specified.)" for logs
+inline std::string HResultText(HRESULT hr)
+{
+    std::string msg = std::system_category().message(hr);
+    while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r' || msg.back() == ' ' || msg.back() == '.'))
+        msg.pop_back();
+    return std::format("0x{:08X} ({})", (unsigned)hr, msg);
+}
+
+inline bool LoadImageFromDisk(String path, DirectX::ScratchImage& imageOut, DirectX::TexMetadata* metadataOut = nullptr,
+                              HRESULT* hrOut = nullptr)
 {
     ZoneScoped;
-    DirectX::TexMetadata metadata;
+    DirectX::TexMetadata metadata = {};
     HRESULT hr;
     if (path.find(".dds") != -1)      hr = DirectX::LoadFromDDSFile(path.ToWString().c_str(), DirectX::DDS_FLAGS_NONE, &metadata, imageOut);
     else if (path.find(".tga") != -1) hr = DirectX::LoadFromTGAFile(path.ToWString().c_str(), DirectX::TGA_FLAGS_NONE, &metadata, imageOut);
-    else                               hr = DirectX::LoadFromWICFile(path.ToWString().c_str(), DirectX::WIC_FLAGS_NONE, &metadata, imageOut);
+    // IGNORE_SRGB: keep the stored bytes. Without it a PNG with an sRGB chunk (Blender writes one even
+    // for Non-Color images) loads as *_SRGB and the BC*_UNORM compression linearises it: normal maps
+    // are destroyed and albedo gets decoded twice (the shader already applies SRGBToLinear).
+    else                               hr = DirectX::LoadFromWICFile(path.ToWString().c_str(), DirectX::WIC_FLAGS_IGNORE_SRGB, &metadata, imageOut);
     if (metadataOut) *metadataOut = metadata;
+    if (hrOut) *hrOut = hr;
     return SUCCEEDED(hr);
 }
 
@@ -390,15 +432,24 @@ public:
 
         // TODO : For a serious streaming system, should this be available in a RAM DataBase for super fast access ?
         String metaPath = path.substr(0, path.length() - 4) + ".meta";
-        DirectStorageSampleTextureMetadataHeader metadata;
+        DirectStorageSampleTextureMetadataHeader metadata = {};
         std::ifstream fin(metaPath, std::ios::binary);
-        if (fin.is_open())
+        if (!fin.is_open())
         {
-            fin.read((char*)&metadata, sizeof(metadata));
-            fin.close();
+            IOs::Log("Texture metadata file not found: {}", metaPath.c_str());
+            return resource;
+        }
+
+        fin.read((char*)&metadata, sizeof(metadata));
+        if (!fin || fin.gcount() != sizeof(metadata))
+        {
+            IOs::Log("Texture metadata file is invalid: {}", metaPath.c_str());
+            return resource;
         }
 
         resource.Create(metadata.resourceDesc, name, ResourceCategory::AssetTexture);
+        if (resource.allocation == nullptr)
+            return resource;
 
         IDStorageFile* fileHandle = nullptr;
         factory->OpenFile(path.ToWString().c_str(), IID_PPV_ARGS(&fileHandle));
@@ -542,6 +593,17 @@ public:
         return filePointerOrStatus.QuadPart;
     }
 
+    // Bump when the import pipeline changes what ends up in a .tex, so old entries get rebuilt.
+    // 2: PNG/JPG sRGB metadata ignored (bytes stored as-is, the shader decodes colour textures);
+    //    before, sRGB-tagged images were linearised on import: normal maps broke, albedo was
+    //    decoded twice.
+    static constexpr uint32_t TextureCacheVersion = 2;
+
+    String CacheVersionPath(assetID id)
+    {
+        return std::format("{}{}.texver", AssetLibrary::instance->assetsPath.c_str(), id.hash);
+    }
+
     assetID IsCached(String name)
     {
         ZoneScoped;
@@ -554,6 +616,27 @@ public:
         if (fin.is_open())
         {
             fin.close();
+
+            // Rebuild a stale entry when its source is at hand: written by an older import
+            // pipeline, or the source image changed since. Without a source, keep what we have.
+            String source = AssetLibrary::instance->FindInImportPath(name);
+            if (!source.empty())
+            {
+                uint32_t version = 0;
+                std::ifstream ver(CacheVersionPath(id), std::ios::binary);
+                if (ver.is_open())
+                    ver.read((char*)&version, sizeof(version));
+                std::error_code ec1, ec2;
+                auto srcTime = std::filesystem::last_write_time((std::string)source, ec1);
+                auto texTime = std::filesystem::last_write_time((std::string)path, ec2);
+                bool newerSource = !ec1 && !ec2 && srcTime > texTime;
+                if (version != TextureCacheVersion || newerSource)
+                {
+                    IOs::Log("  texture '{}': cached copy is stale ({}), rebuilding", name.c_str(),
+                             version != TextureCacheVersion ? "older import version" : "source image changed");
+                    return assetID::Invalid;
+                }
+            }
             return AssetLibrary::instance->Add(path, name, id);
             //return id;
         }
@@ -562,7 +645,8 @@ public:
 
     // mix of directXTex and
     //https://github.com/GPUOpen-LibrariesAndSDKs/DirectStorageSample/blob/main/src/TextureConverter/TextureConverter.cpp#L273
-    assetID Write(String name)
+    // logMisses = false for speculative lookups (alternate extensions) so only real misses are logged
+    assetID Write(String name, bool logMisses = true)
     {
         ZoneScoped;
         bool compressionExhaustive = false;
@@ -575,6 +659,13 @@ public:
         path = std::format("{}{}.dds", AssetLibrary::instance->assetsPath.c_str(), id.hash);
 
         String originalPath = AssetLibrary::instance->FindInImportPath(name);
+        if (originalPath.empty())
+        {
+            if (logMisses)
+                IOs::Log("  texture '{}': no file with that name under import path '{}' (lookup is by file "
+                         "name only, case-insensitive)", name.c_str(), AssetLibrary::instance->importPath.c_str());
+            return assetID::Invalid;
+        }
 
         DirectX::TexMetadata metadata;
         DirectX::ScratchImage imageOriginal;
@@ -583,13 +674,20 @@ public:
         HRESULT hr;
         {
             ZoneScopedN("LoadImage");
-            hr = LoadImageFromDisk(originalPath, imageOriginal, &metadata) ? S_OK : E_FAIL;
+            HRESULT loadHr = S_OK;
+            LoadImageFromDisk(originalPath, imageOriginal, &metadata, &loadHr);
+            hr = loadHr;
         }
         if (FAILED(hr))
         {
-            //IOs::Log("Fail to load {}", name.c_str());
+            std::error_code ec;
+            auto bytes = std::filesystem::file_size((std::string)originalPath, ec);
+            IOs::Log("  texture '{}': found '{}' ({} bytes) but the image loader failed: {}",
+                     name.c_str(), originalPath.c_str(), ec ? 0 : (unsigned long long)bytes, HResultText(hr));
             return assetID::Invalid;
         }
+        IOs::Log("  texture '{}': loaded '{}' {}x{} format {} mips {}", name.c_str(), originalPath.c_str(),
+                 metadata.width, metadata.height, (int)metadata.format, metadata.mipLevels);
 
         if (!metadata.mipLevels || !metadata.arraySize)
             hr = E_INVALIDARG;
@@ -626,7 +724,8 @@ public:
             hr = DirectX::Compress(image->GetImages(), image->GetImageCount(), image->GetMetadata(), compressFormat, compressFlag | DirectX::TEX_COMPRESS_PARALLEL, DirectX::TEX_THRESHOLD_DEFAULT, imageBC);
             if (FAILED(hr))
             {
-                IOs::Log("Fail to compress {}", name.c_str());
+                IOs::Log("  texture '{}': compression of '{}' to {} failed: {}", name.c_str(), originalPath.c_str(),
+                         compressFormat == DXGI_FORMAT_BC1_UNORM ? "BC1" : "BC7", HResultText(hr));
                 return assetID::Invalid;
             }
             //DirectX::SaveToDDSFile(imageBC.GetImages(), imageBC.GetImageCount(), imageBC.GetMetadata(), DirectX::DDS_FLAGS_NONE, path.ToWString().c_str());
@@ -770,6 +869,11 @@ public:
         CloseHandle(metadataFileHandle);
         CloseHandle(texturedataFileHandle);
 
+        {
+            std::ofstream ver(CacheVersionPath(id), std::ios::binary | std::ios::trunc);
+            ver.write((const char*)&TextureCacheVersion, sizeof(TextureCacheVersion));
+        }
+
         path = std::format("{}{}.tex", AssetLibrary::instance->assetsPath.c_str(), id.hash);
         return AssetLibrary::instance->Add(path, name, id);
     }
@@ -873,6 +977,13 @@ public:
         id.hash = std::hash<std::string>{}(name);
         path = std::format("{}{}.mesh", AssetLibrary::instance->assetsPath.c_str(), id.hash);
 
+        // Import always rebuilds the cache entry. A previous {hash}.omm sidecar is indexed by the
+        // old triangles: drop it, the import-time bake rewrites it if this mesh still needs one.
+        {
+            std::error_code ec;
+            std::filesystem::remove((std::string)OMMPath(path), ec);
+        }
+
         std::ofstream fout(path, std::ios::binary);
         if (fout.is_open())
         {
@@ -908,7 +1019,9 @@ public:
             meta.close();
         }
 
-        return AssetLibrary::instance->Add(path, name, id);
+        AssetLibrary::instance->Add(path, name, id);
+        AssetLibrary::instance->DropResident(id); // already streamed in this session -> reload the new geometry
+        return id;
     }
 
     // {hash}.omm sidecar next to the {hash}.mesh cache entry: baked opacity-micromap data,
@@ -1487,9 +1600,13 @@ public:
         animationIndexToEntity.clear();
         skeletonIndexToEntity.clear();
         textureToEntity.clear();
+        nodeToEntity.clear();
 
         editorState.dirtyHierarchy = true;
     }
+
+    // entity created for each mesh-less node of the scene being imported (cleared per import)
+    std::unordered_map<const aiNode*, World::Entity> nodeToEntity;
 
     World::Entity CreateEntities(const aiScene* _scene, aiNode* node, World::Entity parentEntity = entityInvalid)
     {
@@ -1539,6 +1656,7 @@ public:
                 auto& parent = ent.Get<Components::Parent>();
                 parent.entity.Set(parentEntity);
             }
+            nodeToEntity[node] = ent;   // lights / cameras attach to their own node's entity
         }
         else
         {
@@ -1756,16 +1874,46 @@ public:
 
         int tests = 0;
         aiString aitexName("");
+        aiTextureType usedType = aiTextureType_NONE;
         while (aitexName.length == 0 && tests < channelCount)
         {
             aiTextureType t = static_cast<aiTextureType>(va_arg(args, int));
-            if(m->GetTextureCount(t))
+            if (m->GetTextureCount(t))
+            {
                 m->GetTexture(t, 0, &aitexName);
+                usedType = t;
+            }
             tests++;
         }
 
         String texName(aitexName.C_Str());
+        const String requested = texName;
         assetID id = assetID::Invalid;
+
+        // Embedded textures (glb / fbx) are referenced as "*<index>": SeeD only loads image files
+        // from the import path, so try the file name the exporter recorded for that image.
+        if (texName.size() > 0 && texName[0] == '*')
+        {
+            const aiTexture* emb = materialScene ? materialScene->GetEmbeddedTexture(texName.c_str()) : nullptr;
+            String embName = emb ? String(emb->mFilename.C_Str()) : String("");
+            if (embName.size() > 0)
+            {
+                if (embName.find('.') == std::string::npos)
+                    embName += emb->achFormatHint[0] ? String(".") + String(emb->achFormatHint) : String(".png");
+                IOs::Log("  material '{}': {} texture is embedded ({}, original file '{}'): embedded images are "
+                         "not loaded, looking for '{}' in the import path instead",
+                         m->GetName().C_Str(), aiTextureTypeToString(usedType), texName.c_str(),
+                         emb->mFilename.C_Str(), embName.c_str());
+                texName = embName;
+            }
+            else
+            {
+                IOs::Log("  material '{}': {} texture is embedded ({}) with no file name: embedded images are not "
+                         "loaded, export the textures as separate files", m->GetName().C_Str(),
+                         aiTextureTypeToString(usedType), texName.c_str());
+                texName = "";
+            }
+        }
 
         World::Entity ent{ entityInvalid };
         if (texName.size() > 0)
@@ -1778,7 +1926,7 @@ public:
                 // if not it will be assetID::invalid
                 id = TextureLoader::instance->IsCached(texName);
                 if(id == assetID::Invalid)
-                    id = TextureLoader::instance->Write(texName);
+                    id = TextureLoader::instance->Write(texName, extensionTested == 0);
 
                 if (id != assetID::Invalid)
                 {
@@ -1813,7 +1961,8 @@ public:
                 }
             }
             if(id == assetID::Invalid)
-                IOs::Log("Fail to load {}", texName.c_str());
+                IOs::Log("  material '{}': failed to load {} texture '{}' (also tried .jpg .jpeg .tif .png)",
+                         m->GetName().C_Str(), aiTextureTypeToString(usedType), requested.c_str());
         }
         else
         {
@@ -1827,9 +1976,12 @@ public:
         va_end(args);
     }
 
+    const aiScene* materialScene = nullptr;     // for embedded-texture diagnostics in CreateOrLoadTexture
+
     void CreateMaterials(const aiScene* _scene)
     {
         ZoneScoped;
+        materialScene = _scene;
 
         // Registered locally (mirrors the single-entity registration this used to be); the shader
         // routing decision (which of these two a given material points at) now happens after the
@@ -2009,17 +2161,33 @@ public:
         // glTF importer uses (io_scene_gltf2 imp/light.py).
         const float wattsToLumens = 683.0f;
 
+        IOs::Log("  lights : {}", _scene->mNumLights);
+        if (_scene->mNumLights == 0)
+            IOs::Log("  (no lights in the file - from Blender's glTF exporter, tick Include > Data > "
+                     "'Punctual Lights', it is off by default)");
+
         for (unsigned int i = 0; i < _scene->mNumLights; i++)
         {
             auto& l = _scene->mLights[i];
 
-            World::Entity ent;
-            ent.Find(l->mName.C_Str());
-
-            if (!ent.IsValid())
-                continue;
-
+            // Attach to the entity made for this light's own node in this import (assimp names
+            // the light after its node). A world-wide name search would pick an entity from an
+            // earlier import of the same file.
             const aiNode* node = _scene->mRootNode->FindNode(l->mName);
+            World::Entity ent{ entityInvalid };
+            if (node != nullptr)
+            {
+                auto it = nodeToEntity.find(node);
+                if (it != nodeToEntity.end())
+                    ent = it->second;
+            }
+            if (!ent.IsValid())
+            {
+                IOs::Log("  light '{}' skipped: {}", l->mName.C_Str(), node == nullptr
+                         ? "no node with that name in the file"
+                         : "its node carries a mesh too (lights need their own empty node)");
+                continue;
+            }
 
             Components::Light light{};
 

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "RC Carpet Track Builder",
     "author": "Claude",
-    "version": (1, 3, 0),
+    "version": (1, 4, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Sidebar (N) > RC Track",
     "description": "Build RC buggy carpet tracks (road, borders, curbs, jumps, checkpoints) from a traced centerline",
@@ -19,6 +19,9 @@ bl_info = {
 #      corners, floor, start line and checkpoints are rebuilt automatically.
 #      Red issue markers (RC_Issues collection) show corners that are too tight
 #      or track sections that overlap.
+#      Walls = "Shared cells" flood-fills N m around the road instead: parts of the
+#      track that come close share a single wall (Voronoi-like), others get a wall
+#      at the outer limit.
 #   4. Add jumps (separate objects, track width), move them with G and click
 #      "Snap Selected to Track" to align them with the road.
 #   5. Export as .glb (or use File > Export with any format).
@@ -50,13 +53,15 @@ COLL_SOURCE = "RC_Source"
 REF_NAME = "RC_Reference"
 
 MAT_COLORS = {
-    "RC_Road": (0.16, 0.20, 0.28, 1.0),      # blue-grey carpet
-    "RC_Floor": (0.10, 0.26, 0.12, 1.0),     # green carpet
-    "RC_Border": (0.55, 0.38, 0.20, 1.0),    # wood batten
+    "RC_Road": (0.075, 0.094, 0.131, 1.0),     # blue-grey carpet
+    "RC_Floor": (0.106, 0.134, 0.191, 1.0),   # road carpet, a bit brighter (mean of the texture)
+    "RC_Border": (0.90, 0.90, 0.88, 1.0),    # shiny white plastic wall
     "RC_Rope": (0.05, 0.05, 0.05, 1.0),      # black rope
     "RC_CurbRed": (0.85, 0.08, 0.06, 1.0),
     "RC_CurbWhite": (0.92, 0.92, 0.92, 1.0),
-    "RC_Jump": (0.72, 0.56, 0.36, 1.0),      # plywood
+    "RC_Disc": (1.0, 0.36, 0.02, 1.0),       # orange marker discs
+    "RC_Tape": (0.62, 0.63, 0.65, 1.0),      # bright grey duct tape on jump edges
+    "RC_Jump": (0.075, 0.094, 0.131, 1.0),     # carpeted like the road
     # gymnasium
     "RC_GymFloor": (0.10, 0.42, 0.32, 1.0),
     "RC_GymWall": (0.86, 0.86, 0.84, 1.0),
@@ -73,11 +78,13 @@ MAT_COLORS = {
     "RC_GymMetal": (0.25, 0.25, 0.27, 1.0),
     "RC_GymRing": (0.95, 0.35, 0.05, 1.0),
     "RC_GymDoor": (0.50, 0.52, 0.55, 1.0),
+    "RC_GymNet": (0.92, 0.92, 0.90, 0.35),
     "RC_GymLight": (1.0, 1.0, 0.95, 1.0),
 }
 
 COLL_GYM = "RC_Gym"
 COLL_GYM_CEIL = "RC_Gym_Ceiling"
+COLL_GYM_LIGHTS = "RC_Gym_Lights"
 GYM_ROOT = "RC_Gym_Root"
 _gstate = {"pending": False, "last": 0.0, "scene": None}
 
@@ -135,13 +142,32 @@ def get_mesh_object(name, coll):
     return obj
 
 
+MAT_ROUGHNESS = {
+    "RC_Border": 0.15,                        # glossy plastic
+    "RC_Tape": 0.25,                          # duct tape: shiny
+}
+
+MAT_METALLIC = {
+    "RC_Tape": 0.6,                           # duct tape's silvery sheen
+}
+
+
 def get_material(name):
-    mat = bpy.data.materials.get(name)
-    if mat is not None:
-        return mat
+    """Create the material, or re-apply its colour/roughness/metallic when MAT_COLORS /
+    MAT_ROUGHNESS / MAT_METALLIC changed since it was made (tracked with 'rc_spec')."""
     col = MAT_COLORS.get(name, (0.8, 0.8, 0.8, 1.0))
-    mat = bpy.data.materials.new(name)
+    rough = MAT_ROUGHNESS.get(name, 0.9)
+    metal = MAT_METALLIC.get(name, 0.0)
+    spec = repr((tuple(col), rough)) if metal == 0.0 else repr((tuple(col), rough, metal))
+    mat = bpy.data.materials.get(name)
+    if mat is not None and mat.get("rc_spec") == spec:
+        return mat
+    if mat is None:
+        mat = bpy.data.materials.new(name)
+    mat["rc_spec"] = spec
     mat.diffuse_color = col
+    mat.roughness = rough
+    mat.metallic = metal
     try:
         if mat.node_tree is None:
             mat.use_nodes = True
@@ -155,7 +181,8 @@ def get_material(name):
                     out = nt.nodes.new('ShaderNodeOutputMaterial')
                 nt.links.new(bsdf.outputs[0], out.inputs[0])
             bsdf.inputs['Base Color'].default_value = col
-            bsdf.inputs['Roughness'].default_value = 0.9
+            bsdf.inputs['Roughness'].default_value = rough
+            bsdf.inputs['Metallic'].default_value = metal
             if col[3] < 1.0:
                 bsdf.inputs['Alpha'].default_value = col[3]
                 for attr, val in (("surface_render_method", 'BLENDED'), ("blend_method", 'BLEND')):
@@ -172,6 +199,169 @@ def get_material(name):
     except Exception as e:  # material setup is cosmetic only
         print("RC Track: material setup warning:", e)
     return mat
+
+
+# =============================================================================
+#  Carpet texture (procedural, tileable, packed into the .blend)
+# =============================================================================
+
+CARPET_VERSION = "4"          # bump to regenerate the images in existing files
+CARPET_SEEDS = {"RC_Floor": 1234, "RC_Road": 4321}
+CARPET_SIZE = 1024            # pixels per UV tile (uv_tile metres, 1 m by default)
+
+
+def _lin_to_srgb(x):
+    import numpy as np
+    x = np.clip(x, 0.0, 1.0)
+    return np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(x, 1.0 / 2.4) - 0.055)
+
+
+def carpet_maps(base, size=CARPET_SIZE, seed=1234):
+    """Tileable carpet: band-limited noises made in the frequency domain (so they wrap
+    perfectly). Returns (albedo RGBA, normal RGBA), float32 arrays, rows = +V."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    f = np.fft.fftfreq(size) * size                      # cycles per tile
+    fr = np.sqrt(f[None, :] ** 2 + f[:, None] ** 2)
+
+    def band(center, width):
+        w = rng.standard_normal((size, size))
+        flt = np.exp(-0.5 * ((fr - center) / width) ** 2)
+        n = np.real(np.fft.ifft2(np.fft.fft2(w) * flt))
+        return (n - n.mean()) / (n.std() + 1e-12)
+
+    tufts = band(260.0, 70.0)        # ~4 mm loops
+    fibres = band(480.0, 60.0)       # pixel-level fibre grain
+    mottle = band(10.0, 6.0)         # large soft variation across the floor
+    patches = band(56.0, 20.0)       # mid-scale wear / pile direction
+
+    height = 0.65 * tufts + 0.35 * fibres
+    shade = 1.0 + 0.05 * mottle + 0.05 * patches + 0.10 * tufts + 0.07 * fibres
+    shade = np.clip(shade, 0.6, 1.4)
+    alb = np.ones((size, size, 4), np.float32)
+    for c in range(3):
+        alb[..., c] = _lin_to_srgb(base[c] * shade)
+
+    # normal from the periodic height gradient (OpenGL / glTF convention: +Y = +V)
+    k = 1.6
+    gx = (np.roll(height, -1, 1) - np.roll(height, 1, 1)) * 0.5
+    gy = (np.roll(height, -1, 0) - np.roll(height, 1, 0)) * 0.5
+    nx, ny, nz = -k * gx * 0.25, -k * gy * 0.25, np.ones_like(height)
+    inv = 1.0 / np.sqrt(nx * nx + ny * ny + nz * nz)
+    nrm = np.ones((size, size, 4), np.float32)
+    nrm[..., 0] = nx * inv * 0.5 + 0.5
+    nrm[..., 1] = ny * inv * 0.5 + 0.5
+    nrm[..., 2] = nz * inv * 0.5 + 0.5
+    return alb, nrm
+
+
+def _texture_path(name):
+    """PNG next to the .blend (copy it next to the exported .glb). Unsaved file: temp dir."""
+    import os
+    if bpy.data.filepath:
+        return os.path.join(os.path.dirname(bpy.data.filepath), name + ".png"), "//" + name + ".png"
+    p = os.path.join(bpy.app.tempdir or os.path.expanduser("~"), name + ".png")
+    print("RC Track: .blend not saved yet, texture written to", p)
+    return p, p
+
+
+def _carpet_image(name, pixels, colorspace):
+    """Write the texture as an external PNG (not packed) and return an image using it."""
+    old = bpy.data.images.get(name)
+    if old is not None:                      # drop packed / stale versions
+        bpy.data.images.remove(old)
+    size = pixels.shape[0]
+    tmp = bpy.data.images.new(name + "_gen", size, size, alpha=False)
+    tmp.colorspace_settings.name = colorspace
+    tmp.pixels.foreach_set(pixels.ravel())
+    abs_path, rel_path = _texture_path(name)
+    tmp.filepath_raw = abs_path
+    tmp.file_format = 'PNG'
+    tmp.save()
+    bpy.data.images.remove(tmp)
+    img = bpy.data.images.load(abs_path, check_existing=False)
+    img.name = name
+    img.filepath = rel_path
+    img.colorspace_settings.name = colorspace
+    return img
+
+
+def _carpet_files_ok(name):
+    import os
+    for suffix in ("_Albedo", "_Normal"):
+        img = bpy.data.images.get(name + suffix)
+        if img is None or img.packed_file is not None or \
+                not os.path.isfile(bpy.path.abspath(img.filepath)):
+            return False
+    return True
+
+
+def carpet_material(name):
+    """Carpet material: tileable albedo + normal map saved as PNGs next to the .blend."""
+    mat = get_material(name)
+    tag = CARPET_VERSION + repr(tuple(MAT_COLORS[name]))
+    if mat.get("rc_carpet") == tag and mat.use_nodes and \
+            any(n.type == 'NORMAL_MAP' for n in mat.node_tree.nodes) and _carpet_files_ok(name):
+        return mat
+    try:
+        alb, nrm = carpet_maps(MAT_COLORS[name], seed=CARPET_SEEDS.get(name, 1234))
+    except ImportError:
+        print("RC Track: numpy not available, carpet texture skipped")
+        return mat
+    ia = _carpet_image(name + "_Albedo", alb, 'sRGB')
+    inm = _carpet_image(name + "_Normal", nrm, 'Non-Color')
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next((n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if bsdf is None:
+        return mat
+    for n in [n for n in nt.nodes if n.name in ("RC_CarpetAlbedo", "RC_CarpetNormal", "RC_CarpetNormalMap")]:
+        nt.nodes.remove(n)
+    ta = nt.nodes.new('ShaderNodeTexImage')
+    ta.name = "RC_CarpetAlbedo"
+    ta.image = ia
+    ta.location = (bsdf.location.x - 500, bsdf.location.y)
+    tn = nt.nodes.new('ShaderNodeTexImage')
+    tn.name = "RC_CarpetNormal"
+    tn.image = inm
+    tn.location = (bsdf.location.x - 700, bsdf.location.y - 320)
+    nm = nt.nodes.new('ShaderNodeNormalMap')
+    nm.name = "RC_CarpetNormalMap"
+    nm.location = (bsdf.location.x - 300, bsdf.location.y - 320)
+    nt.links.new(ta.outputs['Color'], bsdf.inputs['Base Color'])
+    nt.links.new(tn.outputs['Color'], nm.inputs['Color'])
+    nt.links.new(nm.outputs['Normal'], bsdf.inputs['Normal'])
+    mat["rc_carpet"] = tag
+    return mat
+
+
+def _object_names(coll):
+    """Names of the collection's objects, snapshotted. Iterate these (and look objects up again)
+    whenever the loop body creates/removes datablocks: that invalidates all_objects' cache
+    mid-iteration, giving stale entries or a hard crash."""
+    return [o.name for o in coll.all_objects if o is not None]
+
+
+def recenter_origin(obj):
+    """Move the object origin to the centre of its mesh bounding box without moving the
+    geometry in the world (mesh shifted by -c, object by +c in its parent space)."""
+    if obj is None or obj.type != 'MESH' or not obj.data.vertices:
+        return
+    me = obj.data
+    n = len(me.vertices)
+    co = [0.0] * (3 * n)
+    me.vertices.foreach_get("co", co)
+    xs, ys, zs = co[0::3], co[1::3], co[2::3]
+    c = Vector(((min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5, (min(zs) + max(zs)) * 0.5))
+    if c.length < 1e-7:
+        return
+    me.transform(Matrix.Translation(-c))
+    me.update()
+    obj.matrix_basis = obj.matrix_basis @ Matrix.Translation(c)
+    # hidden objects (e.g. the gym ceiling) are not evaluated, so their cached matrix_world
+    # would stay stale - and exporters read it: write it explicitly
+    parent = (obj.parent.matrix_world @ obj.matrix_parent_inverse) if obj.parent else Matrix.Identity(4)
+    obj.matrix_world = parent @ obj.matrix_basis
 
 
 class MeshAcc:
@@ -210,8 +400,27 @@ def write_mesh(obj, verts, faces, uvs=None, mat_idx=None, mats=(), normals='RECA
             down = [f for f in bm.faces if f.normal.z < 0]
             if down:
                 bmesh.ops.reverse_faces(bm, faces=down)
-    for f in bm.faces:
-        f.smooth = smooth
+    if isinstance(smooth, (list, tuple)):
+        # per-face smoothing GROUP (same order as faces): 0/False = flat, >0 = smooth within
+        # its group. Edges between different groups are made sharp, so e.g. a disc's vertical
+        # rim and its shallow cone don't average their normals into a dome.
+        bm.faces.ensure_lookup_table()
+        group = {}
+        for f in bm.faces:
+            gid = int(smooth[f.index]) if f.index < len(smooth) else 0
+            group[f] = gid
+            f.smooth = gid > 0
+        for e in bm.edges:
+            lf = e.link_faces
+            if len(lf) == 2 and group[lf[0]] != group[lf[1]]:
+                e.smooth = False
+    else:
+        for f in bm.faces:
+            f.smooth = smooth
+    face_mats = None
+    if mat_idx is not None and bm.faces:
+        bm.faces.ensure_lookup_table()
+        face_mats = [int(mat_idx[f.index]) if f.index < len(mat_idx) else 0 for f in bm.faces]
     bm.to_mesh(obj.data)
     bm.free()
     bpy.data.meshes.remove(tmp)
@@ -220,6 +429,10 @@ def write_mesh(obj, verts, faces, uvs=None, mat_idx=None, mats=(), normals='RECA
     me.materials.clear()
     for m in mats:
         me.materials.append(m)
+    # set the per-face slots last: clearing the material slots drops the
+    # material_index attribute (Blender 4+), so setting it earlier is lost
+    if face_mats is not None and len(face_mats) == len(me.polygons):
+        me.polygons.foreach_set("material_index", face_mats)
     me.update()
 
 
@@ -493,8 +706,9 @@ def compute_curvature(tans, ds, cyclic, window=0.8):
     return out
 
 
-def validate(pts, hws, curv, ds, cyclic, border, clearance):
-    """Find corners too tight for the road+border and sections that overlap."""
+def validate(pts, hws, curv, ds, cyclic, border, clearance, overlap=True):
+    """Find corners too tight for the road+border and sections that overlap.
+    With cell walls the overlap test is done on the shared walls instead (overlap=False)."""
     issues = {}
     n = len(pts)
     total = n * ds if cyclic else (n - 1) * ds
@@ -509,6 +723,8 @@ def validate(pts, hws, curv, ds, cyclic, border, clearance):
         if abs(c) * need > 1.03:  # small tolerance for sampling noise
             add(pts[i], 'TIGHT', "Corner radius %.2f m < %.2f m" % (1.0 / abs(c), need))
 
+    if not overlap:
+        return list(issues.values())
     cell = 2 * max(hws) + 2 * border + clearance
     grid = {}
     for i, p in enumerate(pts):
@@ -607,6 +823,387 @@ def sweep(pts, nors, hws, side, profile, idxs, closed, ds, tile, stripe=None, ca
     return verts, faces, uvs, mats
 
 
+# =============================================================================
+#  Cell walls (Voronoi-like shared walls)
+#
+#  Every ground cell is labelled with the closest part of the track (distance to the
+#  road edge, and the arc-length of the nearest centerline point). The drivable area
+#  is everything closer than `wall_distance` + half a wall to the road edge. Walls go
+#  on the outer boundary of that area, and on the boundary between cells whose
+#  nearest track parts are far apart along the track (two "flood fills" touching).
+# =============================================================================
+
+def _seg_field(np, ax, ay, bx, by, ha, hb, px, py):
+    """Signed distance to the road edge of segment(s) A-B (with interpolated half width)."""
+    dx, dy = bx - ax, by - ay
+    L2 = np.maximum(dx * dx + dy * dy, 1e-12)
+    rx, ry = px - ax, py - ay
+    t = np.clip((rx * dx + ry * dy) / L2, 0.0, 1.0)
+    qx, qy = rx - t * dx, ry - t * dy
+    return np.sqrt(qx * qx + qy * qy) - (ha + (hb - ha) * t), t
+
+
+def _douglas_peucker(P, tol):
+    n = len(P)
+    if n < 3:
+        return P
+    keep = [False] * n
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b <= a + 1:
+            continue
+        ax, ay = P[a]
+        bx, by = P[b]
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy)
+        best, bi = -1.0, -1
+        for i in range(a + 1, b):
+            px, py = P[i]
+            d = abs((px - ax) * dy - (py - ay) * dx) / L if L > 1e-12 else math.hypot(px - ax, py - ay)
+            if d > best:
+                best, bi = d, i
+        if best > tol:
+            keep[bi] = True
+            stack += [(a, bi), (bi, b)]
+    return [p for p, k in zip(P, keep) if k]
+
+
+class CellWalls:
+    """Distance/label field around the track and the wall polylines extracted from it."""
+
+    def __init__(self, pts, hws, cyclic, s, border):
+        import numpy as np
+        self.np = np
+        self.cyclic = cyclic
+        P = np.array([(p.x, p.y) for p in pts], dtype=np.float64)
+        Hw = np.array(hws, dtype=np.float64)
+        if cyclic:
+            A, B, hA, hB = P, np.roll(P, -1, 0), Hw, np.roll(Hw, -1)
+        else:
+            A, B, hA, hB = P[:-1], P[1:], Hw[:-1], Hw[1:]
+        L = np.linalg.norm(B - A, axis=1)
+        S0 = np.concatenate(([0.0], np.cumsum(L)[:-1]))
+        self.total = float(L.sum())
+        self.A, self.B, self.hA, self.hB, self.L, self.S0 = A, B, hA, hB, L, S0
+
+        self.Tan = (B - A) / np.maximum(L, 1e-12)[:, None]
+        self.bw = border
+        self.W = s.wall_distance + 0.5 * border           # wall centerline, from road edge
+        # Two cells belong to different parts of the track (-> shared wall between them)
+        # when the track turned around between their nearest points (hairpins, V shapes:
+        # the divider then runs up to the centre of curvature), or when they are further
+        # apart along the track than any single bend inside the flood-fill could explain.
+        self.cos_split = math.cos(s.wall_angle)
+        self.T = 2.0 * math.pi * (float(Hw.max()) + self.W)
+        h = max(s.wall_resolution, 0.005)
+        R = float(Hw.max()) + self.W + 3 * h
+        x0, y0 = P.min(0) - R
+        x1, y1 = P.max(0) + R
+        while (x1 - x0) * (y1 - y0) / (h * h) > 6e6:       # keep the grid reasonable
+            h *= 1.25
+        self.h = h
+        nx = int(math.ceil((x1 - x0) / h)) + 1
+        ny = int(math.ceil((y1 - y0) / h)) + 1
+        self.x0, self.y0, self.nx, self.ny = float(x0), float(y0), nx, ny
+        xs = x0 + np.arange(nx) * h
+        ys = y0 + np.arange(ny) * h
+
+        best = np.full((ny, nx), np.inf)
+        seg = np.full((ny, nx), -1, dtype=np.int32)
+        tpar = np.zeros((ny, nx))
+        for k in range(len(A)):
+            ax, ay = A[k]
+            bx, by = B[k]
+            rk = max(hA[k], hB[k]) + self.W + 3 * h
+            j0 = max(0, int((min(ax, bx) - rk - x0) / h))
+            j1 = min(nx, int((max(ax, bx) + rk - x0) / h) + 2)
+            i0 = max(0, int((min(ay, by) - rk - y0) / h))
+            i1 = min(ny, int((max(ay, by) + rk - y0) / h) + 2)
+            if j1 <= j0 or i1 <= i0:
+                continue
+            f, t = _seg_field(np, ax, ay, bx, by, hA[k], hB[k], xs[None, j0:j1], ys[i0:i1, None])
+            sub = best[i0:i1, j0:j1]
+            m = f < sub
+            sub[m] = f[m]
+            seg[i0:i1, j0:j1][m] = k
+            tpar[i0:i1, j0:j1][m] = t[m]
+        self.best, self.seg = best, seg
+        self.label = np.where(seg >= 0, S0[np.maximum(seg, 0)] + tpar * L[np.maximum(seg, 0)], 0.0)
+        self.inside = best <= self.W
+
+    # -- helpers ------------------------------------------------------------------
+    def arc_sep(self, a, b):
+        d = self.np.abs(a - b)
+        return self.np.minimum(d, self.total - d) if self.cyclic else d
+
+    def far(self, la, lb, ka, kb):
+        np = self.np
+        ta, tb = self.Tan[ka], self.Tan[kb]
+        cos = ta[..., 0] * tb[..., 0] + ta[..., 1] * tb[..., 1]
+        return (self.arc_sep(la, lb) > self.T) | (cos < self.cos_split)
+
+    def field_of(self, k, px, py):
+        np = self.np
+        return _seg_field(np, self.A[k, 0], self.A[k, 1], self.B[k, 0], self.B[k, 1],
+                          self.hA[k], self.hB[k], px, py)[0]
+
+    def cell_at(self, x, y):
+        j = int(round((x - self.x0) / self.h))
+        i = int(round((y - self.y0) / self.h))
+        if 0 <= i < self.ny and 0 <= j < self.nx:
+            return i, j
+        return None
+
+    def extent(self, p, N, max_d):
+        """Free distance from p along +N before leaving the area or entering another part."""
+        c0 = self.cell_at(p.x, p.y)
+        if c0 is None or self.seg[c0] < 0:
+            return 0.0
+        s_here, k_here = self.label[c0], self.seg[c0]
+        d = 0.0
+        while d < max_d:
+            q = p + N * (d + self.h)
+            c = self.cell_at(q.x, q.y)
+            if c is None or not self.inside[c]:
+                break
+            if self.far(self.label[c], s_here, self.seg[c], k_here):
+                break
+            d += self.h
+        return d
+
+    # -- wall extraction ------------------------------------------------------------
+    def extract(self, smooth_iters, clearance):
+        np = self.np
+        h, W = self.h, self.W
+        best, ins, lab, seg = self.best, self.inside, self.label, self.seg
+        X = lambda j: self.x0 + j * h
+        Y = lambda i: self.y0 + i * h
+        nodes = []          # (x, y)
+        issues = []
+        seen_issue = set()
+
+        def crossings(fa, fb, ia, ib, la, lb, sa, sb, ax, ay, bx, by):
+            """Returns (mask, t, wall_clearance) for a batch of grid edges."""
+            outer = ia != ib
+            with np.errstate(invalid='ignore', divide='ignore'):
+                t_out = np.clip((W - fa) / (fb - fa), 0.0, 1.0)
+            shared = ia & ib & self.far(la, lb, sa, sb)
+            t = np.where(outer, t_out, 0.0)
+            clr = np.full(fa.shape, np.inf)
+            idx = np.nonzero(shared & ~outer)[0]
+            if len(idx):
+                ga = fa[idx] - self.field_of(sb[idx], ax[idx], ay[idx])   # <= 0
+                gb = self.field_of(sa[idx], bx[idx], by[idx]) - fb[idx]   # >= 0
+                ts = np.clip(-ga / np.maximum(gb - ga, 1e-12), 0.0, 1.0)
+                t[idx] = ts
+                fA_b = self.field_of(sa[idx], bx[idx], by[idx])
+                clr[idx] = fa[idx] + ts * (fA_b - fa[idx])
+            return outer | shared, t, clr
+
+        def edge_nodes(a_sl, b_sl, horizontal):
+            fa, fb = best[a_sl], best[b_sl]
+            ii, jj = np.nonzero(np.ones(fa.shape, bool))
+            shape = fa.shape
+            fa, fb = fa.ravel(), fb.ravel()
+            ia, ib = ins[a_sl].ravel(), ins[b_sl].ravel()
+            la, lb = lab[a_sl].ravel(), lab[b_sl].ravel()
+            sa, sb = np.maximum(seg[a_sl].ravel(), 0), np.maximum(seg[b_sl].ravel(), 0)
+            ax, ay = X(jj).astype(float), Y(ii).astype(float)
+            bx, by = (ax + h, ay) if horizontal else (ax, ay + h)
+            m, t, clr = crossings(fa, fb, ia, ib, la, lb, sa, sb, ax, ay, bx, by)
+            ids = np.full(shape, -1, dtype=np.int64)
+            for e in np.nonzero(m)[0]:
+                x = ax[e] + (t[e] * h if horizontal else 0.0)
+                y = ay[e] + (0.0 if horizontal else t[e] * h)
+                ids.flat[e] = len(nodes)
+                nodes.append((float(x), float(y)))
+                if clr[e] < 0.5 * self.bw + clearance:
+                    key = (round(x / 1.5), round(y / 1.5))
+                    if key not in seen_issue:
+                        seen_issue.add(key)
+                        issues.append((Vector((x, y, 0.0)), 'OVERLAP',
+                                       "Shared wall only %.2f m from the road" % max(clr[e], 0.0)))
+            return ids
+
+        Hid = edge_nodes((slice(None), slice(0, -1)), (slice(None), slice(1, None)), True)
+        Vid = edge_nodes((slice(0, -1), slice(None)), (slice(1, None), slice(None)), False)
+        sq = np.stack([Hid[:-1, :], Vid[:, 1:], Hid[1:, :], Vid[:, :-1]], axis=-1)
+        cnt = (sq >= 0).sum(-1)
+        adj = {}
+
+        def link(a, b):
+            adj.setdefault(a, []).append(b)
+            adj.setdefault(b, []).append(a)
+
+        for i, j in zip(*np.nonzero(cnt >= 2)):
+            ids = [int(v) for v in sq[i, j] if v >= 0]
+            if len(ids) == 2:
+                link(ids[0], ids[1])
+            else:
+                c = len(nodes)
+                nodes.append((X(j) + 0.5 * h, Y(i) + 0.5 * h))
+                for v in ids:
+                    link(c, v)
+
+        # ---- walk chains between junctions / ends, then loops ----
+        used = set()
+        chains = []
+
+        def walk(a, b):
+            ch = [a, b]
+            used.add((a, b))
+            used.add((b, a))
+            while len(adj[b]) == 2:
+                nb = adj[b][0] if adj[b][1] == a else adj[b][1]
+                if (b, nb) in used:
+                    break
+                used.add((b, nb))
+                used.add((nb, b))
+                a, b = b, nb
+                ch.append(b)
+            return ch
+
+        for v, nb in adj.items():
+            if len(nb) != 2:
+                for w in nb:
+                    if (v, w) not in used:
+                        chains.append((walk(v, w), False))
+        for v, nb in adj.items():
+            for w in nb:
+                if (v, w) not in used:
+                    ch = walk(v, w)
+                    closed = ch[-1] == ch[0]
+                    chains.append((ch[:-1] if closed else ch, closed))
+
+        out = []
+        for ch, closed in chains:
+            Pn = np.array([nodes[v] for v in ch])
+            if len(Pn) < 2 or (not closed and np.linalg.norm(Pn[-1] - Pn[0]) < 1e-6 and len(Pn) < 3):
+                continue
+            for _ in range(smooth_iters):
+                if closed and len(Pn) >= 3:
+                    Pn = 0.5 * Pn + 0.25 * (np.roll(Pn, 1, 0) + np.roll(Pn, -1, 0))
+                elif len(Pn) >= 3:
+                    Pn[1:-1] = 0.5 * Pn[1:-1] + 0.25 * (Pn[:-2] + Pn[2:])
+            pl = [tuple(p) for p in Pn]
+            if closed:
+                pl = _douglas_peucker(pl + [pl[0]], 0.004)[:-1]
+                if len(pl) < 3:
+                    continue
+            else:
+                pl = _douglas_peucker(pl, 0.004)
+                # push ends that sit on a junction outward so the walls overlap there
+                for end, inner in ((0, 1), (-1, -2)):
+                    v = ch[0] if end == 0 else ch[-1]
+                    if len(adj[v]) >= 3 and len(pl) >= 2:
+                        ex, ey = pl[end][0] - pl[inner][0], pl[end][1] - pl[inner][1]
+                        el = math.hypot(ex, ey)
+                        if el > 1e-9:
+                            k = 0.5 * self.bw / el
+                            pl[end] = (pl[end][0] + ex * k, pl[end][1] + ey * k)
+            if self.polyline_length(pl, closed) < max(2 * h, 0.02):
+                continue
+            out.append((pl, closed))
+        return out, issues
+
+    @staticmethod
+    def polyline_length(pl, closed):
+        n = len(pl)
+        m = n if closed else n - 1
+        return sum(math.hypot(pl[(i + 1) % n][0] - pl[i][0], pl[(i + 1) % n][1] - pl[i][1])
+                   for i in range(m))
+
+
+def sweep_polyline(pl, closed, profile, shift, tile, caps=(True, True), v_off=0.0):
+    """Sweep a closed 2D profile (dx, z) along a 2D polyline, offset = dx - shift
+    to the left of the direction of travel."""
+    n = len(pl)
+    m = len(profile)
+    per = [0.0]
+    for k in range(m):
+        a, b = profile[k], profile[(k + 1) % m]
+        per.append(per[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    dirs = []
+    seglen = n if closed else n - 1
+    for i in range(seglen):
+        a, b = pl[i], pl[(i + 1) % n]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        L = math.hypot(dx, dy) or 1e-9
+        dirs.append((dx / L, dy / L, L))
+    verts, vcoord = [], []
+    acc = v_off
+    for i in range(n):
+        if closed:
+            d0, d1 = dirs[i - 1], dirs[i % seglen]
+        else:
+            d0 = dirs[max(i - 1, 0)]
+            d1 = dirs[min(i, seglen - 1)]
+        tx, ty = d0[0] + d1[0], d0[1] + d1[1]
+        tl = math.hypot(tx, ty)
+        if tl < 1e-6:
+            tx, ty, tl = d1[0], d1[1], 1.0
+        tx, ty = tx / tl, ty / tl
+        nxv, nyv = -ty, tx
+        miter = 1.0 / max(nxv * -d1[1] + nyv * d1[0], 0.5)
+        x, y = pl[i]
+        for dx, z in profile:
+            o = (dx - shift) * miter
+            verts.append((x + nxv * o, y + nyv * o, z))
+        if i > 0:
+            acc += dirs[i - 1][2]
+        vcoord.append(acc)
+    if closed:
+        vcoord.append(acc + dirs[-1][2])
+    faces, uvs = [], []
+    rings = n if closed else n - 1
+    for a in range(rings):
+        b = (a + 1) % n
+        va, vb = vcoord[a] / tile, vcoord[a + 1] / tile
+        for k in range(m):
+            k2 = (k + 1) % m
+            faces.append((a * m + k2, b * m + k2, b * m + k, a * m + k))
+            uvs.append([(per[k + 1] / tile, va), (per[k + 1] / tile, vb),
+                        (per[k] / tile, vb), (per[k] / tile, va)])
+    if not closed:
+        for a, rev, want in ((0, False, caps[0]), (n - 1, True, caps[1])):
+            if not want:
+                continue
+            f = [a * m + k for k in range(m)]
+            if rev:
+                f.reverse()
+            faces.append(tuple(f))
+            uvs.append([(profile[i % m][0] / tile, profile[i % m][1] / tile) for i in f])
+    return verts, faces, uvs
+
+
+def disc_mesh(cx, cy, z0, r, h, seg, r_top=0.0125):
+    """Marker disc (track disc): thin vertical rim, then a shallow cone up to a small flat
+    top of radius r_top at the centre.
+    Returns verts, faces, per-face uvs (top-view planar) and per-face smooth flags."""
+    rim = min(0.003, 0.3 * h)
+    r_top = min(max(r_top, 0.001), 0.9 * r)
+    rings = [(r, z0), (r, z0 + rim), (r_top, z0 + h)]
+    verts = []
+    for rr, z in rings:
+        for k in range(seg):
+            a = 2 * math.pi * k / seg
+            verts.append((cx + rr * math.cos(a), cy + rr * math.sin(a), z))
+    faces, sm = [], []
+    for ring in range(len(rings) - 1):
+        for k in range(seg):
+            k2 = (k + 1) % seg
+            faces.append((ring * seg + k, ring * seg + k2, (ring + 1) * seg + k2, (ring + 1) * seg + k))
+            sm.append(1 if ring == 0 else 2)       # rim and cone: separate smoothing groups
+    faces.append(tuple(reversed(range(seg))))                      # bottom
+    faces.append(tuple(range(2 * seg, 3 * seg)))                   # top
+    sm += [False, False]
+    d = 2.0 * r
+    uvs = [[(0.5 + (verts[i][0] - cx) / d, 0.5 + (verts[i][1] - cy) / d) for i in f] for f in faces]
+    return verts, faces, uvs, sm
+
+
 def border_profile(s):
     if s.border_type == 'ROPE':
         r = s.border_width * 0.5
@@ -645,6 +1242,10 @@ def build_track(scene):
     fr = track_frame(s)
     if fr is None:
         return False, "Centerline needs at least 2 points"
+    # bring existing generated materials up to date (e.g. jumps, which are not rebuilt here)
+    for mname in MAT_COLORS:
+        if mname in bpy.data.materials:
+            get_material(mname)
     pts, tans, nors, hws, cyclic, ds = fr
     n = len(pts)
     curv = compute_curvature(tans, ds, cyclic)
@@ -683,7 +1284,7 @@ def build_track(scene):
 
     # ---- Road surface (smooth shaded: 2 exported verts per ring) -------------
     xs, ys = [], []
-    road_mat = get_material("RC_Road")
+    road_mat = carpet_material("RC_Road")
     for sec, part, s0, s1 in chunks(2):
         idxs = ring_idx(s0, s1)
         verts, faces, uvs = [], [], []
@@ -692,10 +1293,10 @@ def build_track(scene):
             r = pts[i] - nors[i] * hws[i]
             verts += [(l.x, l.y, rz), (r.x, r.y, rz)]
         for a in range(len(idxs) - 1):
-            i, j = idxs[a], idxs[a + 1]
-            v0, v1 = (s0 + a) * ds / tile, (s0 + a + 1) * ds / tile
-            faces.append((2 * a, 2 * a + 1, 2 * a + 3, 2 * a + 2))
-            uvs.append([(0.0, v0), (2 * hws[i] / tile, v0), (2 * hws[j] / tile, v1), (0.0, v1)])
+            face = (2 * a, 2 * a + 1, 2 * a + 3, 2 * a + 2)
+            faces.append(face)
+            # top-down planar projection (same as the floor): seamless across chunks
+            uvs.append([(verts[k][0] / tile, verts[k][1] / tile) for k in face])
         name = "RC_Road_S%02d_%d" % (sec, part)
         o = get_mesh_object(name, rcoll)
         write_mesh(o, verts, faces, uvs, None, [road_mat], 'UP', smooth=True)
@@ -706,12 +1307,54 @@ def build_track(scene):
 
     # ---- Borders (battens / rope), one object per side per chunk ------------
     border = 0.0
+    cells = None
+    cell_issues = []
+    if s.wall_mode == 'CELLS':
+        try:
+            t0 = time.time()
+            cells = CellWalls(pts, hws, cyclic, s, s.border_width if s.border_type != 'NONE' else 0.0)
+        except ImportError:
+            print("RC Track: numpy not available, falling back to road-following borders")
     if s.border_type != 'NONE':
         border = s.border_width
         prof = border_profile(s)
         rope = s.border_type == 'ROPE'
         per_ring = (len(prof) + 1) if rope else 2 * len(prof)   # smooth+seam / flat
         mat = get_material("RC_Rope" if rope else "RC_Border")
+    if cells is not None and s.border_type != 'NONE':
+        walls, cell_issues = cells.extract(s.wall_smooth, s.clearance)
+        max_rings = max(2, (limit - 2 * per_ring) // per_ring)
+        k = 0
+        for pl, closed in walls:
+            npt = len(pl)
+            rings = npt + 1 if closed else npt
+            if rings <= max_rings:
+                parts = [(list(range(npt)), closed, (True, True), 0.0)]
+            else:
+                # split into open pieces sharing one ring; caps only at the real chain ends
+                seq = list(range(npt)) + ([0] if closed else [])
+                L = len(seq) - 1
+                cnt = math.ceil(L / (max_rings - 1))
+                parts, voff = [], 0.0
+                for p in range(cnt):
+                    a0 = int(round(L * p / cnt))
+                    a1 = int(round(L * (p + 1) / cnt))
+                    sub_idx = seq[a0:a1 + 1]
+                    caps = (False, False) if closed else (p == 0, p == cnt - 1)
+                    parts.append((sub_idx, False, caps, voff))
+                    voff += CellWalls.polyline_length([pl[i] for i in sub_idx], False)
+            for idx, cl, caps, voff in parts:
+                sub = [pl[i] for i in idx]
+                v, f, u = sweep_polyline(sub, cl, prof, 0.5 * border, tile, caps=caps, v_off=voff)
+                name = "RC_Wall_%03d" % k
+                o = get_mesh_object(name, bcoll)
+                write_mesh(o, v, f, u, None, [mat], 'RECALC', smooth=rope)
+                o["wall_chain"] = k
+                used.add(name)
+                k += 1
+        print("RC Track: cell walls %d chain(s), %d mesh(es), grid %dx%d @ %.3f m, %.2f s"
+              % (len(walls), k, cells.nx, cells.ny, cells.h, time.time() - t0))
+    elif s.border_type != 'NONE':
         for sec, part, s0, s1 in chunks(per_ring):
             idxs = ring_idx(s0, s1)
             for side, tag in ((1, "L"), (-1, "R")):
@@ -735,10 +1378,101 @@ def build_track(scene):
         # flat shading + stripe material splits: ~16 exported verts per ring, +8 for caps
         max_rings = max(2, (limit - 8) // 16)
         curb_mats = [get_material("RC_CurbRed"), get_material("RC_CurbWhite")]
+        discs = s.curb_style == 'DISCS'
+        if discs:
+            dr = 0.5 * s.disc_diameter
+            dh = s.disc_height
+            dseg = s.disc_segments
+            # only direct neighbours may overlap, so two alternating heights avoid z-fighting
+            dsp = max(s.disc_diameter + s.disc_gap, 0.5 * s.disc_diameter + 0.005)
+            per_disc = 6 * dseg                      # exported verts: 2 caps + rim + cone
+            max_discs = max(1, limit // per_disc)
+            disc_mat = [get_material("RC_Disc")]
+            all_discs = []
         k = 0
         for g, (idxs, sg) in enumerate(find_runs(flags, signs, cyclic)):
             idxs = extend_run(idxs, ext, n, cyclic)
             if len(idxs) < 2:
+                continue
+            if discs:
+                # Path of the disc centres, on the inside of the corner: the outer disc edge
+                # sits on the inner limit of the track (+ overhang). With cell walls that is
+                # the inner wall face minus clearance (smoothed: the field is a grid);
+                # otherwise the road edge, where the batten starts.
+                # The path is much shorter than the centerline in tight corners, so discs
+                # are spaced by their real centre-to-centre distance on it.
+                if cells is not None:
+                    lim = []
+                    for i in idxs:
+                        e = cells.extent(pts[i], nors[i] * sg, hws[i] + cells.W)
+                        e -= 0.5 * border + s.clearance
+                        lim.append(min(max(e, hws[i]), hws[i] + s.wall_distance))
+                    w = 3
+                    lim = [sum(lim[max(0, a - w):a + w + 1]) / len(lim[max(0, a - w):a + w + 1])
+                           for a in range(len(lim))]
+                else:
+                    lim = [hws[i] for i in idxs]
+                path = [pts[i] + nors[i] * (sg * (e - dr + s.disc_offset)) for i, e in zip(idxs, lim)]
+                cum = [0.0]
+                for a in range(1, len(path)):
+                    cum.append(cum[-1] + (path[a] - path[a - 1]).length)
+
+                def at(u):
+                    a = 0
+                    while a < len(cum) - 2 and cum[a + 1] < u:
+                        a += 1
+                    seg_l = cum[a + 1] - cum[a]
+                    t = 0.0 if seg_l < 1e-9 else min(1.0, max(0.0, (u - cum[a]) / seg_l))
+                    return path[a].lerp(path[a + 1], t)
+
+                def place(u0):
+                    us, last = [u0], at(u0)
+                    u = u0
+                    while True:
+                        u += 0.01
+                        if u > cum[-1]:
+                            return us
+                        q = at(u)
+                        if (q - last).length >= dsp:
+                            lo, hi = u - 0.01, u          # refine to the exact distance
+                            for _ in range(8):
+                                mid = 0.5 * (lo + hi)
+                                if (at(mid) - last).length >= dsp:
+                                    hi = mid
+                                else:
+                                    lo = mid
+                            u = hi
+                            us.append(u)
+                            last = at(u)
+                us = place(0.0)
+                us = place(0.5 * (cum[-1] - us[-1]))      # centre the row on the run
+                centers = []
+                for c, u in enumerate(us):
+                    q = at(u)
+                    # neighbouring runs (curb extend) may reach the same spot: skip duplicates
+                    if any((q.x - x) ** 2 + (q.y - y) ** 2 < (dsp - 0.005) ** 2 for x, y in all_discs):
+                        continue
+                    centers.append((q.x, q.y, 0.001 * (len(centers) % 2)))
+                all_discs += [(x, y) for x, y, _ in centers]
+                cnt = len(centers)
+                if cnt == 0:
+                    continue
+                for p0 in range(0, cnt, max_discs):
+                    v, f, u, sm = [], [], [], []
+                    for cx, cy, z0 in centers[p0:p0 + max_discs]:
+                        dv, df, du, dsm = disc_mesh(cx, cy, z0, dr, dh, dseg,
+                                                    0.5 * s.disc_top_diameter)
+                        o_ = len(v)
+                        v += dv
+                        f += [tuple(i + o_ for i in face) for face in df]
+                        u += du
+                        sm += dsm
+                    name = "RC_Curb_%03d" % k
+                    o = get_mesh_object(name, kcoll)
+                    write_mesh(o, v, f, u, None, disc_mat, 'RECALC', smooth=sm)
+                    o["curb_group"] = g
+                    used.add(name)
+                    k += 1
                 continue
             nparts = max(1, math.ceil((len(idxs) - 1) / (max_rings - 1)))
             L = len(idxs) - 1
@@ -759,9 +1493,9 @@ def build_track(scene):
                 k += 1
 
     # remove chunks that are no longer needed (and legacy single objects)
-    for o in list(tcoll.all_objects):
-        if o.name.startswith(("RC_Road", "RC_Border", "RC_Curb")) and o.name not in used:
-            remove_object(o.name)
+    for name in _object_names(tcoll):
+        if name.startswith(("RC_Road", "RC_Border", "RC_Curb", "RC_Wall")) and name not in used:
+            remove_object(name)
 
     # ---- Start line ----------------------------------------------------------
     if s.start_line:
@@ -776,12 +1510,12 @@ def build_track(scene):
 
     # ---- Floor -----------------------------------------------------------------
     if s.floor:
-        mg = s.floor_margin + border
+        mg = s.floor_margin + border + (cells.W + 0.5 * border if cells is not None else 0.0)
         x0, x1, y0, y1 = min(xs) - mg, max(xs) + mg, min(ys) - mg, max(ys) + mg
         fv = [(x0, y0, 0.0), (x1, y0, 0.0), (x1, y1, 0.0), (x0, y1, 0.0)]
         fu = [[(x / tile, y / tile) for x, y, _ in fv]]
         fl = get_mesh_object("RC_Floor", tcoll)
-        write_mesh(fl, fv, [(0, 1, 2, 3)], fu, None, [get_material("RC_Floor")], 'UP')
+        write_mesh(fl, fv, [(0, 1, 2, 3)], fu, None, [carpet_material("RC_Floor")], 'UP')
     else:
         remove_object("RC_Floor")
 
@@ -794,9 +1528,18 @@ def build_track(scene):
             i = int(round(k * total / count / ds)) % n
             e = bpy.data.objects.new("RC_CP_%03d" % k, None)
             e.empty_display_type = 'CUBE'
-            e.location = (pts[i].x, pts[i].y, 0.5)
+            if cells is not None:
+                # span the whole cell: from wall to wall across the road at this point
+                mx = hws[i] + cells.W
+                el = cells.extent(pts[i], nors[i], mx)
+                er = cells.extent(pts[i], -nors[i], mx)
+                c = pts[i] + nors[i] * (0.5 * (el - er))
+                half = 0.5 * (el + er) + 0.5 * border
+            else:
+                c, half = pts[i], hws[i] + border
+            e.location = (c.x, c.y, 0.5)
             e.rotation_euler = (0.0, 0.0, math.atan2(tans[i].y, tans[i].x))
-            e.scale = (0.05, hws[i] + border, 0.5)
+            e.scale = (0.05, half, 0.5)
             e["checkpoint_index"] = k
             e["is_start_finish"] = (k == 0)
             ccoll.objects.link(e)
@@ -804,7 +1547,8 @@ def build_track(scene):
 
     # ---- Validation ------------------------------------------------------------
     corner_issues = list(_state.get("corner_issues", []))
-    issues = validate(pts, hws, curv, ds, cyclic, border, s.clearance)
+    issues = validate(pts, hws, curv, ds, cyclic, border, s.clearance, overlap=cells is None)
+    issues += cell_issues
     for loc in corner_issues:
         issues.append((loc, 'CORNER', "Opposite corners too close together - move the points apart"))
     icoll = get_collection(COLL_ISSUES, scene)
@@ -818,9 +1562,16 @@ def build_track(scene):
         icoll.objects.link(e)
     icoll.hide_render = True
 
-    apply_display(scene)
+    # final step: every generated mesh gets its pivot at the centre of its bounds
+    for name in _object_names(tcoll):
+        o = bpy.data.objects.get(name)
+        if o is not None and o.type == 'MESH':
+            recenter_origin(o)
 
-    radii = [1.0 / abs(c) for c in curv if abs(c) > 1e-9]
+    apply_display(scene)
+    refresh_jump_uvs(scene)
+
+    radii =[1.0 / abs(c) for c in curv if abs(c) > 1e-9]
     s.stat_length = total
     s.stat_min_radius = min(radii) if radii else 9999.0
     s.stat_issues = len(issues)
@@ -838,8 +1589,10 @@ def build_track(scene):
 
 SETTINGS_KEYS = ("track_width", "step", "auto_corners", "corner_radius", "max_verts", "border_type", "border_width", "border_height",
                  "curbs", "curb_radius", "curb_width", "curb_height", "curb_extend",
-                 "curb_stripe", "clearance", "floor", "floor_margin", "road_z", "uv_tile",
-                 "start_line", "checkpoints", "checkpoint_spacing")
+                 "curb_stripe", "curb_style", "disc_diameter", "disc_height", "disc_top_diameter", "disc_gap",
+                 "disc_offset", "disc_segments", "clearance", "floor", "floor_margin", "road_z", "uv_tile",
+                 "start_line", "checkpoints", "checkpoint_spacing",
+                 "wall_mode", "wall_distance", "wall_angle", "wall_resolution", "wall_smooth")
 
 
 def curve_signature(obj):
@@ -897,6 +1650,15 @@ def _timer():
 
 @persistent
 def rc_track_depsgraph_handler(scene, depsgraph):
+    # moved jumps: their world-space UVs must follow (transform updates only, so the
+    # UV write itself - a geometry update - does not retrigger this)
+    for u in depsgraph.updates:
+        idd = u.id
+        if isinstance(idd, bpy.types.Object) and u.is_updated_transform:
+            ob = bpy.data.objects.get(idd.name)
+            if ob is not None and getattr(ob, "rc_jump", None) is not None and ob.rc_jump.is_jump:
+                _schedule_jump_uvs(scene)
+                break
     if time.time() < _state.get("ignore_until", 0.0):
         return
     s = getattr(scene, "rc_track", None)
@@ -919,6 +1681,8 @@ def apply_display(scene):
     if coll is None:
         return
     for o in coll.all_objects:
+        if o is None:          # stale entry right after chunks were removed
+            continue
         o.display_type = 'WIRE' if s.track_display == 'WIRE' else 'TEXTURED'
         o.hide_viewport = (s.track_display == 'HIDDEN')
 
@@ -1036,8 +1800,164 @@ def build_jump_mesh(obj):
         u.append([(prof[k][0], prof[k][1]) for k in reversed(range(m))])
         f.append((0, m, 2 * m - 1, m - 1))                          # bottom
         u.append([(prof[0][0], 0.0), (prof[0][0], 2 * w), (prof[-1][0], 2 * w), (prof[-1][0], 0.0)])
-        acc.add(v, f, u)
-    write_mesh(obj, acc.v, acc.f, acc.u, None, [get_material("RC_Jump")], 'RECALC')
+        acc.add(v, f, u, [0] * len(f))
+        if j.tape:
+            for tv, tf, tu in _tape_strips(prof, w, j.tape_width):
+                acc.add(tv, tf, tu, [1] * len(tf))
+    write_mesh(obj, acc.v, acc.f, acc.u, acc.m,
+               [carpet_material("RC_Road"), get_material("RC_Tape")], 'RECALC')
+    jump_world_uvs(obj)
+
+
+def _tape_keys(prof, along):
+    """Arc positions along a jump profile that get duct tape: ground contacts, the lip at the
+    top of every climb, the edge where every descent starts, and any sharp corner."""
+    m = len(prof)
+    ang = [math.atan2(prof[k + 1][1] - prof[k][1], prof[k + 1][0] - prof[k][0]) for k in range(m - 1)]
+    flat = math.radians(5.0)
+    keys = [0.0]
+    for i in range(1, m - 1):
+        a0, a1 = ang[i - 1], ang[i]
+        lip = a0 > flat and a1 <= flat                  # end of a climb
+        edge = a0 >= -flat and a1 < -flat               # start of a descent
+        kink = abs(a1 - a0) > math.radians(25.0)
+        if lip or edge or kink:
+            keys.append(along[i])
+    keys.append(along[-1])
+    out = []
+    for s in sorted(keys):                              # merge keys closer than 3 cm
+        if not out or s - out[-1] > 0.03:
+            out.append(s)
+    return out
+
+
+def _tape_strips(prof, w, width):
+    """Thin closed slabs of tape (0.3-2 mm above the surface) wrapping the profile around each
+    key edge, across the whole jump width. Returns [(verts, faces, uvs)]."""
+    m = len(prof)
+    along = [0.0]
+    for k in range(1, m):
+        along.append(along[-1] + math.hypot(prof[k][0] - prof[k - 1][0], prof[k][1] - prof[k - 1][1]))
+    total = along[-1]
+    if total < 1e-6:
+        return []
+
+    def seg_normal(k):
+        dx, dz = prof[k + 1][0] - prof[k][0], prof[k + 1][1] - prof[k][1]
+        L = math.hypot(dx, dz) or 1.0
+        return (-dz / L, dx / L)                        # left of the travel direction = outward
+
+    def point(s, at_vertex=None):
+        if at_vertex is not None:
+            k = at_vertex
+            na = seg_normal(max(k - 1, 0))
+            nb = seg_normal(min(k, m - 2))
+            nx, nz = na[0] + nb[0], na[1] + nb[1]
+            L = math.hypot(nx, nz) or 1.0
+            return prof[k][0], prof[k][1], nx / L, nz / L
+        k = 0
+        while k < m - 2 and along[k + 1] < s:
+            k += 1
+        seg = along[k + 1] - along[k]
+        t = 0.0 if seg < 1e-9 else min(1.0, max(0.0, (s - along[k]) / seg))
+        x = prof[k][0] + (prof[k + 1][0] - prof[k][0]) * t
+        z = prof[k][1] + (prof[k + 1][1] - prof[k][1]) * t
+        n = seg_normal(k)
+        return x, z, n[0], n[1]
+
+    lo_off, hi_off = 0.0003, 0.002
+    out = []
+    for s in _tape_keys(prof, along):
+        a, b = max(0.0, s - width / 2), min(total, s + width / 2)
+        if b - a < 1e-4:
+            continue
+        samples = [point(a)]
+        for k in range(m):
+            if a + 1e-6 < along[k] < b - 1e-6:
+                samples.append(point(along[k], at_vertex=k))
+        samples.append(point(b))
+        v, f, u = [], [], []
+        for x, z, nx, nz in samples:
+            for off in (lo_off, hi_off):
+                px, pz = x + nx * off, z + nz * off
+                v += [(px, -w, pz), (px, w, pz)]       # 4 verts per sample: lo-, lo+, hi-, hi+
+        n = len(samples)
+        for i in range(n - 1):
+            a0, b0 = 4 * i, 4 * (i + 1)
+            f.append((a0 + 2, b0 + 2, b0 + 3, a0 + 3))   # top
+            f.append((a0 + 0, a0 + 1, b0 + 1, b0 + 0))   # bottom
+            f.append((a0 + 0, b0 + 0, b0 + 2, a0 + 2))   # side -Y
+            f.append((a0 + 1, a0 + 3, b0 + 3, b0 + 1))   # side +Y
+        last = 4 * (n - 1)
+        f.append((0, 2, 3, 1))                            # end caps
+        f.append((last, last + 1, last + 3, last + 2))
+        u = [[(0.0, 0.0)] * len(face) for face in f]      # world UVs are set afterwards
+        out.append((v, f, u))
+    return out
+
+
+def jump_world_uvs(obj, tile=None):
+    """World-space UVs so the road carpet continues seamlessly over the jump:
+    top-down (x, y) on faces looking mostly up/down, side projection (horizontal, z)
+    on steep faces so they are not smeared."""
+    if obj is None or obj.type != 'MESH' or not obj.data.uv_layers:
+        return
+    if tile is None:
+        tile = max(bpy.context.scene.rc_track.uv_tile, 0.01)
+    me = obj.data
+    M = obj.matrix_world
+    R = M.to_3x3()
+    uvl = me.uv_layers.active.data
+    for poly in me.polygons:
+        n = (R @ poly.normal).normalized()
+        for li in poly.loop_indices:
+            p = M @ me.vertices[me.loops[li].vertex_index].co
+            if abs(n.z) >= 0.5:
+                uv = (p.x, p.y)
+            elif abs(n.x) > abs(n.y):
+                uv = (p.y, p.z)
+            else:
+                uv = (p.x, p.z)
+            uvl[li].uv = (uv[0] / tile, uv[1] / tile)
+    me.update()
+
+
+def refresh_jump_uvs(scene):
+    coll = bpy.data.collections.get(COLL_JUMPS)
+    if coll is None:
+        return
+    # Snapshot the NAMES first: rebuilding a mesh creates/removes datablocks, which invalidates
+    # the collection's all_objects cache mid-iteration (stale entries, and a hard crash).
+    names = [o.name for o in coll.all_objects if o is not None]
+    for name in names:
+        o = bpy.data.objects.get(name)
+        if o is not None and o.type == 'MESH' and getattr(o, "rc_jump", None) is not None and o.rc_jump.is_jump:
+            # full rebuild (a few dozen faces): keeps materials, tape and world UVs current
+            build_jump_mesh(o)
+
+
+_jstate = {"pending": False, "scene": None, "last": 0.0}
+
+
+def _jump_uv_timer():
+    if time.time() - _jstate["last"] < 0.2:
+        return 0.1
+    _jstate["pending"] = False
+    scene = bpy.data.scenes.get(_jstate.get("scene") or "")
+    if scene is not None:
+        try:
+            refresh_jump_uvs(scene)
+        except Exception as e:
+            print("RC Track: jump UV refresh failed:", e)
+    return None
+
+
+def _schedule_jump_uvs(scene):
+    _jstate["last"] = time.time()
+    _jstate["scene"] = scene.name
+    if not _jstate["pending"]:
+        _jstate["pending"] = True
+        bpy.app.timers.register(_jump_uv_timer, first_interval=0.2)
 
 
 def _jump_update(self, context):
@@ -1068,6 +1988,9 @@ def snap_object(obj, frame, set_width=True):
     obj.rotation_euler = (0.0, 0.0, ang)
     if is_jump and set_width:
         obj.rc_jump.width = 2 * hws[best]
+    if is_jump:
+        bpy.context.view_layer.update()
+        jump_world_uvs(obj)
 
 
 # =============================================================================
@@ -1226,6 +2149,46 @@ def _hoop_pieces(d):
     return pcs
 
 
+def _handball_goal_pieces(depth=0.9):
+    """Handball goal (3 x 2 m inside) with its back against a wall at x=0, mouth facing +X.
+    Materials: 0 red, 1 white (20 cm post bands), 2 metal frame, 3 net."""
+    hw, hh, p = 1.5, 2.0, 0.08          # inner half width, inner height, post section
+    x1 = depth                          # front face of the posts
+    x0 = x1 - p
+    pcs = []
+    band = 0.2
+    # posts: 20 cm red/white bands, red at the ground
+    for sy in (-1, 1):
+        ya, yb = sy * hw, sy * (hw + p)
+        nb = int(math.ceil((hh + p) / band))
+        for k in range(nb):
+            za, zb = k * band, min((k + 1) * band, hh + p)
+            pcs.append(_setmat(_box(x0, ya, za, x1, yb, zb), k % 2))
+    # crossbar: bands mirrored from the centre (red at both corners like the posts' tops)
+    span = 2 * (hw + p)
+    nb = int(math.ceil(span / band))
+    for k in range(nb):
+        ya = -(hw + p) + k * band
+        yb = min(ya + band, hw + p)
+        pcs.append(_setmat(_box(x0, ya, hh, x1, yb, hh + p), (k + int(math.ceil((hh + p) / band))) % 2))
+    # metal frame: ground rails to the wall, back uprights, top rails, back rails
+    r = 0.015
+    for sy in (-1, 1):
+        y = sy * (hw + p / 2)
+        pcs.append(_setmat(_box(0.0, y - r, 0.0, x0, y + r, 2 * r), 2))            # ground rail
+        pcs.append(_setmat(_box(0.0, y - r, hh + p - 2 * r, x0, y + r, hh + p), 2))  # top rail
+        pcs.append(_setmat(_box(0.0, y - r, 0.0, 2 * r, y + r, hh + p), 2))         # back upright
+    pcs.append(_setmat(_box(0.0, -hw - p, 0.0, 2 * r, hw + p, 2 * r), 2))           # back bottom
+    pcs.append(_setmat(_box(0.0, -hw - p, hh + p - 2 * r, 2 * r, hw + p, hh + p), 2))  # back top
+    # net panels (thin, translucent)
+    n = 0.004
+    pcs.append(_setmat(_box(2 * r, -hw, 0.0, 2 * r + n, hw, hh), 3))                # back
+    pcs.append(_setmat(_box(2 * r, -hw, hh - n, x0, hw, hh), 3))                     # roof
+    for sy in (-1, 1):
+        pcs.append(_setmat(_box(2 * r, sy * hw, 0.0, x0, sy * (hw - n), hh), 3))    # sides
+    return pcs
+
+
 def _bench_pieces(length=3.5):
     h = length / 2
     return [_box(-h, -0.13, 0.30, h, 0.13, 0.34),                 # seat
@@ -1262,6 +2225,23 @@ def pack_pieces(prefix, coll, root, pieces, mats, limit, used, smooth=False, nor
         _parent_to(o, root)
         write_mesh(o, acc.v, acc.f, acc.u, acc.m, mats, normals, smooth=smooth)
         used.add(name)
+
+
+def _get_light_object(name, ltype, coll, root):
+    """Reuse / create a light object (and its own light data) of the given type."""
+    o = bpy.data.objects.get(name)
+    if o is not None and (o.type != 'LIGHT' or o.data.type != ltype):
+        bpy.data.objects.remove(o, do_unlink=True)
+        o = None
+    if o is None:
+        ld = bpy.data.lights.get(name)
+        if ld is None or ld.type != ltype:
+            ld = bpy.data.lights.new(name, ltype)
+        o = bpy.data.objects.new(name, ld)
+    if coll.objects.get(o.name) is None:
+        coll.objects.link(o)
+    _parent_to(o, root)
+    return o
 
 
 def apply_gym_display(scene):
@@ -1368,6 +2348,15 @@ def build_gym(scene):
             pack_pieces("RC_Gym_Hoop_%02d" % k, coll, root,
                         [_xform(pc, Mx) for pc in _hoop_pieces(dd)], hoop_mats, limit, used)
 
+    # Handball goals against the end walls (the ones without benches), mouth to the court
+    if g.handball_goals:
+        goal_mats = [M("RC_GymLineRed"), M("RC_GymLineWhite"), M("RC_GymMetal"), M("RC_GymNet")]
+        ends = (Matrix.Translation((-L / 2, 0, 0)),
+                Matrix.Translation((L / 2, 0, 0)) @ Matrix.Rotation(math.pi, 4, 'Z'))
+        for k, Mx in enumerate(ends):
+            pack_pieces("RC_Gym_Goal_%02d" % k, coll, root,
+                        [_xform(pc, Mx) for pc in _handball_goal_pieces()], goal_mats, limit, used)
+
     # Benches along the long walls
     if g.benches and g.benches_per_wall > 0:
         n = g.benches_per_wall
@@ -1402,10 +2391,44 @@ def build_gym(scene):
             pack_pieces("RC_Gym_Ceil_Beams", ccoll, root, beams, [M("RC_GymBeam")], limit, used)
         if lights:
             pack_pieces("RC_Gym_Ceil_Lights", ccoll, root, lights, [M("RC_GymLight")], limit, used)
+        # one point light just under every fixture
+        if g.lamps:
+            lcoll = get_collection(COLL_GYM_LIGHTS, scene, coll)
+            for k, (v, _f, _u, _m) in enumerate(lights):
+                cx = sum(p[0] for p in v) / len(v)
+                cy = sum(p[1] for p in v) / len(v)
+                zmin = min(p[2] for p in v)
+                o = _get_light_object("RC_Gym_Lamp_%02d" % k, 'POINT', lcoll, root)
+                o.data.energy = g.lamp_power
+                o.data.color = (1.0, 0.97, 0.90)
+                o.data.shadow_soft_size = 0.15
+                o.matrix_basis = Matrix.Translation((cx, cy, zmin - 0.1))
+                used.add(o.name)
 
-    for o in list(coll.all_objects):
-        if o.type == 'MESH' and o.name.startswith("RC_Gym_") and o.name not in used:
-            remove_object(o.name)
+    # Sun: a directional light coming in through the window band
+    if g.sun:
+        side = -1 if g.window_side == 'NEG_Y' else 1          # BOTH / NONE: from +Y
+        el, az = g.sun_elevation, g.sun_azimuth
+        # direction of travel: from outside the window wall, inwards (towards -side Y) and down
+        d = Vector((math.sin(az) * math.cos(el), -side * math.cos(az) * math.cos(el), -math.sin(el)))
+        o = _get_light_object("RC_Gym_Sun", 'SUN', get_collection(COLL_GYM_LIGHTS, scene, coll), root)
+        o.data.energy = g.sun_strength
+        o.data.color = (1.0, 0.96, 0.88)
+        o.data.angle = math.radians(0.53)
+        rot = d.to_track_quat('-Z', 'Y').to_matrix().to_4x4()
+        # position is irrelevant for a sun: put it outside the windows, where it comes from
+        o.matrix_basis = Matrix.Translation((0.0, side * (W / 2 + 4.0), H + 3.0)) @ rot
+        used.add(o.name)
+
+    for name in _object_names(coll):
+        o = bpy.data.objects.get(name)
+        if o is not None and o.type in ('MESH', 'LIGHT') and name.startswith("RC_Gym_") and name not in used:
+            remove_object(name)
+    # final step: pivots at the centre of each mesh (local to RC_Gym_Root)
+    for name in _object_names(coll):
+        o = bpy.data.objects.get(name)
+        if o is not None and o.type == 'MESH' and name in used:
+            recenter_origin(o)
     apply_gym_display(scene)
     return root
 
@@ -1467,9 +2490,30 @@ class RCGymSettings(PropertyGroup):
     benches: BoolProperty(name="Benches", default=True, update=_gym_update)
     benches_per_wall: IntProperty(name="Benches per wall", default=4, min=0, max=20, update=_gym_update)
     doors: BoolProperty(name="Doors", default=True, update=_gym_update)
+    handball_goals: BoolProperty(name="Handball goals", default=True, update=_gym_update,
+                                 description="A handball goal against each end wall "
+                                             "(the walls without benches)")
     ceiling: BoolProperty(name="Ceiling", default=True, update=_gym_update)
     beam_spacing: FloatProperty(name="Beam spacing", default=4.0, min=1.0, unit='LENGTH',
                                 update=_gym_update)
+    lamps: BoolProperty(name="Point lights", default=True, update=_gym_update,
+                        description="A point light just under every ceiling light fixture")
+    lamp_power: FloatProperty(name="Point light power", default=300.0, min=0.0, soft_max=5000.0,
+                              unit='POWER', update=_gym_update)
+    sun: BoolProperty(name="Sun", default=True, update=_gym_update,
+                      description="Directional light shining in through the window band")
+    sun_strength: FloatProperty(name="Sun strength", default=5.0, min=0.0, soft_max=50.0,
+                                update=_gym_update, description="Irradiance (W/m²)")
+    sun_elevation: FloatProperty(name="Sun elevation", default=math.radians(35.0),
+                                 min=math.radians(1.0), max=math.radians(89.0), subtype='ANGLE',
+                                 update=_gym_update,
+                                 description="Height of the sun above the horizon: low = long "
+                                             "patches of light across the floor")
+    sun_azimuth: FloatProperty(name="Sun angle along wall", default=math.radians(30.0),
+                               min=math.radians(-80.0), max=math.radians(80.0), subtype='ANGLE',
+                               update=_gym_update,
+                               description="Horizontal angle of the sun relative to the window "
+                                           "wall normal (0 = straight in)")
     show_ceiling: BoolProperty(name="Show ceiling in viewport", default=False,
                                update=_gym_display_update,
                                description="Viewport only: the ceiling is still exported")
@@ -1529,6 +2573,49 @@ class RCTrackSettings(PropertyGroup):
                                update=_settings_update)
     curb_stripe: FloatProperty(name="Stripe length", default=0.25, min=0.02, unit='LENGTH',
                                update=_settings_update)
+    curb_style: EnumProperty(name="Curb style", default='STRIPES', update=_settings_update, items=[
+        ('STRIPES', "Red/white curbs", "Low striped curb swept along the inner road edge"),
+        ('DISCS', "Marker discs", "Overlapping flat plastic discs along the inner road edge"),
+    ])
+    disc_diameter: FloatProperty(name="Disc diameter", default=0.40, min=0.05, soft_max=1.0,
+                                 unit='LENGTH', update=_settings_update)
+    disc_height: FloatProperty(name="Disc height", default=0.018, min=0.002, soft_max=0.05,
+                               unit='LENGTH', update=_settings_update)
+    disc_top_diameter: FloatProperty(name="Disc top diameter", default=0.025, min=0.002,
+                                     soft_max=0.3, unit='LENGTH', update=_settings_update,
+                                     description="Diameter of the small flat top at the centre: "
+                                                 "the disc is a shallow cone from its edge up to it")
+    disc_gap: FloatProperty(name="Disc gap", default=0.0, soft_min=-0.15, soft_max=0.5,
+                            unit='LENGTH', update=_settings_update,
+                            description="Edge-to-edge gap between neighbouring discs (0 = touching, "
+                                        "negative = overlapping, at most half a diameter)")
+    disc_offset: FloatProperty(name="Disc overhang", default=0.0, soft_min=-0.5, soft_max=0.5,
+                               unit='LENGTH', update=_settings_update,
+                               description="Outer disc edge relative to the inner track limit (wall face with shared cells, road edge otherwise) "
+                                           "(0 = flush, positive = sticks out past the edge)")
+    disc_segments: IntProperty(name="Disc segments", default=16, min=6, max=64,
+                               update=_settings_update)
+    wall_mode: EnumProperty(name="Walls", default='SWEEP', update=_settings_update, items=[
+        ('SWEEP', "Follow road", "Border on both road edges, swept along the centerline"),
+        ('CELLS', "Shared cells", "Flood-fill around the track: walls on the outer limit, and "
+                                  "shared walls where different parts of the track meet"),
+    ])
+    wall_distance: FloatProperty(name="Wall distance", default=0.5, min=0.0, soft_max=5.0,
+                                 unit='LENGTH', update=_settings_update,
+                                 description="Maximum free space between the road edge and a wall. "
+                                             "Shared walls sit half-way where parts are closer")
+    wall_angle: FloatProperty(name="Divider angle", default=math.radians(120.0),
+                              min=math.radians(60.0), max=math.radians(179.0), subtype='ANGLE',
+                              update=_settings_update,
+                              description="Inside a bend turning more than this, the two legs get a "
+                                          "divider wall up to the centre of the bend. Lower = "
+                                          "dividers also on gentler corners")
+    wall_resolution: FloatProperty(name="Wall resolution", default=0.03, min=0.005, max=0.25,
+                                   unit='LENGTH', update=_settings_update,
+                                   description="Grid cell size of the flood fill")
+    wall_smooth: IntProperty(name="Wall smoothing", default=4, min=0, max=50,
+                             update=_settings_update,
+                             description="Smoothing passes on the extracted wall lines")
     clearance: FloatProperty(name="Clearance", default=0.05, min=0.0, unit='LENGTH',
                              update=_settings_update,
                              description="Extra gap required between neighbouring sections")
@@ -1567,6 +2654,11 @@ class RCJumpProps(PropertyGroup):
     smooth: BoolProperty(name="Smooth ramps", default=True, update=_jump_update)
     segments: IntProperty(name="Segments", default=8, min=1, max=64, update=_jump_update)
     reverse: BoolProperty(name="Reverse direction", default=False, update=_jump_reverse_update)
+    tape: BoolProperty(name="Edge tape", default=True, update=_jump_update,
+                       description="Shiny grey duct tape across the ramp edges (ground contacts, "
+                                   "take-off lip, landing edge) so the jump reads at speed")
+    tape_width: FloatProperty(name="Tape width", default=0.05, min=0.01, soft_max=0.2,
+                              unit='LENGTH', update=_jump_update)
 
 
 # =============================================================================
@@ -2033,8 +3125,8 @@ class RC_TRACK_OT_remove_gym(Operator):
         _ensure_object_mode(context)
         coll = bpy.data.collections.get(COLL_GYM)
         if coll is not None:
-            for o in list(coll.all_objects):
-                remove_object(o.name)
+            for name in _object_names(coll):
+                remove_object(name)
         remove_object(GYM_ROOT)
         return {'FINISHED'}
 
@@ -2222,13 +3314,29 @@ class RC_TRACK_PT_track(Panel):
                 col.prop(s, "border_height")
         col.prop(s, "clearance")
         col = layout.column(align=True)
+        col.prop(s, "wall_mode")
+        if s.wall_mode == 'CELLS':
+            col.prop(s, "wall_distance")
+            col.prop(s, "wall_angle")
+            col.prop(s, "wall_resolution")
+            col.prop(s, "wall_smooth")
+        col = layout.column(align=True)
         col.prop(s, "curbs")
         if s.curbs:
+            col.prop(s, "curb_style", text="")
             col.prop(s, "curb_radius")
-            col.prop(s, "curb_width")
-            col.prop(s, "curb_height")
             col.prop(s, "curb_extend")
-            col.prop(s, "curb_stripe")
+            if s.curb_style == 'DISCS':
+                col.prop(s, "disc_diameter")
+                col.prop(s, "disc_height")
+                col.prop(s, "disc_top_diameter")
+                col.prop(s, "disc_gap")
+                col.prop(s, "disc_offset")
+                col.prop(s, "disc_segments")
+            else:
+                col.prop(s, "curb_width")
+                col.prop(s, "curb_height")
+                col.prop(s, "curb_stripe")
         col = layout.column(align=True)
         col.prop(s, "floor")
         if s.floor:
@@ -2281,6 +3389,9 @@ class RC_TRACK_PT_jumps(Panel):
             if j.smooth:
                 box.prop(j, "segments")
             box.prop(j, "reverse")
+            box.prop(j, "tape")
+            if j.tape:
+                box.prop(j, "tape_width")
 
 
 class RC_TRACK_PT_gym(Panel):
@@ -2328,10 +3439,20 @@ class RC_TRACK_PT_gym(Panel):
         col.prop(g, "benches")
         if g.benches:
             col.prop(g, "benches_per_wall")
+        col.prop(g, "handball_goals")
         col.prop(g, "doors")
         col.prop(g, "ceiling")
         if g.ceiling:
             col.prop(g, "beam_spacing")
+            col.prop(g, "lamps")
+            if g.lamps:
+                col.prop(g, "lamp_power")
+        col = layout.column(align=True)
+        col.prop(g, "sun")
+        if g.sun:
+            col.prop(g, "sun_strength")
+            col.prop(g, "sun_elevation")
+            col.prop(g, "sun_azimuth")
 
 
 class RC_TRACK_PT_export(Panel):

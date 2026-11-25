@@ -1773,6 +1773,85 @@ public:
         SaveEntities(name, CollectClosure(root), root);
     }
 
+    // Releases every Material / Texture entity no other entity points to through a Handle field.
+    // Iterates to a fixpoint: dropping an unused material can orphan the textures it used.
+    // Permanent entities are kept (engine-owned, like Clear()). Any Handle counts as a use,
+    // Parent included, so a material/texture with children survives. Optionally returns the counts released.
+    void CleanUnusedMaterialsAndTextures(uint* outMaterials = nullptr, uint* outTextures = nullptr)
+    {
+        ZoneScoped;
+        InitKnownComponents();
+
+        int bucketToKC[Components::componentMaxCount];
+        for (uint i = 0; i < Components::componentMaxCount; i++) bucketToKC[i] = -1;
+        for (uint k = 0; k < knownComponents.size(); k++) bucketToKC[Components::MaskToBucket(knownComponents[k].mask)] = (int)k;
+
+        uint materialBucket = Components::MaskToBucket(Components::Material::mask);
+        uint textureBucket = Components::MaskToBucket(Components::Texture::mask);
+
+        std::unordered_set<uint> removed; // entity ids released so far (their handles no longer count)
+        uint releasedMat = 0, releasedTex = 0;
+        while (true)
+        {
+            // every entity id referenced by a live, not-yet-removed entity (self-references ignored)
+            std::unordered_set<uint> referenced;
+            for (uint p = 0; p < components.size(); p++)
+            {
+                Pool& pool = components[p];
+                for (uint j = 0; j < pool.count; j++)
+                {
+                    EntitySlot slot{ 0, 0, p, j };
+                    uint selfId = slot.Get<Components::Entity>().id;
+                    if (removed.count(selfId)) continue;
+                    for (uint b = 0; b < Components::componentMaxCount; b++)
+                    {
+                        if (!pool.mask[b] || bucketToKC[b] < 0) continue;
+                        char* data = (char*)pool.data[b] + (size_t)j * Components::strides[b];
+                        for (auto& m : knownComponents[bucketToKC[b]].members)
+                        {
+                            if (m.dataType != PropertyTypes::_Handle) continue;
+                            for (int k = 0; k < m.dataCount; k++)
+                            {
+                                EntityBase h = *(EntityBase*)(data + m.offset + (size_t)k * sizeof(EntityBase));
+                                if (h.id != entityInvalid.id && h.id != selfId) referenced.insert(h.id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            std::vector<Entity> toRelease;
+            uint passMat = 0, passTex = 0;
+            for (uint p = 0; p < components.size(); p++)
+            {
+                Pool& pool = components[p];
+                bool isMat = pool.mask[materialBucket];
+                bool isTex = pool.mask[textureBucket];
+                if (!isMat && !isTex) continue;
+                for (uint j = 0; j < pool.count; j++)
+                {
+                    EntitySlot slot{ 0, 0, p, j };
+                    Entity e = slot.Get<Components::Entity>();
+                    if (!e.IsValid() || removed.count(e.id) || referenced.count(e.id)) continue;
+                    if (entitySlots[e.id].permanent) continue;
+                    toRelease.push_back(e);
+                    if (isMat) passMat++; else passTex++;
+                }
+            }
+            if (toRelease.empty()) break;
+            for (auto& e : toRelease)
+            {
+                removed.insert(e.id);
+                e.Release(); // deferred: slot freed in DeferredRelease
+            }
+            releasedMat += passMat;
+            releasedTex += passTex;
+        }
+        IOs::Log("Clean world: released {} unused materials, {} unused textures", releasedMat, releasedTex);
+        if (outMaterials) *outMaterials = releasedMat;
+        if (outTextures) *outTextures = releasedTex;
+    }
+
     // Bumped by Clear(): the renderer drops what it cached about the old scene (GI history)
     uint clearCount = 0;
 

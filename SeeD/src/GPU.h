@@ -1161,9 +1161,10 @@ void Resource::Create(D3D12_RESOURCE_DESC resourceDesc, String name, ResourceCat
         NULL,
         &allocation,
         IID_NULL, NULL);
-    if (FAILED(hr) || allocation->GetResource() == nullptr)
+    if (FAILED(hr) || allocation == nullptr || allocation->GetResource() == nullptr)
     {
         IOs::Log("Buffer {} creation failed {}", name.c_str(), hr);
+        return;
     }
 
     std::wstring wname = name.ToWString();
