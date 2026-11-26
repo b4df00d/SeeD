@@ -3,7 +3,6 @@
 #define SHARC_ENABLE_64_BIT_ATOMICS 1
 #define TRACING_DISTANCE                10000.0f
 #define SPECULAR_HITT_MAX               65504.0f // fp16 max: the specularHitDistance guide is R16_FLOAT, anything above becomes +Inf
-#define SPECULAR_HITT_TRACE_ROUGHNESS_MAX 0.7f   // above this the DLSS-RR hitT guide keeps the diffuse-lobe distance instead of tracing a dedicated specular ray
 #define BOUNCES_MIN                     0
 #define BOUNCES_MAX                     10
 #define RIS_CANDIDATES_LIGHTS           8 // Number of candidates used for resampling of analytical lights
@@ -152,6 +151,11 @@ void PathTraceRays()
     float specularHitTSum = 0.0f;
     float anyHitTSum = 0.0f;
     uint hitTCounts = 0; // specular count << 16 | any count (fewer values live across TraceRay)
+    // Direction of the dedicated hitT guide ray (see after the sample loop), sampled at bounce 0 where
+    // the primary surface is already resolved: bit 31 = valid, 15:15 octahedral. 1 = sky pixel, 0 = not
+    // decided yet. Re-resolving the surface after the loop (visibility buffer + material textures) cost
+    // ~0.85 ms on its own, even when the roughness test then skipped the ray.
+    uint specularGuideDir = 0;
 
     uint2 pixel = launchIndex;
 #if (SHARC_UPDATE)
@@ -203,6 +207,8 @@ void PathTraceRays()
             ray.TMax = cd.viewDist; // reset to TRACING_DISTANCE once bounce 0 has read it
             restirPrevPixel = PackPixel(uint2(cd.previousPixel));
             restirReprojectionConfidence = ReprojectionConfidence(cd);
+            if (!(cd.reverseZ > 0.0))
+                specularGuideDir = 1; // sky: no guide ray
         }
 
         float3 sampleRadiance = float3(0.0f, 0.0f, 0.0f);
@@ -338,6 +344,17 @@ void PathTraceRays()
             // OpenPBRPrepare turns the normals toward the viewer (back faces, normal maps)
             OpenPBRData pbr = OpenPBRPrepare(s, viewVector);
             float3 geometryNormal = pbr.Ng;
+
+            // hitT guide direction, picked before any of the breaks below (the ray is only traced
+            // after the loop, if no sample took the specular lobe)
+            if (!isUpdatePass && bounce == 0 && specularGuideDir == 0
+                && s.specular_roughness <= rtParameters.specularHitTRayRoughnessMax && rtParameters.specularHitTRayRoughnessMax > 0.0f)
+            {
+                float3 guideDir;
+                float2 guideRand = float2(RNG(rngState), RNG(rngState));
+                if (OpenPBRSampleReflectionDirection(pbr, guideRand, guideDir) && dot(geometryNormal, guideDir) > 0.0f)
+                    specularGuideDir = 0x80000000u | octahedral_32(guideDir, 15);
+            }
 
 
             // Construct SharcHitData structure needed for creating a query point at this hit location
@@ -591,45 +608,38 @@ void PathTraceRays()
     // (in proportion to their reflected energy), so on most frames the guide used to carry a
     // random cosine-lobe distance instead, RR reprojected the reflection history to a
     // different virtual point every frame, rejected it and blurred reflections under motion.
-    if (specularHitTCount == 0)
+    // Direction sampled at bounce 0 (specularGuideDir); only the origin is rebuilt here.
+    if (specularHitTCount == 0 && (specularGuideDir & 0x80000000u))
     {
         GBufferCameraData cd = GetGBufferCameraData(pixel);
-        OpenPBRSurface s = GetPrimarySurface(pixel);
-        if (cd.reverseZ > 0.0 && s.specular_roughness <= SPECULAR_HITT_TRACE_ROUGHNESS_MAX)
-        {
-            // same normals and origin as bounce 0 of the path loop
-            OpenPBRData pbr = OpenPBRPrepare(s, -cd.viewDir);
-            float3 geometryNormal = pbr.Ng;
-
-            RayDesc ray;
-            float2 rand2 = float2(RNG(rngState), RNG(rngState));
-            if (OpenPBRSampleReflectionDirection(pbr, rand2, ray.Direction) && dot(geometryNormal, ray.Direction) > 0.0f)
-            {
-                ray.Origin = OffsetRay(cd.offsetedWorldPos, geometryNormal);
-                ray.TMin = 0.01f;
-                ray.TMax = TRACING_DISTANCE;
-                uint rayFlags = (!rtParameters.enableBackFaceCull) ? RAY_FLAG_NONE : RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+        RayDesc ray;
+        ray.Direction = normalize(i_octahedral_32(specularGuideDir & 0x3FFFFFFFu, 15));
+        // offset along the gbuffer normal (bounce 0 used the triangle normal, close enough for a guide)
+        ray.Origin = OffsetRay(cd.offsetedWorldPos, cd.worldNorm);
+        ray.TMin = 0.01f;
+        ray.TMax = TRACING_DISTANCE;
+        uint rayFlags = (!rtParameters.enableBackFaceCull) ? RAY_FLAG_NONE : RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
 #if DISABLE_BACK_FACE_CULLING
-                rayFlags &= (~RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
+        rayFlags &= (~RAY_FLAG_CULL_BACK_FACING_TRIANGLES);
 #endif // DISABLE_BACK_FACE_CULLING
+        if (rtParameters.specularHitTRayOpaque)
+            rayFlags |= RAY_FLAG_FORCE_OPAQUE; // distance guide only: cutouts as solid, no any-hit
 
-                RayPayload payload;
-                payload.hitDistance = -1.0f;
-                payload.instanceID = ~0U;
-                payload.primitiveIndex = ~0U;
-                payload.geometryIndex = ~0U;
-                payload.barycentrics = 0;
+        RayPayload payload;
+        payload.hitDistance = -1.0f;
+        payload.instanceID = ~0U;
+        payload.primitiveIndex = ~0U;
+        payload.geometryIndex = ~0U;
+        payload.barycentrics = 0;
 #if USE_SER
-                // only the distance is needed: no reorder, no closesthit/miss invocation
-                dx::HitObject hit = dx::HitObject::TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
-                specularHitTSum = hit.IsHit() ? hit.GetRayTCurrent() : TRACING_DISTANCE;
+        // only the distance is needed: no reorder, no closesthit/miss invocation
+        dx::HitObject hit = dx::HitObject::TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
+        specularHitTSum = hit.IsHit() ? hit.GetRayTCurrent() : TRACING_DISTANCE;
 #else
-                TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
-                specularHitTSum = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE;
+        TraceRay(AccelerationStructure, rayFlags, 0xFF, 0, 0, 0, ray, payload);
+        specularHitTSum = payload.Hit() ? payload.hitDistance : TRACING_DISTANCE;
 #endif
-                specularHitTCount = 1;
-            }
-        }
+        specularHitTCount = 1;
     }
 
     // Prefer the specular-lobe distance, fall back to the diffuse-lobe first-bounce distance

@@ -36,6 +36,17 @@ public:
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;         // IF using Docking Branch
         io.IniFilename = imguiIniPath.c_str();
 
+        // Fonts[0] stays the default editor font; the HUD gets its own, bigger ones (GameStyle, UI.h).
+        // Checked first: AddFontFromFileTTF asserts on a missing file. Missing -> GameStyle scales
+        // the default font instead.
+        io.Fonts->AddFontDefault();
+        const char* hudFontPath = "C:\\Windows\\Fonts\\segoeuib.ttf";
+        if (std::filesystem::exists(hudFontPath))
+        {
+            GameStyle::fontLarge = io.Fonts->AddFontFromFileTTF(hudFontPath, 40.0f);
+            GameStyle::fontSmall = io.Fonts->AddFontFromFileTTF(hudFontPath, 20.0f);
+        }
+
         DXGI_SWAP_CHAIN_DESC sc;
         swapchain->GetDesc(&sc);
 
@@ -564,6 +575,8 @@ struct RayTracingContext
         rtParameters.enableRussianRoulette = true;
         rtParameters.enableSoftShadows = true;
         rtParameters.directOnly = false;
+        rtParameters.specularHitTRayRoughnessMax = 0.7f;
+        rtParameters.specularHitTRayOpaque = true;
         rtParameters.throughputThreshold = 0.0001f;
         rtParameters.probeDownsampling = 6.0f;
     }
@@ -974,18 +987,27 @@ public:
         ZoneScoped;
         ZoneName(name.c_str(), name.size()); // show the pass name (e.g. "culling") instead of "Execute"
 
+        // A dependency on the same queue is already ordered by submission order (SubmissionList keeps
+        // the On() order), so only cross-queue dependencies get a fence Wait. Each Wait splits the
+        // queue's stream and leaves a bubble while the scheduler releases it -- the small passes at
+        // the start of the frame were separated by these gaps.
+        ID3D12CommandQueue* queue = commandBuffer->queue;
+        auto waitIfCrossQueue = [queue](CommandBuffer& dep)
+        {
+            if (dep.queue != queue)
+                queue->Wait(dep.passEnd.fence, dep.passEnd.fenceValue);
+        };
+
         if (dependency != nullptr)
         {
-            commandBuffer->queue->Wait(dependency->Get().passEnd.fence, dependency->Get().passEnd.fenceValue);
+            waitIfCrossQueue(dependency->Get());
             if (dependency2 != nullptr)
-            {
-                commandBuffer->queue->Wait(dependency2->Get().passEnd.fence, dependency2->Get().passEnd.fenceValue);
-            }
+                waitIfCrossQueue(dependency2->Get());
         }
         else if(endOfLastFrame != nullptr)
         {
             uint lastFrameIndex = GPU::instance->frameIndex ? 0 : 1;
-            commandBuffer->queue->Wait(endOfLastFrame->Get(lastFrameIndex).passEnd.fence, endOfLastFrame->Get(lastFrameIndex).passEnd.fenceValue);
+            waitIfCrossQueue(endOfLastFrame->Get(lastFrameIndex));
         }
         ExecuteNow();
     }
@@ -2599,7 +2621,7 @@ public:
 };
 
 // Hillaire 2020 sky LUTs (SkyAtmosphere.hlsl), rebuilt every frame from view->atmosphere. Submitted
-// on the compute queue before lightingProbes/atmosphericScattering, which (and Lighting, through
+// on the compute queue before lightingProbes/atmosphericScattering (in that order), which (and Lighting, through
 // lightingProbes) read them via ViewContext::atmosphere.
 class SkyAtmosphere : public Pass
 {
@@ -3508,19 +3530,25 @@ public:
 
         profileReadback.On(this, GPU::instance->graphicQueue, "profileReadback", nullptr, nullptr);
         hzb.On(this, GPU::instance->graphicQueue, "hzb", nullptr, nullptr);
-        structuredCommandBufferUpdate.On(this, GPU::instance->computeQueue, "structuredCommandBufferUpdate", nullptr, nullptr);
+        // Frame-start passes all on the graphics queue (with AssetLibraryUpload, see Loading.h): on
+        // compute, culling (graphics) waited for this chain, which itself waited for the previous
+        // frame's graphics end -> a graphics -> compute -> graphics handoff stalled ~8% of the frame.
+        structuredCommandBufferUpdate.On(this, GPU::instance->graphicQueue, "structuredCommandBufferUpdate", nullptr, nullptr);
         gpuDebugInit.On(this, GPU::instance->graphicQueue, "gpuDebugInit", &hzb.commandBuffer, nullptr);
-        terrain.On(this, GPU::instance->computeQueue, "terrain", &AssetLibrary::instance->commandBuffer, nullptr);
-        skinning.On(this, GPU::instance->computeQueue, "skinning", &AssetLibrary::instance->commandBuffer, &structuredCommandBufferUpdate.commandBuffer);
-        particles.On(this, GPU::instance->computeQueue, "particles", &AssetLibrary::instance->commandBuffer, nullptr);
-        spawning.On(this, GPU::instance->computeQueue, "spawning", &AssetLibrary::instance->commandBuffer, nullptr);
+        terrain.On(this, GPU::instance->graphicQueue, "terrain", &AssetLibrary::instance->commandBuffer, nullptr);
+        skinning.On(this, GPU::instance->graphicQueue, "skinning", &AssetLibrary::instance->commandBuffer, &structuredCommandBufferUpdate.commandBuffer);
+        particles.On(this, GPU::instance->graphicQueue, "particles", &AssetLibrary::instance->commandBuffer, nullptr);
+        spawning.On(this, GPU::instance->graphicQueue, "spawning", &AssetLibrary::instance->commandBuffer, nullptr);
         culling.On(this, GPU::instance->graphicQueue, "culling", &spawning.commandBuffer , &hzb.commandBuffer);
         zPrepass.On(this, GPU::instance->graphicQueue, "zPrepass", &culling.commandBuffer, nullptr);
         gBuffers.On(this, GPU::instance->graphicQueue, "gBuffers", &zPrepass.commandBuffer, nullptr);
         skyAtmosphere.On(this, GPU::instance->computeQueue, "skyAtmosphere", nullptr, nullptr); // before lightingProbes/atmospehricScattering on the same queue, see SkyAtmosphere
         accelerationStructure.On(this, GPU::instance->computeQueue, "accelerationStructure", &culling.commandBuffer, nullptr);
-        atmospehricScattering.On(this, GPU::instance->computeQueue, "atmospehricScattering", &accelerationStructure.commandBuffer, nullptr);
+        // lightingProbes ahead of atmospehricScattering on the compute queue: graphics lighting waits on
+        // lightingProbes, and the froxel fog is only read from forward/postProcessHalfRes onward, so it
+        // runs alongside lighting instead of delaying it.
         lightingProbes.On(this, GPU::instance->computeQueue, "lightingProbes", &gBuffers.commandBuffer, &accelerationStructure.commandBuffer);
+        atmospehricScattering.On(this, GPU::instance->computeQueue, "atmospehricScattering", &accelerationStructure.commandBuffer, nullptr);
         lighting.On(this, GPU::instance->graphicQueue, "lighting", &gBuffers.commandBuffer, &lightingProbes.commandBuffer);
         forward.On(this, GPU::instance->graphicQueue, "forward", &lighting.commandBuffer, &atmospehricScattering.commandBuffer);
         postProcessHalfRes.On(this, GPU::instance->graphicQueue, "postProcessHalfRes", &forward.commandBuffer, nullptr);

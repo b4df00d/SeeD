@@ -208,8 +208,19 @@
 //         SSE-only f32_128_N members, so it compiles under both.
 // 
 // [ ] 30. move haze pass from gbuffers to it own pass
-// 
-// 
+//
+// [ ] 31. Shrink the mesh Vertex from 24 to 16 bytes (for heavy-mesh scenes; no gain on the RC track,
+//         which is not bandwidth bound -- measure on a heavy scene before/after).
+//         - uv: float2 -> UNORM16x2 local to a per-mesh UV bounds (like packedPos vs the mesh AABB).
+//           Not half floats: they lose precision on large tiling UVs.
+//         - normal + tangent in ONE uint: e.g. 2x10-bit octahedral normal + quantized tangent angle
+//           around the normal (handedness already lives in packedPos' 4th SNORM16).
+//         - Touches: importer, .mesh cache version (re-bake), GPU.h VertexPacked, structs.hlsl Vertex,
+//           mesh.hlsl, RT hit decode (GetRTSurface) and the visibility-buffer resolve (GetVisibilityHit).
+//         - BLAS memory is unchanged (driver keeps its own position copy); gains are VRAM + vertex fetch.
+//         - Already octahedral elsewhere: Vertex normal/tangent, GIReservoirCompressed.hitNormal. The
+//           GBuffer normal stays RGBA16F: it is DLSS-RR's normal input with roughness packed in .w.
+//
 //
 // ============================================================================
 
@@ -341,6 +352,7 @@ void ImportSceneFile(String path);
 #include "Terrain.h"
 #include "Physic.h"
 #include "RCBuggy.h"
+#include "LapTimer.h"
 #include "ImageWriter.h"
 #include "Renderer.h"
 #include "Calibration.h"

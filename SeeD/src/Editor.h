@@ -1227,6 +1227,14 @@ public:
             ImGui::SliderInt("frameFilter", (int*)&rt.maxFrameFilteringCount, 1, 512, "%d", ImGuiSliderFlags_Logarithmic);
             ImGui::SliderFloat("spacialRadius", &rt.spacialRadius, 0, 128);
             ImGui::SliderInt("spacialSamples", (int*)&rt.spacialSampleCount, 0, 64);
+            ImGui::SliderFloat("specularHitTRayRoughness", &rt.specularHitTRayRoughnessMax, 0, 1);
+            ImGui::SetItemTooltip("DLSS-RR specular hitT guide: trace an extra specular ray on primary surfaces rougher than 0 and below this roughness when the path picked the diffuse lobe. 0 = never (cheapest, blurrier reflections under motion).");
+            {
+                bool opaque = rt.specularHitTRayOpaque != 0;
+                if (ImGui::Checkbox("specularHitTRayOpaque", &opaque))
+                    rt.specularHitTRayOpaque = opaque ? 1u : 0u;
+                ImGui::SetItemTooltip("Force that guide ray opaque: skips the alpha-test any-hit, cutouts count as solid.");
+            }
 
             if (ImGui::TreeNode("Advanced##rt"))
             {
@@ -2220,6 +2228,8 @@ void InitComponentData(World::Entity ent, const ComponentInfo& info)
         ent.Get<Components::HazeLayer>() = Components::HazeLayer();
     if (info.mask == Components::FollowCamera::mask)
         ent.Get<Components::FollowCamera>() = Components::FollowCamera();
+    if (info.mask == Components::StartLine::mask)
+        ent.Get<Components::StartLine>() = Components::StartLine();
 }
 
 // "new Entity": every component of the new entity except the ones Make itself fills
@@ -3287,6 +3297,8 @@ public:
             DrawVolumeGizmo(editorState.selectedObject);
         if (editorState.selectedObject.IsValid() && editorState.selectedObject.Has<Components::FogVolume>())
             DrawFogVolumeGizmo(editorState.selectedObject);
+        if (editorState.selectedObject.IsValid() && editorState.selectedObject.Has<Components::StartLine>())
+            StartLineGizmo(editorState.selectedObject, [&](float3 a, float3 b, ImU32 col) { DrawWorldLine(a, b, col); });
     }
 };
 Guizmo guizmo;
@@ -3621,6 +3633,18 @@ public:
                         pf.loadDistance = 50.0f;
                         editorState.dirtyHierarchy = true;
                     }
+                    if (ImGui::MenuItem("Start Line"))
+                    {
+                        World::Entity ent;
+                        editorState.selectedObject = ent.Make(Components::StartLine::mask | Components::Transform::mask, "Start Line");
+                        auto& trans = ent.Get<Components::Transform>();
+                        trans.position = float3(0);
+                        trans.rotation = quaternion::identity();
+                        trans.scale = float3(1);
+                        ent.Get<Components::StartLine>() = Components::StartLine();
+                        editorState.dirtyHierarchy = true;
+                    }
+                    ImGui::SetItemTooltip("Lap start/finish gate: drive through it along its local +Z (the arrow) while playing.\nThe lap timer HUD shows up in play mode.");
                     if (ImGui::MenuItem("Terrain"))
                     {
                         World::Entity ent;

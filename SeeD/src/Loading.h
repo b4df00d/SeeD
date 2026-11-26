@@ -57,7 +57,7 @@ public:
         instance = this;
         for (uint i = 0; i < FRAMEBUFFERING; i++)
         {
-            commandBuffer.Get(i).On(GPU::instance->computeQueue, name); //not copyQueue because creation of blas needs it :(
+            commandBuffer.Get(i).On(GPU::instance->graphicQueue, name); // not copyQueue: BLAS builds need it. Not compute: the frame-start passes waiting on it are on graphics (see Renderer.h)
         }
         namespace fs = std::filesystem;
         std::error_code ec;
@@ -122,7 +122,7 @@ public:
         if (commandBuffer->open)
             IOs::Log("{} OPEN !!", name);
 
-        if (endOfLastFrame != nullptr)
+        if (endOfLastFrame != nullptr && endOfLastFrame->GetPrevious().queue != commandBuffer->queue) // same queue: already ordered
         {
             commandBuffer->queue->Wait(endOfLastFrame->GetPrevious().passEnd.fence, endOfLastFrame->GetPrevious().passEnd.fenceValue);
         }

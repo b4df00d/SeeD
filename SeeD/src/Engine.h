@@ -19,6 +19,7 @@ public:
 
     Systems::Player player;
     Systems::Driver driver;
+    Systems::LapTimer lapTimer;
     Systems::PrefabStreaming prefabStreaming;
     Systems::TerrainStreaming terrainStreaming;
     Physics physics;
@@ -48,6 +49,7 @@ public:
 
         if (options.playerSystem) player.On();
         driver.On();
+        lapTimer.On();      // after driver: it runsAfter Driver::instance
         prefabStreaming.On();
         terrainStreaming.On();
         physics.On();
@@ -95,6 +97,7 @@ public:
 
         physics.Off();
         if (options.playerSystem) player.Off();
+        lapTimer.Off();
         driver.Off();
         prefabStreaming.Off();
         terrainStreaming.Off();
@@ -135,6 +138,7 @@ public:
         TASK_(Inputs, ios.Update);
         tf::Task LoadAssets = taskflow.emplace([]() { AssetLibrary::instance->Open(); AssetLibrary::instance->LoadAssets(); }).name("Loading");
         MODULE(WorldModule, worldFlow);
+        tf::Task GameWindows = taskflow.emplace([]() { GameWindow::UpdateWindows(); }).name("GameUI");
         tf::Task EditorWindows = taskflow.emplace([]() { EditorWindow::UpdateWindows(); }).name("Editor");
         MODULE(RendererModule, rendererFlow);
         TASK_(PhysicsStep, physics.Step);
@@ -143,7 +147,10 @@ public:
         Inputs.precede(WorldModule);
         PhysicsStep.succeed(WorldModule);
         WorldModule.succeed(LoadAssets);
-        WorldModule.precede(EditorWindows);
+        // Game UI reads what the systems wrote, then the editor draws on top of it (and ImGui is
+        // single-threaded, so the two are chained, never parallel).
+        WorldModule.precede(GameWindows);
+        GameWindows.precede(EditorWindows);
         RendererModule.succeed(EditorWindows, LoadAssets);
 
         builtScheduleKey = ScheduleKey();

@@ -2375,6 +2375,19 @@ namespace Systems
         float previousForward = 1.0f;
         bool wasPlaying = false;
 
+        // Every car ResetVehicle teleported this frame (player, and later AI / network drivers going
+        // through the same function). Cleared at the start of Update, read by systems that
+        // runAfter Driver -- Systems::LapTimer voids the lap of a car that was reset.
+        static std::vector<World::Entity> resetsThisFrame;
+
+        static bool WasResetThisFrame(World::Entity vehicle)
+        {
+            for (const World::Entity& reset : resetsThisFrame)
+                if (reset.id == vehicle.id && reset.rev == vehicle.rev)
+                    return true;
+            return false;
+        }
+
         void On() override
         {
             instance = this;
@@ -2494,11 +2507,15 @@ namespace Systems
 
             if (Physics::instance != nullptr)
                 Physics::instance->StopBody(vehicle);
+
+            resetsThisFrame.push_back(vehicle);
         }
 
         void Update(World* world) override
         {
             ZoneScoped;
+
+            resetsThisFrame.clear();
 
             if (!engineState.playing)
             {
@@ -2575,4 +2592,5 @@ namespace Systems
         }
     };
     Driver* Driver::instance = nullptr;
+    std::vector<World::Entity> Driver::resetsThisFrame;
 }

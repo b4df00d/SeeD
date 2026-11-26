@@ -921,6 +921,10 @@ namespace Systems
     struct SystemBase
     {
         Components::Mask mask;
+        // Explicit ordering: World::Schedule makes this system's task succeed the task of every
+        // system listed here (one that is not registered is ignored). Without an entry, systems
+        // run in parallel in no defined order. Fill it in On(), before registering.
+        std::vector<SystemBase*> runAfter;
         virtual void On() = 0;
         virtual void Off() = 0;
         virtual void Update(World* world) = 0;
@@ -1895,11 +1899,25 @@ public:
     {
         ZoneScoped;
         //ECS systems
+        std::vector<tf::Task> tasks(systems.size());
         for (uint i = 0; i < systems.size(); i++)
         {
             tf::Task t = flow.emplace([this, i]() { if (i < this->systems.size()) this->systems[i]->Update(this); }).name("#system"); // the guard: systems can change before the next rebuild
             if (!predecessor.empty())
                 t.succeed(predecessor);
+            tasks[i] = t;
+        }
+        // SystemBase::runAfter edges. The graph is rebuilt when systems.size() changes
+        // (Engine::ScheduleKey), and runAfter is filled before a system registers, so the edges
+        // always match the registered set.
+        for (uint i = 0; i < systems.size(); i++)
+        {
+            for (Systems::SystemBase* before : systems[i]->runAfter)
+            {
+                auto found = std::find(systems.begin(), systems.end(), before);
+                if (found != systems.end() && *found != systems[i])
+                    tasks[i].succeed(tasks[found - systems.begin()]);
+            }
         }
     }
 

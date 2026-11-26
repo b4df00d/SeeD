@@ -190,6 +190,7 @@ copy /Y "..\Third\omm-main\bin\*.*" "..\x64\Release\"</Command>
     <ClInclude Include="src\GPU.h" />
     <ClInclude Include="src\IO.h" />
     <ClInclude Include="src\Loading.h" />
+    <ClInclude Include="src\LapTimer.h" />
     <ClInclude Include="src\Physic.h" />
     <ClInclude Include="src\RCBuggy.h" />
     <ClInclude Include="src\RCBuggyKinematics.h" />
