@@ -220,7 +220,10 @@ namespace RCKin
             p.shockLength = Length(p.shockBottom - g.shockTop);
         }
 
-        static double Camber(const V3& axleOut) { return std::asin(std::clamp(axleOut.y, -1.0, 1.0)); }          // negative = top in
+        // Negative = top in. The OUTWARD axle tilts UP when the top of the tire leans in (turn a
+        // wheel's up (0,1) by phi towards -x: its outward axle (1,0) turns to (cos, +sin)).
+        // Was asin(+y) until 2026-11-25: every "-2 deg" setup was solved as 2 deg top OUT.
+        static double Camber(const V3& axleOut) { return -std::asin(std::clamp(axleOut.y, -1.0, 1.0)); }
         static double Toe(const V3& axleOut) { return std::atan2(axleOut.z, std::sqrt(axleOut.x * axleOut.x + axleOut.y * axleOut.y)); }  // positive = toe in (right side)
 
         // 1-D root of f on [lo, hi]: scan for the sign change closest to `guess`, then bisect.

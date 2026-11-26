@@ -3086,7 +3086,7 @@ public:
     bool qualityChangePending = false;
 
     NVSDK_NGX_DLSS_Hint_Render_Preset dlssPreset = NVSDK_NGX_DLSS_Hint_Render_Preset_Default;
-    NVSDK_NGX_RayReconstruction_Hint_Render_Preset dlssdPreset = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default;
+    NVSDK_NGX_RayReconstruction_Hint_Render_Preset dlssdPreset = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_F; // DLSS-RR 4.5 (RR2 model)
     bool featureDirty = false;
 
     void On(View* view, ID3D12CommandQueue* queue, String _name, PerFrame<CommandBuffer>* _dependency, PerFrame<CommandBuffer>* _dependency2) override

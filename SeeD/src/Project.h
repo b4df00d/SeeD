@@ -47,7 +47,7 @@ public:
     uint upscalingTechnique = 1;
     int dlssQuality = 1;
     int dlssPreset = 0;
-    int dlssdPreset = 0;
+    int dlssdPreset = 6; // NVSDK_NGX_RayReconstruction_Hint_Render_Preset_F (RR 4.5 / RR2 model)
     bool shaderStatsCsv = false;
     bool playerSystem = true;
 

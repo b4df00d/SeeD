@@ -1298,11 +1298,12 @@ public:
                 }
                 else // dlssd: Ray Reconstruction
                 {
-                    static const char* rrNames[] = { "Default", "Transformer (D)", "Latest Transformer (E)" };
+                    static const char* rrNames[] = { "Default", "Transformer (D)", "Transformer + DoF (E)", "RR 4.5 (F)" };
                     static const NVSDK_NGX_RayReconstruction_Hint_Render_Preset rrValues[] = {
                         NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default,
                         NVSDK_NGX_RayReconstruction_Hint_Render_Preset_D,
                         NVSDK_NGX_RayReconstruction_Hint_Render_Preset_E,
+                        NVSDK_NGX_RayReconstruction_Hint_Render_Preset_F,
                     };
                     int modelIdx = 0;
                     for (int i = 0; i < IM_ARRAYSIZE(rrValues); i++)
@@ -2139,6 +2140,20 @@ public:
     }
 };
 FileBrowserWindow fileBrowserWindow;
+
+// RC Setup's "Save setup..." / "Load setup..." (RCBuggy.h is included before this file). Setups
+// live in <project>\RCSetups, created on first use.
+void RCSetupFile::Dialog(bool save, void (*result)(String))
+{
+    namespace fs = std::filesystem;
+    fs::path dir = Project::instance != nullptr ? fs::path(Project::instance->projectDir.c_str()) / "RCSetups" : fs::current_path();
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (save)
+        fileBrowserWindow.OpenSave(dir.string(), "car.rcsetup", { ".rcsetup" }, result);
+    else
+        fileBrowserWindow.OpenLoad(dir.string(), { ".rcsetup" }, result);
+}
 // Set right before opening fileBrowserWindow for a texture import (DrawHandle below); the
 // FileBrowserWindow result callback is a plain function pointer (no captures), so the target
 // handle to write into rides on this global instead. Cleared once consumed.

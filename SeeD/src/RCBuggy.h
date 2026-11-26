@@ -264,6 +264,12 @@ namespace RCBuggySim
         std::atomic<bool> tireGroundFilter = true;      // drop tire contacts whose normal is "ground"
         std::atomic<bool> tireHeightFilter = true;      // drop tire contacts below -0.5 r
         std::atomic<bool> edgeRemoval = true;           // Jolt enhanced internal edge removal
+        // Tub + skids collide only while the car is flipping (Runtime::UpdateColliderGate): on its
+        // wheels the tire model carries the car and the rigid chassis contacts only add rogue hits.
+        std::atomic<bool> autoGate = true;
+        std::atomic<float> gateTiltDeg = 50.0f;         // on above this tilt from world up, tires or not
+        std::atomic<float> gateAirTiltDeg = 25.0f;      // on above this tilt when fewer than 2 tires touch
+        std::atomic<float> gateHoldTime = 0.25f;        // s, stays on this long after the condition clears
         // shape parameters: need a collider rebuild (button)
         float tireRadiusScale = 0.88f;
         // live: friction of the skid / tub contacts (< 0 = the bodies' combined friction)
@@ -585,6 +591,13 @@ namespace RCBuggySim
         Params P;
         Corner corner[4];
 
+        // Chassis collider gate, written by OnStep, read by RCBuggyValidateContact (workers) and
+        // Manager::Sync (which invalidates the contact cache when it flips).
+        std::atomic<bool> chassisColliders = true;
+        std::atomic<bool> gateChanged = false;
+        double gateTimer = 0;
+        void UpdateColliderGate(JPH::Vec3Arg up, double dt);
+
         // drivetrain state
         double carrierOmega = 0;            // diff carrier(s), rad/s (wheel speed units)
         double diffOmega[2] = { 0, 0 };     // half the left - right difference, per axle (0 front, 1 rear)
@@ -604,6 +617,11 @@ namespace RCBuggySim
         // live readouts
         float motorCurrent = 0, motorRPM = 0, forwardSpeed = 0, motorTorque = 0;
         bool  built = false;
+
+        // the chassis body's mass properties as this car wants them (ChassisMassProperties), and the
+        // inverse inertia diagonal Jolt ended up with -- a physics rebuild of the shape resets them
+        JPH::MassProperties massTarget;
+        JPH::Vec3 appliedInvInertia = JPH::Vec3::sZero();
 
         void Reset()
         {
@@ -651,17 +669,31 @@ namespace RCBuggySim
             double s = sqrt(sx * sx + sy * sy);
             if (s < 1e-9 || load <= 0)
                 return out;
-            double f = mu * load * sin(C * atan(B * s)) / s;
-            out.fx = f * sx;
-            out.fy = -f * sy;
+            double f = mu * load * sin(C * atan(B * s));
+            // Direction. Below the peak the force follows the stiffness-weighted slip (sx, sy);
+            // sliding, it opposes the actual slip VELOCITY (kappa, tan alpha) -- Coulomb friction.
+            // Keeping the normalised direction past the peak shrank the lateral share of a spinning
+            // or locked tire ~2.4x (the ratio of the two peaks): a rear at kappa 0.5 and 5 deg kept
+            // 7% of its grip sideways instead of 17%, so any wheelspin or brake lock spun the car.
+            double dx = sx / s, dy = sy / s;
+            double raw = sqrt(kappa * kappa + tanAlpha * tanAlpha);
+            double w = Clamp(s - 1.0, 0.0, 1.0);
+            if (w > 0 && raw > 1e-9)
+            {
+                dx += w * (kappa / raw - dx);
+                dy += w * (tanAlpha / raw - dy);
+                double l = sqrt(dx * dx + dy * dy);
+                if (l > 1e-9) { dx /= l; dy /= l; }
+            }
+            out.fx = f * dx;
+            out.fy = -f * dy;
             return out;
         }
 
         // ---- motor -----------------------------------------------------------------------------
         // DC model of a sensored brushless motor + its ESC: current from (duty * V - backEMF) over the
-        // winding + battery resistance, clamped by the current limit. Braking shorts the phases
-        // (scaled by the brake strength), and partial throttle above the matching speed brakes too --
-        // what a synchronous-rectified ESC does.
+        // winding + battery resistance, then regulated the way a race ESC does it (see below): the
+        // trigger sets the current, braking shorts the phases at a trigger-set current.
         void Motor(double omegaMotor, double fwdSpeed, double& torque, double& dTorque, double& current)
         {
             double rTotal = P.resistance;
@@ -693,16 +725,36 @@ namespace RCBuggySim
                 reverseArmed = fwdSpeed < 0.25;
             }
 
+            // The ESC regulates CURRENT, i.e. torque. A bare PWM bridge on a 35 mOhm winding is a stiff
+            // speed source: any trigger above the matching speed slams the current limit (part
+            // throttle = full torque off the line), any lift below it regenerates as hard as the
+            // winding allows, and a shorted-phase brake grows with speed (25% trigger at 45 km/h
+            // locked the rears). Measured 2026-11-25 with scripted runs, all three spun the car.
             double slope;
+            const double shortSlope = -1.0 / (P.kvRad * rTotal);
             if (brake > 0.0)
             {
-                current = -brake * emf / rTotal;
-                slope = -brake / (P.kvRad * rTotal);
+                // Brake: the trigger sets the braking current, capped by what the shorted winding
+                // can push at this speed (fades to nothing as the car stops).
+                double limit = brake * P.currentLimit;
+                current = -emf / rTotal;
+                slope = shortSlope;
+                if (current > limit) { current = limit; slope = 0; }
+                if (current < -limit) { current = -limit; slope = 0; }
             }
             else
             {
                 current = (duty * P.batteryVoltage - emf) / rTotal;
-                slope = -1.0 / (P.kvRad * rTotal);
+                slope = shortSlope;
+                // Part throttle = part torque: the trigger's share of the current limit (what the
+                // throttle profile / punch of a race ESC does), the duty still caps the speed.
+                double driveLimit = fabs(duty) * P.currentLimit;
+                // Lifting part way at speed coasts down on the drag brake, it does not regenerate.
+                double coastLimit = P.dragBrake * P.currentLimit;
+                double hi = duty >= 0 ? driveLimit : coastLimit;
+                double lo = duty >= 0 ? -coastLimit : -driveLimit;
+                if (current > hi) { current = hi; slope = 0; }
+                if (current < lo) { current = lo; slope = 0; }
             }
             if (current > P.currentLimit) { current = P.currentLimit; slope = 0; }
             if (current < -P.currentLimit) { current = -P.currentLimit; slope = 0; }
@@ -736,6 +788,39 @@ namespace RCBuggySim
     };
 
     // ---- the per-step work ---------------------------------------------------------------------------
+    // Tub + skids are rigid Jolt contacts only while the car is flipping: tilted past gateTiltDeg
+    // (on its side / roof), or past gateAirTiltDeg with fewer than 2 tires touching (a nose- or
+    // tail-first landing, a car rolling over). Otherwise the tires carry it -- the tire model and
+    // the wheel colliders -- and the chassis contacts only ever produced rogue hits (user report
+    // 2026-11-25: with them off the car drives clean). Held on for gateHoldTime after the condition
+    // clears, so a car rocking back onto its wheels does not flicker.
+    inline void Runtime::UpdateColliderGate(JPH::Vec3Arg up, double dt)
+    {
+        const CollisionDebug& d = collisionDebug;
+        bool want = true;
+        if (d.autoGate.load(std::memory_order_relaxed))
+        {
+            float upY = up.GetY();
+            upY = upY > 1.0f ? 1.0f : (upY < -1.0f ? -1.0f : upY);
+            float tilt = acosf(upY) * 57.2957795f;
+            int touching = 0;
+            for (int i = 0; i < 4; i++)
+                touching += corner[i].contact ? 1 : 0;
+            bool flipping = tilt > d.gateTiltDeg.load(std::memory_order_relaxed)
+                         || (touching < 2 && tilt > d.gateAirTiltDeg.load(std::memory_order_relaxed));
+            if (flipping)
+                gateTimer = d.gateHoldTime.load(std::memory_order_relaxed);
+            else if (gateTimer > 0)
+                gateTimer -= dt;
+            want = gateTimer > 0;
+        }
+        if (want != chassisColliders.load(std::memory_order_relaxed))
+        {
+            chassisColliders.store(want, std::memory_order_relaxed);
+            gateChanged.store(true, std::memory_order_relaxed);
+        }
+    }
+
     inline void Runtime::OnStep(const JPH::PhysicsStepListenerContext& ctx)
     {
         if (!built || ctx.mDeltaTime <= 0.0f)
@@ -908,7 +993,7 @@ namespace RCBuggySim
                 f.lat = (axleRight - f.n * axleRight.Dot(f.n)).NormalizedOr(rot * JPH::Vec3::sAxisX());
                 f.vx = vC.Dot(f.fwd);
                 f.vy = vC.Dot(f.lat);
-                f.camber = asin(Clamp(f.axleOut.Dot(f.n), -1, 1));   // negative = top in
+                f.camber = -asin(Clamp(f.axleOut.Dot(f.n), -1, 1));  // negative = top in (RCKin::Linkage::Camber)
 
                 // Load sensitivity: a tire gives less friction per newton the harder it is pressed.
                 double loadRatio = f.load / (E.staticLoad > 0.1 ? E.staticLoad : 0.1);
@@ -1160,6 +1245,8 @@ namespace RCBuggySim
             }
         }
 
+        UpdateColliderGate(up, dt);
+
         const float inv = 1.0f / (float)n;
         JPH::Vec3 force = forceSum * inv;
         JPH::Vec3 torque = torqueSum * inv;
@@ -1252,7 +1339,7 @@ namespace RCBuggySim
         {
             const Lookup& L = wf[i].pose;
             V3 axle = L.axle;
-            corner[i].camber = (float)(asin(Clamp(axle.y, -1, 1)) * 180 / pi);
+            corner[i].camber = (float)(RCKin::Linkage::Camber(axle) * 180 / pi);
             corner[i].toe = (float)(atan2(axle.z * corner[i].side, sqrt(axle.x * axle.x + axle.y * axle.y)) * 180 / pi);   // + = toe in, both sides
             const RCKin::CornerTable& T = P.end[corner[i].end].table;
             corner[i].travel = (float)((L.wheel.y - T.At(RCKin::itStaticClamp(T, T.thetaStatic), T.nBeta / 2).wheel[1]) * 1000.0);
@@ -1458,6 +1545,54 @@ namespace RCBuggySim
         return true;
     }
 
+    // The chassis body's inertia, from where a buggy's mass really is -- not the CollisionShape box,
+    // which is the whole body shell filled uniformly with the car's mass. Sprung mass: a slab as
+    // long and wide as the tub but only 40 mm tall (plate, battery, motor, servo -- all low),
+    // centred on the centre of mass; unsprung mass (wheel, tire, hub, half the arm and shock) as
+    // point masses at the four wheel centres, ~20% of the car out at the corners. Compared with
+    // the box (1.49 kg B7): pitch +20%, yaw +65%, roll +70% -- the box made the car snap into
+    // spins and flips far quicker than the real one. Mass and centre of mass are unchanged.
+    static JPH::MassProperties ChassisMassProperties(const Params& P, const Components::CollisionShape& cs, const Components::RCBuggyGeometry& g)
+    {
+        double m = P.totalMass;
+        double corner[2] = { P.end[0].unsprungMass, P.end[1].unsprungMass };
+        double unsprung = 2.0 * (corner[0] + corner[1]);
+        if (unsprung > 0.5 * m)
+        {
+            double k = 0.5 * m / unsprung;
+            corner[0] *= k; corner[1] *= k; unsprung = 0.5 * m;
+        }
+        double sprung = m - unsprung;
+        float he[3];
+        store(cs.halfExtent, he);
+        double wx = 2.0 * Clamp(Fin(he[0], 0.05), 0.01, 0.5);
+        double wz = 2.0 * Clamp(Fin(he[2], 0.15), 0.02, 1.0);
+        const double wy = 0.04;
+        double I[3][3] = {};
+        I[0][0] = sprung / 12.0 * (wy * wy + wz * wz);
+        I[1][1] = sprung / 12.0 * (wx * wx + wz * wz);
+        I[2][2] = sprung / 12.0 * (wx * wx + wy * wy);
+        V3 wheel[2] = { ToV3(g.frontWheelCenter), ToV3(g.rearWheelCenter) };
+        for (int end = 0; end < 2; end++)
+            for (int side = -1; side <= 1; side += 2)
+            {
+                V3 r = V3(wheel[end].x * side, wheel[end].y, wheel[end].z) - P.centerOfMass;
+                double rv[3] = { r.x, r.y, r.z };
+                double rr = r.x * r.x + r.y * r.y + r.z * r.z;
+                for (int a = 0; a < 3; a++)
+                    for (int b = 0; b < 3; b++)
+                        I[a][b] += corner[end] * ((a == b ? rr : 0.0) - rv[a] * rv[b]);
+            }
+        JPH::MassProperties mp;
+        mp.mMass = (float)m;
+        mp.mInertia = JPH::Mat44(
+            JPH::Vec4((float)I[0][0], (float)I[1][0], (float)I[2][0], 0),
+            JPH::Vec4((float)I[0][1], (float)I[1][1], (float)I[2][1], 0),
+            JPH::Vec4((float)I[0][2], (float)I[1][2], (float)I[2][2], 0),
+            JPH::Vec4(0, 0, 0, 1));
+        return mp;
+    }
+
     // =============================================================================================
     // The system: records per chassis entity, rebuilt on vehicleDirty, transforms written back
     // =============================================================================================
@@ -1465,6 +1600,15 @@ namespace RCBuggySim
     {
         static Manager* instance;
         std::unordered_map<uint, Runtime*> cars;           // key = chassis entity id
+        // key = chassis BodyID, for the contact filter on Jolt's workers. Rebuilt at the end of Sync;
+        // only read during the step, so no lock.
+        std::unordered_map<JPH::uint32, Runtime*> byBody;
+
+        bool ChassisCollidersOn(const JPH::Body& b) const
+        {
+            auto it = byBody.find(b.GetID().GetIndexAndSequenceNumber());
+            return it == byBody.end() || it->second->chassisColliders.load(std::memory_order_relaxed);
+        }
         std::unordered_set<uint> warned;
         std::unordered_map<uint, std::vector<World::Entity>> partsByChassis;
         uint frame = 0;
@@ -1527,6 +1671,8 @@ namespace RCBuggySim
 
             bool hadState = rt.built;
             rt.P = std::move(P);
+            rt.massTarget = ChassisMassProperties(rt.P, ent.Get<Components::CollisionShape>(), ent.Get<Components::RCBuggyGeometry>());
+            rt.appliedInvInertia = JPH::Vec3::sZero();     // ApplyMass sets it on the next Sync
             for (int i = 0; i < 4; i++)
             {
                 rt.corner[i].end = i < 2 ? 0 : 1;
@@ -1553,8 +1699,8 @@ namespace RCBuggySim
 
             const EndParams& F = rt.P.end[0];
             const EndParams& R = rt.P.end[1];
-            IOs::Log("RCBuggy: entity {} built -- {:.0f} g, FDR {:.2f}, camber links {:.1f}/{:.1f} mm, steering links {:.1f} mm, preload {:.1f}/{:.1f} N, Ackermann {:.1f}/{:.1f} deg",
-                entityId, mass * 1000.0, rt.P.gearTotal, F.table.camberLinkLength * 1000.0, R.table.camberLinkLength * 1000.0, F.table.tieRodLength * 1000.0,
+            IOs::Log("RCBuggy: entity {} built -- {:.0f} g, inertia pitch/yaw/roll {:.4f}/{:.4f}/{:.4f} kg.m2, FDR {:.2f}, camber links {:.1f}/{:.1f} mm, steering links {:.1f} mm, preload {:.1f}/{:.1f} N, Ackermann {:.1f}/{:.1f} deg",
+                entityId, mass * 1000.0, rt.massTarget.mInertia(0, 0), rt.massTarget.mInertia(1, 1), rt.massTarget.mInertia(2, 2), rt.P.gearTotal, F.table.camberLinkLength * 1000.0, R.table.camberLinkLength * 1000.0, F.table.tieRodLength * 1000.0,
                 F.springForceStatic, R.springForceStatic, F.table.steerAtFullLock[0] * 180 / pi, F.table.steerAtFullLock[1] * 180 / pi);
             return true;
         }
@@ -1635,6 +1781,7 @@ namespace RCBuggySim
                 if (rt->throttle != 0 || rt->steering != 0)
                     Physics::instance->physicsSystem.GetBodyInterface().ActivateBody(rt->body);
 
+                ApplyMass(*rt);
                 UpdateWheelColliders(*rt);
                 WriteParts(ent, *rt);
             }
@@ -1651,6 +1798,40 @@ namespace RCBuggySim
                     ++it;
                 }
             }
+
+            // Collider gate: a pair whose chassis contacts were just switched on / off must not keep
+            // reusing its cached manifolds (Jolt skips the contact filter while a pair barely moves).
+            byBody.clear();
+            for (auto& [id, rt] : cars)
+            {
+                if (!rt->built)
+                    continue;
+                byBody[rt->body.GetIndexAndSequenceNumber()] = rt;
+                if (rt->gateChanged.exchange(false, std::memory_order_relaxed))
+                    Physics::instance->physicsSystem.GetBodyInterface().InvalidateContactCache(rt->body);
+            }
+        }
+
+        // ---- chassis inertia -----------------------------------------------------------------------
+        // Puts ChassisMassProperties on the body, and again whenever something else replaced them
+        // (Physics recomputes a body's mass properties from its shape when the shape is rebuilt).
+        // The body's mass is kept as Physics set it. The step is not running here (see Sync).
+        void ApplyMass(Runtime& rt)
+        {
+            JPH::BodyLockWrite lock(Physics::instance->physicsSystem.GetBodyLockInterface(), rt.body);
+            if (!lock.Succeeded() || !lock.GetBody().IsDynamic())
+                return;
+            JPH::MotionProperties* mp = lock.GetBody().GetMotionProperties();
+            JPH::Vec3 current = mp->GetInverseInertiaDiagonal();
+            if (rt.appliedInvInertia != JPH::Vec3::sZero() && current.IsClose(rt.appliedInvInertia, 1e-6f * current.LengthSq()))
+                return;
+            JPH::MassProperties target = rt.massTarget;
+            if (mp->GetInverseMass() > 0.0f)
+                target.mMass = 1.0f / mp->GetInverseMass();
+            if (!(target.mMass > 0.0f) || target.mInertia.GetAxisX().IsNaN() || target.mInertia.GetAxisY().IsNaN() || target.mInertia.GetAxisZ().IsNaN())
+                return;
+            mp->SetMassProperties(mp->GetAllowedDOFs(), target);
+            rt.appliedInvInertia = mp->GetInverseInertiaDiagonal();
         }
 
         // ---- tire colliders ------------------------------------------------------------------------
@@ -1917,12 +2098,12 @@ JPH::ValidateResult RCBuggyValidateContact(const JPH::Body& body1, const JPH::Bo
         JPH::uint64 kind = tag & ~JPH::uint64(0xFF);
         if (kind == tubShapeTag)
         {
-            reject = !dbg.enabled[partTub].load(std::memory_order_relaxed);
+            reject = !dbg.enabled[partTub].load(std::memory_order_relaxed) || !rcBuggyManager.ChassisCollidersOn(b);
             return partTub;
         }
         if (kind == skidShapeTag)
         {
-            reject = !dbg.enabled[partSkid].load(std::memory_order_relaxed);
+            reject = !dbg.enabled[partSkid].load(std::memory_order_relaxed) || !rcBuggyManager.ChassisCollidersOn(b);
             return partSkid;
         }
         if (kind != wheelShapeTag)
@@ -2056,6 +2237,235 @@ namespace Components
                 c.load, c.travel, c.camber, c.slipRatio, c.slipAngle * 180.0f / 3.14159265f);
         }
     }
+}
+
+// =================================================================================================
+// Setup files (.rcsetup): the whole car in one text file
+// =================================================================================================
+// Plain text, INI-like, one "key = value" per line, written from the generated component
+// reflection (knownComponents) so a field added to a component is saved without touching this:
+//   [RCBuggy]           the setup sheet (driver inputs excluded)
+//   [RCBuggyGeometry]   CAD hardpoints + collider layout (metres, model frame)
+//   [RigidBody]         mass, friction, damping, ... of the chassis body
+//   [CollisionShape]    the tub box, its rounding and the centre of mass override
+// float3 = three numbers. '#' starts a comment. LOADING IS PARTIAL ON PURPOSE: a key that is not
+// in the file keeps the car's current value, so a sheet copied from a real setup can carry only
+// what it knows (no hardpoints, say) and still be loaded onto any car.
+namespace RCSetupFile
+{
+    struct Section { const char* name; Components::Mask mask; std::vector<const char*> skip; };
+    static std::vector<Section> Sections()
+    {
+        return {
+            { "RCBuggy", Components::RCBuggy::mask, { "throttleInput", "steeringInput" } },
+            { "RCBuggyGeometry", Components::RCBuggyGeometry::mask, {} },
+            { "RigidBody", Components::RigidBody::mask, { "motionType", "objectLayer", "isSensor" } },
+            { "CollisionShape", Components::CollisionShape::mask, { "shapeType" } },
+        };
+    }
+
+    static const ComponentInfo* Info(const char* name)
+    {
+        InitKnownComponents();
+        for (const ComponentInfo& c : knownComponents)
+            if (c.name == name)
+                return &c;
+        return nullptr;
+    }
+
+    static char* Data(World::Entity car, Components::Mask mask)
+    {
+        if (mask == Components::RCBuggy::mask) return car.Has<Components::RCBuggy>() ? (char*)&car.Get<Components::RCBuggy>() : nullptr;
+        if (mask == Components::RCBuggyGeometry::mask) return car.Has<Components::RCBuggyGeometry>() ? (char*)&car.Get<Components::RCBuggyGeometry>() : nullptr;
+        if (mask == Components::RigidBody::mask) return car.Has<Components::RigidBody>() ? (char*)&car.Get<Components::RigidBody>() : nullptr;
+        if (mask == Components::CollisionShape::mask) return car.Has<Components::CollisionShape>() ? (char*)&car.Get<Components::CollisionShape>() : nullptr;
+        return nullptr;
+    }
+
+    static int Floats(PropertyTypes t)
+    {
+        switch (t)
+        {
+        case PropertyTypes::_float: return 1;
+        case PropertyTypes::_float2: return 2;
+        case PropertyTypes::_float3: return 3;
+        case PropertyTypes::_float4: return 4;
+        default: return 0;
+        }
+    }
+    static bool Saveable(const MemberInfo& m)
+    {
+        if (m.dataCount > 1) return false;
+        return Floats(m.dataType) > 0 || m.dataType == PropertyTypes::_int || m.dataType == PropertyTypes::_uint || m.dataType == PropertyTypes::_bool;
+    }
+    static bool Skipped(const Section& s, const String& name)
+    {
+        for (const char* k : s.skip)
+            if (name == k) return true;
+        return false;
+    }
+
+    static bool Save(World::Entity car, const String& path, String& error)
+    {
+        std::string out = "# SeeD RC buggy setup -- [section] then key = value, '#' comments.\n"
+                          "# Loading is partial: keys left out keep the car's current values.\n";
+        if (car.Has<Components::Name>())
+            out += std::format("# car: {}\n", (const char*)car.Get<Components::Name>().name);
+        for (const Section& s : Sections())
+        {
+            const ComponentInfo* info = Info(s.name);
+            char* data = Data(car, s.mask);
+            if (info == nullptr || data == nullptr)
+                continue;
+            out += std::format("\n[{}]\n", s.name);
+            for (const MemberInfo& m : info->members)
+            {
+                if (!Saveable(m) || Skipped(s, m.name))
+                    continue;
+                const char* p = data + m.offset;
+                std::string value;
+                if (int n = Floats(m.dataType))
+                {
+                    float v[4];
+                    memcpy(v, p, sizeof(float) * n);
+                    for (int i = 0; i < n; i++)
+                    {
+                        // fewest digits that still read back as exactly this float (0.019, not 0.019000001)
+                        std::string text;
+                        for (int digits = 6; digits <= 9; digits++)
+                        {
+                            text = std::format("{:.{}g}", v[i], digits);
+                            if (strtof(text.c_str(), nullptr) == v[i]) break;
+                        }
+                        value += (i ? " " : "") + text;
+                    }
+                }
+                else if (m.dataType == PropertyTypes::_int) { int v; memcpy(&v, p, 4); value = std::format("{}", v); }
+                else if (m.dataType == PropertyTypes::_uint) { uint v; memcpy(&v, p, 4); value = std::format("{}", v); }
+                else { bool v; memcpy(&v, p, 1); value = v ? "1" : "0"; }
+                out += std::format("{} = {}\n", m.name.c_str(), value);
+            }
+        }
+        std::ofstream f(std::filesystem::path(path.c_str()), std::ios::binary);
+        if (!f)
+        {
+            error = std::format("cannot write {}", path.c_str());
+            return false;
+        }
+        f << out;
+        return true;
+    }
+
+    // Returns false (and changes nothing) when the file cannot be read; unknown sections / keys
+    // and unparsable values are skipped and listed in `report`.
+    static bool Load(World::Entity car, const String& path, String& report)
+    {
+        std::ifstream f(std::filesystem::path(path.c_str()), std::ios::binary);
+        if (!f)
+        {
+            report = std::format("cannot read {}", path.c_str());
+            return false;
+        }
+        std::vector<Section> sections = Sections();
+        const Section* section = nullptr;
+        const ComponentInfo* info = nullptr;
+        char* data = nullptr;
+        int applied = 0;
+        std::string skipped;
+        std::string line;
+        int lineNumber = 0;
+        auto trim = [](std::string s)
+        {
+            size_t a = s.find_first_not_of(" \t\r\n");
+            size_t b = s.find_last_not_of(" \t\r\n");
+            return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+        };
+        while (std::getline(f, line))
+        {
+            lineNumber++;
+            size_t hash = line.find('#');
+            if (hash != std::string::npos) line = line.substr(0, hash);
+            line = trim(line);
+            if (line.empty() || line[0] == ';')
+                continue;
+            if (line.front() == '[' && line.back() == ']')
+            {
+                std::string name = trim(line.substr(1, line.size() - 2));
+                section = nullptr; info = nullptr; data = nullptr;
+                for (const Section& s : sections)
+                    if (name == s.name) section = &s;
+                if (section != nullptr)
+                {
+                    info = Info(section->name);
+                    data = Data(car, section->mask);
+                }
+                if (section == nullptr || info == nullptr || data == nullptr)
+                    skipped += std::format(" [{}]", name);
+                continue;
+            }
+            size_t eq = line.find('=');
+            if (eq == std::string::npos || data == nullptr)
+            {
+                if (data != nullptr) skipped += std::format(" line{}", lineNumber);
+                continue;
+            }
+            std::string key = trim(line.substr(0, eq));
+            std::string value = trim(line.substr(eq + 1));
+            const MemberInfo* member = nullptr;
+            for (const MemberInfo& m : info->members)
+                if (m.name == key.c_str()) member = &m;
+            if (member == nullptr || !Saveable(*member) || Skipped(*section, String(key.c_str())))
+            {
+                skipped += std::format(" {}", key);
+                continue;
+            }
+            char* p = data + member->offset;
+            const char* text = value.c_str();
+            char* end = nullptr;
+            bool ok = true;
+            if (int n = Floats(member->dataType))
+            {
+                float v[4];
+                for (int i = 0; i < n && ok; i++)
+                {
+                    v[i] = strtof(text, &end);
+                    ok = end != text && isfinite(v[i]);
+                    text = end;
+                }
+                if (ok) memcpy(p, v, sizeof(float) * n);
+            }
+            else if (member->dataType == PropertyTypes::_bool)
+            {
+                long v = strtol(text, &end, 10);
+                ok = end != text;
+                bool b = v != 0;
+                if (ok) memcpy(p, &b, 1);
+            }
+            else
+            {
+                long long v = strtoll(text, &end, 10);
+                ok = end != text && (member->dataType == PropertyTypes::_int || v >= 0);
+                if (ok) { int32_t i = (int32_t)v; memcpy(p, &i, 4); }
+            }
+            if (ok) applied++;
+            else skipped += std::format(" {}(bad value)", key);
+        }
+        if (car.Has<Components::State>())
+        {
+            car.Get<Components::State>().flags |= Components::State::Flags::vehicleDirty;
+            car.Get<Components::State>().flags |= Components::State::Flags::physicsDirty;     // mass, box, centre of mass
+        }
+        report = std::format("{} values from {}", applied, std::filesystem::path(path.c_str()).filename().string());
+        if (!skipped.empty())
+            report += std::format(", skipped:{}", skipped);
+        IOs::Log("RC setup: loaded {}", report.c_str());
+        return true;
+    }
+
+    // The file dialog lives in Editor.h (included after this file); it calls back with the chosen path.
+    void Dialog(bool save, void (*result)(String));
+    inline World::Entity pendingCar;
+    inline String status;
 }
 
 // =================================================================================================
@@ -2669,7 +3079,7 @@ public:
         for (int it = 0; it < n; it++)
         {
             const RCKin::Sample& s = T.At(it, ib);
-            camber[it] = (float)(asin(RCBuggySim::Clamp(s.axle[1], -1, 1)) * 180 / RCBuggySim::pi);
+            camber[it] = (float)(RCKin::Linkage::Camber(RCKin::V3(s.axle[0], s.axle[1], s.axle[2])) * 180 / RCBuggySim::pi);
             toe[it] = (float)(atan2(s.axle[2], sqrt(s.axle[0] * s.axle[0] + s.axle[1] * s.axle[1])) * 180 / RCBuggySim::pi);
             int a = it > 0 ? it - 1 : it, b = it < T.nTheta - 1 ? it + 1 : it;
             double dy = T.At(b, ib).wheel[1] - T.At(a, ib).wheel[1];
@@ -2737,6 +3147,26 @@ public:
         ImGui::EndDisabled();
         ImGui::Unindent();
         check("enhanced internal edge removal", d.edgeRemoval, "Jolt's fix for ghost collisions on the internal edges of a triangle-mesh track.");
+
+        ImGui::SeparatorText("tub + skids only when flipping");
+        check("auto", d.autoGate, "On: the tub and skids collide only while the car is flipping --\ntilted past the first angle, or past the second with fewer than 2 tires touching.\nOn its wheels the tire model carries the car. Off: they always collide.");
+        ImGui::BeginDisabled(!d.autoGate.load(std::memory_order_relaxed));
+        auto slider = [](const char* label, std::atomic<float>& v, float lo, float hi, const char* fmt, const char* tip)
+        {
+            float f = v.load(std::memory_order_relaxed);
+            if (ImGui::SliderFloat(label, &f, lo, hi, fmt))
+                v.store(f, std::memory_order_relaxed);
+            ImGui::SetItemTooltip("%s", tip);
+        };
+        slider("tilt", d.gateTiltDeg, 20.0f, 120.0f, "%.0f deg", "Chassis contacts on above this tilt from world up, whatever the tires do (side, roof).");
+        slider("tilt, < 2 tires", d.gateAirTiltDeg, 5.0f, 90.0f, "%.0f deg", "Chassis contacts on above this tilt when fewer than 2 tires touch\n(nose- / tail-first landing, rolling over).");
+        slider("hold", d.gateHoldTime, 0.0f, 1.0f, "%.2f s", "Stays on this long after the condition clears.");
+        ImGui::EndDisabled();
+        if (RCBuggySim::Runtime* rt = rcBuggyManager.Find(car))
+        {
+            bool on = rt->chassisColliders.load(std::memory_order_relaxed);
+            ImGui::TextColored(on ? ImVec4(1.0f, 0.75f, 0.3f, 1.0f) : ImVec4(0.5f, 0.9f, 0.5f, 1.0f), on ? "tub + skids: ON" : "tub + skids: off (on its wheels)");
+        }
         auto friction = [](const char* label, std::atomic<float>& v, const char* tip)
         {
             float f = v.load(std::memory_order_relaxed);
@@ -2821,6 +3251,34 @@ public:
             changed = true;
         }
         ImGui::SetItemTooltip("Back to Brady Carrico's RC10B7.1 sheet (2026 JConcepts Indoor Nationals, RC One).");
+        ImGui::SameLine();
+        if (ImGui::Button("Save setup..."))
+        {
+            RCSetupFile::pendingCar = car;
+            RCSetupFile::Dialog(true, [](String path)
+                {
+                    if (path.empty() || !RCSetupFile::pendingCar.IsValid()) return;
+                    String error;
+                    RCSetupFile::status = RCSetupFile::Save(RCSetupFile::pendingCar, path, error)
+                        ? String(std::format("saved {}", std::filesystem::path(path.c_str()).filename().string()).c_str()) : error;
+                });
+        }
+        ImGui::SetItemTooltip("Write the whole car to a .rcsetup text file: the setup sheet, the hardpoints,\nand the chassis body (mass, friction, damping, tub box, centre of mass).");
+        ImGui::SameLine();
+        if (ImGui::Button("Load setup..."))
+        {
+            RCSetupFile::pendingCar = car;
+            RCSetupFile::Dialog(false, [](String path)
+                {
+                    if (path.empty() || !RCSetupFile::pendingCar.IsValid()) return;
+                    String report;
+                    RCSetupFile::Load(RCSetupFile::pendingCar, path, report);
+                    RCSetupFile::status = report;
+                });
+        }
+        ImGui::SetItemTooltip("Apply a .rcsetup file to this car. Keys missing from the file keep their current\nvalues (a real-world sheet can leave out the hardpoints). Rebuilds the body.\nSave the world afterwards to keep it in the scene.");
+        if (!RCSetupFile::status.empty())
+            ImGui::TextDisabled("%s", RCSetupFile::status.c_str());
 
         float columnWidth = 330.0f;
         if (ImGui::BeginTable("rcsetup", 2, ImGuiTableFlags_Resizable | ImGuiTableFlags_BordersInnerV))
@@ -2870,8 +3328,11 @@ public:
                     changed |= SliderStep("timing", s.motorTiming, 0.0f, 60.0f, 1.0f, s.motorTiming > 0 ? "%.0f deg" : "blinky");
                     changed |= SliderStep("battery", s.batteryVoltage, 6.6f, 8.4f, 0.05f, "%.2f V");
                     changed |= SliderStep("current limit", s.currentLimit, 40.0f, 300.0f, 5.0f, "%.0f A");
+                    ImGui::SetItemTooltip("Motor current at full throttle. Part throttle gets its share of it:\nthe trigger sets the torque, the duty only caps the speed.");
                     changed |= SliderStep("drag brake", s.dragBrake, 0.0f, 1.0f, 0.01f, "%.2f");
+                    ImGui::SetItemTooltip("Braking current at neutral, as a share of the current limit.\nAlso the most a part-throttle lift slows the car (no regen beyond it).\nIn the air it stops the wheels and drops the nose.");
                     changed |= SliderStep("brake", s.brakeStrength, 0.0f, 1.0f, 0.01f, "%.2f");
+                    ImGui::SetItemTooltip("Braking current at full brake, as a share of the current limit.\nThe trigger is proportional below it; the motor brakes the rear (2WD) only.");
                     changed |= SliderStep("reverse", s.reverseStrength, 0.0f, 1.0f, 0.05f, "%.2f");
                     ImGui::SeparatorText("steering");
                     changed |= SliderStep("throw (EPA)", s.steeringThrow, 10.0f, 35.0f, 0.5f, "%.1f deg");
